@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-electron/
+build/
+release/
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+server_log.txt
+server_log_new.txt
+
+# Test artifacts
+*.png
+test-*.txt
+clean_output.txt
+
+# Temp files
+hello.txt
+hello_verify.txt
+"hello world"
+
+# Misc test files
+fib.js
+fib.test.js
+hello.py
+hello_world.py
+helloworld.py
+foobar.py
+test123.py
+calculator.js
+script.js
+
+# Local config
+.env
+.env.local

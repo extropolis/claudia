@@ -1,0 +1,38 @@
+{
+  "name": "claudia",
+  "productName": "Claudia",
+  "version": "1.0.0",
+  "description": "Multi-instance Claudia orchestrator web UI",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "workspaces": [
+    "backend",
+    "frontend",
+    "shared"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "npm run dev -w backend",
+    "dev:frontend": "npm run dev -w frontend",
+    "dev:electron": "npm run build:backend && npm run build:electron && NODE_ENV=development electron .",
+    "build": "npm run build:backend && npm run build:frontend && npm run build:electron",
+    "build:backend": "npm run build -w backend",
+    "build:frontend": "npm run build -w frontend",
+    "build:electron": "tsc -p electron/tsconfig.json && tsc -p electron/tsconfig.preload.json",
+    "package": "npm run build && electron-builder",
+    "package:mac": "npm run build && electron-builder --mac",
+    "package:win": "npm run build && electron-builder --win",
+    "package:linux": "npm run build && electron-builder --linux",
+    "start": "./start.sh"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "electron": "^39.2.7",
+    "electron-builder": "^26.4.0",
+    "playwright": "^1.57.0"
+  },
+  "dependencies": {
+    "get-port": "^7.1.0",
+    "node-pty": "^1.1.0"
+  }
+}

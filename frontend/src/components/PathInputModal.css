@@ -1,0 +1,111 @@
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal-content {
+    background: #2a2a2a;
+    border-radius: 8px;
+    padding: 24px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    max-width: 600px;
+    width: 90%;
+}
+
+.path-input-modal h2 {
+    margin: 0 0 12px 0;
+    color: #e0e0e0;
+    font-size: 20px;
+}
+
+.modal-description {
+    color: #b0b0b0;
+    margin-bottom: 20px;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    display: block;
+    color: #e0e0e0;
+    margin-bottom: 8px;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.path-input {
+    width: 100%;
+    padding: 10px 12px;
+    background: #1a1a1a;
+    border: 1px solid #404040;
+    border-radius: 4px;
+    color: #e0e0e0;
+    font-size: 14px;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    box-sizing: border-box;
+}
+
+.path-input:focus {
+    outline: none;
+    border-color: #3b82f6;
+}
+
+.help-text {
+    display: block;
+    color: #808080;
+    font-size: 12px;
+    margin-top: 6px;
+}
+
+.modal-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+}
+
+.btn-primary,
+.btn-secondary {
+    padding: 8px 16px;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background-color 0.2s;
+}
+
+.btn-primary {
+    background: #3b82f6;
+    color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+    background: #2563eb;
+}
+
+.btn-primary:disabled {
+    background: #404040;
+    color: #808080;
+    cursor: not-allowed;
+}
+
+.btn-secondary {
+    background: #404040;
+    color: #e0e0e0;
+}
+
+.btn-secondary:hover {
+    background: #505050;
+}

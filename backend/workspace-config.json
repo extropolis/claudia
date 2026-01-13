@@ -1,0 +1,23 @@
+{
+  "workspaces": [
+    {
+      "id": "/Users/I850333/projects/experiments/codeui",
+      "name": "codeui",
+      "projects": [],
+      "createdAt": "2026-01-11T19:48:46.776Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/learner_ai",
+      "name": "learner_ai",
+      "projects": [],
+      "createdAt": "2026-01-13T17:15:07.779Z"
+    },
+    {
+      "id": "/tmp/test-workspace-cli",
+      "name": "test-workspace-cli",
+      "projects": [],
+      "createdAt": "2026-01-13T19:15:00.522Z"
+    }
+  ],
+  "activeWorkspaceId": "/Users/I850333/projects/experiments/codeui"
+}

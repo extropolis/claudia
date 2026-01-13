@@ -1,0 +1,5 @@
+#!/bin/bash
+# Wrapper for backend test CLI
+source ~/.bashrc
+cd "$(dirname "$0")"
+npx tsx backend/test-cli.ts --auth asdf123 "$@"

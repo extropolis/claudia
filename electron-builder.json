@@ -1,0 +1,53 @@
+{
+  "appId": "com.claude.orchestrator",
+  "productName": "Claudia",
+  "directories": {
+    "output": "release",
+    "buildResources": "build"
+  },
+  "files": [
+    "dist-electron/**/*",
+    "backend/dist/**/*",
+    "frontend/dist/**/*",
+    "package.json",
+    "node_modules/get-port/**/*"
+  ],
+  "extraResources": [
+    {
+      "from": "backend/orchestrator-config.json",
+      "to": "config-defaults/orchestrator-config.json",
+      "filter": [
+        "**/*"
+      ]
+    }
+  ],
+  "mac": {
+    "target": [
+      "dmg",
+      "zip"
+    ],
+    "category": "public.app-category.developer-tools",
+    "hardenedRuntime": true,
+    "gatekeeperAssess": false,
+    "entitlements": "build/entitlements.mac.plist",
+    "entitlementsInherit": "build/entitlements.mac.plist"
+  },
+  "dmg": {
+    "title": "${productName} ${version}"
+  },
+  "win": {
+    "target": [
+      "nsis",
+      "zip"
+    ],
+    "icon": "build/icon.ico"
+  },
+  "linux": {
+    "target": [
+      "AppImage",
+      "deb"
+    ],
+    "category": "Development",
+    "icon": "build/icon.png"
+  }
+}

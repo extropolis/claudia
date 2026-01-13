@@ -1,0 +1,41 @@
+{
+    "name": "backend",
+    "version": "1.0.0",
+    "type": "module",
+    "scripts": {
+        "dev": "tsx watch src/index.ts",
+        "build": "tsc",
+        "start": "node dist/index.js",
+        "test:cli": "tsx test-cli.ts",
+        "test:build": "npm run build && node dist/test-cli.js",
+        "test": "./run-all-tests.sh",
+        "test:unit": "tsx tests/unit/result-parser.test.ts && tsx tests/unit/task-manager.test.ts",
+        "test:unit:parser": "tsx tests/unit/result-parser.test.ts",
+        "test:unit:tasks": "tsx tests/unit/task-manager.test.ts",
+        "test:integration": "tsx tests/integration/orchestrator.integration.test.ts",
+        "test:watch": "tsx watch tests/**/*.test.ts"
+    },
+    "dependencies": {
+        "@opencode-ai/sdk": "^1.1.14",
+        "@claudia/shared": "*",
+        "bcryptjs": "^3.0.3",
+        "cors": "^2.8.5",
+        "express": "^4.18.2",
+        "jsonwebtoken": "^9.0.3",
+        "node-pty": "^1.1.0",
+        "opencode-studio-server": "^1.2.1",
+        "uuid": "^9.0.1",
+        "ws": "^8.16.0"
+    },
+    "devDependencies": {
+        "@types/bcryptjs": "^2.4.6",
+        "@types/cors": "^2.8.17",
+        "@types/express": "^4.17.21",
+        "@types/jsonwebtoken": "^9.0.10",
+        "@types/node": "^20.11.0",
+        "@types/uuid": "^9.0.7",
+        "@types/ws": "^8.5.10",
+        "tsx": "^4.7.0",
+        "typescript": "^5.3.3"
+    }
+}

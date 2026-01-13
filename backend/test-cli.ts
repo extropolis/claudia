@@ -1,0 +1,1045 @@
+#!/usr/bin/env node
+/**
+ * Non-interactive CLI test tool for the orchestrator
+ * Emulates the frontend to test structured output functionality
+ */
+
+import WebSocket from 'ws';
+import { WSMessage, ChatMessage, Task } from './src/types.js';
+import * as fs from 'fs';
+import * as path from 'path';
+
+interface TestConfig {
+    backendUrl: string;
+    testMessage: string;
+    timeoutMs: number;
+    testClear: boolean;
+    createTask: boolean;      // Use task:create instead of chat:send
+    taskName: string;         // Name for task creation
+    workspaceId: string | null;  // Optional workspace ID
+    verbose: boolean;         // Verbose logging of all events
+    authCode: string;         // Auth code for the server
+    // New operations
+    taskInput: boolean;       // Send input to a task
+    taskId: string | null;    // Task ID for operations
+    stopTask: boolean;        // Stop a running task
+    deleteTask: boolean;      // Delete a specific task
+    clearTasks: boolean;      // Clear all tasks
+    approvePlan: boolean;     // Approve current plan
+    rejectPlan: boolean;      // Reject current plan
+    autoApprove: boolean | null;  // Toggle auto-approve mode (null = don't set)
+    createWorkspace: boolean; // Create a new workspace
+    deleteWorkspace: boolean; // Delete a workspace
+    setActiveWorkspace: boolean; // Set active workspace
+    setProject: boolean;      // Set current project path
+    projectPath: string | null;  // Project path for project:set
+    listTasks: boolean;       // List all tasks
+    viewTaskFiles: boolean;   // View code files for a task
+    getConfig: boolean;       // Get orchestrator config
+    imagePath: string | null; // Path to image to attach
+}
+
+class TestCLI {
+    private ws: WebSocket | null = null;
+    private config: TestConfig;
+    private chatMessages: ChatMessage[] = [];
+    private tasks: Map<string, Task> = new Map();
+    private startTime: number = 0;
+    private completionTimer: NodeJS.Timeout | null = null;
+    private lastActivityTime: number = 0;
+
+    constructor(config: TestConfig) {
+        this.config = config;
+    }
+
+    async run(): Promise<void> {
+        console.log('🧪 Test CLI - Starting test');
+        console.log(`📡 Connecting to: ${this.config.backendUrl}`);
+        console.log(`💬 Test message: "${this.config.testMessage}"`);
+        console.log('');
+
+        this.startTime = Date.now();
+
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                console.error('❌ Test timed out');
+                this.cleanup();
+                reject(new Error('Test timeout'));
+            }, this.config.timeoutMs);
+
+            this.ws = new WebSocket(this.config.backendUrl);
+
+            this.ws.on('open', async () => {
+                console.log('✅ Connected to backend');
+                console.log('');
+
+                // Handle different operations based on config
+                if (this.config.listTasks) {
+                    // Wait for init message to populate tasks, then list them
+                    setTimeout(() => {
+                        this.listTasks();
+                        setTimeout(() => this.cleanup(), 1000);
+                    }, 1000);
+                } else if (this.config.viewTaskFiles && this.config.taskId) {
+                    await this.viewTaskFiles(this.config.taskId);
+                    setTimeout(() => this.cleanup(), 1000);
+                } else if (this.config.getConfig) {
+                    await this.getConfig();
+                    setTimeout(() => this.cleanup(), 1000);
+                } else if (this.config.taskInput && this.config.taskId) {
+                    this.sendTaskInput(this.config.taskId, this.config.testMessage);
+                } else if (this.config.stopTask && this.config.taskId) {
+                    this.sendStopTask(this.config.taskId);
+                    setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.deleteTask && this.config.taskId) {
+                    this.sendDeleteTask(this.config.taskId);
+                    setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.clearTasks) {
+                    this.sendClearTasks();
+                    setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.approvePlan) {
+                    this.sendApprovePlan();
+                } else if (this.config.rejectPlan) {
+                    this.sendRejectPlan();
+                    setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.autoApprove !== null) {
+                    this.sendAutoApprove(this.config.autoApprove);
+                    setTimeout(() => this.cleanup(), 1000);
+                } else if (this.config.createWorkspace && this.config.projectPath) {
+                    this.sendCreateWorkspace(this.config.projectPath);
+                    setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.deleteWorkspace && this.config.workspaceId) {
+                    this.sendDeleteWorkspace(this.config.workspaceId);
+                    setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.setActiveWorkspace && this.config.workspaceId) {
+                    this.sendSetActiveWorkspace(this.config.workspaceId);
+                    setTimeout(() => this.cleanup(), 1000);
+                } else if (this.config.setProject && this.config.projectPath) {
+                    this.sendSetProject(this.config.projectPath);
+                    setTimeout(() => this.cleanup(), 1000);
+                } else if (this.config.testClear) {
+                    // Test clear functionality
+                    console.log('🧪 Testing clear functionality...');
+                    console.log('');
+
+                    // Send a message first
+                    this.sendMessage(this.config.testMessage, this.config.imagePath || undefined);
+
+                    // Wait 2 seconds then clear
+                    setTimeout(() => {
+                        this.sendClearChat();
+
+                        // Wait another 2 seconds then send another message
+                        setTimeout(() => {
+                            this.sendMessage('Second message after clear');
+
+                            // Close after 3 seconds
+                            setTimeout(() => {
+                                console.log('');
+                                console.log('✅ Clear test complete - closing connection');
+                                this.cleanup();
+                            }, 3000);
+                        }, 2000);
+                    }, 2000);
+                } else if (this.config.createTask) {
+                    // Create task directly like the frontend does
+                    this.sendTask(this.config.taskName, this.config.testMessage);
+                } else {
+                    this.sendMessage(this.config.testMessage, this.config.imagePath || undefined);
+                }
+            });
+
+            this.ws.on('message', (data: Buffer) => {
+                try {
+                    const message: WSMessage = JSON.parse(data.toString());
+                    this.handleMessage(message);
+                } catch (error) {
+                    console.error('Failed to parse message:', error);
+                }
+            });
+
+            this.ws.on('close', () => {
+                console.log('🔌 Connection closed');
+                clearTimeout(timeout);
+                this.printSummary();
+                resolve();
+            });
+
+            this.ws.on('error', (error: Error) => {
+                console.error('❌ WebSocket error:', error.message);
+                clearTimeout(timeout);
+                reject(error);
+            });
+        });
+    }
+
+    private sendMessage(content: string, imagePath?: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot send message: WebSocket not connected');
+            return;
+        }
+
+        const payload: any = { content };
+
+        // Add image if provided
+        if (imagePath) {
+            try {
+                const imageBuffer = fs.readFileSync(imagePath);
+                const base64Image = imageBuffer.toString('base64');
+                const ext = path.extname(imagePath).toLowerCase();
+                const mimeType = {
+                    '.png': 'image/png',
+                    '.jpg': 'image/jpeg',
+                    '.jpeg': 'image/jpeg',
+                    '.gif': 'image/gif',
+                    '.webp': 'image/webp'
+                }[ext] || 'image/png';
+
+                payload.images = [{
+                    name: path.basename(imagePath),
+                    data: base64Image,
+                    mimeType
+                }];
+
+                console.log(`📤 Sending message with image: ${path.basename(imagePath)}`);
+            } catch (error) {
+                console.error(`Failed to read image: ${error}`);
+                return;
+            }
+        } else {
+            console.log('📤 Sending message...');
+        }
+
+        const message = {
+            type: 'chat:send',
+            payload
+        };
+
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendTask(name: string, description: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot send task: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'task:create',
+            payload: {
+                name,
+                description,
+                workspaceId: this.config.workspaceId
+            }
+        };
+
+        console.log(`📤 Creating task: "${name}"`);
+        console.log(`   Description: ${description}`);
+        if (this.config.workspaceId) {
+            console.log(`   Workspace: ${this.config.workspaceId}`);
+        }
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendClearChat(): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot clear chat: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'chat:clear',
+            payload: {}
+        };
+
+
+        console.log('🗑️  Clearing chat...');
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendTaskInput(taskId: string, input: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot send task input: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'task:input',
+            payload: { taskId, input }
+        };
+
+        console.log(`📥 Sending input to task ${taskId}: "${input}"`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendStopTask(taskId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot stop task: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'task:stop',
+            payload: { taskId }
+        };
+
+        console.log(`⏹️  Stopping task ${taskId}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendDeleteTask(taskId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot delete task: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'task:delete',
+            payload: { taskId }
+        };
+
+        console.log(`🗑️  Deleting task ${taskId}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendClearTasks(): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot clear tasks: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'task:clear',
+            payload: {}
+        };
+
+        console.log('🗑️  Clearing all tasks...');
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendApprovePlan(): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot approve plan: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'plan:approve',
+            payload: {}
+        };
+
+        console.log('✅ Approving plan...');
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendRejectPlan(): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot reject plan: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'plan:reject',
+            payload: {}
+        };
+
+        console.log('❌ Rejecting plan...');
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendAutoApprove(enabled: boolean): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot set auto-approve: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'config:autoApprove',
+            payload: { enabled }
+        };
+
+        console.log(`⚙️  Setting auto-approve to: ${enabled}`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendCreateWorkspace(path: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot create workspace: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'workspace:create',
+            payload: { path }
+        };
+
+        console.log(`📁 Creating workspace: ${path}`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendDeleteWorkspace(workspaceId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot delete workspace: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'workspace:delete',
+            payload: { workspaceId }
+        };
+
+        console.log(`🗑️  Deleting workspace ${workspaceId}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendSetActiveWorkspace(workspaceId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot set active workspace: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'workspace:setActive',
+            payload: { workspaceId }
+        };
+
+        console.log(`🎯 Setting active workspace to ${workspaceId}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendSetProject(path: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot set project: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'project:set',
+            payload: { path }
+        };
+
+        console.log(`📂 Setting project path to: ${path}`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private listTasks(): void {
+        console.log('');
+        console.log('📋 TASK LIST');
+        console.log('='.repeat(80));
+
+        if (this.tasks.size === 0) {
+            console.log('  No tasks found');
+            return;
+        }
+
+        const taskArray = Array.from(this.tasks.values());
+
+        // Group by workspace
+        const byWorkspace = new Map<string, Task[]>();
+        taskArray.forEach(task => {
+            const key = task.projectPath || 'No workspace';
+            if (!byWorkspace.has(key)) {
+                byWorkspace.set(key, []);
+            }
+            byWorkspace.get(key)!.push(task);
+        });
+
+        byWorkspace.forEach((tasks, workspace) => {
+            console.log('');
+            console.log(`📁 ${workspace}`);
+            console.log('-'.repeat(80));
+
+            tasks.forEach(task => {
+                const statusIcon = {
+                    'pending': '⏳',
+                    'running': '▶️',
+                    'complete': '✅',
+                    'error': '❌',
+                    'stopped': '⏹️',
+                    'cancelled': '🚫',
+                    'blocked': '🔒'
+                }[task.status] || '❓';
+
+                console.log(`  ${statusIcon} [${task.id.substring(0, 8)}...] ${task.name}`);
+                console.log(`     Status: ${task.status}`);
+                if (task.parentId) {
+                    console.log(`     Parent: ${task.parentId.substring(0, 8)}...`);
+                }
+            });
+        });
+
+        console.log('');
+    }
+
+    private async viewTaskFiles(taskId: string): Promise<void> {
+        const httpUrl = this.config.backendUrl.replace('ws://', 'http://').replace('ws', '3000');
+        const url = `${httpUrl}/api/tasks/${taskId}/files`;
+
+        console.log(`📄 Fetching files for task ${taskId}...`);
+
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                console.error(`Failed to fetch files: ${response.statusText}`);
+                return;
+            }
+
+            const files = await response.json();
+
+            if (!files || files.length === 0) {
+                console.log('  No files found for this task');
+                return;
+            }
+
+            console.log('');
+            console.log('📂 CODE FILES');
+            console.log('='.repeat(80));
+
+            files.forEach((file: any) => {
+                const opIcon = {
+                    'created': '➕',
+                    'modified': '✏️',
+                    'deleted': '➖'
+                }[file.operation] || '📄';
+
+                console.log('');
+                console.log(`${opIcon} ${file.filename} [${file.operation}] (${file.language})`);
+                console.log('-'.repeat(80));
+                console.log(file.content);
+            });
+
+            console.log('');
+        } catch (error) {
+            console.error('Failed to fetch files:', error);
+        }
+    }
+
+    private async getConfig(): Promise<void> {
+        const httpUrl = this.config.backendUrl.replace('ws://', 'http://').replace('ws', '3000');
+        const url = `${httpUrl}/api/config`;
+
+        console.log('⚙️  Fetching orchestrator configuration...');
+
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                console.error(`Failed to fetch config: ${response.statusText}`);
+                return;
+            }
+
+            const config = await response.json();
+
+            console.log('');
+            console.log('⚙️  ORCHESTRATOR CONFIGURATION');
+            console.log('='.repeat(80));
+            console.log(JSON.stringify(config, null, 2));
+            console.log('');
+        } catch (error) {
+            console.error('Failed to fetch config:', error);
+        }
+    }
+
+    private handleMessage(message: WSMessage): void {
+        // Verbose logging of all events
+        if (this.config.verbose) {
+            const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+            const payloadPreview = JSON.stringify(message.payload).substring(0, 100);
+            console.log(`[${elapsed}s] EVENT     │ ${message.type}: ${payloadPreview}...`);
+        }
+
+        switch (message.type) {
+            case 'init':
+                this.handleInit(message.payload);
+                break;
+
+            case 'chat:message':
+                this.handleChatMessage(message.payload as { message: ChatMessage });
+                break;
+
+            case 'chat:cleared':
+                this.handleChatCleared();
+                break;
+
+            case 'task:created':
+                this.handleTaskCreated(message.payload as { task: Task });
+                break;
+
+            case 'task:updated':
+                this.handleTaskUpdated(message.payload as { task: Task });
+                break;
+
+            case 'task:complete':
+                this.handleTaskComplete(message.payload as { task: Task });
+                break;
+
+            case 'task:output':
+                this.handleTaskOutput(message.payload as { taskId: string; data: string });
+                break;
+
+            case 'plan:created':
+            case 'plan:approved':
+            case 'plan:rejected':
+                if (this.config.verbose) {
+                    const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+                    console.log(`[${elapsed}s] PLAN      │ ${message.type}`);
+                }
+                break;
+
+            default:
+                if (this.config.verbose) {
+                    const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+                    console.log(`[${elapsed}s] UNKNOWN   │ ${message.type}`);
+                }
+                break;
+        }
+    }
+
+    private handleInit(payload: any): void {
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+        const taskCount = payload.tasks?.length || 0;
+        const workspaceCount = payload.workspaces?.length || 0;
+        console.log(`[${elapsed}s] INIT      │ Received ${taskCount} existing tasks, ${workspaceCount} workspaces`);
+
+        // Load existing tasks
+        if (payload.tasks) {
+            for (const task of payload.tasks) {
+                this.tasks.set(task.id, task);
+            }
+        }
+    }
+
+    private handleTaskOutput(payload: { taskId: string; data: string }): void {
+        this.lastActivityTime = Date.now();
+
+        if (this.config.verbose) {
+            const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+            const preview = payload.data.substring(0, 80).replace(/\n/g, ' ');
+            console.log(`[${elapsed}s] OUTPUT    │ [${payload.taskId.substring(0, 8)}...] ${preview}...`);
+        }
+    }
+
+    private handleChatCleared(): void {
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+        console.log(`[${elapsed}s] CLEARED   │ Chat conversation has been cleared`);
+        const previousCount = this.chatMessages.length;
+        this.chatMessages = [];
+        console.log(`[${elapsed}s] CLEARED   │ Removed ${previousCount} messages from local state`);
+    }
+
+    private handleChatMessage(payload: { message: ChatMessage }): void {
+        const msg = payload.message;
+        this.chatMessages.push(msg);
+
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+        const role = msg.role.toUpperCase().padEnd(9);
+
+        console.log(`[${elapsed}s] ${role} │ ${msg.content}`);
+
+        // Update activity time
+        this.lastActivityTime = Date.now();
+
+        // Check for completion after any message
+        this.scheduleCompletionCheck();
+    }
+
+    private handleTaskCreated(payload: { task: Task }): void {
+        const task = payload.task;
+        this.tasks.set(task.id, task);
+
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+        console.log(`[${elapsed}s] TASK      │ Created: ${task.name}`);
+
+        this.lastActivityTime = Date.now();
+    }
+
+    private handleTaskUpdated(payload: { task: Task }): void {
+        const task = payload.task;
+        this.tasks.set(task.id, task);
+
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+        console.log(`[${elapsed}s] TASK      │ Status: ${task.status} - ${task.name}`);
+
+        this.lastActivityTime = Date.now();
+    }
+
+    private handleTaskComplete(payload: { task: Task }): void {
+        const task = payload.task;
+        this.tasks.set(task.id, task);
+
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+        const taskName = task.name;
+        console.log(`[${elapsed}s] COMPLETE  │ ${taskName} (exit: ${task.exitCode ?? 'N/A'}, status: ${task.status})`);
+
+        if (this.config.verbose && task.structuredResult) {
+            console.log(`[${elapsed}s] RESULT    │ Summary: ${task.structuredResult.summary || 'N/A'}`);
+            if (task.structuredResult.artifacts?.length) {
+                console.log(`[${elapsed}s] RESULT    │ Artifacts: ${task.structuredResult.artifacts.join(', ')}`);
+            }
+        }
+
+        this.lastActivityTime = Date.now();
+
+        // Schedule completion check after task completes
+        this.scheduleCompletionCheck();
+    }
+
+    /**
+     * Schedule a completion check after activity stops
+     */
+    private scheduleCompletionCheck(): void {
+        // Cancel any existing timer
+        if (this.completionTimer) {
+            clearTimeout(this.completionTimer);
+        }
+
+        // Wait 4 seconds of inactivity before checking completion
+        this.completionTimer = setTimeout(() => {
+            this.checkForCompletion();
+        }, 4000);
+    }
+
+    /**
+     * Check if the test should be considered complete
+     */
+    private checkForCompletion(): void {
+        const runningTasks = Array.from(this.tasks.values()).filter(t => t.status === 'running');
+        const assistantMessages = this.chatMessages.filter(m => m.role === 'assistant');
+
+        // Complete if:
+        // 1. No tasks are running
+        // 2. We have at least one assistant response
+        // 3. 4 seconds of inactivity have passed
+        if (runningTasks.length === 0 && assistantMessages.length > 0) {
+            const timeSinceActivity = Date.now() - this.lastActivityTime;
+            if (timeSinceActivity >= 4000) {
+                console.log('');
+                console.log('✅ Test complete - closing connection');
+                this.cleanup();
+            }
+        }
+    }
+
+    private printSummary(): void {
+        console.log('');
+        console.log('='.repeat(80));
+        console.log('📊 TEST SUMMARY');
+        console.log('='.repeat(80));
+        console.log('');
+
+        const duration = ((Date.now() - this.startTime) / 1000).toFixed(1);
+        console.log(`⏱️  Duration: ${duration}s`);
+        console.log(`💬 Chat messages: ${this.chatMessages.length}`);
+        console.log(`📋 Tasks: ${this.tasks.size}`);
+        console.log('');
+
+        console.log('📝 ASSISTANT RESPONSES:');
+        console.log('-'.repeat(80));
+
+        const assistantMessages = this.chatMessages.filter(m => m.role === 'assistant');
+        if (assistantMessages.length === 0) {
+            console.log('  ⚠️  No assistant responses received!');
+        } else {
+            assistantMessages.forEach((msg, i) => {
+                console.log(`  ${i + 1}. ${msg.content}`);
+                console.log('');
+            });
+        }
+
+        console.log('✅ TEST VERIFICATION:');
+        console.log('-'.repeat(80));
+
+        // Check if the last assistant message contains actual data (not just "task complete")
+        const lastAssistantMsg = assistantMessages[assistantMessages.length - 1];
+        if (lastAssistantMsg) {
+            const hasRealContent = lastAssistantMsg.content.length > 50 &&
+                !lastAssistantMsg.content.match(/^[✅❌⚠️]\s*(Task|Worker).*complete/i);
+
+            if (hasRealContent) {
+                console.log('  ✅ PASS: Assistant provided detailed results (not just "task complete")');
+            } else {
+                console.log('  ❌ FAIL: Assistant only said "task complete" without showing results');
+            }
+        } else {
+            console.log('  ❌ FAIL: No assistant response received');
+        }
+
+        console.log('');
+    }
+
+    private cleanup(): void {
+        // Clear any pending timers
+        if (this.completionTimer) {
+            clearTimeout(this.completionTimer);
+            this.completionTimer = null;
+        }
+
+        if (this.ws) {
+            this.ws.close();
+            this.ws = null;
+        }
+    }
+}
+
+// Parse command line arguments
+function parseArgs(): TestConfig {
+    const args = process.argv.slice(2);
+
+    let backendUrl = 'ws://localhost:3001';
+    let testMessage = 'echo hello world';
+    let timeoutMs = 120000; // 120 seconds
+    let testClear = false;
+    let createTask = false;
+    let taskName = 'CLI Test Task';
+    let workspaceId: string | null = null;
+    let verbose = false;
+    let authCode = 'asdf123';
+    let taskInput = false;
+    let taskId: string | null = null;
+    let stopTask = false;
+    let deleteTask = false;
+    let clearTasks = false;
+    let approvePlan = false;
+    let rejectPlan = false;
+    let autoApprove: boolean | null = null;
+    let createWorkspace = false;
+    let deleteWorkspace = false;
+    let setActiveWorkspace = false;
+    let setProject = false;
+    let projectPath: string | null = null;
+    let listTasks = false;
+    let viewTaskFiles = false;
+    let getConfig = false;
+    let imagePath: string | null = null;
+
+    for (let i = 0; i < args.length; i++) {
+        switch (args[i]) {
+            case '--url':
+                backendUrl = args[++i];
+                break;
+            case '--message':
+            case '-m':
+                testMessage = args[++i];
+                break;
+            case '--timeout':
+            case '-t':
+                timeoutMs = parseInt(args[++i]);
+                break;
+            case '--clear':
+                testClear = true;
+                break;
+            case '--task':
+                createTask = true;
+                break;
+            case '--task-name':
+            case '-n':
+                taskName = args[++i];
+                break;
+            case '--workspace':
+            case '-w':
+                workspaceId = args[++i];
+                break;
+            case '--verbose':
+            case '-v':
+                verbose = true;
+                break;
+            case '--auth':
+            case '-a':
+                authCode = args[++i];
+                break;
+            case '--task-input':
+                taskInput = true;
+                break;
+            case '--task-id':
+                taskId = args[++i];
+                break;
+            case '--stop-task':
+                stopTask = true;
+                break;
+            case '--delete-task':
+                deleteTask = true;
+                break;
+            case '--clear-tasks':
+                clearTasks = true;
+                break;
+            case '--approve-plan':
+                approvePlan = true;
+                break;
+            case '--reject-plan':
+                rejectPlan = true;
+                break;
+            case '--auto-approve':
+                autoApprove = args[++i] === 'true';
+                break;
+            case '--create-workspace':
+                createWorkspace = true;
+                break;
+            case '--delete-workspace':
+                deleteWorkspace = true;
+                break;
+            case '--set-active-workspace':
+                setActiveWorkspace = true;
+                break;
+            case '--set-project':
+                setProject = true;
+                break;
+            case '--project-path':
+            case '-p':
+                projectPath = args[++i];
+                break;
+            case '--list-tasks':
+                listTasks = true;
+                break;
+            case '--view-files':
+                viewTaskFiles = true;
+                break;
+            case '--get-config':
+                getConfig = true;
+                break;
+            case '--image':
+            case '-i':
+                imagePath = args[++i];
+                break;
+            case '--help':
+            case '-h':
+                console.log(`
+Usage: npx tsx test-cli.ts [options]
+
+BASIC OPTIONS:
+  --url <url>              Backend WebSocket URL (default: ws://localhost:3001)
+  --message, -m <text>     Test message/description to send (default: echo hello world)
+  --timeout, -t <ms>       Timeout in milliseconds (default: 120000)
+  --verbose, -v            Show all WebSocket events and detailed logging
+  --auth, -a <code>        Auth code (default: asdf123)
+  --help, -h               Show this help message
+
+CHAT OPERATIONS:
+  --clear                  Test the clear chat functionality
+  --image, -i <path>       Attach an image to the message
+
+TASK OPERATIONS:
+  --task                   Create task directly (like frontend task:create)
+  --task-name, -n <name>   Name for the task when using --task
+  --task-id <id>           Task ID for operations (stop, delete, input, view-files)
+  --task-input             Send input to a task (requires --task-id and --message)
+  --stop-task              Stop a running task (requires --task-id)
+  --delete-task            Delete a specific task (requires --task-id)
+  --clear-tasks            Clear all tasks
+  --list-tasks             List all tasks with their status
+  --view-files             View code files for a task (requires --task-id)
+
+WORKSPACE OPERATIONS:
+  --workspace, -w <id>     Workspace ID to use for task creation
+  --create-workspace       Create a new workspace (requires --project-path)
+  --delete-workspace       Delete a workspace (requires --workspace)
+  --set-active-workspace   Set active workspace (requires --workspace)
+
+PROJECT OPERATIONS:
+  --set-project            Set current project path (requires --project-path)
+  --project-path, -p <path> Project path for workspace/project operations
+
+PLAN OPERATIONS:
+  --approve-plan           Approve the current plan
+  --reject-plan            Reject the current plan
+  --auto-approve <bool>    Toggle auto-approve mode (true/false)
+
+CONFIGURATION:
+  --get-config             Get orchestrator configuration
+
+Examples:
+  # Basic chat message
+  npx tsx test-cli.ts -m "create a file called hello.txt"
+
+  # Chat with image attachment
+  npx tsx test-cli.ts -m "What's in this image?" -i ./screenshot.png
+
+  # Create a task
+  npx tsx test-cli.ts --task -m "run the tests" -n "Run Tests"
+
+  # Create task in specific workspace
+  npx tsx test-cli.ts --task -w /Users/me/project -m "build the app"
+
+  # Send input to running task
+  npx tsx test-cli.ts --task-input --task-id abc123 -m "yes, continue"
+
+  # Stop a running task
+  npx tsx test-cli.ts --stop-task --task-id abc123
+
+  # Delete a task
+  npx tsx test-cli.ts --delete-task --task-id abc123
+
+  # List all tasks
+  npx tsx test-cli.ts --list-tasks
+
+  # View code files for a task
+  npx tsx test-cli.ts --view-files --task-id abc123
+
+  # Create workspace
+  npx tsx test-cli.ts --create-workspace -p /Users/me/my-project
+
+  # Set active workspace
+  npx tsx test-cli.ts --set-active-workspace -w workspace123
+
+  # Approve plan (when plan mode is enabled)
+  npx tsx test-cli.ts --approve-plan
+
+  # Enable auto-approve
+  npx tsx test-cli.ts --auto-approve true
+
+  # Get configuration
+  npx tsx test-cli.ts --get-config
+
+  # Verbose mode
+  npx tsx test-cli.ts -v -m "list files in current directory"
+
+  # Clear all tasks
+  npx tsx test-cli.ts --clear-tasks
+                `);
+                process.exit(0);
+        }
+    }
+
+    return {
+        backendUrl,
+        testMessage,
+        timeoutMs,
+        testClear,
+        createTask,
+        taskName,
+        workspaceId,
+        verbose,
+        authCode,
+        taskInput,
+        taskId,
+        stopTask,
+        deleteTask,
+        clearTasks,
+        approvePlan,
+        rejectPlan,
+        autoApprove,
+        createWorkspace,
+        deleteWorkspace,
+        setActiveWorkspace,
+        setProject,
+        projectPath,
+        listTasks,
+        viewTaskFiles,
+        getConfig,
+        imagePath
+    };
+}
+
+// Main execution
+async function main() {
+    const config = parseArgs();
+    const cli = new TestCLI(config);
+
+    try {
+        await cli.run();
+        process.exit(0);
+    } catch (error) {
+        console.error('Test failed:', error);
+        process.exit(1);
+    }
+}
+
+main();
