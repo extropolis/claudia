@@ -9,6 +9,7 @@ import { WorkspaceStore } from './workspace-store.js';
 import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
+import { createAnthropicProxy } from './anthropic-proxy/index.js';
 import { Task, Workspace, WSMessage, WSMessageType, ChatMessage, SuggestedAction, WaitingInputType } from '@claudia/shared';
 
 export function createApp(basePath?: string) {
@@ -18,7 +19,23 @@ export function createApp(basePath?: string) {
 
     // Middleware
     app.use(cors());
-    app.use(express.json());
+    app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests
+
+    // Mount Anthropic Proxy if SAP AI Core is configured
+    if (process.env.SAP_AICORE_CLIENT_ID && process.env.SAP_AICORE_CLIENT_SECRET) {
+        console.log('[Server] SAP AI Core configured, mounting Anthropic proxy at /');
+        const anthropicProxy = createAnthropicProxy({
+            clientId: process.env.SAP_AICORE_CLIENT_ID,
+            clientSecret: process.env.SAP_AICORE_CLIENT_SECRET,
+            authUrl: process.env.SAP_AICORE_AUTH_URL || '',
+            baseUrl: process.env.SAP_AICORE_BASE_URL || '',
+            resourceGroup: process.env.SAP_AICORE_RESOURCE_GROUP || 'default',
+            requestTimeoutMs: parseInt(process.env.SAP_AICORE_TIMEOUT_MS || '120000', 10)
+        });
+        app.use('/', anthropicProxy);
+    } else {
+        console.log('[Server] SAP AI Core not configured, Anthropic proxy disabled');
+    }
 
     // Initialize services
     const configStore = new ConfigStore(basePath);
@@ -147,6 +164,13 @@ export function createApp(basePath?: string) {
                         // Kill and remove a task
                         const { taskId } = message.payload;
                         taskSpawner.destroyTask(taskId);
+                        break;
+                    }
+
+                    case 'task:interrupt': {
+                        // Interrupt a running task (send ESC to cancel current operation)
+                        const { taskId } = message.payload;
+                        taskSpawner.interruptTask(taskId);
                         break;
                     }
 

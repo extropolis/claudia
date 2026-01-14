@@ -24,10 +24,12 @@ interface PersistedTask {
     sessionId: string | null;
     outputHistory?: string;
     gitState?: TaskGitState;
+    wasInterrupted?: boolean;  // True if task was busy when backend shut down
 }
 
 interface TaskPersistence {
     tasks: PersistedTask[];
+    archivedTasks?: PersistedTask[];
 }
 
 interface InternalTask extends Task {
@@ -133,6 +135,9 @@ export class TaskSpawner extends EventEmitter {
                 const historyBuffer = Buffer.concat(task.outputHistory);
                 const historyBase64 = historyBuffer.toString('base64');
 
+                // Track if task was busy when being saved (will be interrupted)
+                const wasInterrupted = task.state === 'busy';
+
                 tasksToSave.push({
                     id: task.id,
                     prompt: task.prompt,
@@ -142,6 +147,7 @@ export class TaskSpawner extends EventEmitter {
                     lastState: task.state,
                     sessionId: task.sessionId,
                     outputHistory: historyBase64,
+                    wasInterrupted,
                 });
             }
 
@@ -799,7 +805,8 @@ export class TaskSpawner extends EventEmitter {
         const disconnectedTasks = Array.from(this.disconnectedTasks.values()).map(persisted => ({
             id: persisted.id,
             prompt: persisted.prompt,
-            state: 'disconnected' as TaskState,
+            // Show 'interrupted' state if task was busy when killed, otherwise 'disconnected'
+            state: (persisted.wasInterrupted ? 'interrupted' : 'disconnected') as TaskState,
             workspaceId: persisted.workspaceId,
             createdAt: new Date(persisted.createdAt),
             lastActivity: new Date(persisted.lastActivity),

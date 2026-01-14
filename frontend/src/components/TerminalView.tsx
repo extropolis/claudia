@@ -3,7 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Task } from '@claudia/shared';
-import { Copy, Check } from 'lucide-react';
+import { Copy, Check, Play } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
 
@@ -213,6 +213,19 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
         }
     }, [task]);
 
+    // Handle Resume button click - sends task:restore message
+    const handleResume = () => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+                type: 'task:restore',
+                payload: { taskId: task.id }
+            }));
+        }
+    };
+
+    const showResumeButton = task.state === 'interrupted' || task.state === 'disconnected';
+    const stateLabel = task.state === 'interrupted' ? 'INTERRUPTED' : task.state;
+
     return (
         <div className="terminal-view">
             <div className="terminal-header">
@@ -224,7 +237,17 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
                 >
                     {copied ? <Check size={16} /> : <Copy size={16} />}
                 </button>
-                <span className={`terminal-state ${task.state}`}>{task.state}</span>
+                {showResumeButton && (
+                    <button
+                        className="terminal-resume-button"
+                        onClick={handleResume}
+                        title="Resume this task"
+                    >
+                        <Play size={14} />
+                        Resume
+                    </button>
+                )}
+                <span className={`terminal-state ${task.state}`}>{stateLabel}</span>
             </div>
             <div ref={terminalRef} className="terminal-container" />
         </div>

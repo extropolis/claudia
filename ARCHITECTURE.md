@@ -265,3 +265,102 @@ npm run dev
 
 ### Multi-Instance
 Multiple Claude Code instances can work on this project simultaneously without conflicts. The backend auto-reloads on changes.
+
+---
+
+## Embedded Anthropic Proxy
+
+The backend includes an optional embedded proxy that translates Anthropic Messages API requests to SAP AI Core (AWS Bedrock Claude). This eliminates the need for a separate `sap-ai-proxy` instance.
+
+### Architecture
+
+```
+Claude Code CLI
+    │
+    │ ANTHROPIC_BASE_URL=http://localhost:3001
+    ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                    Backend (Express) :3001                        │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │              Anthropic Proxy (embedded)                     │  │
+│  │   GET  /v1/models    - List available Claude models         │  │
+│  │   POST /v1/messages  - Anthropic Messages API               │  │
+│  │   GET  /health       - Proxy health check                   │  │
+│  └─────────────────────────┬──────────────────────────────────┘  │
+│                            │                                      │
+│  ┌─────────────────────────┼──────────────────────────────────┐  │
+│  │  AccessTokenProvider    │  DeploymentCatalog               │  │
+│  │  (OAuth2 caching)       │  (model discovery)               │  │
+│  └─────────────────────────┼──────────────────────────────────┘  │
+│                            │                                      │
+│  ┌─────────────────────────┼──────────────────────────────────┐  │
+│  │  RequestTransformer     │  StreamTransformer               │  │
+│  │  (Bedrock format)       │  (SSE event types)               │  │
+│  └─────────────────────────┴──────────────────────────────────┘  │
+└───────────────────────────────────────────────────────────────────┘
+                            │
+                            │ OAuth2 + Bearer Token
+                            ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                      SAP AI Core                                  │
+│   /v2/lm/deployments          - Model discovery                  │
+│   /v2/inference/deployments/  - Claude inference (Bedrock)       │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+### Proxy Files (`backend/src/anthropic-proxy/`)
+
+| File | Purpose |
+|------|---------|
+| `index.ts` | Express router with `/v1/models` and `/v1/messages` endpoints |
+| `access-token-provider.ts` | OAuth2 token acquisition and caching (60-second buffer) |
+| `deployment-catalog.ts` | Discovers and caches running Claude deployments from SAP AI Core |
+| `request-transformer.ts` | Transforms Anthropic API requests to Bedrock format |
+| `stream-transformer.ts` | Transforms Bedrock SSE to Anthropic SSE format (adds event types) |
+
+### Configuration
+
+Set these environment variables in `backend/.env`:
+
+```bash
+SAP_AICORE_AUTH_URL=https://xxx.authentication.xxx.hana.ondemand.com
+SAP_AICORE_CLIENT_ID=your-client-id
+SAP_AICORE_CLIENT_SECRET=your-client-secret
+SAP_AICORE_BASE_URL=https://api.ai.xxx.aws.ml.hana.ondemand.com
+SAP_AICORE_RESOURCE_GROUP=default
+SAP_AICORE_TIMEOUT_MS=120000
+```
+
+### Claude Code Configuration
+
+To use the embedded proxy, update your Claude Code settings (`~/.claude/settings.json`):
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:3001",
+    "ANTHROPIC_MODEL": "claude-sonnet-4-5-20250929"
+  }
+}
+```
+
+### Supported Models
+
+The proxy maps external model names to internal SAP AI Core deployments:
+
+| External (Anthropic API) | Internal (SAP AI Core) |
+|--------------------------|------------------------|
+| `claude-sonnet-4-5-20250929` | `anthropic--claude-4.5-sonnet` |
+| `claude-sonnet-4-20250514` | `anthropic--claude-sonnet-4` |
+| `claude-3-7-sonnet-20250219` | `anthropic--claude-3.7-sonnet` |
+| `claude-3-5-sonnet-20241022` | `anthropic--claude-3.5-sonnet` |
+| `claude-opus-4-20250514` | `anthropic--claude-opus-4` |
+| `claude-4-5-opus` | `anthropic--claude-4.5-opus` |
+
+### Features
+
+- **OAuth2 Token Caching:** Tokens cached with 60-second expiry buffer
+- **Model Discovery:** Automatically discovers running deployments
+- **Streaming Support:** Full SSE streaming with proper event types
+- **Reasoning Support:** Converts `reasoning_effort` to `thinking` budget
+- **Error Handling:** Proper HTTP status codes and error responses

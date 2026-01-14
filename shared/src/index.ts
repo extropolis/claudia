@@ -1,6 +1,6 @@
 // Simplified type definitions for task-based Claude Code spawner
 
-export type TaskState = 'idle' | 'busy' | 'waiting_input' | 'exited' | 'disconnected';
+export type TaskState = 'idle' | 'busy' | 'waiting_input' | 'exited' | 'disconnected' | 'interrupted' | 'archived';
 
 // Types of input Claude Code might be waiting for
 export type WaitingInputType = 'question' | 'permission' | 'text_input' | 'confirmation';
@@ -74,8 +74,11 @@ export type WSMessageType =
     | 'task:output'
     | 'task:restore'
     | 'task:destroyed'
+    | 'task:archived'
+    | 'task:restored'
     | 'task:waitingInput'
     | 'tasks:updated'
+    | 'archive:updated'
     | 'workspace:created'
     | 'workspace:deleted'
     | 'task:summary'

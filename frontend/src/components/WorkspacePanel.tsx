@@ -2,8 +2,8 @@ import { useState, useRef, useEffect } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
-    Loader2, CheckCircle, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send
+    Loader2, Square, Circle, ChevronRight, ChevronDown,
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle
 } from 'lucide-react';
 import { VoiceInput, VoiceInputHandle } from './VoiceInput';
 import './WorkspacePanel.css';
@@ -33,11 +33,17 @@ function playNotificationSound() {
 interface StateIconProps {
     task: Task;
     hasActiveQuestion: boolean;
+    lastSegmentHasQuestion: boolean;
+    onArchive?: () => void;
 }
 
-function StateIcon({ task, hasActiveQuestion }: StateIconProps) {
+function StateIcon({ task, hasActiveQuestion, lastSegmentHasQuestion, onArchive }: StateIconProps) {
     if (task.state === 'busy') {
         return <Loader2 className="status-icon spinning" size={14} />;
+    }
+
+    if (task.state === 'interrupted') {
+        return <AlertCircle className="status-icon interrupted" size={14} />;
     }
 
     if (task.state === 'waiting_input' && hasActiveQuestion) {
@@ -45,7 +51,21 @@ function StateIcon({ task, hasActiveQuestion }: StateIconProps) {
     }
 
     if (task.state === 'idle' || task.state === 'waiting_input') {
-        return <CheckCircle className="status-icon idle" size={14} />;
+        // Show "!" if the last segment of the prompt is a question, otherwise empty checkbox
+        if (lastSegmentHasQuestion) {
+            return <span className="status-icon question-icon">!</span>;
+        }
+        // Empty checkbox that archives task when clicked
+        return (
+            <Square
+                className="status-icon idle archive-checkbox"
+                size={14}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    onArchive?.();
+                }}
+            />
+        );
     }
 
     return <Circle className="status-icon" size={14} />;
@@ -54,31 +74,53 @@ function StateIcon({ task, hasActiveQuestion }: StateIconProps) {
 interface TaskItemProps {
     task: Task;
     onDeleteTask: (taskId: string) => void;
+    onInterruptTask: (taskId: string) => void;
+    onArchiveTask: (taskId: string) => void;
     onSelectTask: (taskId: string) => void;
     isSelected: boolean;
     hasActiveQuestion: boolean;
 }
 
-function TaskItem({ task, onDeleteTask, onSelectTask, isSelected, hasActiveQuestion }: TaskItemProps) {
-    // Truncate prompt for display
-    const displayPrompt = task.prompt.length > 50
-        ? task.prompt.substring(0, 50) + '...'
-        : task.prompt;
+function TaskItem({ task, onDeleteTask, onInterruptTask, onArchiveTask, onSelectTask, isSelected, hasActiveQuestion }: TaskItemProps) {
+    // Split prompt by ⏺ dots and get the last segment for display
+    const segments = task.prompt.split('⏺').map(s => s.trim()).filter(Boolean);
+    const lastSegment = segments.length > 0 ? segments[segments.length - 1] : task.prompt;
+
+    // Check if last segment ends with a question mark
+    const lastSegmentHasQuestion = lastSegment.endsWith('?');
+
+    // Truncate for display
+    const displayPrompt = lastSegment.length > 50
+        ? lastSegment.substring(0, 50) + '...'
+        : lastSegment;
+
+    const canInterrupt = task.state === 'busy';
 
     return (
         <div
             className={`task-item ${isSelected ? 'selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''}`}
             onClick={() => onSelectTask(task.id)}
         >
-            <StateIcon task={task} hasActiveQuestion={hasActiveQuestion} />
+            <StateIcon task={task} hasActiveQuestion={hasActiveQuestion} lastSegmentHasQuestion={lastSegmentHasQuestion} onArchive={() => onArchiveTask(task.id)} />
             <span className="task-prompt" title={task.prompt}>{displayPrompt}</span>
-            <button
-                className="task-action-button delete"
-                onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}
-                title="Delete task"
-            >
-                <Trash2 size={12} />
-            </button>
+            <div className="task-actions">
+                {canInterrupt && (
+                    <button
+                        className="task-action-button stop"
+                        onClick={(e) => { e.stopPropagation(); onInterruptTask(task.id); }}
+                        title="Stop task"
+                    >
+                        <StopCircle size={12} />
+                    </button>
+                )}
+                <button
+                    className="task-action-button delete"
+                    onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}
+                    title="Delete task"
+                >
+                    <Trash2 size={12} />
+                </button>
+            </div>
         </div>
     );
 }
@@ -91,6 +133,8 @@ interface WorkspaceSectionProps {
     isExpanded: boolean;
     onToggleExpand: () => void;
     onDeleteTask: (taskId: string) => void;
+    onInterruptTask: (taskId: string) => void;
+    onArchiveTask: (taskId: string) => void;
     onSelectTask: (taskId: string) => void;
     onDeleteWorkspace: () => void;
     onCreateTask: (prompt: string) => void;
@@ -104,6 +148,8 @@ function WorkspaceSection({
     isExpanded,
     onToggleExpand,
     onDeleteTask,
+    onInterruptTask,
+    onArchiveTask,
     onSelectTask,
     onDeleteWorkspace,
     onCreateTask
@@ -171,6 +217,8 @@ function WorkspaceSection({
                                     isSelected={selectedTaskId === task.id}
                                     hasActiveQuestion={waitingInputTaskIds.has(task.id)}
                                     onDeleteTask={onDeleteTask}
+                                    onInterruptTask={onInterruptTask}
+                                    onArchiveTask={onArchiveTask}
                                     onSelectTask={onSelectTask}
                                 />
                             ))}
@@ -215,6 +263,8 @@ function WorkspaceSection({
 
 interface WorkspacePanelProps {
     onDeleteTask: (taskId: string) => void;
+    onInterruptTask: (taskId: string) => void;
+    onArchiveTask: (taskId: string) => void;
     onCreateWorkspace: (path: string) => void;
     onDeleteWorkspace: (workspaceId: string) => void;
     onCreateTask: (prompt: string, workspaceId: string) => void;
@@ -223,6 +273,7 @@ interface WorkspacePanelProps {
 
 export function WorkspacePanel({
     onDeleteTask,
+    onArchiveTask,
     onDeleteWorkspace,
     onCreateTask,
     onSelectTask
@@ -305,6 +356,8 @@ export function WorkspacePanel({
                             isExpanded={expandedWorkspaces.has(workspace.id)}
                             onToggleExpand={() => toggleWorkspaceExpanded(workspace.id)}
                             onDeleteTask={onDeleteTask}
+                            onInterruptTask={() => {}} // TODO: wire up interrupt
+                            onArchiveTask={onArchiveTask}
                             onSelectTask={onSelectTask}
                             onDeleteWorkspace={() => onDeleteWorkspace(workspace.id)}
                             onCreateTask={(prompt) => onCreateTask(prompt, workspace.id)}

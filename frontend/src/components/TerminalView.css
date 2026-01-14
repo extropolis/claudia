@@ -65,6 +65,47 @@
     color: #000;
 }
 
+.terminal-state.interrupted {
+    background: #f97316;
+    color: #000;
+}
+
+.terminal-state.disconnected {
+    background: #666;
+    color: #fff;
+}
+
+.terminal-state.exited {
+    background: #444;
+    color: #fff;
+}
+
+/* Resume button for interrupted/disconnected tasks */
+.terminal-resume-button {
+    background: #0dbc79;
+    border: none;
+    border-radius: 4px;
+    color: #000;
+    cursor: pointer;
+    padding: 4px 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-right: 12px;
+    transition: all 0.2s;
+}
+
+.terminal-resume-button:hover {
+    filter: brightness(1.15);
+    transform: scale(1.02);
+}
+
+.terminal-resume-button:active {
+    transform: scale(0.98);
+}
+
 .history-button {
     background: transparent;
     border: 1px solid #444;

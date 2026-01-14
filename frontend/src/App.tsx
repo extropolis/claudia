@@ -17,6 +17,8 @@ function App() {
     const {
         createTask,
         destroyTask,
+        interruptTask,
+        archiveTask,
         createWorkspace,
         deleteWorkspace,
         sendChatMessage,
@@ -174,6 +176,8 @@ function App() {
                 >
                     <WorkspacePanel
                         onDeleteTask={destroyTask}
+                        onInterruptTask={interruptTask}
+                        onArchiveTask={archiveTask}
                         onCreateWorkspace={createWorkspace}
                         onDeleteWorkspace={deleteWorkspace}
                         onCreateTask={createTask}

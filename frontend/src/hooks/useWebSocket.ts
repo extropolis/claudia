@@ -261,8 +261,16 @@ export function useWebSocket() {
         sendMessage('task:destroy', { taskId });
     }, [sendMessage]);
 
+    const interruptTask = useCallback((taskId: string) => {
+        sendMessage('task:interrupt', { taskId });
+    }, [sendMessage]);
+
     const restoreTask = useCallback((taskId: string) => {
         sendMessage('task:restore', { taskId });
+    }, [sendMessage]);
+
+    const archiveTask = useCallback((taskId: string) => {
+        sendMessage('task:archive', { taskId });
     }, [sendMessage]);
 
     // Workspace actions
@@ -302,7 +310,9 @@ export function useWebSocket() {
         sendTaskInput,
         resizeTask,
         destroyTask,
+        interruptTask,
         restoreTask,
+        archiveTask,
         createWorkspace,
         deleteWorkspace,
         executeSupervisorAction,

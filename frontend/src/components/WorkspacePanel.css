@@ -313,7 +313,7 @@
     cursor: pointer;
     transition: background 0.15s ease;
     border-left: 2px solid transparent;
-    font-size: 0.8125rem;
+    font-size: 0.9375rem;
 }
 
 .workspace-panel .task-item .task-prompt {
@@ -323,7 +323,10 @@
     white-space: nowrap;
 }
 
-.workspace-panel .task-item .task-action-button.delete {
+.workspace-panel .task-item .task-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
     margin-left: auto;
     flex-shrink: 0;
 }
@@ -356,6 +359,17 @@
 
 .workspace-panel .status-icon.complete {
     color: var(--accent-green);
+}
+
+.workspace-panel .status-icon.archive-checkbox {
+    color: var(--accent-green);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.workspace-panel .status-icon.archive-checkbox:hover {
+    color: var(--text-primary);
+    transform: scale(1.1);
 }
 
 .workspace-panel .status-icon.error {
@@ -419,12 +433,12 @@
 
 .task-action-button.stop {
     opacity: 1;
-    color: var(--accent-yellow);
+    color: var(--accent-red);
 }
 
 .task-action-button.stop:hover {
-    background: rgba(255, 171, 64, 0.15);
-    color: var(--accent-yellow);
+    background: rgba(248, 81, 73, 0.15);
+    color: var(--accent-red);
 }
 
 .workspace-panel .status-icon.stopped {
@@ -703,4 +717,17 @@
     font-size: 0.75rem;
     white-space: nowrap;
     z-index: 10;
+}
+
+/* Interrupted state - task was killed during backend reload */
+.workspace-panel .status-icon.interrupted {
+    color: var(--accent-orange, #f97316);
+}
+
+.workspace-panel .task-item.interrupted {
+    background: rgba(249, 115, 22, 0.08);
+}
+
+.workspace-panel .task-item.interrupted .task-prompt {
+    color: var(--text-secondary);
 }
