@@ -18,7 +18,7 @@ if (!claudeCheck.installed) {
 }
 console.log(`Claude Code CLI detected: ${claudeCheck.version}`);
 
-const { server, taskSpawner } = createApp();
+const { server, taskSpawner, gracefulShutdown } = createApp();
 
 console.log(`[Index] Starting server on port ${PORT}...`);
 let httpServer: ReturnType<typeof server.listen> | undefined;
@@ -39,27 +39,9 @@ try {
     console.error('[Index] Exception during server.listen:', err);
 }
 
-// Graceful shutdown
-const shutdown = (signal: string) => {
-    console.log(`\n[${signal}] Shutting down...`);
-
-    httpServer?.close(() => {
-        console.log('HTTP server closed');
-    });
-
-    try {
-        console.log('Cleaning up tasks...');
-        taskSpawner.destroy();
-        console.log('Cleanup complete');
-        process.exit(0);
-    } catch (error) {
-        console.error('Error during shutdown:', error);
-        process.exit(1);
-    }
-};
-
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+// Graceful shutdown - use the server's gracefulShutdown which handles all cleanup
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 process.on('uncaughtException', (err) => {
     console.error('[Index] Uncaught Exception:', err);

@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import { writeFileSync, existsSync, readFileSync } from 'fs';
+import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { TaskSpawner } from './task-spawner.js';
 import { WorkspaceStore } from './workspace-store.js';
@@ -11,6 +12,42 @@ import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { createAnthropicProxy } from './anthropic-proxy/index.js';
 import { Task, Workspace, WSMessage, WSMessageType, ChatMessage, SuggestedAction, WaitingInputType } from '@claudia/shared';
+
+// Valid WebSocket message types for validation
+const VALID_WS_MESSAGE_TYPES = new Set([
+    'task:create',
+    'task:select',
+    'task:input',
+    'task:resize',
+    'task:destroy',
+    'task:interrupt',
+    'task:archive',
+    'task:reconnect',
+    'task:revert',
+    'task:restore',
+    'workspace:create',
+    'workspace:delete',
+    'supervisor:action',
+    'supervisor:analyze',
+    'supervisor:chat:message',
+    'supervisor:chat:history',
+    'supervisor:chat:clear'
+]);
+
+// WebSocket message validation
+interface WSClientMessage {
+    type: string;
+    payload?: Record<string, unknown>;
+}
+
+function isValidWSMessage(data: unknown): data is WSClientMessage {
+    if (typeof data !== 'object' || data === null) return false;
+    const msg = data as Record<string, unknown>;
+    if (typeof msg.type !== 'string') return false;
+    if (!VALID_WS_MESSAGE_TYPES.has(msg.type)) return false;
+    if (msg.payload !== undefined && (typeof msg.payload !== 'object' || msg.payload === null)) return false;
+    return true;
+}
 
 export function createApp(basePath?: string) {
     const app = express();
@@ -44,8 +81,8 @@ export function createApp(basePath?: string) {
     // SupervisorChat now handles both auto-analysis (formerly TaskSupervisor) and chat
     const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore);
 
-    // Helper to extract rules from CLAUDE.md (reverse sync)
-    function extractRulesFromClaudeMd(workspacePath: string): string | null {
+    // Helper to extract rules from CLAUDE.md (reverse sync) - async version
+    async function extractRulesFromClaudeMd(workspacePath: string): Promise<string | null> {
         const claudeMdPath = join(workspacePath, 'CLAUDE.md');
         const marker = '<!-- CODEUI-RULES -->';
         const endMarker = '<!-- /CODEUI-RULES -->';
@@ -54,35 +91,40 @@ export function createApp(basePath?: string) {
             return null;
         }
 
-        const content = readFileSync(claudeMdPath, 'utf-8');
-        const startIdx = content.indexOf(marker);
-        const endIdx = content.indexOf(endMarker);
+        try {
+            const content = await readFile(claudeMdPath, 'utf-8');
+            const startIdx = content.indexOf(marker);
+            const endIdx = content.indexOf(endMarker);
 
-        if (startIdx === -1 || endIdx === -1) {
+            if (startIdx === -1 || endIdx === -1) {
+                return null;
+            }
+
+            // Extract content between markers, removing the "## Custom Rules" header
+            const rulesContent = content.slice(startIdx + marker.length, endIdx);
+            const lines = rulesContent.split('\n');
+
+            // Filter out the "## Custom Rules" header and leading/trailing empty lines
+            const filteredLines = lines.filter((line) => {
+                const trimmed = line.trim();
+                if (trimmed === '## Custom Rules') return false;
+                return true;
+            });
+
+            return filteredLines.join('\n').trim();
+        } catch (error) {
+            console.error(`[Server] Error reading CLAUDE.md from ${workspacePath}:`, error);
             return null;
         }
-
-        // Extract content between markers, removing the "## Custom Rules" header
-        const rulesContent = content.slice(startIdx + marker.length, endIdx);
-        const lines = rulesContent.split('\n');
-
-        // Filter out the "## Custom Rules" header and leading/trailing empty lines
-        const filteredLines = lines.filter((line, idx, arr) => {
-            const trimmed = line.trim();
-            if (trimmed === '## Custom Rules') return false;
-            return true;
-        });
-
-        return filteredLines.join('\n').trim();
     }
 
     // On startup, sync rules FROM CLAUDE.md if config.rules is empty
-    (function initRulesFromClaudeMd() {
+    (async function initRulesFromClaudeMd() {
         const config = configStore.getConfig();
         if (!config.rules) {
             const workspaces = workspaceStore.getWorkspaces();
             for (const workspace of workspaces) {
-                const rules = extractRulesFromClaudeMd(workspace.id);
+                const rules = await extractRulesFromClaudeMd(workspace.id);
                 if (rules) {
                     console.log(`[Server] Found existing rules in ${workspace.id}/CLAUDE.md, syncing to config`);
                     configStore.updateConfig({ rules });
@@ -193,13 +235,28 @@ export function createApp(basePath?: string) {
 
         ws.on('message', async (data: Buffer) => {
             try {
-                const message = JSON.parse(data.toString());
+                let parsed: unknown;
+                try {
+                    parsed = JSON.parse(data.toString());
+                } catch {
+                    console.error('[Server] Invalid JSON in WebSocket message');
+                    return;
+                }
+
+                if (!isValidWSMessage(parsed)) {
+                    console.error('[Server] Invalid WebSocket message format or unknown type:', parsed);
+                    return;
+                }
+
+                const message = parsed;
                 console.log('[Server] Received:', message.type);
+
+                const payload = message.payload || {};
 
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId } = message.payload;
+                        const { prompt, workspaceId } = payload as { prompt?: string; workspaceId?: string };
                         if (!prompt || !workspaceId) {
                             console.error('[Server] task:create requires prompt and workspaceId');
                             return;
@@ -210,14 +267,15 @@ export function createApp(basePath?: string) {
 
                     case 'task:select': {
                         // Switch active task (for terminal viewing)
-                        const { taskId } = message.payload;
-                        taskSpawner.setTaskActive(taskId, true);
+                        const { taskId } = payload as { taskId?: string };
+                        if (taskId) taskSpawner.setTaskActive(taskId, true);
                         break;
                     }
 
                     case 'task:input': {
                         // Send input to a task's terminal
-                        const { taskId, input } = message.payload;
+                        const { taskId, input } = payload as { taskId?: string; input?: string };
+                        if (!taskId || !input) break;
                         // Filter out focus events (ESC [ I and ESC [ O) that confuse Claude's TUI
                         const filteredInput = input
                             .replace(/\x1b\[I/g, '')  // Focus in
@@ -230,35 +288,36 @@ export function createApp(basePath?: string) {
 
                     case 'task:resize': {
                         // Resize a task's terminal
-                        const { taskId, cols, rows } = message.payload;
-                        taskSpawner.resizeTask(taskId, cols, rows);
+                        const { taskId, cols, rows } = payload as { taskId?: string; cols?: number; rows?: number };
+                        if (taskId && cols && rows) taskSpawner.resizeTask(taskId, cols, rows);
                         break;
                     }
 
                     case 'task:destroy': {
                         // Kill and remove a task
-                        const { taskId } = message.payload;
-                        taskSpawner.destroyTask(taskId);
+                        const { taskId } = payload as { taskId?: string };
+                        if (taskId) taskSpawner.destroyTask(taskId);
                         break;
                     }
 
                     case 'task:interrupt': {
                         // Interrupt a running task (send ESC to cancel current operation)
-                        const { taskId } = message.payload;
-                        taskSpawner.interruptTask(taskId);
+                        const { taskId } = payload as { taskId?: string };
+                        if (taskId) taskSpawner.interruptTask(taskId);
                         break;
                     }
 
                     case 'task:archive': {
                         // Archive a completed task (removes from view)
-                        const { taskId } = message.payload;
-                        taskSpawner.archiveTask(taskId);
+                        const { taskId } = payload as { taskId?: string };
+                        if (taskId) taskSpawner.archiveTask(taskId);
                         break;
                     }
 
                     case 'task:reconnect': {
                         // Reconnect to a disconnected task
-                        const { taskId } = message.payload;
+                        const { taskId } = payload as { taskId?: string };
+                        if (!taskId) break;
                         const task = taskSpawner.reconnectTask(taskId);
                         if (task) {
                             broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
@@ -266,9 +325,26 @@ export function createApp(basePath?: string) {
                         break;
                     }
 
+                    case 'task:revert': {
+                        // Revert changes made by a task
+                        const { taskId, cleanUntracked } = payload as { taskId?: string; cleanUntracked?: boolean };
+                        if (!taskId) break;
+                        const result = await taskSpawner.revertTask(taskId, cleanUntracked || false);
+                        // Send result back to client
+                        ws.send(JSON.stringify({
+                            type: 'task:revertResult',
+                            payload: { taskId, ...result }
+                        }));
+                        if (result.success) {
+                            broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+                        }
+                        break;
+                    }
+
                     case 'task:restore': {
                         // Request terminal history restore
-                        const { taskId } = message.payload;
+                        const { taskId } = payload as { taskId?: string };
+                        if (!taskId) break;
                         const task = taskSpawner.getTask(taskId);
                         if (task && task.outputHistory.length > 0) {
                             const history = task.outputHistory.map(buf => buf.toString('utf8')).join('');
@@ -282,7 +358,8 @@ export function createApp(basePath?: string) {
 
                     case 'workspace:create': {
                         // Add a workspace
-                        const { path } = message.payload;
+                        const { path } = payload as { path?: string };
+                        if (!path) break;
                         try {
                             const workspace = workspaceStore.addWorkspace(path);
                             broadcast({ type: 'workspace:created' as WSMessageType, payload: { workspace } });
@@ -294,7 +371,8 @@ export function createApp(basePath?: string) {
 
                     case 'workspace:delete': {
                         // Remove a workspace
-                        const { workspaceId } = message.payload;
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) break;
                         if (workspaceStore.deleteWorkspace(workspaceId)) {
                             broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId } });
                         }
@@ -303,14 +381,15 @@ export function createApp(basePath?: string) {
 
                     case 'supervisor:action': {
                         // Execute a supervisor-suggested action
-                        const { taskId, action } = message.payload;
-                        supervisorChat.executeAction(taskId, action as SuggestedAction);
+                        const { taskId, action } = payload as { taskId?: string; action?: SuggestedAction };
+                        if (taskId && action) supervisorChat.executeAction(taskId, action);
                         break;
                     }
 
                     case 'supervisor:analyze': {
                         // Manually request task analysis (triggers auto-analysis)
-                        const { taskId } = message.payload;
+                        const { taskId } = payload as { taskId?: string };
+                        if (!taskId) break;
                         const task = taskSpawner.getTask(taskId);
                         if (task) {
                             await supervisorChat.autoAnalyzeTask({
@@ -327,7 +406,7 @@ export function createApp(basePath?: string) {
 
                     case 'supervisor:chat:message': {
                         // User sends a chat message to the supervisor
-                        const { content, taskId } = message.payload;
+                        const { content, taskId } = payload as { content?: string; taskId?: string };
                         if (!content) {
                             console.error('[Server] supervisor:chat:message requires content');
                             return;
@@ -402,13 +481,13 @@ export function createApp(basePath?: string) {
     });
 
     // Config API routes
-    app.get('/api/config', (_req, res) => {
+    app.get('/api/config', async (_req, res) => {
         // If rules are empty, try to sync from CLAUDE.md files
         const config = configStore.getConfig();
         if (!config.rules) {
             const workspaces = workspaceStore.getWorkspaces();
             for (const workspace of workspaces) {
-                const rules = extractRulesFromClaudeMd(workspace.id);
+                const rules = await extractRulesFromClaudeMd(workspace.id);
                 if (rules) {
                     console.log(`[Server] Syncing rules from ${workspace.id}/CLAUDE.md to config`);
                     configStore.updateConfig({ rules });
@@ -464,6 +543,18 @@ export function createApp(basePath?: string) {
         }
     });
 
+    // MCP server config type
+    interface MCPServerConfig {
+        command?: string;
+        args?: string[];
+        [key: string]: unknown;
+    }
+
+    interface ClaudeProjectConfig {
+        mcpServers?: Record<string, MCPServerConfig>;
+        [key: string]: unknown;
+    }
+
     // Get Claude Code's global MCP servers from ~/.claude.json
     app.get('/api/claude-mcp-servers', (req, res) => {
         try {
@@ -474,13 +565,16 @@ export function createApp(basePath?: string) {
                 return res.json({ global: [], project: [] });
             }
 
-            const claudeConfig = JSON.parse(readFileSync(claudeConfigPath, 'utf-8'));
+            const claudeConfig = JSON.parse(readFileSync(claudeConfigPath, 'utf-8')) as {
+                mcpServers?: Record<string, MCPServerConfig>;
+                projects?: Record<string, ClaudeProjectConfig>;
+            };
             const workspacePath = req.query.workspace as string;
 
             // Extract global MCP servers
             const globalServers: { name: string; command: string; args?: string[]; scope: 'global' }[] = [];
             if (claudeConfig.mcpServers) {
-                for (const [name, config] of Object.entries(claudeConfig.mcpServers as Record<string, any>)) {
+                for (const [name, config] of Object.entries(claudeConfig.mcpServers)) {
                     globalServers.push({
                         name,
                         command: config.command || '',
@@ -493,9 +587,9 @@ export function createApp(basePath?: string) {
             // Extract project-specific MCP servers if workspace path provided
             const projectServers: { name: string; command: string; args?: string[]; scope: 'project'; projectPath: string }[] = [];
             if (claudeConfig.projects) {
-                for (const [projectPath, projectConfig] of Object.entries(claudeConfig.projects as Record<string, any>)) {
+                for (const [projectPath, projectConfig] of Object.entries(claudeConfig.projects)) {
                     if (projectConfig.mcpServers) {
-                        for (const [name, config] of Object.entries(projectConfig.mcpServers as Record<string, any>)) {
+                        for (const [name, config] of Object.entries(projectConfig.mcpServers)) {
                             // Include if no workspace filter, or if this project matches the workspace
                             if (!workspacePath || projectPath === workspacePath || workspacePath.startsWith(projectPath)) {
                                 projectServers.push({
@@ -590,24 +684,26 @@ export function createApp(basePath?: string) {
                         : 'Successfully authenticated with SAP AI Core'
                 });
 
-            } catch (fetchError: any) {
+            } catch (fetchError: unknown) {
                 clearTimeout(timeout);
-                if (fetchError.name === 'AbortError') {
+                if (fetchError instanceof Error && fetchError.name === 'AbortError') {
                     return res.json({
                         success: false,
                         error: 'Connection timeout - unable to reach auth server'
                     });
                 }
+                const message = fetchError instanceof Error ? fetchError.message : String(fetchError);
                 return res.json({
                     success: false,
-                    error: `Connection error: ${fetchError.message}`
+                    error: `Connection error: ${message}`
                 });
             }
-        } catch (error: any) {
+        } catch (error: unknown) {
             console.error('[Server] Error testing AI Core credentials:', error);
+            const message = error instanceof Error ? error.message : String(error);
             res.status(500).json({
                 success: false,
-                error: `Server error: ${error.message}`
+                error: `Server error: ${message}`
             });
         }
     });
@@ -779,9 +875,8 @@ export function createApp(basePath?: string) {
         }, 500);
     }
 
-    // Cleanup on server shutdown
-    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    // Note: SIGINT/SIGTERM handlers are set up in index.ts to avoid duplicate handlers
+    // The gracefulShutdown function is exported for use by the restart endpoint
 
-    return { app, server, wss, taskSpawner, workspaceStore };
+    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown };
 }

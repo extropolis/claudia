@@ -8,9 +8,6 @@ import { execSync } from 'child_process';
 import { ConfigStore } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
 
-// Find absolute path to claude CLI for reliability
-const CLAUDE_PATH = '/Users/I850333/.nvm/versions/node/v20.19.3/bin/claude';
-
 /**
  * Check if Claude Code CLI is installed and available
  */
@@ -324,6 +321,8 @@ export class TaskSpawner extends EventEmitter {
                     console.log(`[TaskSpawner] Stop hook: task ${taskId} → idle`);
                     task.state = 'idle';
                     task.waitingInputType = undefined;
+                    // Capture git state when task becomes idle (task finished doing work)
+                    this.captureGitStateAfterTask(taskId);
                     this.emit('taskStateChanged', this.toPublicTask(task));
                 }
             }
@@ -351,6 +350,8 @@ export class TaskSpawner extends EventEmitter {
                     } else {
                         task.state = 'idle';
                         task.waitingInputType = undefined;
+                        // Capture git state when task becomes idle
+                        this.captureGitStateAfterTask(task.id);
                         this.emit('taskStateChanged', this.toPublicTask(task));
                     }
                 }

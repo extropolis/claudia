@@ -19,6 +19,12 @@
     color: #d4d4d4;
     font-family: "SF Mono", "Monaco", "Inconsolata", "Fira Code", monospace;
     flex: 1;
+    /* Limit to 3 lines max */
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    line-height: 1.4;
 }
 
 .copy-button {

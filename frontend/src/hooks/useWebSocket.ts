@@ -295,6 +295,10 @@ export function useWebSocket() {
         sendMessage('task:archive', { taskId });
     }, [sendMessage]);
 
+    const revertTask = useCallback((taskId: string, cleanUntracked: boolean = false) => {
+        sendMessage('task:revert', { taskId, cleanUntracked });
+    }, [sendMessage]);
+
     // Workspace actions
     const createWorkspace = useCallback((path: string) => {
         sendMessage('workspace:create', { path });
@@ -336,6 +340,7 @@ export function useWebSocket() {
         restoreTask,
         reconnectTask,
         archiveTask,
+        revertTask,
         createWorkspace,
         deleteWorkspace,
         executeSupervisorAction,

@@ -20,6 +20,7 @@ function App() {
         destroyTask,
         interruptTask,
         archiveTask,
+        revertTask,
         createWorkspace,
         deleteWorkspace,
         sendChatMessage,
@@ -219,6 +220,7 @@ function App() {
                         onDeleteTask={destroyTask}
                         onInterruptTask={interruptTask}
                         onArchiveTask={archiveTask}
+                        onRevertTask={revertTask}
                         onCreateWorkspace={createWorkspace}
                         onDeleteWorkspace={deleteWorkspace}
                         onCreateTask={createTask}

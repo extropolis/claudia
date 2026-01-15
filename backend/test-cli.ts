@@ -841,7 +841,7 @@ class TestCLI {
 function parseArgs(): TestConfig {
     const args = process.argv.slice(2);
 
-    let backendUrl = 'ws://localhost:3001';
+    let backendUrl = 'ws://localhost:4001';
     let testMessage = 'echo hello world';
     let timeoutMs = 120000; // 120 seconds
     let testClear = false;
@@ -967,7 +967,7 @@ function parseArgs(): TestConfig {
 Usage: npx tsx test-cli.ts [options]
 
 BASIC OPTIONS:
-  --url <url>              Backend WebSocket URL (default: ws://localhost:3001)
+  --url <url>              Backend WebSocket URL (default: ws://localhost:4001)
   --message, -m <text>     Test message/description to send (default: echo hello world)
   --timeout, -t <ms>       Timeout in milliseconds (default: 120000)
   --verbose, -v            Show all WebSocket events and detailed logging

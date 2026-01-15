@@ -3,7 +3,7 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
     Loader2, Square, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2
 } from 'lucide-react';
 import { VoiceInput, VoiceInputHandle } from './VoiceInput';
 import './WorkspacePanel.css';
@@ -78,12 +78,13 @@ interface TaskItemProps {
     onDeleteTask: (taskId: string) => void;
     onInterruptTask: (taskId: string) => void;
     onArchiveTask: (taskId: string) => void;
+    onRevertTask: (taskId: string) => void;
     onSelectTask: (taskId: string) => void;
     isSelected: boolean;
     hasActiveQuestion: boolean;
 }
 
-function TaskItem({ task, onDeleteTask, onInterruptTask, onArchiveTask, onSelectTask, isSelected, hasActiveQuestion }: TaskItemProps) {
+function TaskItem({ task, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, isSelected, hasActiveQuestion }: TaskItemProps) {
     const [stopClicked, setStopClicked] = useState(false);
 
     // Reset stopClicked when task state changes from busy
@@ -97,10 +98,8 @@ function TaskItem({ task, onDeleteTask, onInterruptTask, onArchiveTask, onSelect
     const segments = task.prompt.split('⏺').map(s => s.trim()).filter(Boolean);
     const lastSegment = segments.length > 0 ? segments[segments.length - 1] : task.prompt;
 
-    // Truncate for display - max ~80 chars to fit UI well
-    const displayPrompt = lastSegment.length > 80
-        ? lastSegment.substring(0, 80) + '...'
-        : lastSegment;
+    // CSS handles visual truncation with line-clamp
+    const displayPrompt = lastSegment;
 
     const canInterrupt = task.state === 'busy' && !stopClicked;
 
@@ -125,6 +124,18 @@ function TaskItem({ task, onDeleteTask, onInterruptTask, onArchiveTask, onSelect
                         <StopCircle size={12} />
                     </button>
                 )}
+                {task.gitState?.canRevert && (
+                    <button
+                        className="task-action-button revert"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onRevertTask(task.id);
+                        }}
+                        title={`Revert changes (${task.gitState.filesModified.length} files)`}
+                    >
+                        <Undo2 size={12} />
+                    </button>
+                )}
                 <button
                     className="task-action-button delete"
                     onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}
@@ -147,6 +158,7 @@ interface WorkspaceSectionProps {
     onDeleteTask: (taskId: string) => void;
     onInterruptTask: (taskId: string) => void;
     onArchiveTask: (taskId: string) => void;
+    onRevertTask: (taskId: string) => void;
     onSelectTask: (taskId: string) => void;
     onDeleteWorkspace: () => void;
     onCreateTask: (prompt: string) => void;
@@ -162,6 +174,7 @@ function WorkspaceSection({
     onDeleteTask,
     onInterruptTask,
     onArchiveTask,
+    onRevertTask,
     onSelectTask,
     onDeleteWorkspace,
     onCreateTask
@@ -231,6 +244,7 @@ function WorkspaceSection({
                                     onDeleteTask={onDeleteTask}
                                     onInterruptTask={onInterruptTask}
                                     onArchiveTask={onArchiveTask}
+                                    onRevertTask={onRevertTask}
                                     onSelectTask={onSelectTask}
                                 />
                             ))}
@@ -279,6 +293,7 @@ interface WorkspacePanelProps {
     onDeleteTask: (taskId: string) => void;
     onInterruptTask: (taskId: string) => void;
     onArchiveTask: (taskId: string) => void;
+    onRevertTask: (taskId: string) => void;
     onCreateWorkspace: (path: string) => void;
     onDeleteWorkspace: (workspaceId: string) => void;
     onCreateTask: (prompt: string, workspaceId: string) => void;
@@ -289,6 +304,7 @@ export function WorkspacePanel({
     onDeleteTask,
     onInterruptTask,
     onArchiveTask,
+    onRevertTask,
     onDeleteWorkspace,
     onCreateTask,
     onSelectTask
@@ -373,6 +389,7 @@ export function WorkspacePanel({
                             onDeleteTask={onDeleteTask}
                             onInterruptTask={onInterruptTask}
                             onArchiveTask={onArchiveTask}
+                            onRevertTask={onRevertTask}
                             onSelectTask={onSelectTask}
                             onDeleteWorkspace={() => onDeleteWorkspace(workspace.id)}
                             onCreateTask={(prompt) => onCreateTask(prompt, workspace.id)}

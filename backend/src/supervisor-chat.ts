@@ -124,6 +124,10 @@ const TOOLS: ToolDefinition[] = [
 const CHAT_HISTORY_FILE = join(__dirname, '..', 'chat-history.json');
 const MAX_HISTORY_MESSAGES = 200; // Limit history to prevent unbounded growth
 
+// Rate limiting for Claude process spawning
+const RATE_LIMIT_WINDOW_MS = 60000; // 1 minute window
+const MAX_SPAWNS_PER_WINDOW = 10; // Max Claude processes per window
+
 export class SupervisorChat extends EventEmitter {
     private taskSpawner: TaskSpawner;
     private workspaceStore: { getWorkspaces: () => { id: string; name: string }[] };
@@ -132,6 +136,7 @@ export class SupervisorChat extends EventEmitter {
     private isProcessing: boolean = false;
     private processingTasks: Set<string> = new Set();  // Prevent duplicate auto-analysis
     private saveDebounceTimer: NodeJS.Timeout | null = null;
+    private spawnTimestamps: number[] = [];  // Track spawn timestamps for rate limiting
 
     constructor(
         taskSpawner: TaskSpawner,
@@ -180,6 +185,23 @@ export class SupervisorChat extends EventEmitter {
         this.saveDebounceTimer = setTimeout(() => {
             this.saveChatHistoryNow();
         }, 500);
+    }
+
+    /**
+     * Check if we can spawn a new Claude process (rate limiting)
+     */
+    private canSpawnProcess(): boolean {
+        const now = Date.now();
+        // Remove timestamps outside the window
+        this.spawnTimestamps = this.spawnTimestamps.filter(ts => now - ts < RATE_LIMIT_WINDOW_MS);
+        return this.spawnTimestamps.length < MAX_SPAWNS_PER_WINDOW;
+    }
+
+    /**
+     * Record a process spawn for rate limiting
+     */
+    private recordSpawn(): void {
+        this.spawnTimestamps.push(Date.now());
     }
 
     /**
@@ -357,6 +379,12 @@ Keep your response concise and actionable.`;
      * Simple Claude call without tool support (for auto-analysis)
      */
     private async callClaudeSimple(prompt: string, workspaceId: string): Promise<string> {
+        // Rate limiting check
+        if (!this.canSpawnProcess()) {
+            throw new Error('Rate limit exceeded: too many Claude processes spawned recently');
+        }
+        this.recordSpawn();
+
         return new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
                 claudeProcess.kill();
@@ -813,6 +841,12 @@ IMPORTANT: Always respond with valid JSON. Do not include any text outside the J
      * Call Claude Code with tool support
      */
     private async callClaudeWithTools(userMessage: string, context: string): Promise<ClaudeResponse> {
+        // Rate limiting check
+        if (!this.canSpawnProcess()) {
+            throw new Error('Rate limit exceeded: too many Claude processes spawned recently');
+        }
+        this.recordSpawn();
+
         const systemPrompt = this.buildSystemPrompt(context);
         const fullPrompt = `${systemPrompt}\n\nUser message: "${userMessage}"\n\nRespond with JSON:`;
 
@@ -904,7 +938,14 @@ IMPORTANT: Always respond with valid JSON. Do not include any text outside the J
     /**
      * Get a follow-up response after tool execution
      */
-    private async getFollowUpResponse(originalMessage: string, toolResults: string, context: string): Promise<string> {
+    private async getFollowUpResponse(originalMessage: string, toolResults: string, _context: string): Promise<string> {
+        // Rate limiting check
+        if (!this.canSpawnProcess()) {
+            // If rate limited, just return tool results directly
+            return `Action completed:\n${toolResults}`;
+        }
+        this.recordSpawn();
+
         const prompt = `You previously received this user message: "${originalMessage}"
 
 You called tools and got these results:

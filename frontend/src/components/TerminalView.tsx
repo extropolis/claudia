@@ -258,7 +258,7 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
     return (
         <div className="terminal-view">
             <div className="terminal-header">
-                <span className="terminal-title">{task.prompt.substring(0, 80)}{task.prompt.length > 80 ? '...' : ''}</span>
+                <span className="terminal-title">{task.prompt}</span>
                 <button
                     className={`copy-button ${copied ? 'copied' : ''}`}
                     onClick={copyToClipboard}

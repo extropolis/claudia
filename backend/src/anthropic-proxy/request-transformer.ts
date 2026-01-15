@@ -2,11 +2,33 @@
  * RequestTransformer for Bedrock Claude models.
  * Transforms Anthropic API requests to AWS Bedrock format.
  */
+
+// Anthropic API request types
+interface ThinkingConfig {
+    type: string;
+    budget_tokens: number;
+}
+
+interface AnthropicRequest {
+    model?: string;
+    stream?: boolean;
+    reasoning_effort?: string;
+    max_tokens?: number;
+    thinking?: ThinkingConfig;
+    [key: string]: unknown;
+}
+
+interface BedrockRequest {
+    anthropic_version: string;
+    max_tokens?: number;
+    thinking?: ThinkingConfig;
+    [key: string]: unknown;
+}
+
 export class RequestTransformer {
-    transform(input: any): any {
+    transform(input: AnthropicRequest): BedrockRequest {
         // Remove model and stream from the body (they're handled separately)
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { model, stream, reasoning_effort, ...rest } = input;
+        const { model: _model, stream: _stream, reasoning_effort, ...rest } = input;
 
         // Convert reasoning_effort to thinking if present
         let transformed = rest;
@@ -25,7 +47,7 @@ export class RequestTransformer {
         };
     }
 
-    private convertReasoningEffort(effort: string, maxTokens: number): { type: string; budget_tokens: number } {
+    private convertReasoningEffort(effort: string, maxTokens: number): ThinkingConfig {
         const budgetMap: Record<string, number> = {
             'low': Math.max(1024, Math.floor(maxTokens * 0.2)),
             'medium': Math.max(1024, Math.floor(maxTokens * 0.5)),
@@ -39,9 +61,11 @@ export class RequestTransformer {
         };
     }
 
-    private clampThinking(data: any): any {
-        const { max_tokens, thinking } = data;
-        if (!thinking || typeof thinking !== 'object' || thinking.budget_tokens == null) return data;
+    private clampThinking(data: Omit<AnthropicRequest, 'model' | 'stream' | 'reasoning_effort'>): Omit<AnthropicRequest, 'model' | 'stream' | 'reasoning_effort'> {
+        const max_tokens = data.max_tokens;
+        const thinking = data.thinking as ThinkingConfig | undefined;
+
+        if (!thinking || thinking.budget_tokens == null) return data;
         if (!max_tokens || typeof max_tokens !== 'number') return data;
 
         const budget = thinking.budget_tokens;

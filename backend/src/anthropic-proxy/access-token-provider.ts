@@ -18,6 +18,12 @@ interface TokenCache {
     expiresAt: number;
 }
 
+interface TokenResponse {
+    access_token: string;
+    expires_in: number;
+    token_type?: string;
+}
+
 export class AccessTokenProvider {
     private tokenCache: TokenCache = { token: null, expiresAt: 0 };
     private config: AICorConfig;
@@ -44,22 +50,31 @@ export class AccessTokenProvider {
 
         try {
             const response = await this.requestToken(tokenUrl, credentials);
+
+            // Check if response is OK before parsing
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Auth server returned ${response.status}: ${errorText}`);
+            }
+
             const responseText = await response.text();
 
             let tokenData;
             try {
                 tokenData = JSON.parse(responseText);
-            } catch (parseError: any) {
-                throw new Error(`Failed to parse token response as JSON: ${parseError.message}. Response: ${responseText}`);
+            } catch (parseError: unknown) {
+                const message = parseError instanceof Error ? parseError.message : String(parseError);
+                throw new Error(`Failed to parse token response as JSON: ${message}. Response: ${responseText}`);
             }
 
             this.validateTokenData(tokenData);
             this.cacheToken(tokenData, currentTime);
 
             return this.tokenCache.token!;
-        } catch (error: any) {
+        } catch (error: unknown) {
             this.clearCache();
-            throw new Error(`Token acquisition failed: ${error.message}`);
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`Token acquisition failed: ${message}`);
         }
     }
 
@@ -87,8 +102,8 @@ export class AccessTokenProvider {
                 },
                 signal: controller.signal
             });
-        } catch (error: any) {
-            if (error.name === 'AbortError') {
+        } catch (error: unknown) {
+            if (error instanceof Error && error.name === 'AbortError') {
                 throw new Error(`Token request timed out after ${timeoutMs}ms`);
             }
             throw error;
@@ -97,13 +112,17 @@ export class AccessTokenProvider {
         }
     }
 
-    private validateTokenData(data: any): void {
-        if (!data.access_token || !data.expires_in) {
+    private validateTokenData(data: unknown): asserts data is TokenResponse {
+        if (typeof data !== 'object' || data === null) {
+            throw new Error('Invalid token response: not an object');
+        }
+        const tokenData = data as Record<string, unknown>;
+        if (typeof tokenData.access_token !== 'string' || typeof tokenData.expires_in !== 'number') {
             throw new Error('Invalid token response structure from auth server.');
         }
     }
 
-    private cacheToken(tokenData: any, currentTime: number): void {
+    private cacheToken(tokenData: TokenResponse, currentTime: number): void {
         this.tokenCache.token = tokenData.access_token;
         this.tokenCache.expiresAt = currentTime + (tokenData.expires_in - TOKEN_BUFFER_SECONDS) * 1000;
         console.log('[AnthropicProxy] Token cached, expires in', tokenData.expires_in - TOKEN_BUFFER_SECONDS, 'seconds');
