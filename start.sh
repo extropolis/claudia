@@ -38,16 +38,14 @@ for port in $BACKEND_PORT $FRONTEND_PORT $OPENCODE_PORT; do
     fi
 done
 
-# Kill any lingering node/tsx processes related to this project
-pkill -f "tsx watch src/index.ts" 2>/dev/null || true
+# Kill only processes specific to THIS project (codeui)
+# Use full paths or unique identifiers to avoid killing other projects
+pkill -f "codeui/backend.*tsx watch" 2>/dev/null || true
+pkill -f "codeui/backend/src/index.ts" 2>/dev/null || true
+pkill -f "codeui/backend/test-cli.ts" 2>/dev/null || true
 pkill -f "vite.*codeui" 2>/dev/null || true
-pkill -f "node.*backend/src/index.ts" 2>/dev/null || true
-pkill -f "node.*test-cli.ts" 2>/dev/null || true
-# Explicitly kill opencode processes (zombies from SDK)
-pkill -f "opencode" 2>/dev/null || true
-pkill -f "opencode-studio-server" 2>/dev/null || true
-# Kill any node process running in this project directory (aggressive fallback)
-pgrep -f "node" | xargs -I {} sh -c 'lsof -p {} | grep "'$(pwd)'" >/dev/null && kill -9 {}' 2>/dev/null || true
+# Kill opencode processes only if they're related to codeui
+pkill -f "codeui.*opencode" 2>/dev/null || true
 
 # Wait for ports to be freed
 sleep 1

@@ -1,0 +1,66 @@
+/* Global Voice Toggle Button */
+.global-voice-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    transition: all 0.2s ease;
+    position: relative;
+}
+
+.global-voice-toggle:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border-color: var(--text-muted);
+}
+
+.global-voice-toggle.active {
+    background: rgba(248, 81, 73, 0.15);
+    color: var(--accent-red);
+    border-color: var(--accent-red);
+}
+
+.global-voice-toggle.active:hover {
+    background: rgba(248, 81, 73, 0.25);
+}
+
+.global-voice-toggle.unsupported {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.global-voice-toggle .mic-active {
+    animation: pulse-mic 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-mic {
+    0%, 100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+    50% {
+        transform: scale(1.1);
+        opacity: 0.8;
+    }
+}
+
+.voice-target-indicator {
+    font-size: 0.6875rem;
+    padding: 2px 6px;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    color: var(--text-muted);
+    margin-left: 4px;
+}
+
+.global-voice-toggle.active .voice-target-indicator {
+    background: rgba(248, 81, 73, 0.2);
+    color: var(--accent-red);
+}

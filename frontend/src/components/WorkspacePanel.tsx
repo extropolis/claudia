@@ -1,11 +1,10 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
     Loader2, Square, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical
 } from 'lucide-react';
-import { VoiceInput, VoiceInputHandle } from './VoiceInput';
 import './WorkspacePanel.css';
 
 // Simple notification sound using Web Audio API
@@ -129,7 +128,10 @@ function TaskItem({ task, onDeleteTask, onInterruptTask, onArchiveTask, onRevert
                         className="task-action-button revert"
                         onClick={(e) => {
                             e.stopPropagation();
-                            onRevertTask(task.id);
+                            const fileCount = task.gitState?.filesModified.length || 0;
+                            if (window.confirm(`Are you sure you want to revert ${fileCount} file${fileCount !== 1 ? 's' : ''}? This cannot be undone.`)) {
+                                onRevertTask(task.id);
+                            }
                         }}
                         title={`Revert changes (${task.gitState.filesModified.length} files)`}
                     >
@@ -154,6 +156,9 @@ interface WorkspaceSectionProps {
     waitingInputTaskIds: Set<string>;
     selectedTaskId: string | null;
     isExpanded: boolean;
+    index: number;
+    isDragging: boolean;
+    dragOverIndex: number | null;
     onToggleExpand: () => void;
     onDeleteTask: (taskId: string) => void;
     onInterruptTask: (taskId: string) => void;
@@ -162,6 +167,9 @@ interface WorkspaceSectionProps {
     onSelectTask: (taskId: string) => void;
     onDeleteWorkspace: () => void;
     onCreateTask: (prompt: string) => void;
+    onDragStart: (index: number) => void;
+    onDragEnter: (index: number) => void;
+    onDragEnd: () => void;
 }
 
 function WorkspaceSection({
@@ -170,6 +178,9 @@ function WorkspaceSection({
     waitingInputTaskIds,
     selectedTaskId,
     isExpanded,
+    index,
+    isDragging,
+    dragOverIndex,
     onToggleExpand,
     onDeleteTask,
     onInterruptTask,
@@ -177,42 +188,102 @@ function WorkspaceSection({
     onRevertTask,
     onSelectTask,
     onDeleteWorkspace,
-    onCreateTask
+    onCreateTask,
+    onDragStart,
+    onDragEnter,
+    onDragEnd
 }: WorkspaceSectionProps) {
     const [inputValue, setInputValue] = useState('');
-    const [interimTranscript, setInterimTranscript] = useState('');
-    const voiceInputRef = useRef<VoiceInputHandle>(null);
 
-    const handleSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
-        // Stop voice recording when submitting
-        voiceInputRef.current?.stopListening();
+    const {
+        globalVoiceEnabled,
+        focusedInputId,
+        voiceTranscript,
+        voiceInterimTranscript,
+        setFocusedInputId,
+        consumeVoiceTranscript,
+        clearVoiceTranscript
+    } = useTaskStore();
+
+    const inputId = `new-task-${workspace.id}`;
+    const isFocused = focusedInputId === inputId;
+
+    // Append voice transcript to input when this input is focused
+    useEffect(() => {
+        if (isFocused && voiceTranscript) {
+            setInputValue(prev => (prev ? prev + ' ' : '') + voiceTranscript);
+            consumeVoiceTranscript();
+        }
+    }, [isFocused, voiceTranscript, consumeVoiceTranscript]);
+
+    const handleSubmit = useCallback((e?: React.FormEvent) => {
+        e?.preventDefault();
+        if (globalVoiceEnabled) {
+            clearVoiceTranscript();
+        }
         if (inputValue.trim()) {
             onCreateTask(inputValue.trim());
             setInputValue('');
-            setInterimTranscript('');
         }
-    };
+    }, [inputValue, globalVoiceEnabled, clearVoiceTranscript, onCreateTask]);
+
+    // Listen for auto-send event
+    useEffect(() => {
+        const handleAutoSend = (e: CustomEvent<{ inputId: string }>) => {
+            if (e.detail.inputId === inputId && inputValue.trim()) {
+                handleSubmit();
+            }
+        };
+
+        window.addEventListener('voice:autoSend', handleAutoSend as EventListener);
+        return () => {
+            window.removeEventListener('voice:autoSend', handleAutoSend as EventListener);
+        };
+    }, [inputId, inputValue, handleSubmit]);
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            handleSubmit(e);
+            handleSubmit();
         }
     };
 
-    const handleVoiceTranscript = (text: string, isFinal: boolean) => {
-        if (isFinal) {
-            setInputValue(prev => (prev ? prev + ' ' : '') + text);
-            setInterimTranscript('');
-        } else {
-            setInterimTranscript(text);
-        }
+    const handleFocus = () => {
+        setFocusedInputId(inputId);
     };
+
+    const handleBlur = () => {
+        setTimeout(() => {
+            const currentFocused = useTaskStore.getState().focusedInputId;
+            if (currentFocused === inputId) {
+                setFocusedInputId(null);
+            }
+        }, 100);
+    };
+
+    // Show interim transcript when focused and listening
+    const showInterim = globalVoiceEnabled && isFocused && voiceInterimTranscript;
+
+    const isDropTarget = dragOverIndex === index && isDragging;
 
     return (
-        <div className="workspace-section">
+        <div
+            className={`workspace-section ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
+            onDragOver={(e) => e.preventDefault()}
+            onDragEnter={() => onDragEnter(index)}
+        >
             <div className="workspace-header">
+                <div
+                    className="workspace-drag-handle"
+                    draggable
+                    onDragStart={(e) => {
+                        e.dataTransfer.effectAllowed = 'move';
+                        onDragStart(index);
+                    }}
+                    onDragEnd={onDragEnd}
+                >
+                    <GripVertical size={14} />
+                </div>
                 <div className="workspace-header-left" onClick={onToggleExpand}>
                     {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                     <Briefcase size={16} className="workspace-icon" />
@@ -252,32 +323,25 @@ function WorkspaceSection({
                     )}
                     <form className="task-input-form" onSubmit={handleSubmit}>
                         <div className="task-input-row">
-                            <div className="task-input-wrapper">
+                            <div className={`task-input-wrapper ${isFocused && globalVoiceEnabled ? 'voice-active' : ''}`}>
                                 <textarea
                                     className="task-input"
                                     placeholder="Type or speak a task..."
-                                    value={inputValue + (interimTranscript ? (inputValue ? ' ' : '') + interimTranscript : '')}
-                                    onChange={(e) => {
-                                        setInputValue(e.target.value);
-                                        setInterimTranscript('');
-                                    }}
+                                    value={inputValue}
+                                    onChange={(e) => setInputValue(e.target.value)}
                                     onKeyDown={handleKeyDown}
+                                    onFocus={handleFocus}
+                                    onBlur={handleBlur}
                                     rows={2}
                                 />
-                                {interimTranscript && (
-                                    <span className="interim-indicator">listening...</span>
+                                {showInterim && (
+                                    <span className="interim-indicator">{voiceInterimTranscript}</span>
                                 )}
                             </div>
-                            <VoiceInput
-                                ref={voiceInputRef}
-                                onTranscript={handleVoiceTranscript}
-                                className="task-voice-button"
-                                continuous={true}
-                            />
                             <button
                                 type="submit"
                                 className="task-submit-button"
-                                disabled={!inputValue.trim() && !interimTranscript.trim()}
+                                disabled={!inputValue.trim()}
                             >
                                 <Send size={16} />
                             </button>
@@ -316,8 +380,32 @@ export function WorkspacePanel({
         expandedWorkspaces,
         toggleWorkspaceExpanded,
         setShowProjectPicker,
-        waitingInputNotifications
+        waitingInputNotifications,
+        reorderWorkspaces
     } = useTaskStore();
+
+    // Drag and drop state
+    const [dragIndex, setDragIndex] = useState<number | null>(null);
+    const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+
+    const handleDragStart = useCallback((index: number) => {
+        setDragIndex(index);
+        setDragOverIndex(index);
+    }, []);
+
+    const handleDragEnter = useCallback((index: number) => {
+        if (dragIndex !== null) {
+            setDragOverIndex(index);
+        }
+    }, [dragIndex]);
+
+    const handleDragEnd = useCallback(() => {
+        if (dragIndex !== null && dragOverIndex !== null && dragIndex !== dragOverIndex) {
+            reorderWorkspaces(dragIndex, dragOverIndex);
+        }
+        setDragIndex(null);
+        setDragOverIndex(null);
+    }, [dragIndex, dragOverIndex, reorderWorkspaces]);
 
     const prevWaitingRef = useRef<Set<string>>(new Set());
 
@@ -377,7 +465,7 @@ export function WorkspacePanel({
                         </button>
                     </div>
                 ) : (
-                    workspaces.map(workspace => (
+                    workspaces.map((workspace, index) => (
                         <WorkspaceSection
                             key={workspace.id}
                             workspace={workspace}
@@ -385,6 +473,9 @@ export function WorkspacePanel({
                             waitingInputTaskIds={waitingInputTaskIds}
                             selectedTaskId={selectedTaskId}
                             isExpanded={expandedWorkspaces.has(workspace.id)}
+                            index={index}
+                            isDragging={dragIndex !== null}
+                            dragOverIndex={dragOverIndex}
                             onToggleExpand={() => toggleWorkspaceExpanded(workspace.id)}
                             onDeleteTask={onDeleteTask}
                             onInterruptTask={onInterruptTask}
@@ -393,6 +484,9 @@ export function WorkspacePanel({
                             onSelectTask={onSelectTask}
                             onDeleteWorkspace={() => onDeleteWorkspace(workspace.id)}
                             onCreateTask={(prompt) => onCreateTask(prompt, workspace.id)}
+                            onDragStart={handleDragStart}
+                            onDragEnter={handleDragEnter}
+                            onDragEnd={handleDragEnd}
                         />
                     ))
                 )}

@@ -36,6 +36,14 @@ interface TaskStore {
     voicePitch: number;
     voiceVolume: number;
 
+    // Global voice mode state
+    globalVoiceEnabled: boolean;
+    focusedInputId: string | null;
+    voiceTranscript: string;
+    voiceInterimTranscript: string;
+    autoSendEnabled: boolean;
+    autoSendDelayMs: number;
+
     // Supervisor state
     taskSummaries: Map<string, TaskSummary>;
 
@@ -64,6 +72,7 @@ interface TaskStore {
     setWorkspaces: (workspaces: Workspace[]) => void;
     addWorkspace: (workspace: Workspace) => void;
     removeWorkspace: (workspaceId: string) => void;
+    reorderWorkspaces: (fromIndex: number, toIndex: number) => void;
     toggleWorkspaceExpanded: (workspaceId: string) => void;
     setShowProjectPicker: (show: boolean) => void;
 
@@ -71,6 +80,15 @@ interface TaskStore {
     setVoiceEnabled: (enabled: boolean) => void;
     setAutoSpeakResponses: (enabled: boolean) => void;
     setVoiceSettings: (settings: VoiceSettings) => void;
+
+    // Global voice mode actions
+    setGlobalVoiceEnabled: (enabled: boolean) => void;
+    setFocusedInputId: (id: string | null) => void;
+    appendVoiceTranscript: (transcript: string) => void;
+    setVoiceInterimTranscript: (interim: string) => void;
+    clearVoiceTranscript: () => void;
+    consumeVoiceTranscript: () => string;
+    setAutoSendSettings: (enabled: boolean, delayMs: number) => void;
 
     // Supervisor actions
     setTaskSummary: (summary: TaskSummary) => void;
@@ -110,6 +128,14 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     voicePitch: 1.0,
     voiceVolume: 1.0,
 
+    // Global voice mode initial state
+    globalVoiceEnabled: false,
+    focusedInputId: null,
+    voiceTranscript: '',
+    voiceInterimTranscript: '',
+    autoSendEnabled: false,
+    autoSendDelayMs: 2000,
+
     // Supervisor initial state
     taskSummaries: new Map(),
 
@@ -144,7 +170,10 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
         for (const task of tasks) {
             taskMap.set(task.id, task);
         }
-        set({ tasks: taskMap });
+        // Clear selectedTaskId if it's no longer in the task list
+        const { selectedTaskId } = get();
+        const newSelectedId = selectedTaskId && !taskMap.has(selectedTaskId) ? null : selectedTaskId;
+        set({ tasks: taskMap, selectedTaskId: newSelectedId });
     },
 
     addTask: (task) => {
@@ -195,6 +224,18 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
         });
     },
 
+    reorderWorkspaces: (fromIndex, toIndex) => {
+        const { workspaces } = get();
+        if (fromIndex === toIndex) return;
+        if (fromIndex < 0 || fromIndex >= workspaces.length) return;
+        if (toIndex < 0 || toIndex >= workspaces.length) return;
+
+        const newWorkspaces = [...workspaces];
+        const [removed] = newWorkspaces.splice(fromIndex, 1);
+        newWorkspaces.splice(toIndex, 0, removed);
+        set({ workspaces: newWorkspaces });
+    },
+
     toggleWorkspaceExpanded: (workspaceId) => {
         const { expandedWorkspaces } = get();
         const newExpanded = new Set(expandedWorkspaces);
@@ -216,6 +257,28 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
         voiceRate: settings.rate,
         voicePitch: settings.pitch,
         voiceVolume: settings.volume
+    }),
+
+    // Global voice mode actions
+    setGlobalVoiceEnabled: (enabled) => set({ globalVoiceEnabled: enabled }),
+    setFocusedInputId: (id) => set({ focusedInputId: id }),
+    appendVoiceTranscript: (transcript) => {
+        const { voiceTranscript } = get();
+        const newTranscript = voiceTranscript
+            ? voiceTranscript + ' ' + transcript
+            : transcript;
+        set({ voiceTranscript: newTranscript });
+    },
+    setVoiceInterimTranscript: (interim) => set({ voiceInterimTranscript: interim }),
+    clearVoiceTranscript: () => set({ voiceTranscript: '', voiceInterimTranscript: '' }),
+    consumeVoiceTranscript: () => {
+        const { voiceTranscript } = get();
+        set({ voiceTranscript: '', voiceInterimTranscript: '' });
+        return voiceTranscript;
+    },
+    setAutoSendSettings: (enabled, delayMs) => set({
+        autoSendEnabled: enabled,
+        autoSendDelayMs: delayMs
     }),
 
     // Supervisor actions

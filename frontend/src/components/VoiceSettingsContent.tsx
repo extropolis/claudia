@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Volume2, Mic } from 'lucide-react';
+import { Volume2, Mic, Radio, Clock } from 'lucide-react';
 import { useTaskStore } from '../stores/taskStore';
 import { useSpeechSynthesis } from '../hooks/useSpeechSynthesis';
 
@@ -11,9 +11,14 @@ export function VoiceSettingsContent() {
         voiceRate,
         voicePitch,
         voiceVolume,
+        globalVoiceEnabled,
+        autoSendEnabled,
+        autoSendDelayMs,
         setVoiceEnabled,
         setAutoSpeakResponses,
-        setVoiceSettings
+        setVoiceSettings,
+        setGlobalVoiceEnabled,
+        setAutoSendSettings
     } = useTaskStore();
 
     const { voices, speak } = useSpeechSynthesis();
@@ -22,6 +27,7 @@ export function VoiceSettingsContent() {
     const [localRate, setLocalRate] = useState(voiceRate);
     const [localPitch, setLocalPitch] = useState(voicePitch);
     const [localVolume, setLocalVolume] = useState(voiceVolume);
+    const [localAutoSendDelay, setLocalAutoSendDelay] = useState(autoSendDelayMs / 1000);
     const [hasChanges, setHasChanges] = useState(false);
 
     useEffect(() => {
@@ -36,9 +42,10 @@ export function VoiceSettingsContent() {
             localVoice !== (selectedVoiceName || '') ||
             localRate !== voiceRate ||
             localPitch !== voicePitch ||
-            localVolume !== voiceVolume;
+            localVolume !== voiceVolume ||
+            localAutoSendDelay !== autoSendDelayMs / 1000;
         setHasChanges(changed);
-    }, [localVoice, localRate, localPitch, localVolume, selectedVoiceName, voiceRate, voicePitch, voiceVolume]);
+    }, [localVoice, localRate, localPitch, localVolume, localAutoSendDelay, selectedVoiceName, voiceRate, voicePitch, voiceVolume, autoSendDelayMs]);
 
     const handleSave = () => {
         setVoiceSettings({
@@ -47,6 +54,7 @@ export function VoiceSettingsContent() {
             pitch: localPitch,
             volume: localVolume
         });
+        setAutoSendSettings(autoSendEnabled, localAutoSendDelay * 1000);
         setHasChanges(false);
     };
 
@@ -55,39 +63,111 @@ export function VoiceSettingsContent() {
         speak(testText);
     };
 
+    // Check if Web Speech API is supported
+    const isSpeechSupported = !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
+
     return (
         <div className="voice-settings-content">
+            {/* Always-Listening Voice Mode Section */}
             <div className="settings-section">
+                <h3 className="settings-section-title">
+                    <Radio size={16} />
+                    Always-Listening Mode
+                </h3>
+                <label className="toggle-label">
+                    <input
+                        type="checkbox"
+                        checked={globalVoiceEnabled}
+                        onChange={(e) => setGlobalVoiceEnabled(e.target.checked)}
+                        disabled={!isSpeechSupported}
+                    />
+                    <span>Enable Always-Listening Mode</span>
+                </label>
+                <p className="setting-description">
+                    {isSpeechSupported
+                        ? 'When enabled, voice input is always active. Speech routes to whichever input is focused.'
+                        : 'Voice input is not supported in this browser.'}
+                </p>
+            </div>
+
+            <div className="settings-section">
+                <label className="toggle-label">
+                    <input
+                        type="checkbox"
+                        checked={autoSendEnabled}
+                        onChange={(e) => setAutoSendSettings(e.target.checked, localAutoSendDelay * 1000)}
+                        disabled={!isSpeechSupported}
+                    />
+                    <Clock size={16} />
+                    <span>Auto-send on Silence</span>
+                </label>
+                <p className="setting-description">
+                    Automatically send message after you stop speaking
+                </p>
+            </div>
+
+            {autoSendEnabled && (
+                <div className="settings-section">
+                    <label className="setting-label">
+                        Silence Threshold: {localAutoSendDelay.toFixed(1)}s
+                    </label>
+                    <input
+                        type="range"
+                        min="1"
+                        max="5"
+                        step="0.5"
+                        value={localAutoSendDelay}
+                        onChange={(e) => setLocalAutoSendDelay(parseFloat(e.target.value))}
+                        className="slider"
+                    />
+                    <div className="slider-labels">
+                        <span>1s</span>
+                        <span>3s</span>
+                        <span>5s</span>
+                    </div>
+                </div>
+            )}
+
+            <div className="settings-divider"></div>
+
+            {/* Original Voice Input/Output Settings */}
+            <div className="settings-section">
+                <h3 className="settings-section-title">
+                    <Mic size={16} />
+                    Voice Input
+                </h3>
                 <label className="toggle-label">
                     <input
                         type="checkbox"
                         checked={voiceEnabled}
                         onChange={(e) => setVoiceEnabled(e.target.checked)}
                     />
-                    <Mic size={16} />
-                    <span>Enable Voice Input</span>
+                    <span>Show Microphone Buttons (Legacy)</span>
                 </label>
                 <p className="setting-description">
-                    Show microphone button to dictate messages using speech recognition
+                    Show individual microphone buttons on input fields (not needed with always-listening mode)
                 </p>
             </div>
 
+            <div className="settings-divider"></div>
+
             <div className="settings-section">
+                <h3 className="settings-section-title">
+                    <Volume2 size={16} />
+                    Voice Output
+                </h3>
                 <label className="toggle-label">
                     <input
                         type="checkbox"
                         checked={autoSpeakResponses}
                         onChange={(e) => setAutoSpeakResponses(e.target.checked)}
                     />
-                    <Volume2 size={16} />
                     <span>Auto-speak Responses</span>
                 </label>
                 <p className="setting-description">
                     Automatically read aloud responses from the orchestrator and tasks
                 </p>
             </div>
-
-            <div className="settings-divider"></div>
 
             <div className="settings-section">
                 <label className="setting-label">

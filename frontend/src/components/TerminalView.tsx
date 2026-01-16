@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Task } from '@claudia/shared';
 import { Copy, Check, Play } from 'lucide-react';
+import { TaskInputBar } from './TaskInputBar';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
 
@@ -279,6 +280,7 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
                 <span className={`terminal-state ${task.state}`}>{stateLabel}</span>
             </div>
             <div ref={terminalRef} className="terminal-container" />
+            <TaskInputBar task={task} wsRef={wsRef} />
         </div>
     );
 }

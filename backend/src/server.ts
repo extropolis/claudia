@@ -142,8 +142,14 @@ export function createApp(basePath?: string) {
         const data = JSON.stringify(message);
         console.log(`[Server] Broadcasting: type=${message.type}`);
         for (const client of clients) {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(data);
+            try {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(data);
+                }
+            } catch (err) {
+                console.error('[Server] Error sending to client:', err);
+                // Remove broken client from set
+                clients.delete(client);
             }
         }
     }
@@ -157,7 +163,10 @@ export function createApp(basePath?: string) {
     taskSpawner.on('taskStateChanged', (task: Task) => {
         console.log(`[Server] taskStateChanged event: task=${task.id} state=${task.state}`);
         broadcast({ type: 'task:stateChanged', payload: { task } });
-        broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+        // Note: Removed redundant tasks:updated broadcast here.
+        // When many tasks change state quickly, sending full task lists creates race conditions
+        // where older state can overwrite newer state. The task:stateChanged message already
+        // contains the updated task data which updateTask() handles correctly.
     });
 
     taskSpawner.on('taskOutput', (taskId: string, data: string) => {
@@ -296,7 +305,12 @@ export function createApp(basePath?: string) {
                     case 'task:destroy': {
                         // Kill and remove a task
                         const { taskId } = payload as { taskId?: string };
-                        if (taskId) taskSpawner.destroyTask(taskId);
+                        console.log(`[Server] task:destroy received for taskId: ${taskId}`);
+                        if (taskId) {
+                            taskSpawner.destroyTask(taskId);
+                        } else {
+                            console.error('[Server] task:destroy missing taskId');
+                        }
                         break;
                     }
 
@@ -452,27 +466,23 @@ export function createApp(basePath?: string) {
         res.json(taskSpawner.getAllTasks());
     });
 
-    // Poll endpoint for task status - more reliable than hooks
+    // Poll endpoint for task status - uses output-based detection for reliability
     app.get('/api/tasks/:taskId/status', (req, res) => {
         const { taskId } = req.params;
-        const task = taskSpawner.getTask(taskId);
 
-        if (!task) {
-            // Check disconnected tasks
-            const disconnected = taskSpawner.getDisconnectedTask(taskId);
-            if (disconnected) {
-                return res.json({
-                    id: taskId,
-                    state: 'disconnected'
-                });
-            }
+        // Use output-based state detection for more reliable status
+        const actualState = taskSpawner.getActualTaskState(taskId);
+
+        if (!actualState) {
             return res.status(404).json({ error: 'Task not found' });
         }
 
+        const task = taskSpawner.getTask(taskId);
+
         res.json({
-            id: task.id,
-            state: task.state,
-            lastActivity: task.lastActivity
+            id: taskId,
+            state: actualState,
+            lastActivity: task?.lastActivity
         });
     });
 

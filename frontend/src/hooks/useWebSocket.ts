@@ -7,7 +7,9 @@ const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
 
 // Poll interval for task status (ms) - fallback for when hooks don't fire
-const STATUS_POLL_INTERVAL = 5000;
+// Uses faster polling when tasks are busy to quickly detect completion
+const STATUS_POLL_INTERVAL_BUSY = 2000;
+const STATUS_POLL_INTERVAL_IDLE = 5000;
 
 export function useWebSocket() {
     const wsRef = useRef<WebSocket | null>(null);
@@ -70,6 +72,9 @@ export function useWebSocket() {
                         if (payload.workspaces) {
                             setWorkspaces(payload.workspaces);
                         }
+                        // Clear reloading state when we get initialized
+                        setServerReloading(false);
+
                         // Fetch config to get settings
                         fetch(`${API_URL}/api/config`)
                             .then(res => res.json())
@@ -105,10 +110,13 @@ export function useWebSocket() {
                         if (payload.tasks) {
                             setTasks(payload.tasks);
                         }
+                        // Clear reloading state when tasks are updated (e.g. after reconnection)
+                        setServerReloading(false);
                         break;
                     }
                     case 'task:destroyed': {
                         const payload = message.payload as { taskId: string };
+                        console.log(`[WebSocket] Task destroyed: ${payload.taskId}`);
                         deleteTask(payload.taskId);
                         break;
                     }
@@ -213,17 +221,26 @@ export function useWebSocket() {
 
     const sendMessage = useCallback((type: string, payload: unknown) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
+            console.log(`[WebSocket] Sending: ${type}`, payload);
             wsRef.current.send(JSON.stringify({ type, payload }));
+        } else {
+            console.warn(`[WebSocket] Cannot send ${type}: WebSocket not open (state: ${wsRef.current?.readyState})`);
         }
     }, []);
 
     // Poll task statuses for more reliable state detection
+    // Backend uses output-based detection (checking for "ctrl+c to interrupt" etc.)
     const pollTaskStatuses = useCallback(async () => {
         const { tasks } = useTaskStore.getState();
+        let hasBusyTasks = false;
 
         for (const [taskId, task] of tasks) {
             // Only poll active tasks (not disconnected or exited)
             if (task.state === 'disconnected' || task.state === 'exited') continue;
+
+            if (task.state === 'busy') {
+                hasBusyTasks = true;
+            }
 
             try {
                 const response = await fetch(`${API_URL}/api/tasks/${taskId}/status`);
@@ -239,13 +256,21 @@ export function useWebSocket() {
                 // Ignore polling errors
             }
         }
+
+        // Adjust polling interval based on whether we have busy tasks
+        // Poll faster when tasks are busy to quickly detect completion
+        const nextInterval = hasBusyTasks ? STATUS_POLL_INTERVAL_BUSY : STATUS_POLL_INTERVAL_IDLE;
+        if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+        }
+        pollIntervalRef.current = window.setInterval(pollTaskStatuses, nextInterval);
     }, [updateTask]);
 
     useEffect(() => {
         connect();
 
-        // Start polling for task statuses
-        pollIntervalRef.current = window.setInterval(pollTaskStatuses, STATUS_POLL_INTERVAL);
+        // Start polling for task statuses (start with faster interval)
+        pollIntervalRef.current = window.setInterval(pollTaskStatuses, STATUS_POLL_INTERVAL_BUSY);
 
         return () => {
             if (reconnectTimeoutRef.current) {

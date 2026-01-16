@@ -84,6 +84,16 @@
 /* Workspace Section */
 .workspace-section {
     margin-bottom: 4px;
+    transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+.workspace-section.dragging {
+    opacity: 0.7;
+}
+
+.workspace-section.drop-target {
+    background: rgba(0, 212, 255, 0.1);
+    border-top: 2px solid var(--accent-secondary);
 }
 
 .workspace-section.active {
@@ -103,6 +113,27 @@
     font-size: 0.875rem;
     font-weight: 600;
     color: var(--text-primary);
+}
+
+.workspace-drag-handle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: grab;
+    color: var(--text-muted);
+    padding: 2px;
+    border-radius: 4px;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+}
+
+.workspace-drag-handle:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.workspace-drag-handle:active {
+    cursor: grabbing;
 }
 
 .workspace-header-left {

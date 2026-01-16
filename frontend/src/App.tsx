@@ -4,6 +4,8 @@ import { TerminalView } from './components/TerminalView';
 import { SupervisorChat } from './components/SupervisorChat';
 import { ProjectPicker } from './components/ProjectPicker';
 import { SettingsMenu } from './components/SettingsMenu';
+import { GlobalVoiceManager } from './components/GlobalVoiceManager';
+import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
 import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw } from 'lucide-react';
@@ -193,6 +195,7 @@ function App() {
                             {hasUnreadMessages && <span className="message-badge">{chatMessages.length}</span>}
                         </button>
                     )}
+                    <GlobalVoiceToggle />
                     <button
                         className="restart-button"
                         onClick={handleRestartServer}
@@ -279,6 +282,7 @@ function App() {
 
             <ProjectPicker onSelect={handleProjectSelect} />
             <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
+            <GlobalVoiceManager />
 
             {/* Server reloading overlay */}
             {(isServerReloading || !isConnected) && (

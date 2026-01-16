@@ -1991,3 +1991,64 @@ body {
   font-weight: 500;
   color: var(--text-primary);
 }
+
+/* Voice Active Input Glow */
+.task-input-bar.voice-active .task-input-container,
+.task-input-wrapper.voice-active {
+  box-shadow: 0 0 0 2px rgba(248, 81, 73, 0.3);
+  border-color: var(--accent-red);
+}
+
+.task-input-bar.voice-active .task-input-textarea,
+.task-input-wrapper.voice-active .task-input {
+  border-color: var(--accent-red);
+}
+
+.voice-hint {
+  color: var(--accent-red);
+  font-weight: 500;
+}
+
+/* Settings Section Title */
+.settings-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+}
+
+.settings-section-title svg {
+  color: var(--accent-secondary);
+}
+
+/* Voice Settings Footer */
+.voice-settings-footer {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.save-voice-button {
+  width: 100%;
+  padding: 10px 16px;
+  background: var(--accent-secondary);
+  border: none;
+  border-radius: 8px;
+  color: var(--bg-primary);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.save-voice-button:hover:not(:disabled) {
+  background: #00e5ff;
+}
+
+.save-voice-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

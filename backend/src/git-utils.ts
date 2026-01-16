@@ -71,6 +71,30 @@ export async function getFilesBetweenCommits(cwd: string, fromCommit: string, to
 }
 
 /**
+ * Count commits between two commits (how many commits is fromCommit behind toCommit)
+ */
+export async function countCommitsBetween(cwd: string, fromCommit: string, toCommit: string): Promise<number> {
+    try {
+        const { stdout } = await execAsync(`git rev-list --count ${fromCommit}..${toCommit}`, { cwd });
+        return parseInt(stdout.trim(), 10) || 0;
+    } catch {
+        return -1; // Error case
+    }
+}
+
+/**
+ * Check if a commit exists in the repository
+ */
+export async function commitExists(cwd: string, commit: string): Promise<boolean> {
+    try {
+        await execAsync(`git cat-file -t ${commit}`, { cwd });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Capture git state before task starts
  */
 export async function captureGitStateBefore(cwd: string): Promise<Partial<TaskGitState> | null> {
@@ -139,11 +163,17 @@ export async function captureGitStateAfter(
     };
 }
 
+// Maximum number of commits we'll allow reverting across
+// Beyond this, the task is considered stale and revert is blocked
+const MAX_REVERT_COMMITS = 5;
+
 /**
  * Revert changes made by a task
  * This will:
  * 1. Reset to the commit before the task started
  * 2. Optionally clean untracked files
+ *
+ * Safety: Refuses to revert if the stored commitBefore is too far behind current HEAD
  */
 export async function revertTaskChanges(
     cwd: string,
@@ -159,12 +189,56 @@ export async function revertTaskChanges(
             };
         }
 
+        // Get current HEAD to compare against
+        const currentHead = await getHeadCommit(cwd);
+        if (!currentHead) {
+            return {
+                success: false,
+                error: 'Cannot determine current HEAD commit',
+                filesReverted: []
+            };
+        }
+
+        // Check if commitBefore still exists
+        if (!await commitExists(cwd, gitState.commitBefore)) {
+            return {
+                success: false,
+                error: `Target commit ${gitState.commitBefore.substring(0, 7)} no longer exists in repository`,
+                filesReverted: []
+            };
+        }
+
+        // Safety check: count how many commits we'd be reverting
+        // Compare against CURRENT head, not the stored commitAfter (which may be stale)
+        if (gitState.commitBefore !== currentHead) {
+            const commitsBehind = await countCommitsBetween(cwd, gitState.commitBefore, currentHead);
+
+            if (commitsBehind < 0) {
+                return {
+                    success: false,
+                    error: 'Could not determine commit distance - revert blocked for safety',
+                    filesReverted: []
+                };
+            }
+
+            if (commitsBehind > MAX_REVERT_COMMITS) {
+                return {
+                    success: false,
+                    error: `Revert blocked: would undo ${commitsBehind} commits (max ${MAX_REVERT_COMMITS}). ` +
+                           `The task's snapshot is too old. Use git manually if you need to revert.`,
+                    filesReverted: []
+                };
+            }
+
+            console.log(`[GitUtils] Revert will undo ${commitsBehind} commit(s)`);
+        }
+
         // First, check if there are uncommitted changes now
         const hasUncommitted = await hasUncommittedChanges(cwd);
 
         // If commit changed, reset to before commit
-        if (gitState.commitAfter && gitState.commitBefore !== gitState.commitAfter) {
-            console.log(`[GitUtils] Resetting to commit ${gitState.commitBefore.substring(0, 7)}`);
+        if (currentHead !== gitState.commitBefore) {
+            console.log(`[GitUtils] Resetting to commit ${gitState.commitBefore.substring(0, 7)} (undoing ${await countCommitsBetween(cwd, gitState.commitBefore, currentHead)} commits)`);
             await execAsync(`git reset --hard ${gitState.commitBefore}`, { cwd });
         } else if (hasUncommitted) {
             // Just discard uncommitted changes

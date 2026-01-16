@@ -535,20 +535,116 @@ export class TaskSpawner extends EventEmitter {
         return null;
     }
 
-    private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 3): void {
-        console.log(`[TaskSpawner] Writing prompt to PTY: "${prompt}"`);
+    /**
+     * Detect if Claude is actively busy by checking for busy indicators in output.
+     * Claude shows "ctrl+c to interrupt" when it's processing.
+     * This is a fallback when hooks don't fire reliably.
+     */
+    detectBusyFromOutput(taskId: string): boolean {
+        const task = this.tasks.get(taskId);
+        if (!task) return false;
 
-        let charIndex = 0;
-        const writeNextChar = () => {
-            if (charIndex < prompt.length) {
-                task.process.write(prompt[charIndex]);
-                charIndex++;
-                setTimeout(writeNextChar, 5);
-            } else {
-                setTimeout(() => this.sendEnterWithRetry(task, maxRetries), 600);
+        // Get recent output (last 4KB should be enough to check)
+        const recentOutput = this.getRecentOutput(task, 4096).toLowerCase();
+
+        // Pattern that indicates Claude is actively processing
+        // The terminal shows "ctrl+c to interrupt" while Claude is working
+        const busyIndicators = [
+            'ctrl+c to interrupt',
+            'ctrl-c to interrupt',
+            '⏳', // spinner/loading indicators
+            'thinking',
+        ];
+
+        for (const indicator of busyIndicators) {
+            if (recentOutput.includes(indicator)) {
+                return true;
             }
-        };
-        writeNextChar();
+        }
+
+        return false;
+    }
+
+    /**
+     * Get the actual state by combining stored state with output-based detection.
+     * This helps when hooks miss state transitions.
+     * Also updates the internal state when detection corrects it.
+     */
+    getActualTaskState(taskId: string): TaskState | null {
+        const task = this.tasks.get(taskId);
+        if (!task) {
+            const disconnected = this.disconnectedTasks.get(taskId);
+            return disconnected ? 'disconnected' : null;
+        }
+
+        // If task is already exited or disconnected, trust that
+        if (task.state === 'exited' || task.state === 'disconnected') {
+            return task.state;
+        }
+
+        // Use output-based detection for busy state
+        const isBusyFromOutput = this.detectBusyFromOutput(taskId);
+
+        if (isBusyFromOutput) {
+            // Output says busy, so it's busy
+            if (task.state !== 'busy') {
+                console.log(`[TaskSpawner] Output-based detection: task ${taskId} appears busy (was ${task.state})`);
+                task.state = 'busy';
+                this.emit('taskStateChanged', this.toPublicTask(task));
+            }
+            return 'busy';
+        }
+
+        // If output doesn't show busy indicators, check for waiting input
+        if (task.state === 'busy') {
+            // Hooks might have missed the stop - check if waiting for input
+            const recentOutput = this.getRecentOutput(task, 2048);
+            const inputType = this.detectWaitingForInput(recentOutput);
+            if (inputType) {
+                console.log(`[TaskSpawner] Output-based detection: task ${taskId} waiting for ${inputType}`);
+                task.state = 'waiting_input';
+                task.waitingInputType = inputType;
+                this.emit('taskStateChanged', this.toPublicTask(task));
+                this.emit('taskWaitingInput', task.id, inputType, recentOutput);
+                return 'waiting_input';
+            }
+            // If not busy indicators and not waiting for input, likely idle
+            console.log(`[TaskSpawner] Output-based detection: task ${taskId} appears idle (was busy)`);
+            task.state = 'idle';
+            task.waitingInputType = undefined;
+            this.captureGitStateAfterTask(taskId);
+            this.emit('taskStateChanged', this.toPublicTask(task));
+            return 'idle';
+        }
+
+        // Return the stored state
+        return task.state;
+    }
+
+    private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 3): void {
+        console.log(`[TaskSpawner] Writing prompt to PTY: "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}"`);
+
+        // For short prompts, type character by character for a nice effect
+        // For longer prompts (>50 chars), paste directly to avoid slow typing
+        if (prompt.length <= 50) {
+            let charIndex = 0;
+            const writeNextChar = () => {
+                if (charIndex < prompt.length) {
+                    task.process.write(prompt[charIndex]);
+                    charIndex++;
+                    setTimeout(writeNextChar, 5);
+                } else {
+                    setTimeout(() => this.sendEnterWithRetry(task, maxRetries), 600);
+                }
+            };
+            writeNextChar();
+        } else {
+            // Paste the entire prompt at once, then use retry mechanism to ensure Enter is accepted
+            task.process.write(prompt);
+            task.promptSubmitAttempts = 0;
+            // Small delay to let the prompt be written, then send Enter with retries
+            setTimeout(() => this.sendEnterWithRetry(task, maxRetries), 300);
+        }
     }
 
     private sendEnterWithRetry(task: InternalTask, retriesLeft: number): void {
@@ -719,6 +815,11 @@ export class TaskSpawner extends EventEmitter {
 
         task.process.onExit(({ exitCode }) => {
             console.log(`[TaskSpawner] Task ${task.id} exited with code ${exitCode}`);
+            // Only emit events if task still exists in map (not being destroyed)
+            if (!this.tasks.has(task.id)) {
+                console.log(`[TaskSpawner] Task ${task.id} already removed, skipping state change`);
+                return;
+            }
             task.state = 'exited';
             this.scheduleSave();
             this.emit('taskStateChanged', this.toPublicTask(task));
@@ -897,22 +998,38 @@ export class TaskSpawner extends EventEmitter {
     }
 
     destroyTask(taskId: string): void {
+        console.log(`[TaskSpawner] destroyTask called for ${taskId}`);
+        let destroyed = false;
+        let source = '';
+
         const task = this.tasks.get(taskId);
         if (task) {
+            console.log(`[TaskSpawner] Found task ${taskId} in live tasks (state: ${task.state})`);
+            // Delete from map FIRST to prevent onExit handler from emitting state changes
+            this.tasks.delete(taskId);
             try {
                 task.process.kill();
             } catch (_e) {
                 // Process might already be dead
             }
-            this.tasks.delete(taskId);
-            this.scheduleSave();
-            this.emit('taskDestroyed', taskId);
+            destroyed = true;
+            source = 'live';
         }
 
         if (this.disconnectedTasks.has(taskId)) {
+            console.log(`[TaskSpawner] Found task ${taskId} in disconnected tasks`);
             this.disconnectedTasks.delete(taskId);
+            destroyed = true;
+            source = source ? 'both' : 'disconnected';
+        }
+
+        // Only emit once, regardless of which map(s) the task was in
+        if (destroyed) {
+            console.log(`[TaskSpawner] Task ${taskId} destroyed from ${source}, emitting event`);
             this.scheduleSave();
             this.emit('taskDestroyed', taskId);
+        } else {
+            console.log(`[TaskSpawner] Task ${taskId} not found in any map!`);
         }
     }
 
@@ -920,25 +1037,32 @@ export class TaskSpawner extends EventEmitter {
         // Archive removes task from active list but keeps it in persistent storage
         // For now, it behaves the same as destroy - just removes the task
         // TODO: In the future, could move to an archived state instead of deleting
+        let archived = false;
+        let wasLive = false;
+
         const task = this.tasks.get(taskId);
         if (task) {
+            // Delete from map FIRST to prevent onExit handler from emitting state changes
+            this.tasks.delete(taskId);
             try {
                 task.process.kill();
             } catch (_e) {
                 // Process might already be dead
             }
-            this.tasks.delete(taskId);
-            this.scheduleSave();
-            this.emit('taskDestroyed', taskId);
-            console.log(`[TaskSpawner] Archived (destroyed) task ${taskId}`);
-            return;
+            archived = true;
+            wasLive = true;
         }
 
         if (this.disconnectedTasks.has(taskId)) {
             this.disconnectedTasks.delete(taskId);
+            archived = true;
+        }
+
+        // Only emit once, regardless of which map(s) the task was in
+        if (archived) {
             this.scheduleSave();
             this.emit('taskDestroyed', taskId);
-            console.log(`[TaskSpawner] Archived (destroyed) disconnected task ${taskId}`);
+            console.log(`[TaskSpawner] Archived (destroyed) ${wasLive ? 'live' : 'disconnected'} task ${taskId}`);
         }
     }
 

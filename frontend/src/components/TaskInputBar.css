@@ -1,0 +1,130 @@
+.task-input-bar {
+    padding: 12px 16px;
+    background: #1a1a1a;
+    border-top: 1px solid #333;
+    flex-shrink: 0;
+}
+
+.task-input-bar.disabled {
+    opacity: 0.6;
+}
+
+.task-input-container {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    background: #0d0d0d;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 10px 14px;
+    transition: border-color 0.15s ease;
+}
+
+.task-input-container:focus-within {
+    border-color: var(--accent-secondary);
+}
+
+.task-input-icon {
+    color: var(--text-muted);
+    flex-shrink: 0;
+    margin-bottom: 4px;
+}
+
+.task-input-textarea-wrapper {
+    flex: 1;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+}
+
+.task-input-textarea {
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-size: 14px;
+    font-family: inherit;
+    resize: none;
+    outline: none;
+    max-height: 120px;
+    line-height: 1.5;
+}
+
+.task-input-textarea-wrapper .interim-indicator {
+    font-size: 11px;
+    color: var(--accent-red);
+    font-style: italic;
+    margin-top: 4px;
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 0.6; }
+    50% { opacity: 1; }
+}
+
+.task-input-textarea::placeholder {
+    color: var(--text-muted);
+}
+
+.task-input-textarea:disabled {
+    cursor: not-allowed;
+}
+
+.task-input-send {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    background: var(--accent-secondary);
+    border: none;
+    border-radius: 6px;
+    color: var(--bg-primary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+}
+
+.task-input-send:hover:not(:disabled) {
+    background: #00e5ff;
+    transform: scale(1.05);
+}
+
+.task-input-send:disabled {
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+    cursor: not-allowed;
+}
+
+.task-input-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    text-align: right;
+}
+
+/* Voice input button styling within TaskInputBar */
+.task-input-bar .voice-input-container {
+    flex-shrink: 0;
+}
+
+.task-input-bar .voice-input-button {
+    width: 36px;
+    height: 36px;
+    border-radius: 6px;
+    background: transparent;
+    border: 1px solid #444;
+}
+
+.task-input-bar .voice-input-button:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    border-color: var(--accent-secondary);
+    color: var(--accent-secondary);
+}
+
+.task-input-bar .voice-input-button.listening {
+    background: rgba(248, 81, 73, 0.15);
+    border-color: var(--accent-red);
+    color: var(--accent-red);
+}
