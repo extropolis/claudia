@@ -234,8 +234,23 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
             }));
         }
 
+        // Scroll to bottom when terminal mounts (with delays to catch history loads)
+        // This ensures we scroll even if the terminal:scrollToBottom event fired before mounting
+        console.log(`[TerminalView] Terminal mounted for ${task.id}, scheduling scroll to bottom`);
+        const scrollDelays = [50, 200, 500, 1000];
+        const scrollTimeouts = scrollDelays.map(delay =>
+            setTimeout(() => {
+                if (xtermRef.current) {
+                    console.log(`[TerminalView] Scrolling to bottom after ${delay}ms for ${task.id}`);
+                    xtermRef.current.scrollToBottom();
+                }
+            }, delay)
+        );
+
         // Cleanup
         return () => {
+            // Clear scroll timeouts
+            scrollTimeouts.forEach(t => clearTimeout(t));
             resizeObserver.disconnect();
             window.removeEventListener('resize', handleResize);
             if (wsRef.current) {

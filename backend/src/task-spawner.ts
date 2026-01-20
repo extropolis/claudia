@@ -192,6 +192,10 @@ export class TaskSpawner extends EventEmitter {
      * Uses a per-task lock to prevent race conditions from concurrent state transitions.
      */
     private checkTaskStates(): void {
+        // Minimum bytes of output change required to transition idle → busy
+        // This prevents spurious transitions from terminal housekeeping (cursor moves, screen refreshes)
+        const MIN_OUTPUT_CHANGE_FOR_BUSY = 50;
+
         for (const task of this.tasks.values()) {
             if (task.state === 'exited') continue;
 
@@ -201,7 +205,8 @@ export class TaskSpawner extends EventEmitter {
             }
 
             const currentLength = task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
-            const outputChanged = currentLength !== task.lastOutputLength;
+            const outputDelta = currentLength - task.lastOutputLength;
+            const outputChanged = outputDelta !== 0;
             task.lastOutputLength = currentLength;
 
             if (outputChanged) {
@@ -212,7 +217,17 @@ export class TaskSpawner extends EventEmitter {
                         this.transitionTaskState(task, 'busy', undefined, 'polling: starting with output');
                     }
                     // If not hasStartedProcessing, leave in 'starting' state - it's just TUI setup
-                } else if (task.state !== 'busy') {
+                } else if (task.state === 'busy') {
+                    // Already busy, no transition needed
+                } else if (task.state === 'idle' || task.state === 'waiting_input') {
+                    // Only transition idle/waiting_input → busy if output change is significant
+                    // Small changes are likely just terminal housekeeping (cursor, refreshes)
+                    if (outputDelta >= MIN_OUTPUT_CHANGE_FOR_BUSY) {
+                        this.transitionTaskState(task, 'busy', undefined, `polling: significant output (+${outputDelta} bytes)`);
+                    }
+                    // Ignore small output changes for idle/waiting_input tasks
+                } else {
+                    // Other states (e.g., disconnected) - transition to busy on any output
                     this.transitionTaskState(task, 'busy', undefined, 'polling: output changed');
                 }
             } else {

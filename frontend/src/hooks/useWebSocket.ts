@@ -220,6 +220,33 @@ export function useWebSocket() {
                             if (payload.task.state === 'busy' || payload.task.state === 'idle') {
                                 clearWaitingInput(payload.task.id);
                             }
+
+                            // Auto-focus on task when it completes (becomes idle) if setting is enabled
+                            // This behaves like clicking on the task - selects it and scrolls to bottom
+                            if (payload.task.state === 'idle') {
+                                const { autoFocusOnInput, selectedTaskId } = useTaskStore.getState();
+                                if (autoFocusOnInput && selectedTaskId !== payload.task.id) {
+                                    console.log('[WebSocket] Auto-focusing on completed task:', payload.task.id);
+                                    selectTask(payload.task.id);
+
+                                    // Dispatch scroll-to-bottom events like handleSelectTask does
+                                    const delays = [100, 300, 600];
+                                    delays.forEach(delay => {
+                                        setTimeout(() => {
+                                            window.dispatchEvent(new CustomEvent('terminal:scrollToBottom', {
+                                                detail: { taskId: payload.task!.id }
+                                            }));
+                                        }, delay);
+                                    });
+
+                                    // Focus the task input bar after a short delay to allow the component to mount
+                                    setTimeout(() => {
+                                        window.dispatchEvent(new CustomEvent('taskInput:focus', {
+                                            detail: { taskId: payload.task!.id }
+                                        }));
+                                    }, 150);
+                                }
+                            }
                         }
                         if (payload.tasks) {
                             setTasks(payload.tasks);
