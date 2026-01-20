@@ -221,8 +221,12 @@ export function useVoiceRecognition(options: VoiceRecognitionOptions = {}) {
     }, [continuous, interimResults, language]);
 
     const startListening = useCallback(() => {
-        console.log('[VoiceRecognition] startListening called | isListening:', isListening, '| hasRecognition:', !!recognitionRef.current);
-        if (!recognitionRef.current || isListening) return;
+        console.log('[VoiceRecognition] startListening called | isListening:', isListening, '| shouldBeListening:', shouldBeListeningRef.current, '| hasRecognition:', !!recognitionRef.current);
+        // Use ref as primary guard since state updates are async and can cause race conditions
+        if (!recognitionRef.current || shouldBeListeningRef.current) {
+            console.log('[VoiceRecognition] Skipping start - already listening or no recognition');
+            return;
+        }
 
         // Reset state
         setTranscript('');

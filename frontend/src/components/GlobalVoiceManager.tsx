@@ -58,18 +58,13 @@ export function GlobalVoiceManager() {
         }
     }, [appendVoiceTranscript, setVoiceInterimTranscript, scheduleAutoSend, clearSilenceTimer]);
 
-    // Handle listening state changes - sync with store when recognition stops unexpectedly
-    // We use the store's getState() directly to avoid dependency issues
+    // Handle listening state changes - just for logging
+    // We intentionally do NOT auto-disable globalVoiceEnabled here because:
+    // 1. In continuous mode, recognition naturally stops/restarts on silence
+    // 2. The hook handles its own restart logic
+    // 3. If there's a fatal error, the user will notice and can toggle manually
     const handleListeningChange = useCallback((listening: boolean) => {
-        const currentGlobalVoiceEnabled = useTaskStore.getState().globalVoiceEnabled;
-        console.log('[GlobalVoiceManager] Listening state changed:', listening, '| globalVoiceEnabled:', currentGlobalVoiceEnabled);
-
-        // If recognition stopped but we still think voice is enabled, turn it off
-        // This handles cases where the browser silently stops recognition
-        if (!listening && currentGlobalVoiceEnabled) {
-            console.warn('[GlobalVoiceManager] Recognition stopped unexpectedly, disabling global voice');
-            useTaskStore.getState().setGlobalVoiceEnabled(false);
-        }
+        console.log('[GlobalVoiceManager] Listening state changed:', listening);
     }, []);
 
     const {

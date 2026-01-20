@@ -1636,8 +1636,9 @@ export class TaskSpawner extends EventEmitter {
         const disconnectedTasks = Array.from(this.disconnectedTasks.values()).map(persisted => ({
             id: persisted.id,
             prompt: persisted.prompt,
-            // Show 'interrupted' state if task was busy when killed, otherwise 'disconnected'
-            state: (persisted.wasInterrupted ? 'interrupted' : 'disconnected') as TaskState,
+            // Show 'interrupted' state if task was busy when killed, otherwise show the original state
+            // This makes the UI show tasks in their proper state rather than all showing "disconnected"
+            state: (persisted.wasInterrupted ? 'interrupted' : persisted.lastState) as TaskState,
             workspaceId: persisted.workspaceId,
             createdAt: new Date(persisted.createdAt),
             lastActivity: new Date(persisted.lastActivity),

@@ -53,3 +53,4 @@ backend/tasks.json
 backend/config.json
 backend/workspace-config.json
 backend/chat-history.json
+backend/archived-histories/

@@ -186,6 +186,26 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
         };
         window.addEventListener('resize', handleResize);
 
+        // Track output for scroll-on-settle behavior
+        let lastOutputTime = 0;
+        let scrollSettleTimeout: number | null = null;
+        let isRestoringHistory = false;
+        const SCROLL_SETTLE_DELAY = 150; // Wait 150ms after last output to scroll
+
+        // Function to scroll after output settles
+        const scheduleScrollOnSettle = () => {
+            if (scrollSettleTimeout) {
+                clearTimeout(scrollSettleTimeout);
+            }
+            scrollSettleTimeout = window.setTimeout(() => {
+                if (xtermRef.current) {
+                    console.log(`[TerminalView] Output settled, scrolling to bottom for ${task.id}`);
+                    xtermRef.current.scrollToBottom();
+                }
+                scrollSettleTimeout = null;
+            }, SCROLL_SETTLE_DELAY);
+        };
+
         // WebSocket message handler for this terminal
         const handleMessage = (event: MessageEvent) => {
             try {
@@ -195,25 +215,37 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
                     const { taskId, data } = message.payload;
                     if (taskId === task.id) {
                         term.write(data);
+                        lastOutputTime = Date.now();
+                        // After history restore, keep scrolling to bottom as output arrives
+                        if (isRestoringHistory) {
+                            scheduleScrollOnSettle();
+                        }
                     }
                 } else if (message.type === 'task:restore') {
                     const { taskId, history } = message.payload;
                     if (taskId === task.id && history) {
                         console.log(`[TerminalView] Received task:restore for ${taskId}, history length: ${history.length}`);
+                        isRestoringHistory = true;
                         // Write history - it goes into scrollback buffer
                         // Claude's TUI will redraw the screen but history remains scrollable
                         term.write(history, () => {
                             console.log(`[TerminalView] History write complete for ${taskId}, scrolling to bottom`);
                             // Callback fires after write is fully processed
-                            // Use multiple scroll attempts to ensure we catch the final position
                             term.scrollToBottom();
-                            requestAnimationFrame(() => {
-                                term.scrollToBottom();
-                            });
-                            // Extra scroll after a short delay for large histories
+                            // Schedule additional scrolls as output continues to arrive
+                            scheduleScrollOnSettle();
+                            // Stop the restore scroll behavior after 3 seconds
                             setTimeout(() => {
-                                term.scrollToBottom();
-                            }, 100);
+                                isRestoringHistory = false;
+                                if (scrollSettleTimeout) {
+                                    clearTimeout(scrollSettleTimeout);
+                                    scrollSettleTimeout = null;
+                                }
+                                // Final scroll
+                                if (xtermRef.current) {
+                                    xtermRef.current.scrollToBottom();
+                                }
+                            }, 3000);
                         });
                     }
                 }
@@ -251,6 +283,9 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
         return () => {
             // Clear scroll timeouts
             scrollTimeouts.forEach(t => clearTimeout(t));
+            if (scrollSettleTimeout) {
+                clearTimeout(scrollSettleTimeout);
+            }
             resizeObserver.disconnect();
             window.removeEventListener('resize', handleResize);
             if (wsRef.current) {
