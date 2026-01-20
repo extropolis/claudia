@@ -18,6 +18,13 @@ if (!claudeCheck.installed) {
 }
 console.log(`Claude Code CLI detected: ${claudeCheck.version}`);
 
+// Debug: Log memory usage every 2 seconds to trace OOM issues
+setInterval(() => {
+    const usage = process.memoryUsage();
+    console.log(`[Memory] RSS: ${(usage.rss / 1024 / 1024).toFixed(2)}MB | HeapUsed: ${(usage.heapUsed / 1024 / 1024).toFixed(2)}MB | HeapTotal: ${(usage.heapTotal / 1024 / 1024).toFixed(2)}MB | External: ${(usage.external / 1024 / 1024).toFixed(2)}MB`);
+}, 2000);
+
+
 const { server, taskSpawner, gracefulShutdown } = createApp();
 
 console.log(`[Index] Starting server on port ${PORT}...`);

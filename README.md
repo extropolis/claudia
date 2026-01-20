@@ -109,21 +109,6 @@ The project uses auto-reload for rapid development:
 - **Backend**: `tsx watch` reloads on file changes (1-2 seconds)
 - **Frontend**: Vite HMR provides instant updates
 
-### Testing with CLI
-
-```bash
-cd backend
-
-# List all tasks
-npx tsx test-cli.ts --list-tasks
-
-# Create a task
-npx tsx test-cli.ts -m "your prompt" -w /path/to/workspace
-
-# See all options
-npx tsx test-cli.ts --help
-```
-
 ### Project Structure
 
 ```
@@ -133,7 +118,6 @@ claudia/
 │   │   ├── server.ts         # Main server
 │   │   ├── task-spawner.ts   # Process management
 │   │   └── config-store.ts   # Settings storage
-│   └── test-cli.ts           # CLI testing tool
 ├── frontend/          # React + Vite SPA
 │   └── src/
 │       ├── App.tsx

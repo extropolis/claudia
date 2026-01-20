@@ -58,6 +58,9 @@ interface TaskStore {
     // Waiting input notifications
     waitingInputNotifications: Map<string, WaitingInputInfo>;
 
+    // Draft input per task (preserved when switching tasks)
+    taskDraftInputs: Map<string, string>;
+
     // Settings
     autoFocusOnInput: boolean;
     supervisorEnabled: boolean;
@@ -113,6 +116,11 @@ interface TaskStore {
     // Waiting input actions
     setWaitingInput: (info: WaitingInputInfo) => void;
     clearWaitingInput: (taskId: string) => void;
+
+    // Draft input actions
+    setTaskDraftInput: (taskId: string, input: string) => void;
+    getTaskDraftInput: (taskId: string) => string;
+    clearTaskDraftInput: (taskId: string) => void;
 
     // Settings actions
     setAutoFocusOnInput: (enabled: boolean) => void;
@@ -172,7 +180,7 @@ export const useTaskStore = create<TaskStore>()(
     voiceTranscript: '',
     voiceInterimTranscript: '',
     autoSendEnabled: false,
-    autoSendDelayMs: 2000,
+    autoSendDelayMs: 3000,
 
     // Supervisor initial state
     taskSummaries: new Map(),
@@ -183,6 +191,9 @@ export const useTaskStore = create<TaskStore>()(
 
     // Waiting input initial state
     waitingInputNotifications: new Map(),
+
+    // Draft input initial state
+    taskDraftInputs: new Map(),
 
     // Settings initial state
     autoFocusOnInput: false,
@@ -400,6 +411,28 @@ export const useTaskStore = create<TaskStore>()(
         const newNotifications = new Map(waitingInputNotifications);
         newNotifications.delete(taskId);
         set({ waitingInputNotifications: newNotifications });
+    },
+
+    // Draft input actions
+    setTaskDraftInput: (taskId, input) => {
+        const { taskDraftInputs } = get();
+        const newDrafts = new Map(taskDraftInputs);
+        if (input) {
+            newDrafts.set(taskId, input);
+        } else {
+            newDrafts.delete(taskId);
+        }
+        set({ taskDraftInputs: newDrafts });
+    },
+    getTaskDraftInput: (taskId) => {
+        const { taskDraftInputs } = get();
+        return taskDraftInputs.get(taskId) || '';
+    },
+    clearTaskDraftInput: (taskId) => {
+        const { taskDraftInputs } = get();
+        const newDrafts = new Map(taskDraftInputs);
+        newDrafts.delete(taskId);
+        set({ taskDraftInputs: newDrafts });
     },
 
     // Settings actions

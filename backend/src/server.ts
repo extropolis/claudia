@@ -879,6 +879,82 @@ export function createApp(basePath?: string) {
         }
     });
 
+    // Get mcpServers section from ~/.claude.json for direct editing
+    app.get('/api/claude-config/mcp-servers', (_req, res) => {
+        try {
+            const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+            const claudeConfigPath = join(homeDir, '.claude.json');
+
+            if (!existsSync(claudeConfigPath)) {
+                // Return empty mcpServers if file doesn't exist
+                return res.json({
+                    content: JSON.stringify({}, null, 2),
+                    path: claudeConfigPath,
+                    exists: false
+                });
+            }
+
+            const fileContent = readFileSync(claudeConfigPath, 'utf-8');
+            const config = JSON.parse(fileContent);
+            const mcpServers = config.mcpServers || {};
+
+            res.json({
+                content: JSON.stringify(mcpServers, null, 2),
+                path: claudeConfigPath,
+                exists: true
+            });
+        } catch (error) {
+            console.error('[Server] Failed to read Claude MCP servers:', error);
+            res.status(500).json({ error: 'Failed to read MCP servers config' });
+        }
+    });
+
+    // Update mcpServers section in ~/.claude.json
+    app.put('/api/claude-config/mcp-servers', (req, res) => {
+        try {
+            const { content } = req.body;
+
+            if (typeof content !== 'string') {
+                return res.status(400).json({ error: 'Content must be a string' });
+            }
+
+            // Validate JSON syntax and structure
+            let mcpServers;
+            try {
+                mcpServers = JSON.parse(content);
+                if (typeof mcpServers !== 'object' || Array.isArray(mcpServers)) {
+                    return res.status(400).json({ error: 'mcpServers must be an object' });
+                }
+            } catch (parseError) {
+                return res.status(400).json({
+                    error: 'Invalid JSON syntax',
+                    details: parseError instanceof Error ? parseError.message : 'Parse error'
+                });
+            }
+
+            const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+            const claudeConfigPath = join(homeDir, '.claude.json');
+
+            // Read existing config or create new one
+            let config: Record<string, unknown> = {};
+            if (existsSync(claudeConfigPath)) {
+                const fileContent = readFileSync(claudeConfigPath, 'utf-8');
+                config = JSON.parse(fileContent);
+            }
+
+            // Update only the mcpServers section
+            config.mcpServers = mcpServers;
+
+            writeFileSync(claudeConfigPath, JSON.stringify(config, null, 2), 'utf-8');
+            console.log('[Server] Updated MCP servers in Claude config:', claudeConfigPath);
+
+            res.json({ success: true, path: claudeConfigPath });
+        } catch (error) {
+            console.error('[Server] Failed to write MCP servers config:', error);
+            res.status(500).json({ error: 'Failed to write MCP servers config' });
+        }
+    });
+
     // Test AI Core credentials endpoint
     app.post('/api/aicore/test', async (req, res) => {
         try {

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Power, PowerOff, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key } from 'lucide-react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Power, PowerOff, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
 import './SettingsMenu.css';
@@ -77,6 +77,13 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
     const [isAddingServer, setIsAddingServer] = useState(false);
     const [newServer, setNewServer] = useState({ name: '', command: '', args: '' });
+
+    // JSON editor state
+    const [mcpViewMode, setMcpViewMode] = useState<'list' | 'json'>('list');
+    const [claudeConfigJson, setClaudeConfigJson] = useState('');
+    const [claudeConfigPath, setClaudeConfigPath] = useState('');
+    const [jsonEditorSaved, setJsonEditorSaved] = useState(true);
+    const [jsonEditorError, setJsonEditorError] = useState<string | null>(null);
     const [skipPermissions, setSkipPermissions] = useState(false);
     const [rules, setRules] = useState('');
     const [rulesSaved, setRulesSaved] = useState(true);
@@ -112,6 +119,13 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             fetchConfig();
         }
     }, [isOpen]);
+
+    // Fetch Claude config when switching to JSON view mode
+    useEffect(() => {
+        if (mcpViewMode === 'json' && expandedPanels.mcp) {
+            fetchClaudeConfig();
+        }
+    }, [mcpViewMode, expandedPanels.mcp]);
 
     const fetchConfig = async () => {
         try {
@@ -151,6 +165,77 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             }
         } catch (error) {
             console.error('Failed to save MCP servers:', error);
+        }
+    };
+
+    const fetchClaudeConfig = async () => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`);
+            if (response.ok) {
+                const data = await response.json();
+                // Pretty-print the JSON for editing
+                try {
+                    const parsed = JSON.parse(data.content);
+                    setClaudeConfigJson(JSON.stringify(parsed, null, 2));
+                } catch {
+                    setClaudeConfigJson(data.content);
+                }
+                setClaudeConfigPath(data.path);
+                setJsonEditorSaved(true);
+                setJsonEditorError(null);
+            }
+        } catch (error) {
+            console.error('Failed to fetch MCP servers config:', error);
+            setJsonEditorError('Failed to load MCP servers config');
+        }
+    };
+
+    const saveClaudeConfig = async () => {
+        try {
+            // Validate JSON before saving
+            const parsed = JSON.parse(claudeConfigJson);
+            if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+                setJsonEditorError('mcpServers must be an object');
+                return;
+            }
+            setJsonEditorError(null);
+        } catch (e) {
+            setJsonEditorError(`Invalid JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
+            return;
+        }
+
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: claudeConfigJson })
+            });
+            if (response.ok) {
+                setJsonEditorSaved(true);
+                setJsonEditorError(null);
+            } else {
+                const error = await response.json();
+                setJsonEditorError(error.error || 'Failed to save');
+            }
+        } catch (error) {
+            console.error('Failed to save MCP servers config:', error);
+            setJsonEditorError('Failed to save MCP servers config');
+        }
+    };
+
+    const handleJsonChange = (value: string) => {
+        setClaudeConfigJson(value);
+        setJsonEditorSaved(false);
+        // Validate JSON as user types
+        try {
+            const parsed = JSON.parse(value);
+            if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+                setJsonEditorError('mcpServers must be an object');
+            } else {
+                setJsonEditorError(null);
+            }
+        } catch (e) {
+            setJsonEditorError(`Invalid JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
         }
     };
 
@@ -691,89 +776,146 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                         onToggle={() => togglePanel('mcp')}
                     >
                         <div className="mcp-servers-content">
-                            {mcpServers.length === 0 ? (
-                                <p className="mcp-empty-state">No MCP servers configured</p>
-                            ) : (
-                                <div className="mcp-server-list">
-                                    {mcpServers.map((server, index) => (
-                                        <div key={index} className={`mcp-server-item ${!server.enabled ? 'disabled' : ''}`}>
-                                            <div className="mcp-server-info">
-                                                <span className="mcp-server-name">{server.name}</span>
-                                                <span className="mcp-server-command">
-                                                    {server.command} {server.args?.join(' ')}
-                                                </span>
-                                            </div>
-                                            <div className="mcp-server-actions">
-                                                <button
-                                                    className={`mcp-toggle-btn ${server.enabled ? 'enabled' : ''}`}
-                                                    onClick={() => handleToggleServer(index)}
-                                                    title={server.enabled ? 'Disable' : 'Enable'}
-                                                >
-                                                    {server.enabled ? <Power size={16} /> : <PowerOff size={16} />}
-                                                </button>
-                                                <button
-                                                    className="mcp-delete-btn"
-                                                    onClick={() => handleRemoveServer(index)}
-                                                    title="Remove"
-                                                >
-                                                    <Trash2 size={16} />
-                                                </button>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
+                            {/* View mode toggle */}
+                            <div className="mcp-view-toggle">
+                                <button
+                                    className={`mcp-view-btn ${mcpViewMode === 'list' ? 'active' : ''}`}
+                                    onClick={() => setMcpViewMode('list')}
+                                    title="List View"
+                                >
+                                    <Eye size={14} />
+                                    <span>List</span>
+                                </button>
+                                <button
+                                    className={`mcp-view-btn ${mcpViewMode === 'json' ? 'active' : ''}`}
+                                    onClick={() => setMcpViewMode('json')}
+                                    title="Edit JSON directly"
+                                >
+                                    <Code size={14} />
+                                    <span>JSON</span>
+                                </button>
+                            </div>
 
-                            {isAddingServer ? (
-                                <div className="mcp-add-form">
-                                    <input
-                                        type="text"
-                                        placeholder="Server name"
-                                        value={newServer.name}
-                                        onChange={(e) => setNewServer(prev => ({ ...prev, name: e.target.value }))}
-                                        className="mcp-input"
+                            {mcpViewMode === 'json' ? (
+                                /* JSON Editor View */
+                                <div className="mcp-json-editor">
+                                    <p className="mcp-json-path">
+                                        Editing <code>mcpServers</code> in <code>{claudeConfigPath || '~/.claude.json'}</code>
+                                    </p>
+                                    <textarea
+                                        className={`mcp-json-textarea ${jsonEditorError ? 'error' : ''}`}
+                                        value={claudeConfigJson}
+                                        onChange={(e) => handleJsonChange(e.target.value)}
+                                        placeholder="Loading..."
+                                        spellCheck={false}
                                     />
-                                    <input
-                                        type="text"
-                                        placeholder="Command (e.g., npx)"
-                                        value={newServer.command}
-                                        onChange={(e) => setNewServer(prev => ({ ...prev, command: e.target.value }))}
-                                        className="mcp-input"
-                                    />
-                                    <input
-                                        type="text"
-                                        placeholder="Arguments (space-separated)"
-                                        value={newServer.args}
-                                        onChange={(e) => setNewServer(prev => ({ ...prev, args: e.target.value }))}
-                                        className="mcp-input"
-                                    />
-                                    <div className="mcp-add-form-actions">
+                                    {jsonEditorError && (
+                                        <div className="mcp-json-error">
+                                            <AlertCircle size={14} />
+                                            <span>{jsonEditorError}</span>
+                                        </div>
+                                    )}
+                                    <div className="mcp-json-actions">
+                                        <span className={`mcp-json-status ${jsonEditorSaved ? 'saved' : 'unsaved'}`}>
+                                            {jsonEditorSaved ? 'Saved' : 'Unsaved changes'}
+                                        </span>
                                         <button
-                                            className="mcp-cancel-btn"
-                                            onClick={() => {
-                                                setIsAddingServer(false);
-                                                setNewServer({ name: '', command: '', args: '' });
-                                            }}
+                                            className="mcp-json-save-btn"
+                                            onClick={saveClaudeConfig}
+                                            disabled={jsonEditorSaved || !!jsonEditorError}
                                         >
-                                            Cancel
-                                        </button>
-                                        <button
-                                            className="mcp-save-btn"
-                                            onClick={handleAddServer}
-                                            disabled={!newServer.name || !newServer.command}
-                                        >
-                                            Add Server
+                                            Save
                                         </button>
                                     </div>
                                 </div>
                             ) : (
-                                <button
-                                    className="mcp-add-btn"
-                                    onClick={() => setIsAddingServer(true)}
-                                >
-                                    <Plus size={16} />
-                                    Add MCP Server
-                                </button>
+                                /* List View */
+                                <>
+                                    {mcpServers.length === 0 ? (
+                                        <p className="mcp-empty-state">No MCP servers configured</p>
+                                    ) : (
+                                        <div className="mcp-server-list">
+                                            {mcpServers.map((server, index) => (
+                                                <div key={index} className={`mcp-server-item ${!server.enabled ? 'disabled' : ''}`}>
+                                                    <div className="mcp-server-info">
+                                                        <span className="mcp-server-name">{server.name}</span>
+                                                        <span className="mcp-server-command">
+                                                            {server.command} {server.args?.join(' ')}
+                                                        </span>
+                                                    </div>
+                                                    <div className="mcp-server-actions">
+                                                        <button
+                                                            className={`mcp-toggle-btn ${server.enabled ? 'enabled' : ''}`}
+                                                            onClick={() => handleToggleServer(index)}
+                                                            title={server.enabled ? 'Disable' : 'Enable'}
+                                                        >
+                                                            {server.enabled ? <Power size={16} /> : <PowerOff size={16} />}
+                                                        </button>
+                                                        <button
+                                                            className="mcp-delete-btn"
+                                                            onClick={() => handleRemoveServer(index)}
+                                                            title="Remove"
+                                                        >
+                                                            <Trash2 size={16} />
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+
+                                    {isAddingServer ? (
+                                        <div className="mcp-add-form">
+                                            <input
+                                                type="text"
+                                                placeholder="Server name"
+                                                value={newServer.name}
+                                                onChange={(e) => setNewServer(prev => ({ ...prev, name: e.target.value }))}
+                                                className="mcp-input"
+                                            />
+                                            <input
+                                                type="text"
+                                                placeholder="Command (e.g., npx)"
+                                                value={newServer.command}
+                                                onChange={(e) => setNewServer(prev => ({ ...prev, command: e.target.value }))}
+                                                className="mcp-input"
+                                            />
+                                            <input
+                                                type="text"
+                                                placeholder="Arguments (space-separated)"
+                                                value={newServer.args}
+                                                onChange={(e) => setNewServer(prev => ({ ...prev, args: e.target.value }))}
+                                                className="mcp-input"
+                                            />
+                                            <div className="mcp-add-form-actions">
+                                                <button
+                                                    className="mcp-cancel-btn"
+                                                    onClick={() => {
+                                                        setIsAddingServer(false);
+                                                        setNewServer({ name: '', command: '', args: '' });
+                                                    }}
+                                                >
+                                                    Cancel
+                                                </button>
+                                                <button
+                                                    className="mcp-save-btn"
+                                                    onClick={handleAddServer}
+                                                    disabled={!newServer.name || !newServer.command}
+                                                >
+                                                    Add Server
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <button
+                                            className="mcp-add-btn"
+                                            onClick={() => setIsAddingServer(true)}
+                                        >
+                                            <Plus size={16} />
+                                            Add MCP Server
+                                        </button>
+                                    )}
+                                </>
                             )}
                         </div>
                     </CollapsiblePanel>

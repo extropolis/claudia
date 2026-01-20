@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useRef, useEffect, useCallback } from 'react';
 import { Send, MessageSquare } from 'lucide-react';
 import { Task } from '@claudia/shared';
 import { useTaskStore } from '../stores/taskStore';
@@ -10,7 +10,6 @@ interface TaskInputBarProps {
 }
 
 export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
-    const [message, setMessage] = useState('');
     const inputRef = useRef<HTMLTextAreaElement>(null);
 
     const {
@@ -20,8 +19,15 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
         voiceInterimTranscript,
         setFocusedInputId,
         consumeVoiceTranscript,
-        clearVoiceTranscript
+        clearVoiceTranscript,
+        setTaskDraftInput,
+        getTaskDraftInput,
+        clearTaskDraftInput
     } = useTaskStore();
+
+    // Get the draft message from the store (preserved when switching tasks)
+    const message = getTaskDraftInput(task.id);
+    const setMessage = (value: string) => setTaskDraftInput(task.id, value);
 
     const inputId = `task-${task.id}`;
     const isFocused = focusedInputId === inputId;
@@ -51,11 +57,11 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
     // Append voice transcript to message when this input is focused
     useEffect(() => {
         if (isFocused && voiceTranscript) {
-            setMessage(prev => (prev ? prev + ' ' : '') + voiceTranscript);
+            setMessage(message ? message + ' ' + voiceTranscript : voiceTranscript);
             // Clear the transcript after consuming
             consumeVoiceTranscript();
         }
-    }, [isFocused, voiceTranscript, consumeVoiceTranscript]);
+    }, [isFocused, voiceTranscript, consumeVoiceTranscript, message, setMessage]);
 
     const sendMessage = useCallback(() => {
         if (!message.trim()) return;
@@ -73,8 +79,8 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
             payload: { taskId: task.id, input: messageWithEnter }
         }));
 
-        setMessage('');
-    }, [message, wsRef, task.id, globalVoiceEnabled, clearVoiceTranscript]);
+        clearTaskDraftInput(task.id);
+    }, [message, wsRef, task.id, globalVoiceEnabled, clearVoiceTranscript, clearTaskDraftInput]);
 
     // Listen for auto-send event
     useEffect(() => {

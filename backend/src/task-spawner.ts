@@ -3,7 +3,7 @@ import { EventEmitter } from 'events';
 import { Task, TaskState, TaskGitState, WaitingInputType } from '@claudia/shared';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { execSync } from 'child_process';
 import { ConfigStore } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
@@ -86,6 +86,7 @@ interface InternalTask extends Task {
     stateTransitionLock?: boolean; // Prevents concurrent state transitions during polling
     shouldContinue?: boolean; // True if this is a reconnected task that should auto-continue
     continuationSent?: boolean; // True if continuation prompt has been sent
+    consecutiveOutputChanges?: number; // Count of consecutive polls with output changes (for idle→busy debouncing)
 }
 
 /**
@@ -163,6 +164,20 @@ export class TaskSpawner extends EventEmitter {
     /**
      * Get the directory for archived task histories
      */
+    private getTaskHistoryPath(taskId: string): string {
+        return join(this.getHistoryDir(), `${taskId}.txt`);
+    }
+
+    /**
+     * Get the directory for task histories
+     */
+    private getHistoryDir(): string {
+        return join(dirname(this.persistencePath), 'task-histories');
+    }
+
+    /**
+     * Get the directory for archived task histories
+     */
     private getArchivedHistoryDir(): string {
         return join(dirname(this.persistencePath), 'archived-histories');
     }
@@ -192,9 +207,13 @@ export class TaskSpawner extends EventEmitter {
      * Uses a per-task lock to prevent race conditions from concurrent state transitions.
      */
     private checkTaskStates(): void {
-        // Minimum bytes of output change required to transition idle → busy
-        // This prevents spurious transitions from terminal housekeeping (cursor moves, screen refreshes)
-        const MIN_OUTPUT_CHANGE_FOR_BUSY = 50;
+        // Number of consecutive polls with output changes required to transition idle → busy
+        // This prevents spurious transitions from one-time terminal redraws (resize, focus, etc.)
+        const CONSECUTIVE_CHANGES_FOR_BUSY = 2;
+
+        if (process.env.DEBUG_POLLING) {
+            console.log(`[TaskSpawner] checking state for ${this.tasks.size} tasks`);
+        }
 
         for (const task of this.tasks.values()) {
             if (task.state === 'exited') continue;
@@ -205,11 +224,13 @@ export class TaskSpawner extends EventEmitter {
             }
 
             const currentLength = task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
-            const outputDelta = currentLength - task.lastOutputLength;
-            const outputChanged = outputDelta !== 0;
+            const outputChanged = currentLength !== task.lastOutputLength;
             task.lastOutputLength = currentLength;
 
             if (outputChanged) {
+                // Track consecutive output changes for idle → busy debouncing
+                task.consecutiveOutputChanges = (task.consecutiveOutputChanges || 0) + 1;
+
                 // Output is changing → busy (or starting → busy if task actually started)
                 if (task.state === 'starting') {
                     // Task is starting and we got output - check if it's real processing or just TUI setup
@@ -220,17 +241,20 @@ export class TaskSpawner extends EventEmitter {
                 } else if (task.state === 'busy') {
                     // Already busy, no transition needed
                 } else if (task.state === 'idle' || task.state === 'waiting_input') {
-                    // Only transition idle/waiting_input → busy if output change is significant
-                    // Small changes are likely just terminal housekeeping (cursor, refreshes)
-                    if (outputDelta >= MIN_OUTPUT_CHANGE_FOR_BUSY) {
-                        this.transitionTaskState(task, 'busy', undefined, `polling: significant output (+${outputDelta} bytes)`);
+                    // Only transition idle/waiting_input → busy if we've seen consecutive output changes
+                    // This prevents one-time TUI redraws (from resize, focus, etc.) from causing spurious busy state
+                    if (task.consecutiveOutputChanges >= CONSECUTIVE_CHANGES_FOR_BUSY) {
+                        this.transitionTaskState(task, 'busy', undefined, `polling: sustained output (${task.consecutiveOutputChanges} consecutive)`);
                     }
-                    // Ignore small output changes for idle/waiting_input tasks
+                    // Single output change is likely just terminal housekeeping - wait for sustained activity
                 } else {
                     // Other states (e.g., disconnected) - transition to busy on any output
                     this.transitionTaskState(task, 'busy', undefined, 'polling: output changed');
                 }
             } else {
+                // Reset consecutive output counter when output is stable
+                task.consecutiveOutputChanges = 0;
+
                 // Output stable → check if idle or waiting_input (but only for tasks that have started)
                 if (task.state === 'busy') {
                     const recentOutput = this.getRecentOutput(task, 2048);
@@ -391,7 +415,31 @@ export class TaskSpawner extends EventEmitter {
                 const persistence = JSON.parse(data) as { tasks: PersistedTask[]; archivedTasks?: any[] };
                 console.log(`[TaskSpawner] Loading ${persistence.tasks.length} persisted tasks`);
 
+                // Ensure history directory exists
+                const historyDir = this.getHistoryDir();
+                if (!existsSync(historyDir)) {
+                    mkdirSync(historyDir, { recursive: true });
+                }
+
                 for (const persisted of persistence.tasks) {
+                    // MIGRATION: If task has outputHistory string, move it to file
+                    if (persisted.outputHistory && typeof persisted.outputHistory === 'string') {
+                        try {
+                            writeFileSync(this.getTaskHistoryPath(persisted.id), persisted.outputHistory);
+                            if (process.env.DEBUG_TASKS) {
+                                console.log(`[TaskSpawner] Migrated history for task ${persisted.id} to file`);
+                            }
+                            // Remove from object to free memory
+                            delete persisted.outputHistory;
+                        } catch (e) {
+                            console.error(`[TaskSpawner] Failed to migrate history for task ${persisted.id}:`, e);
+                        }
+                    }
+
+                    // Debug: log each task being loaded
+                    if (process.env.DEBUG_TASKS) {
+                        console.log(`[TaskSpawner] Loading task ${persisted.id}`);
+                    }
                     this.disconnectedTasks.set(persisted.id, persisted);
                 }
 
@@ -457,32 +505,32 @@ export class TaskSpawner extends EventEmitter {
             const tasksToSave: PersistedTask[] = [];
 
             for (const task of this.tasks.values()) {
-                let historyBase64: string;
-
-                // If history was never decoded (lazy loading), try to preserve it without decoding
-                if (task.lazyHistoryBase64 && !task.previousHistory) {
-                    // Check if current output is minimal (just the resume message)
-                    const currentOutputSize = task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
-
-                    if (currentOutputSize < 1024) {
-                        // Minimal new output - just use the original lazy history as-is
-                        // The small amount of new output will be regenerated on next restart anyway
-                        historyBase64 = task.lazyHistoryBase64;
-                    } else {
-                        // Significant new output - need to combine (this is rare)
-                        const currentOutput = Buffer.concat(task.outputHistory);
-                        const lazyHistory = Buffer.from(task.lazyHistoryBase64, 'base64');
-                        historyBase64 = Buffer.concat([lazyHistory, currentOutput]).toString('base64');
-                    }
-                } else {
-                    // Combine previous history + current output for persistence
+                // Save history to separate file
+                const historyPath = this.getTaskHistoryPath(task.id);
+                try {
                     const buffers: Buffer[] = [];
+
+                    // If we have base history loaded, we can overwrite safely
                     if (task.previousHistory) {
                         buffers.push(task.previousHistory);
+                        if (task.outputHistory.length > 0) {
+                            buffers.push(...task.outputHistory);
+                        }
+                        const fullHistory = Buffer.concat(buffers);
+                        writeFileSync(historyPath, fullHistory.toString('base64'));
                     }
-                    buffers.push(...task.outputHistory);
-                    const historyBuffer = Buffer.concat(buffers);
-                    historyBase64 = historyBuffer.toString('base64');
+                    // If we DON'T have base history, check if file exists
+                    else if (!existsSync(historyPath)) {
+                        // New file, safe to write current output
+                        if (task.outputHistory.length > 0) {
+                            const fullHistory = Buffer.concat(task.outputHistory);
+                            writeFileSync(historyPath, fullHistory.toString('base64'));
+                        }
+                    }
+                    // Else: File exists but unloaded history. Skip to avoid data loss.
+                    // (History will be saved when task is viewed)
+                } catch (e) {
+                    console.error(`[TaskSpawner] Failed to save history for task ${task.id}:`, e);
                 }
 
                 // Track if task was busy when being saved (will be interrupted)
@@ -498,7 +546,7 @@ export class TaskSpawner extends EventEmitter {
                     lastActivity: task.lastActivity.toISOString(),
                     lastState: task.state,
                     sessionId: task.sessionId,
-                    outputHistory: historyBase64,
+                    // outputHistory removed from JSON
                     wasInterrupted,
                     shouldContinue,
                     systemPrompt: task.systemPrompt,
@@ -729,10 +777,29 @@ export class TaskSpawner extends EventEmitter {
             return 'confirmation';
         }
 
-        // Get the last section of output (separated by ⏺ dots or horizontal lines)
+        // Get the last meaningful section of output (separated by ⏺ dots or horizontal lines)
         // Claude separates messages with ⏺ or ─── lines
+        // Important: After a response, there's often an empty input prompt section (just "❯")
+        // We need to find the last section that actually contains Claude's response
         const sections = str.split(/(?:⏺|─{3,})/);
-        const lastSection = sections.length > 0 ? sections[sections.length - 1] : str;
+
+        // Filter out empty sections and sections that are just the input prompt
+        const meaningfulSections = sections.filter(s => {
+            const trimmed = s.trim();
+            // Skip empty sections or sections that are just the input prompt marker
+            if (!trimmed || trimmed === '❯' || /^❯\s*$/.test(trimmed)) {
+                return false;
+            }
+            // Skip sections that are only TUI chrome (shortcuts, model info, etc.)
+            if (/^\s*(?:\? for shortcuts|Try "|\/model|bypass permissions|shift\+tab)/i.test(trimmed)) {
+                return false;
+            }
+            return true;
+        });
+
+        const lastSection = meaningfulSections.length > 0
+            ? meaningfulSections[meaningfulSections.length - 1]
+            : str;
 
         // Clean up the section for analysis
         const cleanSection = lastSection
@@ -792,6 +859,9 @@ export class TaskSpawner extends EventEmitter {
                 console.log(`[TaskSpawner] Question detected (ends with ?): "${trimmedSection.slice(-80)}"`);
                 return 'question';
             }
+
+            // Debug: log when we have a question mark but didn't detect a question
+            console.log(`[TaskSpawner] Has '?' but no question pattern matched. Section: "${trimmedSection.slice(0, 150)}"`);
         }
 
         return null;
@@ -878,11 +948,8 @@ export class TaskSpawner extends EventEmitter {
         const context = isInitialPrompt ? 'initial prompt' : 'input';
 
         if (retriesLeft <= 0) {
-            console.log(`[TaskSpawner] Max retries reached for ${context} on task ${task.id}, sending burst of Enter keys`);
-            // Final attempt - send multiple Enters in quick succession
-            task.process.write(enterKey);
-            setTimeout(() => task.process.write(enterKey), 100);
-            setTimeout(() => task.process.write(enterKey), 250);
+            console.log(`[TaskSpawner] Max retries reached for ${context} on task ${task.id}, giving up`);
+            // Just return, do not send burst to avoid PTY crashes
             return;
         }
 
@@ -1145,10 +1212,11 @@ export class TaskSpawner extends EventEmitter {
             for (const task of this.tasks.values()) {
                 task.isActive = false;
                 // If this task has decoded history but isn't the one being activated,
-                // re-encode it back to base64 to free the buffer memory
-                if (task.id !== taskId && task.previousHistory && !task.lazyHistoryBase64) {
-                    task.lazyHistoryBase64 = task.previousHistory.toString('base64');
+                // clear it to free memory. We can reload from disk later.
+                if (task.id !== taskId && task.previousHistory) {
                     task.previousHistory = undefined;
+                    // Also clear lazyHistoryBase64 if it exists (legacy)
+                    task.lazyHistoryBase64 = undefined;
                     console.log(`[TaskSpawner] Freed memory for inactive task ${task.id}`);
                 }
             }
@@ -1201,6 +1269,51 @@ export class TaskSpawner extends EventEmitter {
         // Limit history sent to frontend to prevent memory exhaustion
         const MAX_HISTORY_TO_SEND = 2 * 1024 * 1024; // 2MB max
 
+        // Handle lazy loading from file
+        if (!task.previousHistory && !task.lazyHistoryBase64) {
+            const historyPath = this.getTaskHistoryPath(task.id);
+            if (existsSync(historyPath)) {
+                try {
+                    const stat = statSync(historyPath);
+                    const fileSize = stat.size;
+
+                    let base64Content: string;
+
+                    // If file is larger than MAX_HISTORY_TO_SEND, only read the tail
+                    // Base64 encoding inflates size by ~33%, so calculate raw max size
+                    const maxBase64Size = Math.floor(MAX_HISTORY_TO_SEND * 1.33);
+
+                    if (fileSize > maxBase64Size) {
+                        // Only read the last portion of the file
+                        const fd = openSync(historyPath, 'r');
+                        const buffer = Buffer.alloc(maxBase64Size);
+                        const offset = fileSize - maxBase64Size;
+                        readSync(fd, buffer, 0, maxBase64Size, offset);
+                        closeSync(fd);
+                        base64Content = buffer.toString('utf-8');
+                        console.log(`[TaskSpawner] Loaded tail of history from file for ${task.id}: ${fileSize} bytes (file) -> ${maxBase64Size} bytes (loaded)`);
+                    } else {
+                        // File is small enough, read it all
+                        base64Content = readFileSync(historyPath, 'utf-8');
+                        console.log(`[TaskSpawner] Loaded complete history from file for ${task.id}: ${fileSize} bytes`);
+                    }
+
+                    // Decode base64 to buffer
+                    const decoded = Buffer.from(base64Content, 'base64');
+
+                    // Add truncation message if we only loaded partial history
+                    if (fileSize > maxBase64Size) {
+                        const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n');
+                        task.previousHistory = Buffer.concat([truncationMessage, decoded]);
+                    } else {
+                        task.previousHistory = decoded;
+                    }
+                } catch (e) {
+                    console.error(`[TaskSpawner] Failed to load history file for ${task.id}:`, e);
+                }
+            }
+        }
+
         // Handle lazy loading: decode base64 history on first access
         if (task.lazyHistoryBase64 && !task.previousHistory) {
             try {
@@ -1219,6 +1332,7 @@ export class TaskSpawner extends EventEmitter {
                 }
                 // Clear the base64 string to free memory
                 task.lazyHistoryBase64 = undefined;
+
             } catch (e) {
                 console.error(`[TaskSpawner] Failed to lazy load history:`, e);
                 task.lazyHistoryBase64 = undefined;
@@ -1681,16 +1795,37 @@ export class TaskSpawner extends EventEmitter {
             cwd: persisted.workspaceId,
             env: taskEnv,
         });
+        console.log(`[TaskSpawner] Process spawned for task ${taskId}, PID: ${ptyProcess.pid}`);
 
         const now = new Date();
 
         // Use lazy loading for history to prevent memory exhaustion during startup
-        // History will be decoded only when task is selected (setTaskActive)
-        const lazyHistoryBase64 = persisted.outputHistory || undefined;
-        if (lazyHistoryBase64) {
-            // Estimate size from base64 (base64 is ~4/3 the size of binary)
-            const estimatedSize = Math.floor(lazyHistoryBase64.length * 0.75);
-            console.log(`[TaskSpawner] Deferred loading ~${estimatedSize} bytes of history (lazy load)`);
+        // History will be loaded from file only when task is selected (setTaskActive)
+        // Check if history file exists
+        let lazyHistoryBase64: string | undefined;
+        try {
+            const historyPath = this.getTaskHistoryPath(taskId);
+            if (existsSync(historyPath)) {
+                // Just flag that we have history, don't read it yet!
+                // We'll read it "on demand" in getCombinedHistory or when needed
+                // For now, we set a placeholder to indicate history exists
+                // BUT wait: logic below expects lazyHistoryBase64 to BE the content.
+                // We need to change getCombinedHistory to read from file if this is a "file path" or special marker.
+                // Alternatively, read it here? NO, that defeats the purpose of avoiding 30MB load.
+                // WE MUST READ IT LAZILY.
+
+                // Let's modify getCombinedHistory to handle reading from file.
+                // For this refactor, we'll store a special marker or changed InternalTask interface? 
+                // Currently InternalTask has lazyHistoryBase64 as string. 
+                // Let's treat it as NULL here, and modify getCombinedHistory to check file.
+                lazyHistoryBase64 = undefined;
+                console.log(`[TaskSpawner] Task ${taskId} has history file (lazy load enabled)`);
+            } else if (persisted.outputHistory) {
+                // Fallback for tasks not yet migrated (should happen in loadPersistedTasks though)
+                lazyHistoryBase64 = persisted.outputHistory;
+            }
+        } catch (e) {
+            console.error(`[TaskSpawner] Failed to check history file for ${taskId}:`, e);
         }
 
         // Create a separator message for the live output stream

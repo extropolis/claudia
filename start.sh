@@ -13,6 +13,29 @@ FRONTEND_PORT=5173
 OPENCODE_PORT=4097
 # ============================================
 
+# Lock file to prevent recursive starts
+LOCK_FILE="/tmp/claudia-server.lock"
+
+# Check if server is already running (lock file exists and process is alive)
+if [ -f "$LOCK_FILE" ]; then
+    LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+    if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
+        echo "❌ Claudia is already running (PID: $LOCK_PID)"
+        echo "   If you want to restart, first kill the existing instance:"
+        echo "   pkill -f 'npm run dev' or kill $LOCK_PID"
+        exit 1
+    else
+        # Stale lock file, remove it
+        rm -f "$LOCK_FILE"
+    fi
+fi
+
+# Create lock file with our PID
+echo $$ > "$LOCK_FILE"
+
+# Clean up lock file on exit
+trap "rm -f '$LOCK_FILE'" EXIT INT TERM
+
 # Ensure OpenCode CLI is in PATH
 export PATH=$HOME/.opencode/bin:$PATH
 
@@ -79,7 +102,7 @@ cd "$(dirname "$0")"
 export PORT=$BACKEND_PORT
 
 # Increase Node.js memory limit for backend (handles many persisted tasks + archived tasks)
-export NODE_OPTIONS="--max-old-space-size=4096"
+export NODE_OPTIONS="--max-old-space-size=8192"
 
 # Start backend and frontend
 # Backend: tsx watch auto-reloads on .ts file changes
