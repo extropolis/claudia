@@ -1,4 +1,7 @@
+![WF1ds0PyunwPNJfoZjzvS](https://github.com/user-attachments/assets/5169464e-7630-4327-8f2d-56500256f117)
+
 # Claudia
+
 
 A web-based UI for managing multiple Claude Code CLI instances simultaneously. Claudia provides a visual interface for spawning, monitoring, and interacting with Claude Code tasks across different workspaces.
 
@@ -11,6 +14,10 @@ A web-based UI for managing multiple Claude Code CLI instances simultaneously. C
 - **AI Supervisor** - Optional AI-powered task analysis and chat interface
 - **Git Integration** - Track changes and revert task modifications
 - **Task Persistence** - Tasks survive server restarts with automatic reconnection
+
+
+https://github.com/user-attachments/assets/e0d9d9a3-77eb-45b6-ac55-984d8ec9c663
+
 
 ## Prerequisites
 
