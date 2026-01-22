@@ -9,6 +9,7 @@ import { ConfigStore } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
 import { sanitizePrompt } from './validation.js';
 import { createLogger } from './logger.js';
+import { CodeBackend, BackendType, BackendTask, createBackend } from './backends/index.js';
 
 const logger = createLogger('[TaskSpawner]');
 
@@ -135,6 +136,12 @@ export class TaskSpawner extends EventEmitter {
     /** Polling interval in ms - configurable via STATE_POLLING_MS env var */
     private readonly statePollingMs: number;
 
+    // Backend abstraction for multi-backend support (Claude Code, OpenCode, etc.)
+    private backend: CodeBackend | null = null;
+    private backendType: BackendType = 'claude-code';
+    /** Track which tasks use which backend (for mixed-backend scenarios during transition) */
+    private taskBackends: Map<string, BackendType> = new Map();
+
     /**
      * Creates a new TaskSpawner instance
      * @param persistencePath - Optional path for task persistence file (default: tasks.json in backend dir)
@@ -150,15 +157,153 @@ export class TaskSpawner extends EventEmitter {
         const envPollingMs = parseInt(process.env.STATE_POLLING_MS || '', 10);
         this.statePollingMs = !isNaN(envPollingMs) && envPollingMs >= 500 ? envPollingMs : 3000;
 
+        // Initialize backend based on config
+        this.backendType = configStore?.getBackend() || 'claude-code';
+        this.initializeBackend();
+
         this.loadPersistedTasks();
 
-        // Start state polling
-        this.startStatePolling();
+        // Start state polling (only for claude-code backend which uses PTY)
+        // OpenCode backend handles its own state management via HTTP API
+        if (this.backendType === 'claude-code') {
+            this.startStatePolling();
+        }
 
         if (autoReconnect && this.disconnectedTasks.size > 0) {
             // Start auto-reconnect immediately but track the promise
             this.autoReconnectPromise = this.autoReconnectTasks();
         }
+    }
+
+    /**
+     * Initialize or reinitialize the backend
+     */
+    private initializeBackend(): void {
+        // Shutdown existing backend if any
+        if (this.backend) {
+            this.backend.shutdown().catch(err => {
+                logger.error('Failed to shutdown previous backend', { error: err });
+            });
+        }
+
+        // Create new backend based on config
+        this.backendType = this.configStore?.getBackend() || 'claude-code';
+        this.backend = createBackend(this.backendType, this.configStore || undefined);
+
+        // Wire up backend events
+        this.backend.on('task:output', (taskId: string, data: string) => {
+            const task = this.tasks.get(taskId);
+            const taskBackendType = this.taskBackends.get(taskId);
+
+            logger.debug('Backend task:output event received', {
+                taskId,
+                taskExists: !!task,
+                isActive: task?.isActive,
+                taskBackendType,
+                dataLength: data.length
+            });
+
+            // For OpenCode tasks, always emit output (they don't use PTY streaming like Claude Code)
+            // For Claude Code tasks, only emit if task is active (to avoid duplicate output)
+            if (task && (taskBackendType === 'opencode' || task.isActive)) {
+                logger.debug('Emitting taskOutput', { taskId, dataLength: data.length });
+                this.emit('taskOutput', taskId, data);
+            }
+        });
+
+        this.backend.on('task:stateChanged', (backendTask: BackendTask) => {
+            const task = this.tasks.get(backendTask.id);
+            if (task) {
+                const oldState = task.state;
+                task.state = backendTask.state;
+                task.waitingInputType = backendTask.waitingInputType;
+                task.lastActivity = backendTask.lastActivity;
+
+                if (oldState !== task.state) {
+                    logger.debug('Task state changed via backend', { taskId: task.id, oldState, newState: task.state });
+                    this.emit('taskStateChanged', this.toPublicTask(task));
+                    this.scheduleSave();
+                }
+            }
+        });
+
+        this.backend.on('task:waitingInput', (taskId: string, inputType: WaitingInputType, context: string) => {
+            this.emit('taskWaitingInput', taskId, inputType, context);
+        });
+
+        this.backend.on('task:sessionCaptured', (taskId: string, sessionId: string) => {
+            const task = this.tasks.get(taskId);
+            if (task && !task.sessionId) {
+                task.sessionId = sessionId;
+                this.sessionToTaskId.set(sessionId, taskId);
+                this.scheduleSave();
+            }
+        });
+
+        this.backend.on('task:exit', (taskId: string, exitCode: number) => {
+            const task = this.tasks.get(taskId);
+            if (task) {
+                task.state = 'exited';
+                this.emit('taskStateChanged', this.toPublicTask(task));
+                this.scheduleSave();
+            }
+        });
+
+        // Initialize the backend
+        this.backend.initialize().then(() => {
+            logger.info('Backend initialized', { type: this.backendType });
+        }).catch(err => {
+            logger.error('Failed to initialize backend', { type: this.backendType, error: err });
+        });
+    }
+
+    /**
+     * Get the current backend type
+     */
+    getBackendType(): BackendType {
+        return this.backendType;
+    }
+
+    /**
+     * Switch to a different backend
+     * Called when the backend config is changed via API
+     */
+    async switchBackend(newBackendType: BackendType): Promise<void> {
+        if (newBackendType === this.backendType) {
+            logger.debug('Backend unchanged, skipping switch', { type: newBackendType });
+            return;
+        }
+
+        logger.info('Switching backend', { from: this.backendType, to: newBackendType });
+
+        // Stop state polling for claude-code
+        if (this.backendType === 'claude-code' && this.statePollingInterval) {
+            clearInterval(this.statePollingInterval);
+            this.statePollingInterval = null;
+        }
+
+        // Update the config store if we have one
+        if (this.configStore) {
+            this.configStore.setBackend(newBackendType);
+        }
+
+        // Reinitialize the backend
+        this.initializeBackend();
+
+        // Start state polling if switching to claude-code
+        if (this.backendType === 'claude-code') {
+            this.startStatePolling();
+        }
+    }
+
+    /**
+     * Check if a specific backend is available
+     */
+    async checkBackendStatus(backendType?: BackendType): Promise<{ installed: boolean; version?: string; error?: string }> {
+        const type = backendType || this.backendType;
+        const tempBackend = createBackend(type, this.configStore || undefined);
+        const status = await tempBackend.checkInstalled();
+        return status;
     }
 
     /**
@@ -696,10 +841,10 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
-     * Get environment variables for spawning Claude tasks based on API mode
+     * Get environment variables for spawning tasks based on API mode
      * - default: Use Claude's default settings from ~/.claude.json
      * - custom-anthropic: Use custom API key with Anthropic's API directly
-     * - sap-ai-core: Use the embedded proxy that routes through SAP AI Core
+     * - sap-ai-core: Use the embedded proxy (Claude) or native AICORE_SERVICE_KEY (OpenCode)
      */
     private getTaskEnvironment(): { [key: string]: string } {
         const taskEnv = { ...process.env } as { [key: string]: string };
@@ -707,7 +852,7 @@ export class TaskSpawner extends EventEmitter {
         if (!this.configStore) return taskEnv;
 
         const apiMode = this.configStore.getApiMode();
-        console.log(`[TaskSpawner] API mode: ${apiMode}`);
+        console.log(`[TaskSpawner] API mode: ${apiMode}, backend: ${this.backendType}`);
 
         if (apiMode === 'custom-anthropic') {
             const apiKey = this.configStore.getCustomAnthropicApiKey();
@@ -716,13 +861,55 @@ export class TaskSpawner extends EventEmitter {
                 console.log(`[TaskSpawner] Using custom Anthropic API key`);
             }
         } else if (apiMode === 'sap-ai-core') {
-            // Point to the embedded proxy server
-            // The proxy is mounted at the backend's root, so we use the backend URL
-            const backendPort = process.env.PORT || '3001';
-            taskEnv['ANTHROPIC_BASE_URL'] = `http://localhost:${backendPort}`;
-            console.log(`[TaskSpawner] Using SAP AI Core proxy at localhost:${backendPort}`);
+            let credentials = this.configStore.getAICoreCredentials();
+
+            // Fallback to environment variables if no credentials in config
+            if (!credentials && process.env.SAP_AICORE_CLIENT_ID) {
+                credentials = {
+                    clientId: process.env.SAP_AICORE_CLIENT_ID || '',
+                    clientSecret: process.env.SAP_AICORE_CLIENT_SECRET || '',
+                    authUrl: process.env.SAP_AICORE_AUTH_URL || '',
+                    baseUrl: process.env.SAP_AICORE_BASE_URL || '',
+                    resourceGroup: process.env.AICORE_RESOURCE_GROUP || 'default',
+                };
+                console.log(`[TaskSpawner] Using SAP AI Core credentials from environment variables`);
+            }
+
+            if (this.backendType === 'opencode' && credentials) {
+                // OpenCode has native SAP AI Core support via AICORE_SERVICE_KEY
+                // Format: {"clientid":"...","clientsecret":"...","url":"...","serviceurls":{"AI_API_URL":"..."}}
+                const serviceKey = {
+                    clientid: credentials.clientId,
+                    clientsecret: credentials.clientSecret,
+                    url: credentials.authUrl,
+                    serviceurls: {
+                        AI_API_URL: credentials.baseUrl
+                    }
+                };
+                taskEnv['AICORE_SERVICE_KEY'] = JSON.stringify(serviceKey);
+
+                // Optionally set resource group if configured
+                if (credentials.resourceGroup) {
+                    taskEnv['AICORE_RESOURCE_GROUP'] = credentials.resourceGroup;
+                }
+
+                // Clear any inherited base URL that might interfere with OpenCode's native AI Core support
+                delete taskEnv['ANTHROPIC_BASE_URL'];
+                delete taskEnv['OPENAI_BASE_URL'];
+
+                console.log(`[TaskSpawner] Using SAP AI Core native support for OpenCode`);
+                console.log(`[TaskSpawner] AICORE_SERVICE_KEY authUrl: ${credentials.authUrl}, baseUrl: ${credentials.baseUrl}`);
+            } else if (this.backendType === 'opencode' && !credentials) {
+                console.log(`[TaskSpawner] WARNING: SAP AI Core mode selected but no credentials found for OpenCode`);
+            } else {
+                // Claude Code uses the embedded proxy server
+                // The proxy is mounted at the backend's root, so we use the backend URL
+                const backendPort = process.env.PORT || '3001';
+                taskEnv['ANTHROPIC_BASE_URL'] = `http://localhost:${backendPort}`;
+                console.log(`[TaskSpawner] Using SAP AI Core proxy at localhost:${backendPort}`);
+            }
         }
-        // 'default' mode: don't set any env vars, let Claude Code use its own settings
+        // 'default' mode: don't set any env vars, let the backend use its own settings
 
         return taskEnv;
     }
@@ -767,6 +954,13 @@ export class TaskSpawner extends EventEmitter {
             return 'question';
         }
 
+        // Numbered selection menu (like "Exit plan mode?" dialog)
+        // Looks for pattern like: "❯ 1. Yes" or "  2. No" indicating a numbered choice menu
+        if (str.match(/❯\s*\d+\.\s+\w/) && str.match(/\s+\d+\.\s+\w/)) {
+            console.log(`[TaskSpawner] Numbered selection menu detected`);
+            return 'question';
+        }
+
         // Permission dialog - "Allow" / "Deny" patterns (tool permissions)
         if (str.includes('Allow') && str.includes('Deny')) {
             return 'permission';
@@ -783,7 +977,7 @@ export class TaskSpawner extends EventEmitter {
         // We need to find the last section that actually contains Claude's response
         const sections = str.split(/(?:⏺|─{3,})/);
 
-        // Filter out empty sections and sections that are just the input prompt
+        // Filter out empty sections and sections that are just the input prompt or TUI chrome
         const meaningfulSections = sections.filter(s => {
             const trimmed = s.trim();
             // Skip empty sections or sections that are just the input prompt marker
@@ -791,7 +985,8 @@ export class TaskSpawner extends EventEmitter {
                 return false;
             }
             // Skip sections that are only TUI chrome (shortcuts, model info, etc.)
-            if (/^\s*(?:\? for shortcuts|Try "|\/model|bypass permissions|shift\+tab)/i.test(trimmed)) {
+            // These can have prefixes like ⏵⏵ or other symbols
+            if (/(?:\? for shortcuts|Try "|\/model to try|bypass permissions|shift\+tab to cycle)/i.test(trimmed) && trimmed.length < 100) {
                 return false;
             }
             return true;
@@ -986,20 +1181,133 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
-     * Creates a new Claude Code task
+     * Creates a new AI coding task
      * @param prompt - The user's prompt for the task
      * @param workspaceId - The workspace directory path
      * @param systemPrompt - Optional system prompt override
      * @returns The created task object
      */
     async createTask(prompt: string, workspaceId: string, systemPrompt?: string): Promise<Task> {
-        const id = `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-
         // Sanitize prompt to prevent command injection and other issues
         const sanitizedPrompt = sanitizePrompt(prompt);
         const sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
 
         const gitStateBefore = await captureGitStateBefore(workspaceId);
+
+        // Log which backend we're using for debugging
+        logger.info('createTask called', {
+            backendType: this.backendType,
+            hasBackend: !!this.backend,
+            configBackend: this.configStore?.getBackend()
+        });
+
+        // Use OpenCode backend if configured
+        if (this.backendType === 'opencode' && this.backend) {
+            logger.info('Using OpenCode backend for task creation');
+            return this.createTaskWithOpenCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore);
+        }
+
+        // Default: Use Claude Code with PTY (existing logic)
+        logger.info('Using Claude Code backend for task creation');
+        return this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore);
+    }
+
+    /**
+     * Create task using OpenCode backend (HTTP API based)
+     */
+    private async createTaskWithOpenCode(
+        prompt: string,
+        workspaceId: string,
+        systemPrompt: string | undefined,
+        gitStateBefore: Partial<TaskGitState> | null
+    ): Promise<Task> {
+        if (!this.backend) {
+            throw new Error('OpenCode backend not initialized');
+        }
+
+        logger.info('Creating task with OpenCode backend', { workspaceId });
+
+        const taskEnv = this.getTaskEnvironment();
+
+        // Determine model based on API mode
+        let model: string | undefined;
+        const apiMode = this.configStore?.getApiMode();
+        if (apiMode === 'sap-ai-core') {
+            // Use Claude Opus 4.5 via SAP AI Core
+            model = 'anthropic/claude-opus-4-5';
+            logger.info('Using SAP AI Core model', { model });
+        }
+
+        const backendTask = await this.backend.createTask({
+            prompt,
+            workspaceId,
+            systemPrompt,
+            skipPermissions: this.configStore?.getSkipPermissions(),
+            model
+        }, taskEnv);
+
+        // Create a placeholder PTY process (not used for OpenCode, but needed for type compatibility)
+        // In a full refactor, InternalTask would be made backend-agnostic
+        const dummyProcess = {
+            onData: () => {},
+            onExit: () => {},
+            write: (data: string) => {
+                // Forward writes to the backend
+                this.backend?.sendInput(backendTask.id, data);
+            },
+            resize: () => {},
+            kill: () => {
+                this.backend?.destroyTask(backendTask.id);
+            },
+            pid: 0,
+            cols: 120,
+            rows: 40,
+            process: 'opencode'
+        } as unknown as IPty;
+
+        const now = new Date();
+        const task: InternalTask = {
+            id: backendTask.id,
+            prompt,
+            workspaceId,
+            process: dummyProcess,
+            state: backendTask.state,
+            outputHistory: [],
+            lastActivity: now,
+            createdAt: now,
+            isActive: false,
+            initialPromptSent: true,  // OpenCode handles prompt submission
+            pendingPrompt: null,
+            sessionId: backendTask.sessionId,
+            gitStateBefore: gitStateBefore || undefined,
+            systemPrompt: systemPrompt?.trim() || undefined,
+            lastOutputLength: 0,
+            hasStartedProcessing: true,
+        };
+
+        this.tasks.set(task.id, task);
+        this.taskBackends.set(task.id, 'opencode');
+        this.scheduleSave();
+        this.emit('taskCreated', this.toPublicTask(task));
+
+        if (gitStateBefore) {
+            logger.info('Captured git state before task', { taskId: task.id, commit: gitStateBefore.commitBefore?.substring(0, 7) });
+        }
+
+        return this.toPublicTask(task);
+    }
+
+    /**
+     * Create task using Claude Code with PTY (existing behavior)
+     */
+    private async createTaskWithClaudeCode(
+        prompt: string,
+        workspaceId: string,
+        systemPrompt: string | undefined,
+        gitStateBefore: Partial<TaskGitState> | null
+    ): Promise<Task> {
+        const id = `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
         if (gitStateBefore) {
             logger.info(`Captured git state before task`, { taskId: id, commit: gitStateBefore.commitBefore?.substring(0, 7) });
         }
@@ -1016,12 +1324,12 @@ export class TaskSpawner extends EventEmitter {
         }
 
         // Add custom system prompt if provided
-        if (sanitizedSystemPrompt && sanitizedSystemPrompt.trim()) {
-            claudeArgs.push('--system-prompt', sanitizedSystemPrompt.trim());
+        if (systemPrompt && systemPrompt.trim()) {
+            claudeArgs.push('--system-prompt', systemPrompt.trim());
             logger.info(`Using custom system prompt`);
         }
 
-        logger.info(`Creating task`, { taskId: id, workspaceId });
+        logger.info(`Creating task with Claude Code`, { taskId: id, workspaceId });
         logger.debug(`Command args`, { args: claudeArgs });
 
         // Get environment with API mode settings
@@ -1038,7 +1346,7 @@ export class TaskSpawner extends EventEmitter {
         const now = new Date();
         const task: InternalTask = {
             id,
-            prompt: sanitizedPrompt,
+            prompt,
             workspaceId,
             process: ptyProcess,
             state: 'starting',  // Start in 'starting' state until Claude actually begins processing
@@ -1047,16 +1355,17 @@ export class TaskSpawner extends EventEmitter {
             createdAt: now,
             isActive: false,
             initialPromptSent: false,
-            pendingPrompt: sanitizedPrompt,
+            pendingPrompt: prompt,
             sessionId: null,
             gitStateBefore: gitStateBefore || undefined,
-            systemPrompt: sanitizedSystemPrompt?.trim() || undefined,
+            systemPrompt: systemPrompt?.trim() || undefined,
             lastOutputLength: 0,  // Initialize for state polling
             hasStartedProcessing: false,  // Will be true once output changes after prompt sent
         };
 
         this.setupProcessHandlers(task);
         this.tasks.set(id, task);
+        this.taskBackends.set(id, 'claude-code');
         this.scheduleSave();
         this.emit('taskCreated', this.toPublicTask(task));
         this.startSessionCapture(id, workspaceId);
@@ -1246,10 +1555,22 @@ export class TaskSpawner extends EventEmitter {
             task.isActive = active;
 
             if (active) {
+                // Notify backend if using OpenCode
+                const taskBackend = this.taskBackends.get(taskId);
+                if (taskBackend === 'opencode' && this.backend) {
+                    this.backend.setTaskActive(taskId, true);
+                }
+
                 // Send combined history: previous + current
                 const history = this.getCombinedHistory(task);
                 if (history) {
                     this.emit('taskRestore', task.id, history);
+                }
+            } else {
+                // Notify backend if using OpenCode
+                const taskBackend = this.taskBackends.get(taskId);
+                if (taskBackend === 'opencode' && this.backend) {
+                    this.backend.setTaskActive(taskId, false);
                 }
             }
         }
@@ -1369,44 +1690,64 @@ export class TaskSpawner extends EventEmitter {
 
     writeToTask(taskId: string, data: string): void {
         const task = this.tasks.get(taskId);
-        if (task) {
-            // Check if this is a message with Enter at the end (from input bar)
-            const endsWithEnter = data.endsWith('\r') || data.endsWith('\n');
-            const hasMessageContent = data.length > 1 && endsWithEnter;
+        if (!task) return;
 
-            if (hasMessageContent && (task.state === 'idle' || task.state === 'waiting_input')) {
-                // Split message from Enter key - write message first, then retry Enter
-                const messageContent = data.slice(0, -1);
-                const enterKey = data.slice(-1);
+        // Check if this task uses the OpenCode backend
+        const taskBackend = this.taskBackends.get(taskId);
+        if (taskBackend === 'opencode' && this.backend) {
+            this.backend.sendInput(taskId, data);
+            return;
+        }
 
-                console.log(`[TaskSpawner] Writing message to task ${taskId}, will retry Enter if needed`);
-                task.process.write(messageContent);
-                task.promptSubmitAttempts = 0;
+        // Claude Code PTY-based input handling
+        // Check if this is a message with Enter at the end (from input bar)
+        const endsWithEnter = data.endsWith('\r') || data.endsWith('\n');
+        const hasMessageContent = data.length > 1 && endsWithEnter;
 
-                // Use consolidated retry mechanism with follow-up input options
-                setTimeout(() => this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey }), 200);
-            } else {
-                // Single keypress or task is busy - write directly
-                task.process.write(data);
-            }
+        if (hasMessageContent && (task.state === 'idle' || task.state === 'waiting_input')) {
+            // Split message from Enter key - write message first, then retry Enter
+            const messageContent = data.slice(0, -1);
+            const enterKey = data.slice(-1);
+
+            console.log(`[TaskSpawner] Writing message to task ${taskId}, will retry Enter if needed`);
+            task.process.write(messageContent);
+            task.promptSubmitAttempts = 0;
+
+            // Use consolidated retry mechanism with follow-up input options
+            setTimeout(() => this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey }), 200);
+        } else {
+            // Single keypress or task is busy - write directly
+            task.process.write(data);
         }
     }
 
     resizeTask(taskId: string, cols: number, rows: number): void {
         const task = this.tasks.get(taskId);
-        if (task) {
-            task.process.resize(cols, rows);
+        if (!task) return;
+
+        // Check if this task uses the OpenCode backend
+        const taskBackend = this.taskBackends.get(taskId);
+        if (taskBackend === 'opencode' && this.backend) {
+            this.backend.resizeTask(taskId, cols, rows);
+            return;
         }
+
+        task.process.resize(cols, rows);
     }
 
     interruptTask(taskId: string): boolean {
         const task = this.tasks.get(taskId);
-        if (task && task.state === 'busy') {
-            console.log(`[TaskSpawner] Interrupting task ${taskId}`);
-            task.process.write('\x1b');
-            return true;
+        if (!task || task.state !== 'busy') return false;
+
+        // Check if this task uses the OpenCode backend
+        const taskBackend = this.taskBackends.get(taskId);
+        if (taskBackend === 'opencode' && this.backend) {
+            return this.backend.interruptTask(taskId);
         }
-        return false;
+
+        console.log(`[TaskSpawner] Interrupting task ${taskId}`);
+        task.process.write('\x1b');
+        return true;
     }
 
     /**
@@ -1421,6 +1762,12 @@ export class TaskSpawner extends EventEmitter {
         }
 
         if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
+            // Check if this task uses the OpenCode backend
+            const taskBackend = this.taskBackends.get(taskId);
+            if (taskBackend === 'opencode' && this.backend) {
+                return this.backend.stopTask(taskId);
+            }
+
             logger.info(`Stopping task`, { taskId, state: task.state });
             // Send ESC to interrupt Claude first (more graceful)
             try {
@@ -1447,29 +1794,42 @@ export class TaskSpawner extends EventEmitter {
         // Clean up any pending session capture for this task
         this.clearSessionCapture(taskId);
 
+        // Check if this task uses the OpenCode backend
+        const taskBackend = this.taskBackends.get(taskId);
+
         const task = this.tasks.get(taskId);
         if (task) {
             logger.info(`Found task in live tasks`, { taskId, state: task.state });
 
-            // If task is running, first try to stop it gracefully
-            if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
-                logger.info(`Task is running, sending interrupt first`, { taskId, state: task.state });
+            // If using OpenCode backend, use backend's destroy method
+            if (taskBackend === 'opencode' && this.backend) {
+                this.backend.destroyTask(taskId);
+                this.tasks.delete(taskId);
+                this.taskBackends.delete(taskId);
+                destroyed = true;
+                source = 'live (opencode)';
+            } else {
+                // Claude Code: If task is running, first try to stop it gracefully
+                if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
+                    logger.info(`Task is running, sending interrupt first`, { taskId, state: task.state });
+                    try {
+                        task.process.write('\x1b'); // Send ESC to interrupt
+                    } catch (_e) {
+                        // Process might already be dead
+                    }
+                }
+
+                // Delete from map FIRST to prevent onExit handler from emitting state changes
+                this.tasks.delete(taskId);
+                this.taskBackends.delete(taskId);
                 try {
-                    task.process.write('\x1b'); // Send ESC to interrupt
+                    task.process.kill();
                 } catch (_e) {
                     // Process might already be dead
                 }
+                destroyed = true;
+                source = 'live';
             }
-
-            // Delete from map FIRST to prevent onExit handler from emitting state changes
-            this.tasks.delete(taskId);
-            try {
-                task.process.kill();
-            } catch (_e) {
-                // Process might already be dead
-            }
-            destroyed = true;
-            source = 'live';
         }
 
         if (this.disconnectedTasks.has(taskId)) {

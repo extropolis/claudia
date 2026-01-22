@@ -3,18 +3,15 @@
     "version": "1.0.0",
     "type": "module",
     "scripts": {
-        "dev": "tsx src/index.ts",
-        "dev:watch": "tsx watch src/index.ts",
+        "dev": "NODE_OPTIONS='--max-old-space-size=2048' tsx watch src/index.ts",
+        "dev:no-watch": "NODE_OPTIONS='--max-old-space-size=2048' tsx src/index.ts",
         "build": "tsc",
         "start": "node dist/index.js",
         "test:cli": "tsx test-cli.ts",
         "test:build": "npm run build && node dist/test-cli.js",
-        "test": "./run-all-tests.sh",
-        "test:unit": "tsx tests/unit/result-parser.test.ts && tsx tests/unit/task-manager.test.ts",
-        "test:unit:parser": "tsx tests/unit/result-parser.test.ts",
-        "test:unit:tasks": "tsx tests/unit/task-manager.test.ts",
-        "test:integration": "tsx tests/integration/orchestrator.integration.test.ts",
-        "test:watch": "tsx watch tests/**/*.test.ts"
+        "test": "npx vitest run",
+        "test:watch": "npx vitest",
+        "test:coverage": "npx vitest run --coverage"
     },
     "dependencies": {
         "@anthropic-ai/sdk": "^0.71.2",
@@ -26,6 +23,8 @@
         "dotenv": "^17.2.3",
         "express": "^4.18.2",
         "jsonwebtoken": "^9.0.3",
+        "marked": "^15.0.12",
+        "marked-terminal": "^7.3.0",
         "node-pty": "^1.1.0",
         "opencode-studio-server": "^1.2.1",
         "uuid": "^9.0.1",
@@ -40,6 +39,7 @@
         "@types/uuid": "^9.0.7",
         "@types/ws": "^8.5.10",
         "tsx": "^4.7.0",
-        "typescript": "^5.3.3"
+        "typescript": "^5.3.3",
+        "vitest": "^3.1.4"
     }
 }

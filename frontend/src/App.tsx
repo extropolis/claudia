@@ -9,7 +9,7 @@ import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
 import { SystemStats } from './components/SystemStats';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, GitBranch } from 'lucide-react';
 import { getApiBaseUrl } from './config/api-config';
 
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
@@ -32,10 +32,11 @@ function App() {
         restoreArchivedTask,
         deleteArchivedTask,
         continueArchivedTask,
+        pushToGithub,
         wsRef
     } = useWebSocket();
 
-    const { selectedTaskId, tasks, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured } = useTaskStore();
+    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
 
     // Count tasks that have running processes (not disconnected or archived)
@@ -213,6 +214,24 @@ function App() {
         }
     };
 
+    // Push changes to GitHub
+    const handlePushToGithub = () => {
+        // Use the workspace of the currently selected task, or the first workspace
+        let workspaceId: string | null = null;
+
+        if (selectedTask) {
+            workspaceId = selectedTask.workspaceId;
+        } else if (workspaces.length > 0) {
+            workspaceId = workspaces[0].id;
+        }
+
+        if (workspaceId) {
+            pushToGithub(workspaceId);
+        } else {
+            alert('Please add a workspace first');
+        }
+    };
+
     return (
         <div className="app">
             <header className="app-header">
@@ -229,7 +248,7 @@ function App() {
                         <span className="count-idle">{idleCount}</span>
                     </div>
 
-                    <SystemStats />
+                    {showSystemStats && <SystemStats />}
                     {supervisorEnabled && (
                         <button
                             className={`chat-toggle-button ${showChatPanel ? 'active' : ''} ${hasUnreadMessages ? 'has-messages' : ''}`}
@@ -242,6 +261,14 @@ function App() {
                         </button>
                     )}
                     <GlobalVoiceToggle />
+                    <button
+                        className="push-button"
+                        onClick={handlePushToGithub}
+                        title="Push to GitHub"
+                        disabled={workspaces.length === 0}
+                    >
+                        <GitBranch size={20} />
+                    </button>
                     <button
                         className="restart-button"
                         onClick={handleRestartServer}
@@ -346,19 +373,18 @@ function App() {
                 </div>
             )}
 
-            {/* Server reloading overlay */}
+            {/* Server reloading banner (non-blocking) */}
             {!isOffline && (isServerReloading || !isConnected) && (
-                <div className="server-reload-overlay">
-                    <div className="server-reload-content">
-                        <RefreshCw className="spinning" size={32} />
-                        <span>
-                            {isServerReloading
-                                ? 'Backend is restarting...'
-                                : 'Reconnecting to backend...'}
-                        </span>
-                    </div>
+                <div className="server-reload-banner">
+                    <RefreshCw className="spinning" size={18} />
+                    <span>
+                        {isServerReloading
+                            ? 'Backend is restarting...'
+                            : 'Reconnecting to backend...'}
+                    </span>
                 </div>
             )}
+
         </div>
     );
 }

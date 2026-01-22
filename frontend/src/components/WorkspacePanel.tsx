@@ -304,7 +304,12 @@ function WorkspaceSection({
                 </div>
                 <button
                     className="workspace-action-button delete"
-                    onClick={(e) => { e.stopPropagation(); onDeleteWorkspace(); }}
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        if (window.confirm(`Remove workspace "${workspace.name}"? Tasks will not be deleted.`)) {
+                            onDeleteWorkspace();
+                        }
+                    }}
                     title="Remove workspace"
                 >
                     <Trash2 size={14} />

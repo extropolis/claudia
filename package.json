@@ -23,7 +23,11 @@
     "package:mac": "npm run build && electron-builder --mac",
     "package:win": "npm run build && electron-builder --win",
     "package:linux": "npm run build && electron-builder --linux",
-    "start": "./start.sh"
+    "start": "./start.sh",
+    "test": "npm run test:backend && npm run test:frontend",
+    "test:backend": "npm test -w backend",
+    "test:frontend": "npm test -w frontend",
+    "test:watch": "concurrently \"npm run test:watch -w backend\" \"npm run test:watch -w frontend\""
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

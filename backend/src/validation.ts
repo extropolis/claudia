@@ -45,6 +45,8 @@ export interface ConfigUpdatePayload {
         resourceGroup?: string;
         timeoutMs?: number;
     };
+    backend?: 'claude-code' | 'opencode';
+    opencodePort?: number;
 }
 
 /**
@@ -131,6 +133,23 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
             return { valid: false, error: 'customAnthropicApiKey must be a string' };
         }
         result.customAnthropicApiKey = payload.customAnthropicApiKey;
+    }
+
+    // Validate backend (optional enum)
+    if (payload.backend !== undefined) {
+        const validBackends = ['claude-code', 'opencode'];
+        if (!validBackends.includes(payload.backend as string)) {
+            return { valid: false, error: `backend must be one of: ${validBackends.join(', ')}` };
+        }
+        result.backend = payload.backend as ConfigUpdatePayload['backend'];
+    }
+
+    // Validate opencodePort (optional number)
+    if (payload.opencodePort !== undefined) {
+        if (typeof payload.opencodePort !== 'number' || payload.opencodePort < 1 || payload.opencodePort > 65535) {
+            return { valid: false, error: 'opencodePort must be a number between 1 and 65535' };
+        }
+        result.opencodePort = payload.opencodePort;
     }
 
     // Validate aiCoreCredentials (optional object)

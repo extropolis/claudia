@@ -48,6 +48,9 @@ interface TestConfig {
     continueArchivedTask: boolean; // Continue an archived task (restore + reconnect)
     watchTask: boolean;           // Watch task state changes
     archiveTask: boolean;         // Archive a task
+    gitPush: boolean;             // Push to GitHub
+    backendStatus: boolean;       // Get backend status (no WebSocket needed)
+    setBackend: string | null;    // Set backend ('claude-code' or 'opencode')
 }
 
 class TestCLI {
@@ -184,6 +187,8 @@ class TestCLI {
                 } else if (this.config.archiveTask && this.config.taskId) {
                     this.sendArchiveTask(this.config.taskId);
                     setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.gitPush && this.config.workspaceId) {
+                    this.sendGitPush(this.config.workspaceId);
                 } else {
                     this.sendMessage(this.config.testMessage, this.config.imagePath || undefined);
                 }
@@ -264,17 +269,17 @@ class TestCLI {
             return;
         }
 
+        // Server expects 'prompt' and 'workspaceId' fields
         const message = {
             type: 'task:create',
             payload: {
-                name,
-                description,
+                prompt: description,
                 workspaceId: this.config.workspaceId
             }
         };
 
         console.log(`📤 Creating task: "${name}"`);
-        console.log(`   Description: ${description}`);
+        console.log(`   Prompt: ${description}`);
         if (this.config.workspaceId) {
             console.log(`   Workspace: ${this.config.workspaceId}`);
         }
@@ -567,6 +572,21 @@ class TestCLI {
         };
 
         console.log(`📦 Archiving task ${taskId}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendGitPush(workspaceId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot push to GitHub: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'git:push',
+            payload: { workspaceId }
+        };
+
+        console.log(`🚀 Pushing to GitHub for workspace ${workspaceId}...`);
         this.ws.send(JSON.stringify(message));
     }
 
@@ -1104,6 +1124,9 @@ function parseArgs(): TestConfig {
 
     let watchTask = false;
     let archiveTask = false;
+    let gitPush = false;
+    let backendStatus = false;
+    let setBackend: string | null = null;
 
     for (let i = 0; i < args.length; i++) {
         switch (args[i]) {
@@ -1224,6 +1247,15 @@ function parseArgs(): TestConfig {
             case '--archive-task':
                 archiveTask = true;
                 break;
+            case '--git-push':
+                gitPush = true;
+                break;
+            case '--backend-status':
+                backendStatus = true;
+                break;
+            case '--set-backend':
+                setBackend = args[++i];
+                break;
             case '--help':
             case '-h':
                 console.log(`
@@ -1276,6 +1308,10 @@ PLAN OPERATIONS:
 
 CONFIGURATION:
   --get-config             Get orchestrator configuration
+
+BACKEND OPERATIONS:
+  --backend-status         Get current backend status (claude-code or opencode)
+  --set-backend <name>     Set the AI backend ('claude-code' or 'opencode')
 
 Examples:
   # Basic chat message
@@ -1334,6 +1370,15 @@ Examples:
 
   # Delete an archived task permanently
   npx tsx test-cli.ts --delete-archived --task-id task-123456
+
+  # Check backend status
+  npx tsx test-cli.ts --backend-status
+
+  # Switch to opencode backend
+  npx tsx test-cli.ts --set-backend opencode
+
+  # Switch back to claude-code backend
+  npx tsx test-cli.ts --set-backend claude-code
                 `);
                 process.exit(0);
         }
@@ -1375,13 +1420,110 @@ Examples:
         deleteArchivedTask,
         continueArchivedTask,
         watchTask,
-        archiveTask
+        archiveTask,
+        gitPush,
+        backendStatus,
+        setBackend
     };
+}
+
+// Backend status and configuration functions (no WebSocket needed)
+async function getBackendStatus(baseHttpUrl: string): Promise<void> {
+    console.log('🔍 Checking backend status...');
+    console.log('');
+
+    try {
+        const response = await fetch(`${baseHttpUrl}/api/backend/status`);
+        if (!response.ok) {
+            console.error(`Failed to get backend status: ${response.statusText}`);
+            return;
+        }
+
+        const status = await response.json();
+
+        console.log('⚙️  BACKEND STATUS');
+        console.log('='.repeat(60));
+        console.log(`  Current Backend: ${status.backend}`);
+        console.log(`  Installed:       ${status.installed ? '✅ Yes' : '❌ No'}`);
+
+        if (status.installed && status.version) {
+            console.log(`  Version:         ${status.version}`);
+        }
+
+        if (status.serverRunning !== undefined) {
+            console.log(`  Server Running:  ${status.serverRunning ? '✅ Yes' : '❌ No'}`);
+        }
+
+        if (status.error) {
+            console.log(`  Error:           ${status.error}`);
+        }
+
+        console.log('');
+        console.log('Available Backends:');
+        for (const backend of status.availableBackends || []) {
+            const isCurrent = backend === status.backend;
+            console.log(`  ${isCurrent ? '►' : ' '} ${backend}`);
+        }
+        console.log('');
+    } catch (error) {
+        console.error('Failed to get backend status:', error);
+    }
+}
+
+async function setBackendConfig(baseHttpUrl: string, backend: string): Promise<void> {
+    const validBackends = ['claude-code', 'opencode'];
+    if (!validBackends.includes(backend)) {
+        console.error(`Invalid backend: ${backend}`);
+        console.error(`Valid options: ${validBackends.join(', ')}`);
+        process.exit(1);
+    }
+
+    console.log(`⚙️  Setting backend to: ${backend}`);
+
+    try {
+        const response = await fetch(`${baseHttpUrl}/api/config`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backend })
+        });
+
+        if (!response.ok) {
+            console.error(`Failed to set backend: ${response.statusText}`);
+            return;
+        }
+
+        console.log('✅ Backend updated successfully');
+        console.log('');
+
+        // Show new status
+        await getBackendStatus(baseHttpUrl);
+    } catch (error) {
+        console.error('Failed to set backend:', error);
+    }
 }
 
 // Main execution
 async function main() {
     const config = parseArgs();
+
+    // Derive HTTP URL from WebSocket URL for API calls
+    const baseHttpUrl = config.backendUrl
+        .replace('ws://', 'http://')
+        .replace('wss://', 'https://')
+        .replace(/:\d+$/, ':4001');  // Ensure correct port
+
+    // Handle backend commands that don't need WebSocket
+    if (config.backendStatus) {
+        await getBackendStatus(baseHttpUrl);
+        process.exit(0);
+    }
+
+    if (config.setBackend) {
+        await setBackendConfig(baseHttpUrl, config.setBackend);
+        process.exit(0);
+    }
+
+    // WebSocket-based operations
     const cli = new TestCLI(config);
 
     try {

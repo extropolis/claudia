@@ -443,6 +443,11 @@ export function useWebSocket() {
         sendMessage('task:archived:continue', { taskId });
     }, [sendMessage]);
 
+    // Git actions
+    const pushToGithub = useCallback((workspaceId: string) => {
+        sendMessage('git:push', { workspaceId });
+    }, [sendMessage]);
+
     return {
         createTask,
         selectTaskOnServer,
@@ -466,6 +471,7 @@ export function useWebSocket() {
         restoreArchivedTask,
         deleteArchivedTask,
         continueArchivedTask,
+        pushToGithub,
         wsRef
     };
 }

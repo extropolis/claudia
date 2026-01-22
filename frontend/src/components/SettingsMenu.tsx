@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Power, PowerOff, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye } from 'lucide-react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Power, PowerOff, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
+import { useTaskStore } from '../stores/taskStore';
 import './SettingsMenu.css';
 
 interface SettingsMenuProps {
@@ -28,6 +29,16 @@ interface AICoreCredentials {
 }
 
 type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core';
+type BackendType = 'claude-code' | 'opencode';
+
+interface BackendStatus {
+    backend: BackendType;
+    installed: boolean;
+    version?: string;
+    error?: string;
+    serverRunning?: boolean;
+    availableBackends: BackendType[];
+}
 
 interface CollapsiblePanelProps {
     title: string;
@@ -57,9 +68,11 @@ function CollapsiblePanel({ title, icon, isExpanded, onToggle, children }: Colla
 }
 
 export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProps) {
+    const { showSystemStats, setShowSystemStats } = useTaskStore();
     const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
         sound: false,
         behavior: false,
+        backend: false,
         api: false,
         mcp: false,
         permissions: false,
@@ -114,11 +127,25 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [customApiKeyTestStatus, setCustomApiKeyTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [customApiKeyTestMessage, setCustomApiKeyTestMessage] = useState('');
 
+    // Backend state
+    const [backend, setBackend] = useState<BackendType>('claude-code');
+    const [backendSaved, setBackendSaved] = useState(true);
+    const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null);
+    const [backendStatusLoading, setBackendStatusLoading] = useState(false);
+
     useEffect(() => {
         if (isOpen) {
             fetchConfig();
+            fetchBackendStatus();
         }
     }, [isOpen]);
+
+    // Fetch backend status when backend panel is expanded
+    useEffect(() => {
+        if (expandedPanels.backend) {
+            fetchBackendStatus();
+        }
+    }, [expandedPanels.backend]);
 
     // Fetch Claude config when switching to JSON view mode
     useEffect(() => {
@@ -147,9 +174,26 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                     setAiCoreCredentials(config.aiCoreCredentials);
                 }
                 setAiCoreSaved(true);
+                setBackend(config.backend || 'claude-code');
+                setBackendSaved(true);
             }
         } catch (error) {
             console.error('Failed to fetch config:', error);
+        }
+    };
+
+    const fetchBackendStatus = async () => {
+        setBackendStatusLoading(true);
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/backend/status`);
+            if (response.ok) {
+                const status = await response.json();
+                setBackendStatus(status);
+            }
+        } catch (error) {
+            console.error('Failed to fetch backend status:', error);
+        } finally {
+            setBackendStatusLoading(false);
         }
     };
 
@@ -392,6 +436,28 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     };
 
+    const handleBackendChange = (newBackend: BackendType) => {
+        setBackend(newBackend);
+        setBackendSaved(false);
+    };
+
+    const saveBackend = async () => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ backend })
+            });
+            if (response.ok) {
+                setBackendSaved(true);
+                // Refresh backend status after save
+                fetchBackendStatus();
+            }
+        } catch (error) {
+            console.error('Failed to save backend:', error);
+        }
+    };
+
     const handleApiModeChange = (mode: ApiMode) => {
         setApiMode(mode);
         setApiModeSaved(false);
@@ -543,6 +609,115 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     <span className="toggle-slider"></span>
                                 </label>
                             </div>
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Show System Stats</span>
+                                    <span className="permission-description">
+                                        Display CPU and memory usage in the header.
+                                    </span>
+                                </div>
+                                <label className="toggle-switch">
+                                    <input
+                                        type="checkbox"
+                                        checked={showSystemStats}
+                                        onChange={(e) => setShowSystemStats(e.target.checked)}
+                                    />
+                                    <span className="toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                    </CollapsiblePanel>
+
+                    <CollapsiblePanel
+                        title="AI Backend"
+                        icon={<Terminal size={18} />}
+                        isExpanded={expandedPanels.backend}
+                        onToggle={() => togglePanel('backend')}
+                    >
+                        <div className="api-config-content">
+                            <p className="api-config-description">
+                                Choose which AI coding assistant to use.
+                            </p>
+
+                            <div className="api-mode-selector">
+                                <label className={`api-mode-option ${backend === 'claude-code' ? 'selected' : ''}`}>
+                                    <input
+                                        type="radio"
+                                        name="backend"
+                                        value="claude-code"
+                                        checked={backend === 'claude-code'}
+                                        onChange={() => handleBackendChange('claude-code')}
+                                    />
+                                    <div className="api-mode-content">
+                                        <span className="api-mode-title">Claude Code</span>
+                                        <span className="api-mode-description">
+                                            Anthropic's official CLI tool for Claude
+                                        </span>
+                                    </div>
+                                </label>
+
+                                <label className={`api-mode-option ${backend === 'opencode' ? 'selected' : ''}`}>
+                                    <input
+                                        type="radio"
+                                        name="backend"
+                                        value="opencode"
+                                        checked={backend === 'opencode'}
+                                        onChange={() => handleBackendChange('opencode')}
+                                    />
+                                    <div className="api-mode-content">
+                                        <span className="api-mode-title">OpenCode</span>
+                                        <span className="api-mode-description">
+                                            Open-source AI coding agent by SST
+                                        </span>
+                                    </div>
+                                </label>
+                            </div>
+
+                            {/* Backend status */}
+                            {backendStatusLoading ? (
+                                <div className="backend-status loading">
+                                    <Loader2 size={16} className="spinning" />
+                                    <span>Checking backend status...</span>
+                                </div>
+                            ) : backendStatus && (
+                                <div className={`backend-status ${backendStatus.installed ? 'installed' : 'not-installed'}`}>
+                                    {backendStatus.installed ? (
+                                        <>
+                                            <CheckCircle size={16} />
+                                            <span>
+                                                {backendStatus.version}
+                                                {backendStatus.serverRunning !== undefined && (
+                                                    backendStatus.serverRunning
+                                                        ? ' (server running)'
+                                                        : ' (server not running)'
+                                                )}
+                                            </span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <AlertCircle size={16} />
+                                            <span>{backendStatus.error}</span>
+                                        </>
+                                    )}
+                                </div>
+                            )}
+
+                            <div className="api-mode-actions">
+                                <span className={`api-mode-status ${backendSaved ? 'saved' : 'unsaved'}`}>
+                                    {backendSaved ? 'Saved' : 'Unsaved changes'}
+                                </span>
+                                <button
+                                    className="aicore-save-btn"
+                                    onClick={saveBackend}
+                                    disabled={backendSaved}
+                                >
+                                    Save Backend
+                                </button>
+                            </div>
+
+                            <p className="api-config-note">
+                                Note: Changing backends requires restarting tasks. Existing tasks will continue with their original backend.
+                            </p>
                         </div>
                     </CollapsiblePanel>
 

@@ -65,6 +65,7 @@ interface TaskStore {
     autoFocusOnInput: boolean;
     supervisorEnabled: boolean;
     aiCoreConfigured: boolean | null; // null = not checked yet, false = not configured, true = configured
+    showSystemStats: boolean;
 
     // Actions
     setConnected: (connected: boolean) => void;
@@ -126,6 +127,7 @@ interface TaskStore {
     setAutoFocusOnInput: (enabled: boolean) => void;
     setSupervisorEnabled: (enabled: boolean) => void;
     setAiCoreConfigured: (configured: boolean | null) => void;
+    setShowSystemStats: (show: boolean) => void;
 }
 
 // Storage key for localStorage
@@ -147,6 +149,7 @@ interface PersistedState {
     autoSendDelayMs: number;
     autoFocusOnInput: boolean;
     supervisorEnabled: boolean;
+    showSystemStats: boolean;
     taskSummaries: [string, TaskSummary][];  // Stored as entries array
     chatMessages: ChatMessage[];
 }
@@ -199,6 +202,7 @@ export const useTaskStore = create<TaskStore>()(
     autoFocusOnInput: false,
     supervisorEnabled: false,
     aiCoreConfigured: null,
+    showSystemStats: true,
 
     // Actions
     setConnected: (connected) => {
@@ -438,7 +442,8 @@ export const useTaskStore = create<TaskStore>()(
     // Settings actions
     setAutoFocusOnInput: (enabled) => set({ autoFocusOnInput: enabled }),
     setSupervisorEnabled: (enabled) => set({ supervisorEnabled: enabled }),
-    setAiCoreConfigured: (configured) => set({ aiCoreConfigured: configured })
+    setAiCoreConfigured: (configured) => set({ aiCoreConfigured: configured }),
+    setShowSystemStats: (show) => set({ showSystemStats: show })
         }),
         {
             name: STORAGE_KEY,
@@ -459,6 +464,7 @@ export const useTaskStore = create<TaskStore>()(
                 autoSendDelayMs: state.autoSendDelayMs,
                 autoFocusOnInput: state.autoFocusOnInput,
                 supervisorEnabled: state.supervisorEnabled,
+                showSystemStats: state.showSystemStats,
                 taskSummaries: Array.from(state.taskSummaries.entries()),
                 chatMessages: state.chatMessages,
             }),
@@ -485,6 +491,7 @@ export const useTaskStore = create<TaskStore>()(
                     autoSendDelayMs: persisted.autoSendDelayMs ?? currentState.autoSendDelayMs,
                     autoFocusOnInput: persisted.autoFocusOnInput ?? currentState.autoFocusOnInput,
                     supervisorEnabled: persisted.supervisorEnabled ?? currentState.supervisorEnabled,
+                    showSystemStats: persisted.showSystemStats ?? currentState.showSystemStats,
                     taskSummaries: persisted.taskSummaries
                         ? new Map(persisted.taskSummaries)
                         : currentState.taskSummaries,

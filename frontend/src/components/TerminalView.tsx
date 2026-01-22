@@ -18,20 +18,26 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
     const resizeDebounceRef = useRef<number | null>(null);
+    const userHasScrolledRef = useRef(false); // Track if user manually scrolled up
     const [copied, setCopied] = useState(false);
 
-    // Expose scrollToBottom for external use
-    const scrollToBottom = () => {
+    // Expose scrollToBottom for external use (resets user scroll state since it's explicit)
+    const scrollToBottom = (resetUserScroll = true) => {
+        if (resetUserScroll) {
+            userHasScrolledRef.current = false;
+        }
         if (xtermRef.current) {
             xtermRef.current.scrollToBottom();
         }
     };
 
-    // Listen for custom scroll-to-bottom events
+    // Listen for custom scroll-to-bottom events (user explicitly selected task)
     useEffect(() => {
         const handleScrollToBottom = (e: CustomEvent<{ taskId: string }>) => {
             if (e.detail.taskId === task.id) {
                 console.log(`[TerminalView] Received scrollToBottom event for ${task.id}`);
+                // Reset user scroll state since user explicitly selected this task
+                userHasScrolledRef.current = false;
                 scrollToBottom();
             }
         };
@@ -73,6 +79,9 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
 
     useEffect(() => {
         if (!terminalRef.current) return;
+
+        // Reset user scroll state when task changes (new terminal instance)
+        userHasScrolledRef.current = false;
 
         // Create terminal instance
         const term = new Terminal({
@@ -192,13 +201,31 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
         let isRestoringHistory = false;
         const SCROLL_SETTLE_DELAY = 150; // Wait 150ms after last output to scroll
 
+        // Track user scroll events to detect manual scrolling
+        term.onScroll(() => {
+            // Only mark as user-scrolled if we're past the initial restore phase
+            // and user scrolled away from bottom
+            if (!isRestoringHistory && xtermRef.current) {
+                const buffer = xtermRef.current.buffer.active;
+                const viewportTop = buffer.viewportY;
+                const maxScrollY = buffer.baseY;
+                // User has scrolled up if they're not at the bottom
+                userHasScrolledRef.current = viewportTop < maxScrollY;
+            }
+        });
+
         // Function to scroll after output settles
         const scheduleScrollOnSettle = () => {
+            // Don't auto-scroll if user has manually scrolled up
+            if (userHasScrolledRef.current) {
+                console.log(`[TerminalView] Skipping auto-scroll - user has scrolled up for ${task.id}`);
+                return;
+            }
             if (scrollSettleTimeout) {
                 clearTimeout(scrollSettleTimeout);
             }
             scrollSettleTimeout = window.setTimeout(() => {
-                if (xtermRef.current) {
+                if (xtermRef.current && !userHasScrolledRef.current) {
                     console.log(`[TerminalView] Output settled, scrolling to bottom for ${task.id}`);
                     xtermRef.current.scrollToBottom();
                 }
@@ -241,8 +268,8 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
                                     clearTimeout(scrollSettleTimeout);
                                     scrollSettleTimeout = null;
                                 }
-                                // Final scroll
-                                if (xtermRef.current) {
+                                // Final scroll only if user hasn't scrolled up
+                                if (xtermRef.current && !userHasScrolledRef.current) {
                                     xtermRef.current.scrollToBottom();
                                 }
                             }, 3000);
@@ -272,7 +299,8 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
         const scrollDelays = [50, 200, 500, 1000];
         const scrollTimeouts = scrollDelays.map(delay =>
             setTimeout(() => {
-                if (xtermRef.current) {
+                // Only auto-scroll if user hasn't scrolled up
+                if (xtermRef.current && !userHasScrolledRef.current) {
                     console.log(`[TerminalView] Scrolling to bottom after ${delay}ms for ${task.id}`);
                     xtermRef.current.scrollToBottom();
                 }

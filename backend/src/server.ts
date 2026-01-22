@@ -42,6 +42,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:create',
     'workspace:delete',
     'workspace:reorder',
+    'git:push',
     'supervisor:action',
     'supervisor:analyze',
     'supervisor:chat:message',
@@ -572,6 +573,30 @@ export function createApp(basePath?: string) {
                         break;
                     }
 
+                    case 'git:push': {
+                        // Create a task to push changes to GitHub
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) {
+                            logger.error('git:push requires workspaceId');
+                            sendWSError(ws, 'git:push requires workspaceId', message.type, 'MISSING_PARAMS');
+                            return;
+                        }
+                        // Validate workspace path
+                        const workspaceValidation = validateWorkspacePath(workspaceId);
+                        if (!workspaceValidation.valid) {
+                            logger.error('Invalid workspace path', { error: workspaceValidation.error });
+                            sendWSError(ws, workspaceValidation.error || 'Invalid workspace path', message.type, 'INVALID_WORKSPACE');
+                            return;
+                        }
+                        // Create a task to push to GitHub
+                        const pushPrompt = 'Push the latest changes to GitHub. First check git status to see what needs to be committed. If there are uncommitted changes, create a commit with an appropriate message, then push to the remote repository. If there are no changes, just confirm that everything is already up to date.';
+                        const rules = configStore.getRules();
+                        const systemPrompt = rules?.trim() || undefined;
+                        logger.info('Creating git push task', { workspaceId });
+                        taskSpawner.createTask(pushPrompt, workspaceValidation.data!, systemPrompt);
+                        break;
+                    }
+
                     case 'supervisor:action': {
                         // Execute a supervisor-suggested action
                         const { taskId, action } = payload as { taskId?: string; action?: SuggestedAction };
@@ -640,6 +665,55 @@ export function createApp(basePath?: string) {
     // REST API routes
     app.get('/api/health', (_req, res) => {
         res.json({ status: 'ok' });
+    });
+
+    // Backend status endpoint - check which backend is configured and its status
+    app.get('/api/backend/status', async (_req, res) => {
+        const currentBackend = configStore.getBackend();
+        let status: { installed: boolean; version?: string; error?: string; serverRunning?: boolean };
+
+        try {
+            if (currentBackend === 'opencode') {
+                // Check OpenCode installation
+                const { execSync } = await import('child_process');
+                try {
+                    const version = execSync('opencode --version', { encoding: 'utf8', timeout: 5000 }).trim();
+
+                    // Check if server is running
+                    let serverRunning = false;
+                    const port = configStore.getOpencodePort();
+                    try {
+                        const response = await fetch(`http://127.0.0.1:${port}/global/health`, {
+                            signal: AbortSignal.timeout(2000)
+                        });
+                        serverRunning = response.ok;
+                    } catch {
+                        serverRunning = false;
+                    }
+
+                    status = { installed: true, version, serverRunning };
+                } catch {
+                    status = { installed: false, error: 'OpenCode is not installed. Install from: https://opencode.ai' };
+                }
+            } else {
+                // Check Claude Code installation
+                const { execSync } = await import('child_process');
+                try {
+                    const version = execSync('claude --version', { encoding: 'utf8', timeout: 5000 }).trim();
+                    status = { installed: true, version };
+                } catch {
+                    status = { installed: false, error: 'Claude Code is not installed. Install from: https://claude.ai/code' };
+                }
+            }
+        } catch (error) {
+            status = { installed: false, error: 'Failed to check backend status' };
+        }
+
+        res.json({
+            backend: currentBackend,
+            ...status,
+            availableBackends: ['claude-code', 'opencode']
+        });
     });
 
     // System stats endpoint for CPU and memory monitoring
@@ -779,7 +853,7 @@ export function createApp(basePath?: string) {
         res.json({ ...config, aiCoreCredentials, aiCoreConfiguredFromEnv });
     });
 
-    app.put('/api/config', (req, res) => {
+    app.put('/api/config', async (req, res) => {
         try {
             // Validate the config update payload
             const validation = validateConfigUpdate(req.body);
@@ -788,8 +862,18 @@ export function createApp(basePath?: string) {
                 return res.status(400).json({ error: validation.error });
             }
 
+            // Check if backend is being changed
+            const currentBackend = configStore.getBackend();
+            const newBackend = validation.data!.backend;
+
             // Cast is needed because ConfigUpdatePayload has optional fields but AppConfig requires them
             const updatedConfig = configStore.updateConfig(validation.data! as Parameters<typeof configStore.updateConfig>[0]);
+
+            // If backend was changed, switch the task spawner's backend
+            if (newBackend && newBackend !== currentBackend) {
+                logger.info('Backend config changed, switching task spawner backend', { from: currentBackend, to: newBackend });
+                await taskSpawner.switchBackend(newBackend);
+            }
 
             // If rules were updated, sync to all workspace CLAUDE.md files
             if (validation.data!.rules !== undefined) {

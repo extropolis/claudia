@@ -66,7 +66,8 @@ body {
 
 /* Settings Button */
 .settings-button,
-.restart-button {
+.restart-button,
+.push-button {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -89,6 +90,23 @@ body {
   background: var(--bg-tertiary);
   color: var(--accent-warning, #f59e0b);
   border-color: var(--accent-warning, #f59e0b);
+}
+
+.push-button:hover {
+  background: var(--bg-tertiary);
+  color: var(--accent-success, #10b981);
+  border-color: var(--accent-success, #10b981);
+}
+
+.push-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.push-button:disabled:hover {
+  background: transparent;
+  color: var(--text-secondary);
+  border-color: var(--border-color);
 }
 
 /* Header Controls */
@@ -2082,6 +2100,46 @@ body {
   margin: 0;
   text-align: center;
 }
+
+/* Server Reload Banner (non-blocking) */
+.server-reload-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 12px 24px;
+  background: rgba(0, 212, 255, 0.15);
+  border-bottom: 1px solid var(--accent-secondary);
+  backdrop-filter: blur(8px);
+  z-index: 9998;
+  animation: slideDown 0.3s ease;
+}
+
+@keyframes slideDown {
+  from {
+    transform: translateY(-100%);
+  }
+
+  to {
+    transform: translateY(0);
+  }
+}
+
+.server-reload-banner svg.spinning {
+  color: var(--accent-secondary);
+  animation: spin 1s linear infinite;
+}
+
+.server-reload-banner span {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
 
 /* Voice Active Input Glow */
 .task-input-bar.voice-active .task-input-container,

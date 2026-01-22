@@ -4,6 +4,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { BackendType } from './backends/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -38,6 +39,8 @@ export interface AppConfig {
     aiCoreCredentials?: AICoreCredentials;  // SAP AI Core credentials for Anthropic proxy
     apiMode: ApiMode;  // Which API connection mode to use
     customAnthropicApiKey?: string;  // API key for custom-anthropic mode
+    backend: BackendType;  // Which AI backend to use (claude-code or opencode)
+    opencodePort?: number;  // Port for OpenCode server (default: 4096)
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are an AI supervisor monitoring coding tasks. Your job is to:
@@ -70,7 +73,9 @@ const DEFAULT_CONFIG: AppConfig = {
     supervisorEnabled: false,
     supervisorSystemPrompt: DEFAULT_SUPERVISOR_PROMPT,
     autoFocusOnInput: false,
-    apiMode: 'default'
+    apiMode: 'default',
+    backend: 'claude-code',
+    opencodePort: 4096
 };
 
 export class ConfigStore {
@@ -104,7 +109,9 @@ export class ConfigStore {
                     autoFocusOnInput: loaded.autoFocusOnInput ?? false,
                     aiCoreCredentials: loaded.aiCoreCredentials,
                     apiMode: loaded.apiMode ?? 'default',
-                    customAnthropicApiKey: loaded.customAnthropicApiKey
+                    customAnthropicApiKey: loaded.customAnthropicApiKey,
+                    backend: loaded.backend ?? 'claude-code',
+                    opencodePort: loaded.opencodePort ?? 4096
                 };
             }
         } catch (error) {
@@ -154,6 +161,12 @@ export class ConfigStore {
         }
         if (updates.customAnthropicApiKey !== undefined) {
             this.config.customAnthropicApiKey = updates.customAnthropicApiKey;
+        }
+        if (updates.backend !== undefined) {
+            this.config.backend = updates.backend;
+        }
+        if (updates.opencodePort !== undefined) {
+            this.config.opencodePort = updates.opencodePort;
         }
         this.saveConfig();
         return this.getConfig();
@@ -210,5 +223,23 @@ export class ConfigStore {
         this.config = { ...DEFAULT_CONFIG };
         this.saveConfig();
         return this.getConfig();
+    }
+
+    getBackend(): BackendType {
+        return this.config.backend;
+    }
+
+    setBackend(backend: BackendType): void {
+        this.config.backend = backend;
+        this.saveConfig();
+    }
+
+    getOpencodePort(): number {
+        return this.config.opencodePort ?? 4096;
+    }
+
+    setOpencodePort(port: number): void {
+        this.config.opencodePort = port;
+        this.saveConfig();
     }
 }
