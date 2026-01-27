@@ -3,9 +3,10 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import os from 'os';
-import { writeFileSync, existsSync, readFileSync } from 'fs';
+import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync } from 'fs';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
+import multer from 'multer';
 import { TaskSpawner } from './task-spawner.js';
 import { WorkspaceStore } from './workspace-store.js';
 import { ConfigStore } from './config-store.js';
@@ -42,6 +43,10 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:create',
     'workspace:delete',
     'workspace:reorder',
+    'workspace:openFolder',
+    'workspace:openTerminal',
+    'workspace:systemPrompt:get',
+    'workspace:systemPrompt:set',
     'git:push',
     'supervisor:action',
     'supervisor:analyze',
@@ -372,10 +377,11 @@ export function createApp(basePath?: string) {
                             sendWSError(ws, workspaceValidation.error || 'Invalid workspace path', message.type, 'INVALID_WORKSPACE');
                             return;
                         }
-                        // Pass rules as system prompt if configured
+                        // Use workspace system prompt if set, otherwise fall back to global rules
+                        const workspaceSystemPrompt = workspaceStore.getSystemPrompt(workspaceId);
                         const rules = configStore.getRules();
-                        const systemPrompt = rules?.trim() || undefined;
-                        logger.info(`Creating task with rules`, { hasRules: !!systemPrompt, rulesLength: systemPrompt?.length });
+                        const systemPrompt = workspaceSystemPrompt?.trim() || rules?.trim() || undefined;
+                        logger.info(`Creating task with system prompt`, { hasSystemPrompt: !!systemPrompt, source: workspaceSystemPrompt ? 'workspace' : (rules ? 'rules' : 'none') });
                         taskSpawner.createTask(prompt, workspaceValidation.data!, systemPrompt);
                         break;
                     }
@@ -573,6 +579,81 @@ export function createApp(basePath?: string) {
                         break;
                     }
 
+                    case 'workspace:openFolder': {
+                        // Open workspace folder in native file explorer
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) break;
+                        const { exec } = await import('child_process');
+                        const platform = process.platform;
+                        let command: string;
+                        if (platform === 'darwin') {
+                            command = `open "${workspaceId}"`;
+                        } else if (platform === 'win32') {
+                            command = `explorer "${workspaceId}"`;
+                        } else {
+                            command = `xdg-open "${workspaceId}"`;
+                        }
+                        exec(command, (error) => {
+                            if (error) {
+                                logger.error('Failed to open folder', { workspaceId, error: error.message });
+                            }
+                        });
+                        break;
+                    }
+
+                    case 'workspace:openTerminal': {
+                        // Open terminal at workspace folder
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) break;
+                        const { exec } = await import('child_process');
+                        const platform = process.platform;
+                        let command: string;
+                        if (platform === 'darwin') {
+                            // Use AppleScript to open Terminal.app at the specified directory
+                            command = `osascript -e 'tell application "Terminal" to do script "cd \\"${workspaceId}\\""' -e 'tell application "Terminal" to activate'`;
+                        } else if (platform === 'win32') {
+                            command = `start cmd /K "cd /d "${workspaceId}""`;
+                        } else {
+                            // Try common Linux terminal emulators
+                            command = `x-terminal-emulator --working-directory="${workspaceId}" 2>/dev/null || gnome-terminal --working-directory="${workspaceId}" 2>/dev/null || xterm -e "cd '${workspaceId}' && bash"`;
+                        }
+                        exec(command, (error) => {
+                            if (error) {
+                                logger.error('Failed to open terminal', { workspaceId, error: error.message });
+                            }
+                        });
+                        break;
+                    }
+
+                    case 'workspace:systemPrompt:get': {
+                        // Get system prompt for a workspace
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) break;
+                        const systemPrompt = workspaceStore.getSystemPrompt(workspaceId);
+                        ws.send(JSON.stringify({
+                            type: 'workspace:systemPrompt',
+                            payload: { workspaceId, systemPrompt: systemPrompt || '' }
+                        }));
+                        break;
+                    }
+
+                    case 'workspace:systemPrompt:set': {
+                        // Set system prompt for a workspace
+                        const { workspaceId, systemPrompt } = payload as { workspaceId?: string; systemPrompt?: string };
+                        if (!workspaceId) break;
+                        const success = workspaceStore.setSystemPrompt(workspaceId, systemPrompt || undefined);
+                        if (success) {
+                            // Broadcast updated workspace list to all clients
+                            const workspaces = workspaceStore.getWorkspaces();
+                            broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
+                        }
+                        ws.send(JSON.stringify({
+                            type: 'workspace:systemPrompt:result',
+                            payload: { workspaceId, success }
+                        }));
+                        break;
+                    }
+
                     case 'git:push': {
                         // Create a task to push changes to GitHub
                         const { workspaceId } = payload as { workspaceId?: string };
@@ -666,6 +747,103 @@ export function createApp(basePath?: string) {
     app.get('/api/health', (_req, res) => {
         res.json({ status: 'ok' });
     });
+
+    // Image upload configuration
+    const uploadsDir = join(basePath || process.cwd(), 'uploads');
+    if (!existsSync(uploadsDir)) {
+        mkdirSync(uploadsDir, { recursive: true });
+    }
+
+    const storage = multer.diskStorage({
+        destination: (_req, _file, cb) => {
+            cb(null, uploadsDir);
+        },
+        filename: (_req, file, cb) => {
+            // Generate unique filename with timestamp
+            const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1E9)}`;
+            const ext = file.originalname.split('.').pop() || 'png';
+            cb(null, `image-${uniqueSuffix}.${ext}`);
+        }
+    });
+
+    const upload = multer({
+        storage,
+        limits: { fileSize: 20 * 1024 * 1024 }, // 20MB limit
+        fileFilter: (_req, file, cb) => {
+            // Allow common image types
+            const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
+            if (allowedTypes.includes(file.mimetype)) {
+                cb(null, true);
+            } else {
+                cb(new Error(`Invalid file type: ${file.mimetype}. Only images are allowed.`));
+            }
+        }
+    });
+
+    // Image upload endpoint
+    app.post('/api/upload/image', upload.single('image'), (req, res) => {
+        if (!req.file) {
+            return res.status(400).json({ error: 'No image file provided' });
+        }
+        const filePath = join(uploadsDir, req.file.filename);
+        console.log(`[Server] Image uploaded: ${filePath}`);
+        res.json({
+            success: true,
+            filePath,
+            filename: req.file.filename,
+            originalName: req.file.originalname,
+            size: req.file.size,
+            mimetype: req.file.mimetype
+        });
+    });
+
+    // Delete uploaded image endpoint
+    app.delete('/api/upload/image/:filename', (req, res) => {
+        const { filename } = req.params;
+        // Validate filename to prevent directory traversal
+        if (filename.includes('/') || filename.includes('..')) {
+            return res.status(400).json({ error: 'Invalid filename' });
+        }
+        const filePath = join(uploadsDir, filename);
+        if (existsSync(filePath)) {
+            try {
+                unlinkSync(filePath);
+                console.log(`[Server] Image deleted: ${filePath}`);
+                res.json({ success: true });
+            } catch (error) {
+                console.error(`[Server] Error deleting image: ${error}`);
+                res.status(500).json({ error: 'Failed to delete image' });
+            }
+        } else {
+            res.status(404).json({ error: 'Image not found' });
+        }
+    });
+
+    // Cleanup old uploads (files older than 24 hours)
+    const cleanupOldUploads = () => {
+        try {
+            const files = readdirSync(uploadsDir);
+            const now = Date.now();
+            const maxAge = 24 * 60 * 60 * 1000; // 24 hours
+            for (const file of files) {
+                const filePath = join(uploadsDir, file);
+                try {
+                    const timestamp = parseInt(file.split('-')[1] || '0', 10);
+                    if (timestamp && now - timestamp > maxAge) {
+                        unlinkSync(filePath);
+                        console.log(`[Server] Cleaned up old upload: ${file}`);
+                    }
+                } catch {
+                    // Ignore files that can't be parsed
+                }
+            }
+        } catch (error) {
+            console.error('[Server] Error cleaning up uploads:', error);
+        }
+    };
+    // Run cleanup on startup and every hour
+    cleanupOldUploads();
+    setInterval(cleanupOldUploads, 60 * 60 * 1000);
 
     // Backend status endpoint - check which backend is configured and its status
     app.get('/api/backend/status', async (_req, res) => {
@@ -1232,6 +1410,124 @@ export function createApp(basePath?: string) {
         } catch (error) {
             console.error('[Server] Failed to get session conversation:', error);
             res.status(500).json({ error: 'Failed to get conversation' });
+        }
+    });
+
+    // Learn from conversation - analyze and suggest system prompt improvements
+    app.post('/api/tasks/:taskId/learn', async (req, res) => {
+        try {
+            const { taskId } = req.params;
+            const { currentSystemPrompt, workspaceId } = req.body;
+
+            // Get the task to find its session ID
+            const task = taskSpawner.getTask(taskId) || taskSpawner.getDisconnectedTask(taskId);
+            if (!task) {
+                return res.status(404).json({ error: 'Task not found' });
+            }
+
+            if (!task.sessionId) {
+                return res.status(404).json({ error: 'Task has no conversation history (no session ID)' });
+            }
+
+            // Get the conversation history
+            const workspace = workspaceStore.getWorkspaces().find(w => w.id === (workspaceId || task.workspaceId));
+            if (!workspace) {
+                return res.status(404).json({ error: 'Workspace not found' });
+            }
+
+            const conversation = await getConversationHistory(workspace.id, task.sessionId);
+            if (!conversation || conversation.messages.length === 0) {
+                return res.status(404).json({ error: 'No conversation history found' });
+            }
+
+            // Build the conversation summary for analysis
+            const conversationText = conversation.messages
+                .map(m => `${m.role.toUpperCase()}: ${m.content.substring(0, 1500)}${m.content.length > 1500 ? '...' : ''}`)
+                .join('\n\n');
+
+            // Use the LLM to analyze the conversation and suggest improvements
+            const { generateLLMResponse } = await import('./llm-service.js');
+
+            const analysisPrompt = `You are analyzing a conversation between a user and an AI coding assistant to improve the system prompt.
+
+CURRENT SYSTEM PROMPT (may be empty):
+${currentSystemPrompt || '(No system prompt set)'}
+
+CONVERSATION:
+${conversationText}
+
+Analyze this conversation to identify:
+1. Mistakes or misunderstandings the AI made that could be prevented with better instructions
+2. Repeated lookups or questions that could be pre-answered in the system prompt
+3. Project-specific knowledge that would help the AI be more effective
+4. Preferences the user expressed that should be remembered
+
+Respond in this exact JSON format:
+{
+  "suggestions": [
+    {
+      "id": "unique_id_1",
+      "description": "Short description of what this suggestion improves",
+      "promptAddition": "The actual text to add to the system prompt for this suggestion"
+    }
+  ],
+  "reasoning": "A brief explanation of what you learned from this conversation"
+}
+
+Guidelines:
+- Each suggestion should be independent and self-contained
+- The promptAddition should be a complete instruction that can be added to the system prompt
+- Keep each promptAddition concise (1-3 sentences)
+- Focus on actionable instructions that prevent specific mistakes
+- Generate 2-5 suggestions maximum
+- Use unique IDs like "s1", "s2", etc.`;
+
+            const response = await generateLLMResponse(
+                'You are a system prompt optimization expert. Always respond with valid JSON.',
+                analysisPrompt,
+                { maxTokens: 2000, temperature: 0.3, timeoutMs: 90000 }
+            );
+
+            // Parse the JSON response
+            let analysis;
+            try {
+                // Try to extract JSON from the response (in case there's extra text)
+                const jsonMatch = response.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                    analysis = JSON.parse(jsonMatch[0]);
+                } else {
+                    throw new Error('No JSON found in response');
+                }
+            } catch (parseError) {
+                console.error('[Server] Failed to parse LLM response as JSON:', response);
+                // Return a fallback response
+                analysis = {
+                    suggestions: [],
+                    reasoning: 'The analysis could not be completed. Please try again.'
+                };
+            }
+
+            // Validate the response structure
+            if (!analysis.suggestions || !Array.isArray(analysis.suggestions)) {
+                analysis.suggestions = [];
+            }
+            // Validate each suggestion has required fields
+            analysis.suggestions = analysis.suggestions.filter((s: { id?: string; description?: string; promptAddition?: string }) =>
+                s && typeof s.id === 'string' && typeof s.description === 'string' && typeof s.promptAddition === 'string'
+            );
+            if (!analysis.reasoning || typeof analysis.reasoning !== 'string') {
+                analysis.reasoning = 'No specific reasoning provided.';
+            }
+
+            logger.info('Learn from conversation analysis complete', {
+                taskId,
+                suggestionCount: analysis.suggestions.length
+            });
+
+            res.json(analysis);
+        } catch (error) {
+            console.error('[Server] Failed to learn from conversation:', error);
+            res.status(500).json({ error: 'Failed to analyze conversation' });
         }
     });
 

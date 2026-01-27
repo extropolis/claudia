@@ -3,6 +3,7 @@
     flex-direction: column;
     height: 100%;
     background: #0a0a0a;
+    overflow: hidden; /* Prevent children from causing overflow */
 }
 
 .terminal-header {
@@ -47,6 +48,33 @@
 
 .copy-button.copied {
     color: #4ade80;
+}
+
+/* Learn from conversation button */
+.learn-button {
+    background: transparent;
+    border: 1px solid #8b5cf6;
+    border-radius: 4px;
+    color: #8b5cf6;
+    cursor: pointer;
+    padding: 4px 10px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    font-weight: 500;
+    margin-right: 8px;
+    transition: all 0.2s;
+}
+
+.learn-button:hover {
+    background: rgba(139, 92, 246, 0.15);
+    color: #a78bfa;
+    border-color: #a78bfa;
+}
+
+.learn-button:active {
+    transform: scale(0.98);
 }
 
 .terminal-state {
@@ -158,6 +186,8 @@
 .terminal-container {
     flex: 1;
     padding: 8px;
+    min-height: 100px; /* Minimum height so terminal is always visible */
+    overflow: hidden;
 }
 
 .terminal-container .xterm {
@@ -166,4 +196,27 @@
 
 .terminal-container .xterm-viewport {
     background: transparent !important;
+}
+
+/* Ensure xterm scrollbar is visible and draggable */
+.terminal-container .xterm-viewport::-webkit-scrollbar {
+    width: 12px;
+}
+
+.terminal-container .xterm-viewport::-webkit-scrollbar-track {
+    background: #1a1a1a;
+}
+
+.terminal-container .xterm-viewport::-webkit-scrollbar-thumb {
+    background: #444;
+    border-radius: 6px;
+    border: 2px solid #1a1a1a;
+}
+
+.terminal-container .xterm-viewport::-webkit-scrollbar-thumb:hover {
+    background: #666;
+}
+
+.terminal-container .xterm-viewport::-webkit-scrollbar-thumb:active {
+    background: #888;
 }

@@ -2,24 +2,28 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { Task } from '@claudia/shared';
-import { Copy, Check, Play } from 'lucide-react';
+import { Task, Workspace } from '@claudia/shared';
+import { Copy, Check, Play, BookOpen } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
+import { LearnFromConversationModal } from './LearnFromConversationModal';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
 
 interface TerminalViewProps {
     task: Task;
     wsRef: React.RefObject<WebSocket | null>;
+    workspace?: Workspace;
+    onSetSystemPrompt?: (workspaceId: string, systemPrompt: string) => void;
 }
 
-export function TerminalView({ task, wsRef }: TerminalViewProps) {
+export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: TerminalViewProps) {
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
     const resizeDebounceRef = useRef<number | null>(null);
     const userHasScrolledRef = useRef(false); // Track if user manually scrolled up
     const [copied, setCopied] = useState(false);
+    const [showLearnModal, setShowLearnModal] = useState(false);
 
     // Expose scrollToBottom for external use (resets user scroll state since it's explicit)
     const scrollToBottom = (resetUserScroll = true) => {
@@ -157,6 +161,9 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
 
             try {
                 fitAddonRef.current.fit();
+                // Force a full refresh to fix any rendering artifacts
+                const rows = xtermRef.current.rows;
+                xtermRef.current.refresh(0, rows - 1);
             } catch (err) {
                 console.warn('Failed to fit terminal:', err);
             }
@@ -198,8 +205,26 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
         // Track output for scroll-on-settle behavior
         let lastOutputTime = 0;
         let scrollSettleTimeout: number | null = null;
+        let refreshTimeout: number | null = null;
         let isRestoringHistory = false;
+        let hasReceivedRestore = false; // Guard against duplicate restore messages
         const SCROLL_SETTLE_DELAY = 150; // Wait 150ms after last output to scroll
+        const REFRESH_DELAY = 200; // Refresh terminal after output burst settles
+
+        // Schedule a terminal fit + refresh after output settles (fixes rendering artifacts)
+        const scheduleRefresh = () => {
+            if (refreshTimeout) {
+                clearTimeout(refreshTimeout);
+            }
+            refreshTimeout = window.setTimeout(() => {
+                if (fitAddonRef.current && xtermRef.current) {
+                    fitAddonRef.current.fit();
+                    const rows = xtermRef.current.rows;
+                    xtermRef.current.refresh(0, rows - 1);
+                }
+                refreshTimeout = null;
+            }, REFRESH_DELAY);
+        };
 
         // Track user scroll events to detect manual scrolling
         term.onScroll(() => {
@@ -243,6 +268,8 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
                     if (taskId === task.id) {
                         term.write(data);
                         lastOutputTime = Date.now();
+                        // Schedule a refresh to fix any rendering artifacts
+                        scheduleRefresh();
                         // After history restore, keep scrolling to bottom as output arrives
                         if (isRestoringHistory) {
                             scheduleScrollOnSettle();
@@ -251,14 +278,42 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
                 } else if (message.type === 'task:restore') {
                     const { taskId, history } = message.payload;
                     if (taskId === task.id && history) {
+                        // Guard against duplicate restore messages
+                        if (hasReceivedRestore) {
+                            console.log(`[TerminalView] Ignoring duplicate task:restore for ${taskId}`);
+                            return;
+                        }
+                        hasReceivedRestore = true;
                         console.log(`[TerminalView] Received task:restore for ${taskId}, history length: ${history.length}`);
                         isRestoringHistory = true;
+                        // Fully reset terminal before restoring history to prevent duplication
+                        // Using escape sequences is more reliable than term.clear()
+                        // \x1b[2J = clear entire screen, \x1b[3J = clear scrollback, \x1b[H = move cursor home
+                        term.write('\x1b[2J\x1b[3J\x1b[H');
                         // Write history - it goes into scrollback buffer
                         // Claude's TUI will redraw the screen but history remains scrollable
                         term.write(history, () => {
                             console.log(`[TerminalView] History write complete for ${taskId}, scrolling to bottom`);
                             // Callback fires after write is fully processed
                             term.scrollToBottom();
+
+                            // Force multiple fit + refresh cycles to fix rendering artifacts
+                            // This mimics what happens when the user resizes the window
+                            const fitAndRefresh = () => {
+                                if (fitAddonRef.current && xtermRef.current) {
+                                    fitAddonRef.current.fit();
+                                    const rows = xtermRef.current.rows;
+                                    xtermRef.current.refresh(0, rows - 1);
+                                    xtermRef.current.scrollToBottom();
+                                }
+                            };
+
+                            // Fit immediately and then again after short delays
+                            fitAndRefresh();
+                            setTimeout(fitAndRefresh, 50);
+                            setTimeout(fitAndRefresh, 150);
+                            setTimeout(fitAndRefresh, 300);
+
                             // Schedule additional scrolls as output continues to arrive
                             scheduleScrollOnSettle();
                             // Stop the restore scroll behavior after 3 seconds
@@ -314,6 +369,9 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
             if (scrollSettleTimeout) {
                 clearTimeout(scrollSettleTimeout);
             }
+            if (refreshTimeout) {
+                clearTimeout(refreshTimeout);
+            }
             resizeObserver.disconnect();
             window.removeEventListener('resize', handleResize);
             if (wsRef.current) {
@@ -332,13 +390,18 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
 
     // Refit on task ID change (when switching between tasks)
     useEffect(() => {
-        if (fitAddonRef.current && terminalRef.current) {
+        if (fitAddonRef.current && terminalRef.current && xtermRef.current) {
             // Check if container has valid dimensions
             if (terminalRef.current.clientWidth > 0 && terminalRef.current.clientHeight > 0) {
                 // Use a small timeout to let layout settle after task switch
                 const timeoutId = setTimeout(() => {
                     try {
                         fitAddonRef.current?.fit();
+                        // Force refresh to fix any rendering artifacts after task switch
+                        if (xtermRef.current) {
+                            const rows = xtermRef.current.rows;
+                            xtermRef.current.refresh(0, rows - 1);
+                        }
                     } catch (e) {
                         // Ignore fit errors during task switch
                     }
@@ -361,6 +424,16 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
     const showResumeButton = task.state === 'interrupted' || task.state === 'disconnected';
     const stateLabel = task.state === 'interrupted' ? 'INTERRUPTED' : task.state;
 
+    const handleLearnFromConversation = () => {
+        setShowLearnModal(true);
+    };
+
+    const handleSaveSystemPrompt = (newPrompt: string) => {
+        if (workspace && onSetSystemPrompt) {
+            onSetSystemPrompt(workspace.id, newPrompt);
+        }
+    };
+
     return (
         <div className="terminal-view">
             <div className="terminal-header">
@@ -372,6 +445,16 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
                 >
                     {copied ? <Check size={16} /> : <Copy size={16} />}
                 </button>
+                {workspace && onSetSystemPrompt && (
+                    <button
+                        className="learn-button"
+                        onClick={handleLearnFromConversation}
+                        title="Learn from this conversation to improve the system prompt"
+                    >
+                        <BookOpen size={14} />
+                        Learn
+                    </button>
+                )}
                 {showResumeButton && (
                     <button
                         className="terminal-resume-button"
@@ -386,6 +469,17 @@ export function TerminalView({ task, wsRef }: TerminalViewProps) {
             </div>
             <div ref={terminalRef} className="terminal-container" />
             <TaskInputBar task={task} wsRef={wsRef} />
+
+            {showLearnModal && workspace && (
+                <LearnFromConversationModal
+                    taskId={task.id}
+                    workspaceId={workspace.id}
+                    workspaceName={workspace.name}
+                    currentSystemPrompt={workspace.systemPrompt || ''}
+                    onSave={handleSaveSystemPrompt}
+                    onClose={() => setShowLearnModal(false)}
+                />
+            )}
         </div>
     );
 }

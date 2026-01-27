@@ -605,15 +605,20 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
     }
 
     private extractSessionId(str: string): string | null {
-        // OpenCode session ID patterns
+        // OpenCode session ID format: ses_<alphanumeric> (e.g., ses_4186bf4b8ffeBrRCHWt7nDkIrP)
         const patterns = [
-            /session[:\s]+([a-f0-9-]{36})/i,
+            // OpenCode session ID format (ses_ prefix with alphanumeric ID)
+            /(ses_[a-zA-Z0-9]{20,})/,
+            // Fallback: session followed by an ID
+            /session[:\s]+(ses_[a-zA-Z0-9]+)/i,
             /session[:\s]+([a-zA-Z0-9_-]{20,})/i,
-            /([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i,
         ];
         for (const pattern of patterns) {
             const match = str.match(pattern);
-            if (match) return match[1];
+            if (match) {
+                logger.debug('Extracted session ID', { sessionId: match[1], pattern: pattern.source });
+                return match[1];
+            }
         }
         return null;
     }

@@ -28,12 +28,14 @@ export interface Task {
     gitState?: TaskGitState; // Git state for revert functionality
     waitingInputType?: WaitingInputType; // Type of input Claude is waiting for
     systemPrompt?: string;   // Custom system prompt for this task
+    order?: number;          // Display order within workspace (lower = higher in list)
 }
 
 export interface Workspace {
     id: string;              // Full path
     name: string;            // Folder name
     createdAt: string;
+    systemPrompt?: string;   // Custom system prompt for this workspace
 }
 
 export interface FileNode {
@@ -95,6 +97,9 @@ export type WSMessageType =
     | 'workspace:created'
     | 'workspace:deleted'
     | 'workspace:reordered'
+    | 'workspace:updated'
+    // Task reordering
+    | 'tasks:reordered'
     // Supervisor/Chat
     | 'task:summary'
     | 'supervisor:chat:response'

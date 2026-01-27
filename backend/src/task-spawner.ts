@@ -48,6 +48,7 @@ interface PersistedTask {
     wasInterrupted?: boolean;  // True if task was busy when backend shut down
     systemPrompt?: string;     // Custom system prompt for this task
     shouldContinue?: boolean;  // True if task should auto-continue on reconnect
+    backendType?: BackendType; // Which backend created this task (for reconnection)
 }
 
 // Lightweight metadata for archived tasks (no outputHistory - loaded lazily from disk)
@@ -504,14 +505,21 @@ export class TaskSpawner extends EventEmitter {
             const persisted = this.disconnectedTasks.get(taskId);
             if (!persisted) continue;
 
+            // Log memory BEFORE reconnecting this task
+            const memBefore = process.memoryUsage();
             console.log(`[TaskSpawner] Auto-reconnecting task ${i + 1}/${tasksToReconnect.length}: ${taskId}`);
+            console.log(`[TaskSpawner]   Prompt: ${persisted.prompt?.substring(0, 80) || 'No prompt'}...`);
+            console.log(`[TaskSpawner]   Memory BEFORE: RSS=${(memBefore.rss / 1024 / 1024).toFixed(2)}MB Heap=${(memBefore.heapUsed / 1024 / 1024).toFixed(2)}MB`);
 
             let success = false;
             for (let attempt = 1; attempt <= MAX_RETRIES && !success; attempt++) {
                 try {
                     const task = this.reconnectTask(taskId);
                     if (task) {
+                        // Log memory AFTER successful reconnection
+                        const memAfter = process.memoryUsage();
                         console.log(`[TaskSpawner] Successfully reconnected task ${taskId}`);
+                        console.log(`[TaskSpawner]   Memory AFTER: RSS=${(memAfter.rss / 1024 / 1024).toFixed(2)}MB Heap=${(memAfter.heapUsed / 1024 / 1024).toFixed(2)}MB (Δ RSS: ${((memAfter.rss - memBefore.rss) / 1024 / 1024).toFixed(2)}MB)`);
                         success = true;
                     } else {
                         console.log(`[TaskSpawner] Failed to reconnect task ${taskId} (attempt ${attempt}/${MAX_RETRIES})`);
@@ -683,6 +691,9 @@ export class TaskSpawner extends EventEmitter {
                 // Tasks that were busy should auto-continue on restart
                 const shouldContinue = wasInterrupted && task.sessionId != null;
 
+                // Get the backend type for this task (needed for correct reconnection)
+                const taskBackendType = this.taskBackends.get(task.id);
+
                 tasksToSave.push({
                     id: task.id,
                     prompt: task.prompt,
@@ -695,6 +706,7 @@ export class TaskSpawner extends EventEmitter {
                     wasInterrupted,
                     shouldContinue,
                     systemPrompt: task.systemPrompt,
+                    backendType: taskBackendType,
                 });
             }
 
@@ -871,6 +883,7 @@ export class TaskSpawner extends EventEmitter {
                     authUrl: process.env.SAP_AICORE_AUTH_URL || '',
                     baseUrl: process.env.SAP_AICORE_BASE_URL || '',
                     resourceGroup: process.env.AICORE_RESOURCE_GROUP || 'default',
+                    timeoutMs: parseInt(process.env.SAP_AICORE_TIMEOUT_MS || '120000', 10),
                 };
                 console.log(`[TaskSpawner] Using SAP AI Core credentials from environment variables`);
             }
@@ -1249,13 +1262,13 @@ export class TaskSpawner extends EventEmitter {
         // Create a placeholder PTY process (not used for OpenCode, but needed for type compatibility)
         // In a full refactor, InternalTask would be made backend-agnostic
         const dummyProcess = {
-            onData: () => {},
-            onExit: () => {},
+            onData: () => { },
+            onExit: () => { },
             write: (data: string) => {
                 // Forward writes to the backend
                 this.backend?.sendInput(backendTask.id, data);
             },
-            resize: () => {},
+            resize: () => { },
             kill: () => {
                 this.backend?.destroyTask(backendTask.id);
             },
@@ -2128,33 +2141,77 @@ export class TaskSpawner extends EventEmitter {
             return null;
         }
 
-        const customArgs = process.env['CC_CLAUDE_ARGS']
-            ? process.env['CC_CLAUDE_ARGS'].split(' ')
-            : [];
-
-        const claudeArgs = [...customArgs];
-
-        if (this.configStore?.getSkipPermissions()) {
-            claudeArgs.push('--dangerously-skip-permissions');
-        }
-
-        if (persisted.sessionId) {
-            claudeArgs.push('--resume', persisted.sessionId);
-            console.log(`[TaskSpawner] Reconnecting task ${taskId} with session ${persisted.sessionId}`);
-        } else {
-            console.log(`[TaskSpawner] Reconnecting task ${taskId} (fresh start)`);
-        }
+        // Determine which backend was used to create this task
+        // Use persisted backendType, fallback to 'claude-code' for backwards compatibility
+        const taskBackendType = persisted.backendType || 'claude-code';
+        console.log(`[TaskSpawner] Reconnecting task ${taskId} using ${taskBackendType} backend`);
 
         // Get environment with API mode settings
         const taskEnv = this.getTaskEnvironment();
 
-        const ptyProcess = spawn('claude', claudeArgs, {
-            name: 'xterm-256color',
-            cols: 120,
-            rows: 40,
-            cwd: persisted.workspaceId,
-            env: taskEnv,
-        });
+        let ptyProcess: IPty;
+
+        // Check if session file exists before trying to resume
+        let sessionIdToUse = persisted.sessionId;
+        if (sessionIdToUse) {
+            const claudeDir = this.getClaudeProjectsDir(persisted.workspaceId);
+            const sessionFilePath = join(claudeDir, `${sessionIdToUse}.jsonl`);
+            if (!existsSync(sessionFilePath)) {
+                console.log(`[TaskSpawner] Session file not found for ${taskId}: ${sessionFilePath}`);
+                console.log(`[TaskSpawner] Will start fresh session instead of resuming`);
+                sessionIdToUse = null;
+                // Clear the invalid session ID from persisted data
+                persisted.sessionId = null;
+                this.scheduleSave();
+            }
+        }
+
+        if (taskBackendType === 'opencode') {
+            // Use OpenCode backend for reconnection
+            const opencodeArgs: string[] = [];
+
+            if (sessionIdToUse) {
+                opencodeArgs.push('--session', sessionIdToUse);
+                console.log(`[TaskSpawner] Reconnecting OpenCode task ${taskId} with session ${sessionIdToUse}`);
+            } else {
+                console.log(`[TaskSpawner] Reconnecting OpenCode task ${taskId} (fresh start)`);
+            }
+
+            ptyProcess = spawn('opencode', opencodeArgs, {
+                name: 'xterm-256color',
+                cols: 120,
+                rows: 40,
+                cwd: persisted.workspaceId,
+                env: taskEnv,
+            });
+        } else {
+            // Use Claude Code backend for reconnection (default)
+            const customArgs = process.env['CC_CLAUDE_ARGS']
+                ? process.env['CC_CLAUDE_ARGS'].split(' ')
+                : [];
+
+            const claudeArgs = [...customArgs];
+
+            if (this.configStore?.getSkipPermissions()) {
+                claudeArgs.push('--dangerously-skip-permissions');
+            }
+
+            if (sessionIdToUse) {
+                claudeArgs.push('--resume', sessionIdToUse);
+                console.log(`[TaskSpawner] Reconnecting Claude Code task ${taskId} with session ${sessionIdToUse}`);
+            } else {
+                console.log(`[TaskSpawner] Reconnecting Claude Code task ${taskId} (fresh start)`);
+            }
+
+            ptyProcess = spawn('claude', claudeArgs, {
+                name: 'xterm-256color',
+                cols: 120,
+                rows: 40,
+                cwd: persisted.workspaceId,
+                env: taskEnv,
+            });
+        }
+
         console.log(`[TaskSpawner] Process spawned for task ${taskId}, PID: ${ptyProcess.pid}`);
 
         const now = new Date();

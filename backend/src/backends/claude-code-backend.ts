@@ -194,9 +194,24 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
             claudeArgs.push('--dangerously-skip-permissions');
         }
 
-        if (config.sessionId) {
-            claudeArgs.push('--resume', config.sessionId);
-            logger.info('Reconnecting task with session', { taskId: config.taskId, sessionId: config.sessionId });
+        // Check if session file exists before trying to resume
+        let sessionIdToUse = config.sessionId;
+        if (sessionIdToUse) {
+            const claudeDir = this.getClaudeProjectsDir(config.workspaceId);
+            const sessionFilePath = join(claudeDir, `${sessionIdToUse}.jsonl`);
+            if (!existsSync(sessionFilePath)) {
+                logger.warn('Session file not found, starting fresh', {
+                    taskId: config.taskId,
+                    sessionId: sessionIdToUse,
+                    path: sessionFilePath
+                });
+                sessionIdToUse = null;
+            }
+        }
+
+        if (sessionIdToUse) {
+            claudeArgs.push('--resume', sessionIdToUse);
+            logger.info('Reconnecting task with session', { taskId: config.taskId, sessionId: sessionIdToUse });
         } else {
             logger.info('Reconnecting task (fresh start)', { taskId: config.taskId });
         }
@@ -210,10 +225,10 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
         });
 
         const now = new Date();
-        const shouldContinue = config.shouldContinue && config.sessionId != null;
+        const shouldContinue = config.shouldContinue && sessionIdToUse != null;
 
-        const resumeMessage = config.sessionId
-            ? `\r\n\x1b[90m─── Resuming session ${config.sessionId} ───\x1b[0m\r\n\r\n`
+        const resumeMessage = sessionIdToUse
+            ? `\r\n\x1b[90m─── Resuming session ${sessionIdToUse} ───\x1b[0m\r\n\r\n`
             : `\r\n\x1b[90m─── Session reconnected ───\x1b[0m\r\n\r\n`;
 
         const task: InternalTask = {
@@ -228,7 +243,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
             isActive: false,
             initialPromptSent: !shouldContinue,
             pendingPrompt: shouldContinue ? 'continue' : null,
-            sessionId: config.sessionId,
+            sessionId: sessionIdToUse,
             lastOutputLength: resumeMessage.length,
             hasStartedProcessing: !shouldContinue,
             shouldContinue,

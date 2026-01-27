@@ -157,4 +157,21 @@ export class WorkspaceStore {
         console.log(`[WorkspaceStore] Reordered workspace from ${fromIndex} to ${toIndex}`);
         return true;
     }
+
+    // Get workspace system prompt
+    getSystemPrompt(workspaceId: string): string | undefined {
+        const workspace = this.config.workspaces.find(w => w.id === workspaceId);
+        return workspace?.systemPrompt;
+    }
+
+    // Set workspace system prompt
+    setSystemPrompt(workspaceId: string, systemPrompt: string | undefined): boolean {
+        const workspace = this.config.workspaces.find(w => w.id === workspaceId);
+        if (!workspace) return false;
+
+        workspace.systemPrompt = systemPrompt;
+        this.saveConfig();
+        console.log(`[WorkspaceStore] Updated system prompt for ${workspaceId}`);
+        return true;
+    }
 }

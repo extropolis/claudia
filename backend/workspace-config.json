@@ -1,20 +1,17 @@
 {
   "workspaces": [
     {
+      "id": "/Users/I850333/projects/experiments/Minecraft",
+      "name": "Minecraft",
+      "createdAt": "2026-01-23T16:12:25.478Z",
+      "systemPrompt": " Port 2567 is the main server                                                     \n Port 3000 is the frontend (vite)   \n\n./start.sh restarts the app    \n\nNEVER touch port 4001"
+    },
+    {
       "id": "/Users/I850333/projects/experiments/codeui",
       "name": "codeui",
-      "createdAt": "2026-01-22T20:30:35.607Z"
-    },
-    {
-      "id": "/Users/I850333/projects/experiments/learner_ai",
-      "name": "learner_ai",
-      "createdAt": "2026-01-20T15:51:52.783Z"
-    },
-    {
-      "id": "/Users/I850333/projects/experiments/learner",
-      "name": "learner",
-      "createdAt": "2026-01-22T18:54:58.557Z"
+      "createdAt": "2026-01-22T20:30:35.607Z",
+      "systemPrompt": "talk like a pirate"
     }
   ],
-  "activeWorkspaceId": "/Users/I850333/projects/experiments/learner_ai"
+  "activeWorkspaceId": "/Users/I850333/projects/experiments/codeui"
 }

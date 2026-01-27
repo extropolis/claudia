@@ -1,0 +1,44 @@
+.system-prompt-modal {
+    max-width: 700px;
+}
+
+.system-prompt-modal .modal-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.system-prompt-modal .modal-header h2 {
+    margin: 0;
+    color: #e0e0e0;
+    font-size: 20px;
+}
+
+.system-prompt-modal .modal-header svg {
+    color: #3b82f6;
+}
+
+.system-prompt-input {
+    width: 100%;
+    padding: 12px;
+    background: #1a1a1a;
+    border: 1px solid #404040;
+    border-radius: 4px;
+    color: #e0e0e0;
+    font-size: 14px;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    box-sizing: border-box;
+    resize: vertical;
+    min-height: 150px;
+    line-height: 1.5;
+}
+
+.system-prompt-input:focus {
+    outline: none;
+    border-color: #3b82f6;
+}
+
+.system-prompt-input::placeholder {
+    color: #606060;
+}

@@ -28,9 +28,9 @@ interface AnthropicResponse {
 export async function generateLLMResponse(
     systemPrompt: string,
     userMessage: string,
-    options: { maxTokens?: number; temperature?: number } = {}
+    options: { maxTokens?: number; temperature?: number; timeoutMs?: number } = {}
 ): Promise<string> {
-    const { maxTokens = 200, temperature = 0.7 } = options;
+    const { maxTokens = 200, temperature = 0.7, timeoutMs = 60000 } = options;
 
     const messages: AnthropicMessage[] = [
         { role: 'user', content: userMessage }
@@ -40,7 +40,7 @@ export async function generateLLMResponse(
         console.log(`[LLM] Calling ${LLM_MODEL} via built-in Anthropic proxy...`);
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
         const response = await fetch(LLM_API_URL, {
             method: 'POST',
@@ -79,7 +79,7 @@ export async function generateLLMResponse(
         return content.trim();
     } catch (error) {
         if (error instanceof Error && error.name === 'AbortError') {
-            console.error('[LLM] Request timed out after 30 seconds');
+            console.error(`[LLM] Request timed out after ${timeoutMs / 1000} seconds`);
         } else {
             console.error('[LLM] Error generating response:', error);
         }

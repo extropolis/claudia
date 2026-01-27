@@ -85,6 +85,27 @@
 
 .summary-content {
     margin-bottom: 12px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+/* Custom scrollbar for summary content */
+.summary-content::-webkit-scrollbar {
+    width: 6px;
+}
+
+.summary-content::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 3px;
+}
+
+.summary-content::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+}
+
+.summary-content::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
 }
 
 .summary-text {

@@ -66,6 +66,7 @@ interface TaskStore {
     supervisorEnabled: boolean;
     aiCoreConfigured: boolean | null; // null = not checked yet, false = not configured, true = configured
     showSystemStats: boolean;
+    browserNotificationsEnabled: boolean;
 
     // Actions
     setConnected: (connected: boolean) => void;
@@ -89,6 +90,9 @@ interface TaskStore {
     reorderWorkspaces: (fromIndex: number, toIndex: number) => void;
     toggleWorkspaceExpanded: (workspaceId: string) => void;
     setShowProjectPicker: (show: boolean) => void;
+
+    // Task reordering
+    reorderTasks: (workspaceId: string, fromIndex: number, toIndex: number) => void;
 
     // Voice actions
     setVoiceEnabled: (enabled: boolean) => void;
@@ -128,6 +132,7 @@ interface TaskStore {
     setSupervisorEnabled: (enabled: boolean) => void;
     setAiCoreConfigured: (configured: boolean | null) => void;
     setShowSystemStats: (show: boolean) => void;
+    setBrowserNotificationsEnabled: (enabled: boolean) => void;
 }
 
 // Storage key for localStorage
@@ -150,6 +155,7 @@ interface PersistedState {
     autoFocusOnInput: boolean;
     supervisorEnabled: boolean;
     showSystemStats: boolean;
+    browserNotificationsEnabled: boolean;
     taskSummaries: [string, TaskSummary][];  // Stored as entries array
     chatMessages: ChatMessage[];
 }
@@ -203,6 +209,7 @@ export const useTaskStore = create<TaskStore>()(
     supervisorEnabled: false,
     aiCoreConfigured: null,
     showSystemStats: true,
+    browserNotificationsEnabled: false,
 
     // Actions
     setConnected: (connected) => {
@@ -345,6 +352,33 @@ export const useTaskStore = create<TaskStore>()(
 
     setShowProjectPicker: (show) => set({ showProjectPicker: show }),
 
+    // Task reordering within a workspace
+    reorderTasks: (workspaceId, fromIndex, toIndex) => {
+        const { tasks } = get();
+        if (fromIndex === toIndex) return;
+
+        // Get tasks for this workspace, sorted by current order
+        const workspaceTasks = Array.from(tasks.values())
+            .filter(t => t.workspaceId === workspaceId)
+            .sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity));
+
+        if (fromIndex < 0 || fromIndex >= workspaceTasks.length) return;
+        if (toIndex < 0 || toIndex >= workspaceTasks.length) return;
+
+        // Reorder the array
+        const [removed] = workspaceTasks.splice(fromIndex, 1);
+        workspaceTasks.splice(toIndex, 0, removed);
+
+        // Update order values for all tasks in workspace
+        const newTasks = new Map(tasks);
+        workspaceTasks.forEach((task, index) => {
+            const updatedTask = { ...task, order: index };
+            newTasks.set(task.id, updatedTask);
+        });
+
+        set({ tasks: newTasks });
+    },
+
     // Voice actions
     setVoiceEnabled: (enabled) => set({ voiceEnabled: enabled }),
     setAutoSpeakResponses: (enabled) => set({ autoSpeakResponses: enabled }),
@@ -443,7 +477,8 @@ export const useTaskStore = create<TaskStore>()(
     setAutoFocusOnInput: (enabled) => set({ autoFocusOnInput: enabled }),
     setSupervisorEnabled: (enabled) => set({ supervisorEnabled: enabled }),
     setAiCoreConfigured: (configured) => set({ aiCoreConfigured: configured }),
-    setShowSystemStats: (show) => set({ showSystemStats: show })
+    setShowSystemStats: (show) => set({ showSystemStats: show }),
+    setBrowserNotificationsEnabled: (enabled) => set({ browserNotificationsEnabled: enabled })
         }),
         {
             name: STORAGE_KEY,
@@ -465,6 +500,7 @@ export const useTaskStore = create<TaskStore>()(
                 autoFocusOnInput: state.autoFocusOnInput,
                 supervisorEnabled: state.supervisorEnabled,
                 showSystemStats: state.showSystemStats,
+                browserNotificationsEnabled: state.browserNotificationsEnabled,
                 taskSummaries: Array.from(state.taskSummaries.entries()),
                 chatMessages: state.chatMessages,
             }),
@@ -492,6 +528,7 @@ export const useTaskStore = create<TaskStore>()(
                     autoFocusOnInput: persisted.autoFocusOnInput ?? currentState.autoFocusOnInput,
                     supervisorEnabled: persisted.supervisorEnabled ?? currentState.supervisorEnabled,
                     showSystemStats: persisted.showSystemStats ?? currentState.showSystemStats,
+                    browserNotificationsEnabled: persisted.browserNotificationsEnabled ?? currentState.browserNotificationsEnabled,
                     taskSummaries: persisted.taskSummaries
                         ? new Map(persisted.taskSummaries)
                         : currentState.taskSummaries,

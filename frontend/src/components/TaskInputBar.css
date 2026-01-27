@@ -3,6 +3,15 @@
     background: #1a1a1a;
     border-top: 1px solid #333;
     flex-shrink: 0;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    max-height: 250px; /* Limit max height to prevent pushing off screen */
+    overflow: hidden; /* Contain content within bounds */
+}
+
+.task-input-bar.dragging {
+    background: rgba(0, 188, 212, 0.05);
 }
 
 .task-input-bar.disabled {
@@ -127,4 +136,111 @@
     background: rgba(248, 81, 73, 0.15);
     border-color: var(--accent-red);
     color: var(--accent-red);
+}
+
+/* Image upload button */
+.task-input-upload {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    background: transparent;
+    border: 1px solid #444;
+    border-radius: 6px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+}
+
+.task-input-upload:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    border-color: var(--accent-secondary);
+    color: var(--accent-secondary);
+}
+
+.task-input-upload:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Image previews */
+.task-input-images {
+    display: flex;
+    gap: 8px;
+    padding: 8px 0;
+    flex-wrap: wrap;
+    overflow-y: auto;
+    max-height: 80px; /* Limit image preview area - fits 1 row of images */
+    flex-shrink: 1;
+}
+
+.task-input-image-preview {
+    position: relative;
+    width: 64px;
+    height: 64px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid #444;
+}
+
+.task-input-image-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.task-input-image-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.7);
+    border: none;
+    color: white;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.task-input-image-preview:hover .task-input-image-remove {
+    opacity: 1;
+}
+
+.task-input-image-remove:hover {
+    background: var(--accent-red);
+}
+
+/* Drop zone overlay */
+.task-input-dropzone {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 188, 212, 0.1);
+    border: 2px dashed var(--accent-secondary);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--accent-secondary);
+    font-size: 14px;
+    z-index: 10;
+    pointer-events: none;
+}
+
+/* Upload error message */
+.task-input-error {
+    color: var(--accent-red);
+    font-size: 12px;
+    padding: 4px 0;
 }

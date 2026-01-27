@@ -9,7 +9,7 @@ import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
 import { SystemStats } from './components/SystemStats';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, GitBranch } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity } from 'lucide-react';
 import { getApiBaseUrl } from './config/api-config';
 
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
@@ -26,6 +26,9 @@ function App() {
         createWorkspace,
         deleteWorkspace,
         reorderWorkspaces,
+        openFolder,
+        openTerminal,
+        setSystemPrompt,
         sendChatMessage,
         clearChatHistory,
         requestArchivedTasks,
@@ -38,6 +41,7 @@ function App() {
 
     const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
+    const selectedWorkspace = selectedTask ? workspaces.find(w => w.id === selectedTask.workspaceId) : undefined;
 
     // Count tasks that have running processes (not disconnected or archived)
     const activeTasks = Array.from(tasks.values()).filter(t =>
@@ -214,24 +218,6 @@ function App() {
         }
     };
 
-    // Push changes to GitHub
-    const handlePushToGithub = () => {
-        // Use the workspace of the currently selected task, or the first workspace
-        let workspaceId: string | null = null;
-
-        if (selectedTask) {
-            workspaceId = selectedTask.workspaceId;
-        } else if (workspaces.length > 0) {
-            workspaceId = workspaces[0].id;
-        }
-
-        if (workspaceId) {
-            pushToGithub(workspaceId);
-        } else {
-            alert('Please add a workspace first');
-        }
-    };
-
     return (
         <div className="app">
             <header className="app-header">
@@ -261,14 +247,6 @@ function App() {
                         </button>
                     )}
                     <GlobalVoiceToggle />
-                    <button
-                        className="push-button"
-                        onClick={handlePushToGithub}
-                        title="Push to GitHub"
-                        disabled={workspaces.length === 0}
-                    >
-                        <GitBranch size={20} />
-                    </button>
                     <button
                         className="restart-button"
                         onClick={handleRestartServer}
@@ -300,6 +278,10 @@ function App() {
                         onCreateWorkspace={createWorkspace}
                         onDeleteWorkspace={deleteWorkspace}
                         onReorderWorkspaces={reorderWorkspaces}
+                        onOpenFolder={openFolder}
+                        onOpenTerminal={openTerminal}
+                        onPushToGithub={pushToGithub}
+                        onSetSystemPrompt={setSystemPrompt}
                         onCreateTask={createTask}
                         onSelectTask={handleSelectTask}
                         onRequestArchivedTasks={requestArchivedTasks}
@@ -316,7 +298,13 @@ function App() {
 
                 <section className="main-panel">
                     {selectedTask ? (
-                        <TerminalView key={selectedTask.id} task={selectedTask} wsRef={wsRef} />
+                        <TerminalView
+                            key={selectedTask.id}
+                            task={selectedTask}
+                            wsRef={wsRef}
+                            workspace={selectedWorkspace}
+                            onSetSystemPrompt={setSystemPrompt}
+                        />
                     ) : (
                         <div className="empty-state-main">
                             <Terminal size={48} strokeWidth={1} />

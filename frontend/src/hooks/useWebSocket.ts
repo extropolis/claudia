@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { WSMessage, WSErrorPayload, Task, Workspace, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
 import { getWebSocketUrl, getApiBaseUrl } from '../config/api-config';
+import { sendTaskCompletionNotification } from '../utils/browserCapabilities';
 
 const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
@@ -148,6 +149,12 @@ export function useWebSocket() {
                     case 'workspace:reordered': {
                         const payload = message.payload as { workspaces: Workspace[] };
                         console.log('[WebSocket] Workspaces reordered');
+                        setWorkspaces(payload.workspaces);
+                        break;
+                    }
+                    case 'workspace:updated': {
+                        const payload = message.payload as { workspaces: Workspace[] };
+                        console.log('[WebSocket] Workspaces updated');
                         setWorkspaces(payload.workspaces);
                         break;
                     }
@@ -404,6 +411,18 @@ export function useWebSocket() {
         sendMessage('workspace:reorder', { fromIndex, toIndex });
     }, [sendMessage]);
 
+    const openFolder = useCallback((workspaceId: string) => {
+        sendMessage('workspace:openFolder', { workspaceId });
+    }, [sendMessage]);
+
+    const openTerminal = useCallback((workspaceId: string) => {
+        sendMessage('workspace:openTerminal', { workspaceId });
+    }, [sendMessage]);
+
+    const setSystemPrompt = useCallback((workspaceId: string, systemPrompt: string) => {
+        sendMessage('workspace:systemPrompt:set', { workspaceId, systemPrompt });
+    }, [sendMessage]);
+
     // Supervisor actions
     const executeSupervisorAction = useCallback((taskId: string, action: SuggestedAction) => {
         sendMessage('supervisor:action', { taskId, action });
@@ -462,6 +481,9 @@ export function useWebSocket() {
         createWorkspace,
         deleteWorkspace,
         reorderWorkspaces,
+        openFolder,
+        openTerminal,
+        setSystemPrompt,
         executeSupervisorAction,
         requestTaskAnalysis,
         sendChatMessage,

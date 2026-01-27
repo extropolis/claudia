@@ -82,3 +82,105 @@ export function getBrowserCapabilities(): BrowserCapabilities {
         directorySelectionMethod: getDirectorySelectionMethod(),
     };
 }
+
+/**
+ * Check if browser supports Notification API
+ */
+export function hasBrowserNotifications(): boolean {
+    return typeof window !== 'undefined' && 'Notification' in window;
+}
+
+/**
+ * Get current notification permission status
+ */
+export function getNotificationPermission(): NotificationPermission | 'unsupported' {
+    if (!hasBrowserNotifications()) return 'unsupported';
+    return Notification.permission;
+}
+
+/**
+ * Request permission to show browser notifications
+ * @returns Promise that resolves to the permission status
+ */
+export async function requestNotificationPermission(): Promise<NotificationPermission | 'unsupported'> {
+    if (!hasBrowserNotifications()) return 'unsupported';
+    
+    if (Notification.permission === 'granted') return 'granted';
+    if (Notification.permission === 'denied') return 'denied';
+    
+    try {
+        const permission = await Notification.requestPermission();
+        return permission;
+    } catch (error) {
+        console.error('Failed to request notification permission:', error);
+        return 'denied';
+    }
+}
+
+/**
+ * Send a browser notification
+ * @param title - Notification title
+ * @param options - Optional notification options (body, icon, etc.)
+ * @returns The Notification object if successful, null otherwise
+ */
+export function sendBrowserNotification(
+    title: string,
+    options?: NotificationOptions
+): Notification | null {
+    if (!hasBrowserNotifications()) {
+        console.warn('Browser notifications not supported');
+        return null;
+    }
+    
+    if (Notification.permission !== 'granted') {
+        console.warn('Notification permission not granted');
+        return null;
+    }
+    
+    try {
+        const notification = new Notification(title, {
+            icon: '/claudia-icon.png',
+            badge: '/claudia-icon.png',
+            ...options,
+        });
+        
+        // Auto-close after 5 seconds
+        setTimeout(() => notification.close(), 5000);
+        
+        // Focus window when notification is clicked
+        notification.onclick = () => {
+            window.focus();
+            notification.close();
+        };
+        
+        return notification;
+    } catch (error) {
+        console.error('Failed to send notification:', error);
+        return null;
+    }
+}
+
+/**
+ * Send a task completion notification if tab is not visible
+ * @param taskPrompt - The task prompt/description to include in notification
+ * @returns true if notification was sent, false otherwise
+ */
+export function sendTaskCompletionNotification(taskPrompt?: string): boolean {
+    // Only send notification if tab is not visible
+    if (!document.hidden) {
+        return false;
+    }
+    
+    const body = taskPrompt 
+        ? taskPrompt.length > 100 
+            ? taskPrompt.substring(0, 100) + '...'
+            : taskPrompt
+        : 'A task has finished executing';
+    
+    const notification = sendBrowserNotification('Task Complete', {
+        body,
+        tag: 'task-complete', // Prevents duplicate notifications
+    });
+    
+    return notification !== null;
+}
