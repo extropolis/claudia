@@ -135,6 +135,3 @@ claudia/
 └── start.sh           # Startup script
 ```
 
-## License
-
-MIT
