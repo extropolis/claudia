@@ -105,7 +105,7 @@ export PORT=$BACKEND_PORT
 export NODE_OPTIONS="--max-old-space-size=8192"
 
 # Start backend and frontend
-# Backend: tsx watch auto-reloads on .ts file changes
+# Backend: tsx without watch - use restart button in UI to reload
 # Frontend: Vite HMR auto-reloads on file changes
-npm run dev
+npm run dev:no-watch -w backend & npm run dev -w frontend
 

@@ -56,8 +56,8 @@ export function useWebSocket() {
             reconnectAttempts.current = 0;
         };
 
-        ws.onclose = () => {
-            console.log('[WebSocket] Disconnected');
+        ws.onclose = (event) => {
+            console.log(`[WebSocket] Disconnected - code: ${event.code}, reason: ${event.reason || 'none'}, wasClean: ${event.wasClean}`);
             setConnected(false);
             // Exponential backoff: delay = min(base * 2^attempts, max)
             const delay = Math.min(
@@ -117,13 +117,16 @@ export function useWebSocket() {
                     case 'task:created': {
                         const payload = message.payload as { task: Task };
                         addTask(payload.task);
-                        // Auto-select newly created task
+                        // Auto-select newly created task (both locally and on server)
                         selectTask(payload.task.id);
+                        // IMPORTANT: Notify server that task is active so it sends the initial prompt
+                        sendMessage('task:select', { taskId: payload.task.id });
                         break;
                     }
                     case 'tasks:updated': {
                         const payload = message.payload as { tasks?: Task[] };
                         if (payload.tasks) {
+                            console.log(`[WebSocket] tasks:updated received with ${payload.tasks.length} tasks`);
                             setTasks(payload.tasks);
                         }
                         // Clear reloading state when tasks are updated (e.g. after reconnection)

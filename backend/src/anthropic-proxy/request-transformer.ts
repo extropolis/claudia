@@ -28,7 +28,14 @@ interface BedrockRequest {
 export class RequestTransformer {
     transform(input: AnthropicRequest): BedrockRequest {
         // Remove model and stream from the body (they're handled separately)
-        const { model: _model, stream: _stream, reasoning_effort, ...rest } = input;
+        // Also remove context_management and other unsupported parameters
+        const {
+            model: _model,
+            stream: _stream,
+            reasoning_effort,
+            context_management: _contextManagement,
+            ...rest
+        } = input;
 
         // Convert reasoning_effort to thinking if present
         let transformed = rest;

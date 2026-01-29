@@ -48,6 +48,19 @@ export function createAnthropicProxy(config: AnthropicProxyConfig): Router {
     });
 
     /**
+     * GET /v1/deployments - Debug endpoint to see raw deployments
+     */
+    router.get('/v1/deployments', async (_req: Request, res: Response) => {
+        try {
+            const deployments = await deploymentCatalog.getAvailableDeployments();
+            res.json(deployments);
+        } catch (error: any) {
+            console.error('[AnthropicProxy] Failed to list deployments:', error);
+            res.status(500).json({ error: { message: error.message } });
+        }
+    });
+
+    /**
      * POST /v1/messages - Anthropic Messages API
      */
     router.post('/v1/messages', async (req: Request, res: Response) => {
@@ -81,6 +94,14 @@ export function createAnthropicProxy(config: AnthropicProxyConfig): Router {
             const endpoint = stream ? 'invoke-with-response-stream' : 'invoke';
             const url = `${aiCoreConfig.baseUrl}/v2/inference/deployments/${deployment.id}/${endpoint}`;
 
+            // Log SAP AI Core request details
+            console.log(`[AnthropicProxy] 🔵 SAP AI CORE REQUEST`);
+            console.log(`[AnthropicProxy]   Model: ${model} → ${internalModel}`);
+            console.log(`[AnthropicProxy]   Deployment ID: ${deployment.id}`);
+            console.log(`[AnthropicProxy]   URL: ${url}`);
+            console.log(`[AnthropicProxy]   Resource Group: ${aiCoreConfig.resourceGroup}`);
+            console.log(`[AnthropicProxy]   Stream: ${stream}`);
+
             // Transform request body for Bedrock
             const transformedBody = requestTransformer.transform(req.body);
 
@@ -99,6 +120,11 @@ export function createAnthropicProxy(config: AnthropicProxyConfig): Router {
                     body: JSON.stringify(transformedBody),
                     signal: controller.signal
                 });
+
+                clearTimeout(timeoutId);
+
+                // Log SAP AI Core response
+                console.log(`[AnthropicProxy] ✅ SAP AI CORE RESPONSE: ${response.status} ${response.statusText}`);
 
                 // Copy response headers (except transfer-encoding)
                 for (const [key, value] of response.headers.entries()) {
@@ -160,6 +186,142 @@ export function createAnthropicProxy(config: AnthropicProxyConfig): Router {
             }
         } catch (error: any) {
             console.error('[AnthropicProxy] Request failed:', error);
+
+            if (error.name === 'AbortError') {
+                return res.status(504).json({
+                    error: { type: 'timeout_error', message: 'Request timed out' }
+                });
+            }
+
+            res.status(500).json({
+                error: { type: 'api_error', message: error.message }
+            });
+        }
+    });
+
+    /**
+     * POST /v1/embeddings - OpenAI-compatible embeddings API
+     * Routes to SAP AI Core text embedding models (Azure, GCP Gemini, etc.)
+     */
+    router.post('/v1/embeddings', async (req: Request, res: Response) => {
+        try {
+            const { model, input } = req.body;
+
+            if (!input) {
+                return res.status(400).json({
+                    error: { type: 'invalid_request_error', message: 'input is required' }
+                });
+            }
+
+            // Get OAuth token
+            const accessToken = await tokenProvider.getValidToken();
+
+            // Default to gemini-embedding if no model specified
+            const embeddingModel = model || 'gemini-embedding';
+
+            // Try multiple model name formats to find deployment
+            const modelsToTry = [
+                embeddingModel,                          // As provided (e.g., "gemini-embedding")
+                `gcp--${embeddingModel}`,                // GCP prefix for Gemini
+                `azure--${embeddingModel}`,              // Azure prefix
+                `openai--${embeddingModel}`,             // OpenAI prefix
+            ];
+
+            console.log(`[AnthropicProxy] Looking for embedding deployment. Model: ${embeddingModel}, trying: ${modelsToTry.join(', ')}`);
+
+            let foundDeployment = null;
+            let foundModelName = '';
+            for (const modelName of modelsToTry) {
+                foundDeployment = await deploymentCatalog.findDeploymentFor(modelName);
+                if (foundDeployment) {
+                    foundModelName = modelName;
+                    console.log(`[AnthropicProxy] Found embedding deployment: ${modelName} (id: ${foundDeployment.id})`);
+                    break;
+                }
+            }
+
+            if (!foundDeployment) {
+                return res.status(404).json({
+                    error: {
+                        type: 'not_found_error',
+                        message: `Embedding model not available. Tried: ${modelsToTry.join(', ')}`
+                    }
+                });
+            }
+
+            // Determine endpoint and request format based on model type
+            const isGemini = foundModelName.includes('gemini');
+
+            let url: string;
+            let requestBody: any;
+
+            if (isGemini) {
+                // Gemini embedding - try /text/embeddings path
+                url = `${aiCoreConfig.baseUrl}/v2/inference/deployments/${foundDeployment.id}/text/embeddings`;
+
+                // Use OpenAI-compatible format
+                requestBody = { input };
+                console.log(`[AnthropicProxy] Using Gemini embedding with /text/embeddings path`);
+            } else {
+                // OpenAI/Azure format
+                url = `${aiCoreConfig.baseUrl}/v2/inference/deployments/${foundDeployment.id}/embeddings`;
+                requestBody = { input };
+                console.log(`[AnthropicProxy] Using OpenAI embedding format`);
+            }
+
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), aiCoreConfig.requestTimeoutMs);
+
+            try {
+                console.log(`[AnthropicProxy] Sending embedding request to: ${url}`);
+                console.log(`[AnthropicProxy] Request body: ${JSON.stringify(requestBody)}`);
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Bearer ${accessToken}`,
+                        'Content-Type': 'application/json',
+                        'AI-Resource-Group': aiCoreConfig.resourceGroup
+                    },
+                    body: JSON.stringify(requestBody),
+                    signal: controller.signal
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error(`[AnthropicProxy] Embedding error: ${response.status} - ${errorText}`);
+                    return res.status(response.status).send(errorText);
+                }
+
+                const data = await response.json();
+                console.log(`[AnthropicProxy] Raw response keys: ${Object.keys(data).join(', ')}`);
+
+                // Transform Gemini response to OpenAI format
+                if (isGemini) {
+                    // Gemini returns { embedding: { values: [...] } }
+                    const embeddingValues = data.embedding?.values || data.values || [];
+                    const transformed = {
+                        object: 'list',
+                        data: [{
+                            object: 'embedding',
+                            index: 0,
+                            embedding: embeddingValues
+                        }],
+                        model: embeddingModel,
+                        usage: {
+                            prompt_tokens: 0,
+                            total_tokens: 0
+                        }
+                    };
+                    console.log(`[AnthropicProxy] Transformed Gemini response: ${embeddingValues.length} dimensions`);
+                    return res.json(transformed);
+                }
+
+                res.json(data);
+            } finally {
+                clearTimeout(timeoutId);
+            }
+        } catch (error: any) {
+            console.error('[AnthropicProxy] Embedding request failed:', error);
 
             if (error.name === 'AbortError') {
                 return res.status(504).json({

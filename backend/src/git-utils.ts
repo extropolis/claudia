@@ -1,6 +1,6 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { TaskGitState } from '@claudia/shared';
+import { TaskGitState, FileDiff } from '@claudia/shared';
 
 const execAsync = promisify(exec);
 

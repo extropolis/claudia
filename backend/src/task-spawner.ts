@@ -10,6 +10,7 @@ import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from '
 import { sanitizePrompt } from './validation.js';
 import { createLogger } from './logger.js';
 import { CodeBackend, BackendType, BackendTask, createBackend } from './backends/index.js';
+import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 
 const logger = createLogger('[TaskSpawner]');
 
@@ -143,6 +144,11 @@ export class TaskSpawner extends EventEmitter {
     /** Track which tasks use which backend (for mixed-backend scenarios during transition) */
     private taskBackends: Map<string, BackendType> = new Map();
 
+    // Learnings store for RAG-based context injection
+    private learningsStore: LearningsStore | null = null;
+    /** Track which learnings were injected into which tasks (for utility updates) */
+    private taskLearnings: Map<string, string[]> = new Map();
+
     /**
      * Creates a new TaskSpawner instance
      * @param persistencePath - Optional path for task persistence file (default: tasks.json in backend dir)
@@ -161,6 +167,9 @@ export class TaskSpawner extends EventEmitter {
         // Initialize backend based on config
         this.backendType = configStore?.getBackend() || 'claude-code';
         this.initializeBackend();
+
+        // Initialize learnings store for RAG
+        this.learningsStore = new LearningsStore(undefined, configStore || undefined);
 
         this.loadPersistedTasks();
 
@@ -889,17 +898,24 @@ export class TaskSpawner extends EventEmitter {
             }
 
             if (this.backendType === 'opencode' && credentials) {
-                // OpenCode has native SAP AI Core support via AICORE_SERVICE_KEY
-                // Format: {"clientid":"...","clientsecret":"...","url":"...","serviceurls":{"AI_API_URL":"..."}}
-                const serviceKey = {
-                    clientid: credentials.clientId,
-                    clientsecret: credentials.clientSecret,
-                    url: credentials.authUrl,
-                    serviceurls: {
-                        AI_API_URL: credentials.baseUrl
-                    }
-                };
-                taskEnv['AICORE_SERVICE_KEY'] = JSON.stringify(serviceKey);
+                // Check if AICORE_SERVICE_KEY is already set in environment
+                if (process.env.AICORE_SERVICE_KEY) {
+                    // Use the pre-configured service key from environment
+                    taskEnv['AICORE_SERVICE_KEY'] = process.env.AICORE_SERVICE_KEY;
+                    console.log(`[TaskSpawner] Using AICORE_SERVICE_KEY from environment`);
+                } else {
+                    // OpenCode has native SAP AI Core support via AICORE_SERVICE_KEY
+                    // Format: {"clientid":"...","clientsecret":"...","url":"...","serviceurls":{"AI_API_URL":"..."}}
+                    const serviceKey = {
+                        clientid: credentials.clientId,
+                        clientsecret: credentials.clientSecret,
+                        url: credentials.authUrl,
+                        serviceurls: {
+                            AI_API_URL: credentials.baseUrl
+                        }
+                    };
+                    taskEnv['AICORE_SERVICE_KEY'] = JSON.stringify(serviceKey);
+                }
 
                 // Optionally set resource group if configured
                 if (credentials.resourceGroup) {
@@ -911,6 +927,7 @@ export class TaskSpawner extends EventEmitter {
                 delete taskEnv['OPENAI_BASE_URL'];
 
                 console.log(`[TaskSpawner] Using SAP AI Core native support for OpenCode`);
+
                 console.log(`[TaskSpawner] AICORE_SERVICE_KEY authUrl: ${credentials.authUrl}, baseUrl: ${credentials.baseUrl}`);
             } else if (this.backendType === 'opencode' && !credentials) {
                 console.log(`[TaskSpawner] WARNING: SAP AI Core mode selected but no credentials found for OpenCode`);
@@ -1203,26 +1220,65 @@ export class TaskSpawner extends EventEmitter {
     async createTask(prompt: string, workspaceId: string, systemPrompt?: string): Promise<Task> {
         // Sanitize prompt to prevent command injection and other issues
         const sanitizedPrompt = sanitizePrompt(prompt);
-        const sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
+        let sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
 
         const gitStateBefore = await captureGitStateBefore(workspaceId);
+
+        // Search for relevant learnings and inject if enabled
+        let injectedLearnings: LearningSearchResult[] = [];
+        if (this.configStore?.getUseLearnings() && this.learningsStore) {
+            try {
+                injectedLearnings = await this.learningsStore.searchLearnings({
+                    query: sanitizedPrompt,
+                    workspaceId,
+                    topK: 5,
+                    minScore: 0.3
+                });
+
+                if (injectedLearnings.length > 0) {
+                    const learningsContext = this.learningsStore.formatForContext(injectedLearnings);
+                    logger.info('Injecting learnings into task', {
+                        count: injectedLearnings.length,
+                        scores: injectedLearnings.map(l => l.score.toFixed(3))
+                    });
+
+                    // Prepend learnings to system prompt
+                    if (sanitizedSystemPrompt) {
+                        sanitizedSystemPrompt = `${learningsContext}\n\n${sanitizedSystemPrompt}`;
+                    } else {
+                        sanitizedSystemPrompt = learningsContext;
+                    }
+                }
+            } catch (err) {
+                logger.error('Failed to search learnings:', err);
+            }
+        }
 
         // Log which backend we're using for debugging
         logger.info('createTask called', {
             backendType: this.backendType,
             hasBackend: !!this.backend,
-            configBackend: this.configStore?.getBackend()
+            configBackend: this.configStore?.getBackend(),
+            learningsInjected: injectedLearnings.length
         });
 
         // Use OpenCode backend if configured
+        let task: Task;
         if (this.backendType === 'opencode' && this.backend) {
             logger.info('Using OpenCode backend for task creation');
-            return this.createTaskWithOpenCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore);
+            task = await this.createTaskWithOpenCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore);
+        } else {
+            // Default: Use Claude Code with PTY (existing logic)
+            logger.info('Using Claude Code backend for task creation');
+            task = await this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore);
         }
 
-        // Default: Use Claude Code with PTY (existing logic)
-        logger.info('Using Claude Code backend for task creation');
-        return this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore);
+        // Track which learnings were injected for this task (for utility updates later)
+        if (injectedLearnings.length > 0) {
+            this.taskLearnings.set(task.id, injectedLearnings.map(l => l.learning.id));
+        }
+
+        return task;
     }
 
     /**
@@ -1249,6 +1305,13 @@ export class TaskSpawner extends EventEmitter {
             // Use Claude Opus 4.5 via SAP AI Core
             model = 'anthropic/claude-opus-4-5';
             logger.info('Using SAP AI Core model', { model });
+            // Verify environment is set correctly
+            const hasServiceKey = !!taskEnv['AICORE_SERVICE_KEY'];
+            logger.info('SAP AI Core environment check', {
+                hasServiceKey,
+                hasAnthropicBaseUrl: !!taskEnv['ANTHROPIC_BASE_URL'],
+                model
+            });
         }
 
         const backendTask = await this.backend.createTask({
@@ -1515,16 +1578,38 @@ export class TaskSpawner extends EventEmitter {
         return this.tasks.get(taskId);
     }
 
-    getDisconnectedTask(taskId: string): { id: string; workspaceId: string; sessionId: string | null } | undefined {
+    getDisconnectedTask(taskId: string): { id: string; workspaceId: string; sessionId: string | null; prompt: string } | undefined {
         const persisted = this.disconnectedTasks.get(taskId);
         if (persisted) {
             return {
                 id: persisted.id,
                 workspaceId: persisted.workspaceId,
-                sessionId: persisted.sessionId
+                sessionId: persisted.sessionId,
+                prompt: persisted.prompt
             };
         }
         return undefined;
+    }
+
+    /**
+     * Get the learning IDs that were injected into a task
+     */
+    getTaskLearnings(taskId: string): string[] {
+        return this.taskLearnings.get(taskId) || [];
+    }
+
+    /**
+     * Update utility scores for learnings used in a task based on outcome
+     */
+    updateTaskLearningsUtility(taskId: string, success: boolean): void {
+        const learningIds = this.taskLearnings.get(taskId);
+        if (!learningIds || !this.learningsStore) return;
+
+        for (const id of learningIds) {
+            this.learningsStore.updateUtility(id, success);
+        }
+
+        logger.info('Updated learning utilities', { taskId, success, count: learningIds.length });
     }
 
     setTaskActive(taskId: string, active: boolean): void {

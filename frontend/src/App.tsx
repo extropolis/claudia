@@ -303,7 +303,6 @@ function App() {
                             task={selectedTask}
                             wsRef={wsRef}
                             workspace={selectedWorkspace}
-                            onSetSystemPrompt={setSystemPrompt}
                         />
                     ) : (
                         <div className="empty-state-main">

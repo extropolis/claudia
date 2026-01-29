@@ -18,6 +18,13 @@ export interface TaskGitState {
     revertedAt?: string;         // ISO timestamp when reverted
 }
 
+// File diff for viewing changes
+export interface FileDiff {
+    filePath: string;
+    status: 'added' | 'modified' | 'deleted';
+    diff: string;  // unified diff format
+}
+
 export interface Task {
     id: string;
     prompt: string;          // The user's message that created this task

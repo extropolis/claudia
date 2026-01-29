@@ -13,10 +13,9 @@ interface TerminalViewProps {
     task: Task;
     wsRef: React.RefObject<WebSocket | null>;
     workspace?: Workspace;
-    onSetSystemPrompt?: (workspaceId: string, systemPrompt: string) => void;
 }
 
-export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: TerminalViewProps) {
+export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
@@ -428,12 +427,6 @@ export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: Term
         setShowLearnModal(true);
     };
 
-    const handleSaveSystemPrompt = (newPrompt: string) => {
-        if (workspace && onSetSystemPrompt) {
-            onSetSystemPrompt(workspace.id, newPrompt);
-        }
-    };
-
     return (
         <div className="terminal-view">
             <div className="terminal-header">
@@ -445,11 +438,11 @@ export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: Term
                 >
                     {copied ? <Check size={16} /> : <Copy size={16} />}
                 </button>
-                {workspace && onSetSystemPrompt && (
+                {workspace && (
                     <button
                         className="learn-button"
                         onClick={handleLearnFromConversation}
-                        title="Learn from this conversation to improve the system prompt"
+                        title="Learn from this conversation - extracts learnings for future tasks"
                     >
                         <BookOpen size={14} />
                         Learn
@@ -475,8 +468,6 @@ export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: Term
                     taskId={task.id}
                     workspaceId={workspace.id}
                     workspaceName={workspace.name}
-                    currentSystemPrompt={workspace.systemPrompt || ''}
-                    onSave={handleSaveSystemPrompt}
                     onClose={() => setShowLearnModal(false)}
                 />
             )}

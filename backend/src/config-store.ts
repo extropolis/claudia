@@ -41,6 +41,7 @@ export interface AppConfig {
     customAnthropicApiKey?: string;  // API key for custom-anthropic mode
     backend: BackendType;  // Which AI backend to use (claude-code or opencode)
     opencodePort?: number;  // Port for OpenCode server (default: 4096)
+    useLearnings: boolean;  // Use RAG-based learnings injection for tasks
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are an AI supervisor monitoring coding tasks. Your job is to:
@@ -75,7 +76,8 @@ const DEFAULT_CONFIG: AppConfig = {
     autoFocusOnInput: false,
     apiMode: 'default',
     backend: 'claude-code',
-    opencodePort: 4096
+    opencodePort: 4096,
+    useLearnings: false
 };
 
 export class ConfigStore {
@@ -111,7 +113,8 @@ export class ConfigStore {
                     apiMode: loaded.apiMode ?? 'default',
                     customAnthropicApiKey: loaded.customAnthropicApiKey,
                     backend: loaded.backend ?? 'claude-code',
-                    opencodePort: loaded.opencodePort ?? 4096
+                    opencodePort: loaded.opencodePort ?? 4096,
+                    useLearnings: loaded.useLearnings ?? false
                 };
             }
         } catch (error) {
@@ -167,6 +170,9 @@ export class ConfigStore {
         }
         if (updates.opencodePort !== undefined) {
             this.config.opencodePort = updates.opencodePort;
+        }
+        if (updates.useLearnings !== undefined) {
+            this.config.useLearnings = updates.useLearnings;
         }
         this.saveConfig();
         return this.getConfig();
@@ -240,6 +246,15 @@ export class ConfigStore {
 
     setOpencodePort(port: number): void {
         this.config.opencodePort = port;
+        this.saveConfig();
+    }
+
+    getUseLearnings(): boolean {
+        return this.config.useLearnings;
+    }
+
+    setUseLearnings(useLearnings: boolean): void {
+        this.config.useLearnings = useLearnings;
         this.saveConfig();
     }
 }

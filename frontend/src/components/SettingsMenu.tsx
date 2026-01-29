@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Power, PowerOff, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal } from 'lucide-react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Power, PowerOff, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
 import { useTaskStore } from '../stores/taskStore';
@@ -77,7 +77,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         mcp: false,
         permissions: false,
         rules: false,
-        supervisor: false
+        supervisor: false,
+        learnings: false
     });
 
     // Handle initial panel expansion when settings opens
@@ -104,6 +105,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [supervisorSystemPrompt, setSupervisorSystemPrompt] = useState('');
     const [supervisorPromptSaved, setSupervisorPromptSaved] = useState(true);
     const [autoFocusOnInput, setAutoFocusOnInput] = useState(false);
+    const [useLearnings, setUseLearnings] = useState(false);
 
     // API Mode state
     const [apiMode, setApiMode] = useState<ApiMode>('default');
@@ -176,6 +178,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 setAiCoreSaved(true);
                 setBackend(config.backend || 'claude-code');
                 setBackendSaved(true);
+                setUseLearnings(config.useLearnings || false);
             }
         } catch (error) {
             console.error('Failed to fetch config:', error);
@@ -433,6 +436,21 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             }
         } catch (error) {
             console.error('Failed to save auto focus setting:', error);
+        }
+    };
+
+    const saveUseLearnings = async (value: boolean) => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ useLearnings: value })
+            });
+            if (response.ok) {
+                setUseLearnings(value);
+            }
+        } catch (error) {
+            console.error('Failed to save use learnings setting:', error);
         }
     };
 
@@ -1214,6 +1232,39 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     </div>
                                 </>
                             )}
+                        </div>
+                    </CollapsiblePanel>
+
+                    <CollapsiblePanel
+                        title="Learnings (RAG)"
+                        icon={<Brain size={18} />}
+                        isExpanded={expandedPanels.learnings}
+                        onToggle={() => togglePanel('learnings')}
+                    >
+                        <div className="permissions-content">
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Use Learnings</span>
+                                    <span className="permission-description">
+                                        When enabled, relevant learnings from past conversations will be
+                                        automatically retrieved and injected into new task contexts using
+                                        semantic search (RAG).
+                                    </span>
+                                </div>
+                                <label className="toggle-switch">
+                                    <input
+                                        type="checkbox"
+                                        checked={useLearnings}
+                                        onChange={(e) => saveUseLearnings(e.target.checked)}
+                                    />
+                                    <span className="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <p className="api-config-note" style={{ marginTop: '12px' }}>
+                                To add learnings, click the "Learn" button on a completed task.
+                                Learnings are stored with embeddings and matched based on semantic
+                                similarity to new task prompts.
+                            </p>
                         </div>
                     </CollapsiblePanel>
 
