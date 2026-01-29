@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
+import { BackendType } from '@claudia/shared';
 
 export interface ConversationMessage {
     role: 'user' | 'assistant';
@@ -16,7 +17,8 @@ export interface ParsedConversation {
     summary?: string;
 }
 
-interface JsonlEntry {
+// Claude Code JSONL entry format
+interface ClaudeJsonlEntry {
     type: string;
     uuid?: string;
     parentUuid?: string;
@@ -28,6 +30,41 @@ interface JsonlEntry {
         content: string | Array<{ type: string; text?: string; thinking?: string }>;
     };
 }
+
+// OpenCode message file format
+interface OpenCodeMessage {
+    id: string;
+    sessionID: string;
+    role: 'user' | 'assistant';
+    time: {
+        created: number;
+    };
+    summary?: {
+        title?: string;
+        diffs?: unknown[];
+    };
+    agent?: string;
+    model?: {
+        providerID: string;
+        modelID: string;
+    };
+    variant?: string;
+}
+
+// OpenCode part file format (contains the actual message content)
+interface OpenCodePart {
+    id: string;
+    messageID: string;
+    sessionID: string;
+    type: string;
+    time: {
+        created: number;
+    };
+    text?: string;
+    thinking?: string;
+}
+
+// ================== Claude Code Functions ==================
 
 /**
  * Convert a workspace path to the Claude projects folder name format
@@ -48,9 +85,9 @@ function getClaudeProjectsDir(workspacePath: string): string {
 }
 
 /**
- * Find the JSONL file for a given session ID
+ * Find the Claude Code JSONL file for a given session ID
  */
-export async function findSessionFile(workspacePath: string, sessionId: string): Promise<string | null> {
+async function findClaudeSessionFile(workspacePath: string, sessionId: string): Promise<string | null> {
     const projectDir = getClaudeProjectsDir(workspacePath);
     const sessionFile = path.join(projectDir, `${sessionId}.jsonl`);
 
@@ -62,32 +99,9 @@ export async function findSessionFile(workspacePath: string, sessionId: string):
 }
 
 /**
- * Find the most recent JSONL files in a workspace
+ * Extract text content from a Claude Code message content field
  */
-export async function findRecentSessionFiles(workspacePath: string, limit: number = 10): Promise<string[]> {
-    const projectDir = getClaudeProjectsDir(workspacePath);
-
-    if (!fs.existsSync(projectDir)) {
-        return [];
-    }
-
-    const files = fs.readdirSync(projectDir)
-        .filter(f => f.endsWith('.jsonl'))
-        .map(f => ({
-            name: f,
-            path: path.join(projectDir, f),
-            mtime: fs.statSync(path.join(projectDir, f)).mtime.getTime()
-        }))
-        .sort((a, b) => b.mtime - a.mtime)
-        .slice(0, limit);
-
-    return files.map(f => f.path);
-}
-
-/**
- * Extract text content from a message content field
- */
-function extractTextContent(content: string | Array<{ type: string; text?: string; thinking?: string }>): { text: string; thinking?: string } {
+function extractClaudeTextContent(content: string | Array<{ type: string; text?: string; thinking?: string }>): { text: string; thinking?: string } {
     if (typeof content === 'string') {
         return { text: content };
     }
@@ -107,9 +121,9 @@ function extractTextContent(content: string | Array<{ type: string; text?: strin
 }
 
 /**
- * Parse a JSONL conversation file
+ * Parse a Claude Code JSONL conversation file
  */
-export async function parseConversationFile(filePath: string): Promise<ParsedConversation> {
+async function parseClaudeConversationFile(filePath: string): Promise<ParsedConversation> {
     return new Promise((resolve, reject) => {
         const messages: ConversationMessage[] = [];
         let sessionId = '';
@@ -124,7 +138,7 @@ export async function parseConversationFile(filePath: string): Promise<ParsedCon
 
         rl.on('line', (line) => {
             try {
-                const entry: JsonlEntry = JSON.parse(line);
+                const entry: ClaudeJsonlEntry = JSON.parse(line);
 
                 // Capture session ID
                 if (entry.sessionId && !sessionId) {
@@ -142,7 +156,7 @@ export async function parseConversationFile(filePath: string): Promise<ParsedCon
                     if (seenUuids.has(entry.uuid)) return;
                     seenUuids.add(entry.uuid);
 
-                    const { text } = extractTextContent(entry.message.content);
+                    const { text } = extractClaudeTextContent(entry.message.content);
                     if (text) {
                         messages.push({
                             role: 'user',
@@ -159,7 +173,7 @@ export async function parseConversationFile(filePath: string): Promise<ParsedCon
                     if (seenUuids.has(entry.uuid)) return;
                     seenUuids.add(entry.uuid);
 
-                    const { text, thinking } = extractTextContent(entry.message.content);
+                    const { text, thinking } = extractClaudeTextContent(entry.message.content);
                     // Only add if there's actual text content (skip pure thinking blocks)
                     if (text) {
                         messages.push({
@@ -189,23 +203,23 @@ export async function parseConversationFile(filePath: string): Promise<ParsedCon
 }
 
 /**
- * Get conversation history for a task by session ID
+ * Get Claude Code conversation history
  */
-export async function getConversationHistory(workspacePath: string, sessionId: string): Promise<ParsedConversation | null> {
-    const filePath = await findSessionFile(workspacePath, sessionId);
+async function getClaudeConversationHistory(workspacePath: string, sessionId: string): Promise<ParsedConversation | null> {
+    const filePath = await findClaudeSessionFile(workspacePath, sessionId);
     if (!filePath) {
-        console.log(`[ConversationParser] No session file found for ${sessionId} in ${workspacePath}`);
+        console.log(`[ConversationParser] No Claude Code session file found for ${sessionId} in ${workspacePath}`);
         return null;
     }
 
-    console.log(`[ConversationParser] Parsing session file: ${filePath}`);
-    return parseConversationFile(filePath);
+    console.log(`[ConversationParser] Parsing Claude Code session file: ${filePath}`);
+    return parseClaudeConversationFile(filePath);
 }
 
 /**
- * Get all session summaries for a workspace
+ * Get Claude Code sessions for a workspace
  */
-export async function getWorkspaceSessions(workspacePath: string): Promise<Array<{ sessionId: string; summary?: string; lastModified: Date }>> {
+async function getClaudeWorkspaceSessions(workspacePath: string): Promise<Array<{ sessionId: string; summary?: string; lastModified: Date }>> {
     const projectDir = getClaudeProjectsDir(workspacePath);
 
     if (!fs.existsSync(projectDir)) {
@@ -248,4 +262,294 @@ export async function getWorkspaceSessions(workspacePath: string): Promise<Array
     }
 
     return results;
+}
+
+// ================== OpenCode Functions ==================
+
+/**
+ * Get the OpenCode storage directory
+ */
+function getOpenCodeStorageDir(): string {
+    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+    return path.join(homeDir, '.local', 'share', 'opencode', 'storage');
+}
+
+/**
+ * Get OpenCode conversation history for a session
+ */
+async function getOpenCodeConversationHistory(sessionId: string): Promise<ParsedConversation | null> {
+    const storageDir = getOpenCodeStorageDir();
+    const messageDir = path.join(storageDir, 'message', sessionId);
+    const partDir = path.join(storageDir, 'part');
+
+    console.log(`[ConversationParser] Looking for OpenCode session ${sessionId}`);
+    console.log(`[ConversationParser] Message dir: ${messageDir}`);
+
+    if (!fs.existsSync(messageDir)) {
+        console.log(`[ConversationParser] No OpenCode message directory found for ${sessionId}`);
+        return null;
+    }
+
+    // Read all message files for this session
+    const messageFiles = fs.readdirSync(messageDir)
+        .filter(f => f.endsWith('.json'))
+        .map(f => {
+            try {
+                const content = fs.readFileSync(path.join(messageDir, f), 'utf-8');
+                return JSON.parse(content) as OpenCodeMessage;
+            } catch {
+                return null;
+            }
+        })
+        .filter((m): m is OpenCodeMessage => m !== null)
+        .sort((a, b) => a.time.created - b.time.created);
+
+    console.log(`[ConversationParser] Found ${messageFiles.length} messages`);
+
+    // For each message, find its parts (content)
+    const messages: ConversationMessage[] = [];
+
+    for (const msg of messageFiles) {
+        // Look for parts that belong to this message
+        // Parts are stored in part/{sessionId}/ directory
+        const sessionPartDir = path.join(partDir, sessionId);
+
+        if (!fs.existsSync(sessionPartDir)) {
+            // Try the global session
+            const globalPartDir = path.join(partDir, 'global');
+            if (!fs.existsSync(globalPartDir)) {
+                continue;
+            }
+        }
+
+        // Find parts for this message ID
+        const partDirToSearch = fs.existsSync(path.join(partDir, sessionId))
+            ? path.join(partDir, sessionId)
+            : path.join(partDir);
+
+        let content = '';
+        let thinking: string | undefined;
+
+        // Search for parts that match this message
+        try {
+            const searchDirs = [
+                path.join(partDir, sessionId),
+                path.join(partDir, 'global'),
+            ];
+
+            for (const dir of searchDirs) {
+                if (!fs.existsSync(dir)) continue;
+
+                const partFiles = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+                for (const partFile of partFiles) {
+                    try {
+                        const partContent = fs.readFileSync(path.join(dir, partFile), 'utf-8');
+                        const part = JSON.parse(partContent) as OpenCodePart;
+
+                        if (part.messageID === msg.id) {
+                            if (part.type === 'text' && part.text) {
+                                content += part.text;
+                            } else if (part.type === 'thinking' && part.thinking) {
+                                thinking = part.thinking;
+                            }
+                        }
+                    } catch { /* skip */ }
+                }
+            }
+        } catch { /* skip */ }
+
+        // If we didn't find parts, use the message summary as a fallback
+        if (!content && msg.summary?.title) {
+            content = msg.summary.title;
+        }
+
+        if (content || msg.role === 'user') {
+            messages.push({
+                role: msg.role,
+                content: content || '(no content)',
+                timestamp: new Date(msg.time.created).toISOString(),
+                uuid: msg.id,
+                thinking
+            });
+        }
+    }
+
+    // Get session info for summary
+    let summary: string | undefined;
+    try {
+        // Try to find session file to get title
+        const sessionDirs = [
+            path.join(storageDir, 'session', 'global'),
+            ...fs.readdirSync(path.join(storageDir, 'session'))
+                .filter(d => d !== 'global')
+                .map(d => path.join(storageDir, 'session', d))
+        ];
+
+        for (const dir of sessionDirs) {
+            if (!fs.existsSync(dir)) continue;
+            const sessionFile = path.join(dir, `${sessionId}.json`);
+            if (fs.existsSync(sessionFile)) {
+                const sessionData = JSON.parse(fs.readFileSync(sessionFile, 'utf-8'));
+                summary = sessionData.title || sessionData.slug;
+                break;
+            }
+        }
+    } catch { /* skip */ }
+
+    return {
+        sessionId,
+        messages,
+        summary
+    };
+}
+
+/**
+ * Get all OpenCode sessions
+ */
+async function getOpenCodeWorkspaceSessions(): Promise<Array<{ sessionId: string; summary?: string; lastModified: Date }>> {
+    const storageDir = getOpenCodeStorageDir();
+    const sessionDir = path.join(storageDir, 'session');
+
+    if (!fs.existsSync(sessionDir)) {
+        return [];
+    }
+
+    const results: Array<{ sessionId: string; summary?: string; lastModified: Date }> = [];
+
+    // Scan all session subdirectories
+    const subdirs = fs.readdirSync(sessionDir).filter(d => {
+        const stat = fs.statSync(path.join(sessionDir, d));
+        return stat.isDirectory();
+    });
+
+    for (const subdir of subdirs) {
+        const subdirPath = path.join(sessionDir, subdir);
+        const sessionFiles = fs.readdirSync(subdirPath)
+            .filter(f => f.endsWith('.json'))
+            .map(f => path.join(subdirPath, f));
+
+        for (const sessionFile of sessionFiles) {
+            try {
+                const stat = fs.statSync(sessionFile);
+                const sessionData = JSON.parse(fs.readFileSync(sessionFile, 'utf-8'));
+
+                results.push({
+                    sessionId: sessionData.id || path.basename(sessionFile, '.json'),
+                    summary: sessionData.title || sessionData.slug,
+                    lastModified: stat.mtime
+                });
+            } catch { /* skip */ }
+        }
+    }
+
+    // Sort by last modified descending
+    results.sort((a, b) => b.lastModified.getTime() - a.lastModified.getTime());
+
+    return results.slice(0, 50); // Limit to 50 most recent
+}
+
+// ================== Public API ==================
+
+/**
+ * Find the session file for a given session ID (legacy - Claude Code only)
+ * @deprecated Use getConversationHistory with backendType instead
+ */
+export async function findSessionFile(workspacePath: string, sessionId: string): Promise<string | null> {
+    return findClaudeSessionFile(workspacePath, sessionId);
+}
+
+/**
+ * Find the most recent JSONL files in a workspace (legacy - Claude Code only)
+ * @deprecated Use getWorkspaceSessions with backendType instead
+ */
+export async function findRecentSessionFiles(workspacePath: string, limit: number = 10): Promise<string[]> {
+    const projectDir = getClaudeProjectsDir(workspacePath);
+
+    if (!fs.existsSync(projectDir)) {
+        return [];
+    }
+
+    const files = fs.readdirSync(projectDir)
+        .filter(f => f.endsWith('.jsonl'))
+        .map(f => ({
+            name: f,
+            path: path.join(projectDir, f),
+            mtime: fs.statSync(path.join(projectDir, f)).mtime.getTime()
+        }))
+        .sort((a, b) => b.mtime - a.mtime)
+        .slice(0, limit);
+
+    return files.map(f => f.path);
+}
+
+/**
+ * Parse a JSONL conversation file (legacy - Claude Code only)
+ * @deprecated Use getConversationHistory with backendType instead
+ */
+export async function parseConversationFile(filePath: string): Promise<ParsedConversation> {
+    return parseClaudeConversationFile(filePath);
+}
+
+/**
+ * Get conversation history for a task by session ID
+ * Supports both Claude Code and OpenCode backends
+ */
+export async function getConversationHistory(
+    workspacePath: string,
+    sessionId: string,
+    backendType?: BackendType
+): Promise<ParsedConversation | null> {
+    console.log(`[ConversationParser] Getting conversation for session ${sessionId}, backend: ${backendType || 'auto-detect'}`);
+
+    // If backend type is specified, use that
+    if (backendType === 'opencode') {
+        return getOpenCodeConversationHistory(sessionId);
+    } else if (backendType === 'claude-code') {
+        return getClaudeConversationHistory(workspacePath, sessionId);
+    }
+
+    // Auto-detect: Try Claude Code first, then OpenCode
+    // Claude Code session IDs are UUIDs, OpenCode session IDs start with "ses_"
+    if (sessionId.startsWith('ses_')) {
+        console.log(`[ConversationParser] Auto-detected OpenCode session (ses_ prefix)`);
+        return getOpenCodeConversationHistory(sessionId);
+    }
+
+    // Try Claude Code
+    const claudeResult = await getClaudeConversationHistory(workspacePath, sessionId);
+    if (claudeResult) {
+        return claudeResult;
+    }
+
+    // Fall back to OpenCode
+    console.log(`[ConversationParser] Claude Code lookup failed, trying OpenCode`);
+    return getOpenCodeConversationHistory(sessionId);
+}
+
+/**
+ * Get all session summaries for a workspace
+ * Supports both Claude Code and OpenCode backends
+ */
+export async function getWorkspaceSessions(
+    workspacePath: string,
+    backendType?: BackendType
+): Promise<Array<{ sessionId: string; summary?: string; lastModified: Date }>> {
+    console.log(`[ConversationParser] Getting sessions for workspace ${workspacePath}, backend: ${backendType || 'all'}`);
+
+    if (backendType === 'opencode') {
+        return getOpenCodeWorkspaceSessions();
+    } else if (backendType === 'claude-code') {
+        return getClaudeWorkspaceSessions(workspacePath);
+    }
+
+    // Return sessions from both backends, sorted by lastModified
+    const [claudeSessions, opencodeSessions] = await Promise.all([
+        getClaudeWorkspaceSessions(workspacePath),
+        getOpenCodeWorkspaceSessions()
+    ]);
+
+    const allSessions = [...claudeSessions, ...opencodeSessions];
+    allSessions.sort((a, b) => b.lastModified.getTime() - a.lastModified.getTime());
+
+    return allSessions.slice(0, 50);
 }

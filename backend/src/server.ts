@@ -408,7 +408,7 @@ export function createApp(basePath?: string) {
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId } = payload as { prompt?: string; workspaceId?: string };
+                        const { prompt, workspaceId, initialCols, initialRows } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number };
                         if (!prompt || !workspaceId) {
                             logger.error('task:create requires prompt and workspaceId');
                             sendWSError(ws, 'task:create requires prompt and workspaceId', message.type, 'MISSING_PARAMS');
@@ -426,7 +426,9 @@ export function createApp(basePath?: string) {
                         const rules = configStore.getRules();
                         const systemPrompt = workspaceSystemPrompt?.trim() || rules?.trim() || undefined;
                         logger.info(`Creating task with system prompt`, { hasSystemPrompt: !!systemPrompt, source: workspaceSystemPrompt ? 'workspace' : (rules ? 'rules' : 'none') });
-                        taskSpawner.createTask(prompt, workspaceValidation.data!, systemPrompt);
+
+                        // Pass initial dimensions if provided
+                        taskSpawner.createTask(prompt, workspaceValidation.data!, systemPrompt, initialCols, initialRows);
                         break;
                     }
 
@@ -1659,7 +1661,9 @@ export function createApp(basePath?: string) {
     app.get('/api/tasks/:taskId/conversation', async (req, res) => {
         try {
             const { taskId } = req.params;
-            const task = taskSpawner.getTask(taskId) || taskSpawner.getDisconnectedTask(taskId);
+            const activeTask = taskSpawner.getTask(taskId);
+            const disconnectedTask = taskSpawner.getDisconnectedTask(taskId);
+            const task = activeTask || disconnectedTask;
 
             if (!task) {
                 return res.status(404).json({ error: 'Task not found' });
@@ -1675,7 +1679,14 @@ export function createApp(basePath?: string) {
                 return res.status(404).json({ error: 'Workspace not found' });
             }
 
-            const conversation = await getConversationHistory(workspace.id, task.sessionId);
+            // Determine backend type: from task, or from task backends map, or auto-detect
+            const backendType = ('backendType' in task && task.backendType)
+                ? task.backendType
+                : undefined;
+
+            logger.info('Getting conversation history', { taskId, sessionId: task.sessionId, backendType });
+
+            const conversation = await getConversationHistory(workspace.id, task.sessionId, backendType);
             if (!conversation) {
                 return res.status(404).json({ error: 'Conversation not found' });
             }
@@ -1749,7 +1760,12 @@ export function createApp(basePath?: string) {
                 return res.status(404).json({ error: 'Workspace not found' });
             }
 
-            const conversation = await getConversationHistory(workspace.id, task.sessionId);
+            // Determine backend type from task
+            const backendType = ('backendType' in task && task.backendType)
+                ? task.backendType
+                : undefined;
+
+            const conversation = await getConversationHistory(workspace.id, task.sessionId, backendType);
             if (!conversation || conversation.messages.length === 0) {
                 return res.status(404).json({ error: 'No conversation history found' });
             }

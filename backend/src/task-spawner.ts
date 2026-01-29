@@ -1,6 +1,6 @@
 import { spawn, IPty } from 'node-pty';
 import { EventEmitter } from 'events';
-import { Task, TaskState, TaskGitState, WaitingInputType } from '@claudia/shared';
+import { Task, TaskState, TaskGitState, WaitingInputType, BackendType } from '@claudia/shared';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
@@ -9,7 +9,7 @@ import { ConfigStore } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
 import { sanitizePrompt } from './validation.js';
 import { createLogger } from './logger.js';
-import { CodeBackend, BackendType, BackendTask, createBackend } from './backends/index.js';
+import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 
 const logger = createLogger('[TaskSpawner]');
@@ -587,7 +587,16 @@ export class TaskSpawner extends EventEmitter {
                     // MIGRATION: If task has outputHistory string, move it to file
                     if (persisted.outputHistory && typeof persisted.outputHistory === 'string') {
                         try {
-                            writeFileSync(this.getTaskHistoryPath(persisted.id), persisted.outputHistory);
+                            // outputHistory is likely raw text from older versions. Convert to Base64 to match new file format.
+                            // If it's already Base64, this might double-encode, but we can't easily tell without heuristics.
+                            // Given this is a migration from older version, assuming raw text is safer.
+                            let contentToWrite = persisted.outputHistory;
+                            // Heuristic: If it contains ESC char, it's definitely raw text.
+                            // Most tasks have ESC chars for colors/TUI.
+                            if (contentToWrite.includes('\x1b') || contentToWrite.includes(' ')) {
+                                contentToWrite = Buffer.from(contentToWrite, 'utf8').toString('base64');
+                            }
+                            writeFileSync(this.getTaskHistoryPath(persisted.id), contentToWrite);
                             if (process.env.DEBUG_TASKS) {
                                 console.log(`[TaskSpawner] Migrated history for task ${persisted.id} to file`);
                             }
@@ -603,6 +612,11 @@ export class TaskSpawner extends EventEmitter {
                         console.log(`[TaskSpawner] Loading task ${persisted.id}`);
                     }
                     this.disconnectedTasks.set(persisted.id, persisted);
+
+                    // Restore the taskBackends map from persisted backendType
+                    if (persisted.backendType) {
+                        this.taskBackends.set(persisted.id, persisted.backendType);
+                    }
                 }
 
                 // Load archived tasks - migrate old format if needed
@@ -619,7 +633,11 @@ export class TaskSpawner extends EventEmitter {
                                 mkdirSync(historyDir, { recursive: true });
                             }
                             try {
-                                writeFileSync(this.getArchivedHistoryPath(archived.id), archived.outputHistory);
+                                let contentToWrite = archived.outputHistory;
+                                if (contentToWrite.includes('\x1b') || contentToWrite.includes(' ')) {
+                                    contentToWrite = Buffer.from(contentToWrite, 'utf8').toString('base64');
+                                }
+                                writeFileSync(this.getArchivedHistoryPath(archived.id), contentToWrite);
                                 migratedCount++;
                             } catch (e) {
                                 console.error(`[TaskSpawner] Failed to migrate history for ${archived.id}:`, e);
@@ -1217,7 +1235,7 @@ export class TaskSpawner extends EventEmitter {
      * @param systemPrompt - Optional system prompt override
      * @returns The created task object
      */
-    async createTask(prompt: string, workspaceId: string, systemPrompt?: string): Promise<Task> {
+    async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number): Promise<Task> {
         // Sanitize prompt to prevent command injection and other issues
         const sanitizedPrompt = sanitizePrompt(prompt);
         let sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
@@ -1259,7 +1277,8 @@ export class TaskSpawner extends EventEmitter {
             backendType: this.backendType,
             hasBackend: !!this.backend,
             configBackend: this.configStore?.getBackend(),
-            learningsInjected: injectedLearnings.length
+            learningsInjected: injectedLearnings.length,
+            initialDims: initialCols && initialRows ? `${initialCols}x${initialRows}` : 'default'
         });
 
         // Use OpenCode backend if configured
@@ -1270,7 +1289,7 @@ export class TaskSpawner extends EventEmitter {
         } else {
             // Default: Use Claude Code with PTY (existing logic)
             logger.info('Using Claude Code backend for task creation');
-            task = await this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore);
+            task = await this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore, initialCols, initialRows);
         }
 
         // Track which learnings were injected for this task (for utility updates later)
@@ -1380,7 +1399,9 @@ export class TaskSpawner extends EventEmitter {
         prompt: string,
         workspaceId: string,
         systemPrompt: string | undefined,
-        gitStateBefore: Partial<TaskGitState> | null
+        gitStateBefore: Partial<TaskGitState> | null,
+        initialCols?: number,
+        initialRows?: number
     ): Promise<Task> {
         const id = `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
@@ -1405,7 +1426,7 @@ export class TaskSpawner extends EventEmitter {
             logger.info(`Using custom system prompt`);
         }
 
-        logger.info(`Creating task with Claude Code`, { taskId: id, workspaceId });
+        logger.info(`Creating task with Claude Code`, { taskId: id, workspaceId, cols: initialCols, rows: initialRows });
         logger.debug(`Command args`, { args: claudeArgs });
 
         // Get environment with API mode settings
@@ -1413,8 +1434,8 @@ export class TaskSpawner extends EventEmitter {
 
         const ptyProcess = spawn('claude', claudeArgs, {
             name: 'xterm-256color',
-            cols: 120,
-            rows: 40,
+            cols: initialCols || 120, // Use provided cols or default 120 (increased from 80)
+            rows: initialRows || 40,  // Use provided rows or default 40 (increased from 24)
             cwd: workspaceId,
             env: taskEnv,
         });
@@ -1512,6 +1533,9 @@ export class TaskSpawner extends EventEmitter {
     }
 
     private toPublicTask(task: InternalTask): Task {
+        // Get the backend type for this task (defaults to current backend if not tracked)
+        const backendType = this.taskBackends.get(task.id) || this.backendType;
+
         return {
             id: task.id,
             prompt: task.prompt,
@@ -1522,6 +1546,8 @@ export class TaskSpawner extends EventEmitter {
             gitState: task.gitState,
             waitingInputType: task.waitingInputType,
             systemPrompt: task.systemPrompt,
+            sessionId: task.sessionId || undefined,
+            backendType,
         };
     }
 
@@ -1578,14 +1604,15 @@ export class TaskSpawner extends EventEmitter {
         return this.tasks.get(taskId);
     }
 
-    getDisconnectedTask(taskId: string): { id: string; workspaceId: string; sessionId: string | null; prompt: string } | undefined {
+    getDisconnectedTask(taskId: string): { id: string; workspaceId: string; sessionId: string | null; prompt: string; backendType?: BackendType } | undefined {
         const persisted = this.disconnectedTasks.get(taskId);
         if (persisted) {
             return {
                 id: persisted.id,
                 workspaceId: persisted.workspaceId,
                 sessionId: persisted.sessionId,
-                prompt: persisted.prompt
+                prompt: persisted.prompt,
+                backendType: persisted.backendType
             };
         }
         return undefined;
@@ -1696,25 +1723,58 @@ export class TaskSpawner extends EventEmitter {
                     const stat = statSync(historyPath);
                     const fileSize = stat.size;
 
+                    // Check file format (Base64 vs Raw Text) by reading a small sample
+                    const fdCheck = openSync(historyPath, 'r');
+                    const checkBuf = Buffer.alloc(Math.min(100, fileSize));
+                    const bytesReadCheck = readSync(fdCheck, checkBuf, 0, checkBuf.length, 0);
+                    closeSync(fdCheck);
+
+                    const sample = checkBuf.subarray(0, bytesReadCheck).toString('utf8');
+                    // Heuristic: Raw terminal output contains ESC or spaces.
+                    // Base64 does not contain spaces (usually) and definitely no ESC.
+                    const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
+
                     let base64Content: string;
 
-                    // If file is larger than MAX_HISTORY_TO_SEND, only read the tail
-                    // Base64 encoding inflates size by ~33%, so calculate raw max size
-                    const maxBase64Size = Math.floor(MAX_HISTORY_TO_SEND * 1.33);
-
-                    if (fileSize > maxBase64Size) {
-                        // Only read the last portion of the file
-                        const fd = openSync(historyPath, 'r');
-                        const buffer = Buffer.alloc(maxBase64Size);
-                        const offset = fileSize - maxBase64Size;
-                        readSync(fd, buffer, 0, maxBase64Size, offset);
-                        closeSync(fd);
-                        base64Content = buffer.toString('utf-8');
-                        console.log(`[TaskSpawner] Loaded tail of history from file for ${task.id}: ${fileSize} bytes (file) -> ${maxBase64Size} bytes (loaded)`);
+                    if (isRawText) {
+                        // Raw text file - read strictly the last portion as utf8
+                        if (fileSize > MAX_HISTORY_TO_SEND) {
+                            const fd = openSync(historyPath, 'r');
+                            const buffer = Buffer.alloc(MAX_HISTORY_TO_SEND);
+                            const offset = fileSize - MAX_HISTORY_TO_SEND;
+                            readSync(fd, buffer, 0, MAX_HISTORY_TO_SEND, offset);
+                            closeSync(fd);
+                            // Since it's raw text, we treat it as the decoded content directly
+                            // But we need to pretend it was base64 for the logic below, OR change logic below.
+                            // Changing logic below is better.
+                            // Actually, let's just encode it to base64 here so the rest of the function works as is
+                            base64Content = buffer.toString('base64');
+                            console.log(`[TaskSpawner] Loaded tail of RAW history: ${fileSize} bytes -> ${MAX_HISTORY_TO_SEND} bytes`);
+                        } else {
+                            const rawContent = readFileSync(historyPath, 'utf8');
+                            base64Content = Buffer.from(rawContent, 'utf8').toString('base64');
+                            console.log(`[TaskSpawner] Loaded complete RAW history: ${fileSize} bytes`);
+                        }
                     } else {
-                        // File is small enough, read it all
-                        base64Content = readFileSync(historyPath, 'utf-8');
-                        console.log(`[TaskSpawner] Loaded complete history from file for ${task.id}: ${fileSize} bytes`);
+                        // Base64 file (standard path)
+                        // If file is larger than MAX_HISTORY_TO_SEND, only read the tail
+                        // Base64 encoding inflates size by ~33%, so calculate raw max size
+                        const maxBase64Size = Math.floor(MAX_HISTORY_TO_SEND * 1.33);
+
+                        if (fileSize > maxBase64Size) {
+                            // Only read the last portion of the file
+                            const fd = openSync(historyPath, 'r');
+                            const buffer = Buffer.alloc(maxBase64Size);
+                            const offset = fileSize - maxBase64Size;
+                            readSync(fd, buffer, 0, maxBase64Size, offset);
+                            closeSync(fd);
+                            base64Content = buffer.toString('utf-8');
+                            console.log(`[TaskSpawner] Loaded tail of Base64 history from file for ${task.id}: ${fileSize} bytes (file) -> ${maxBase64Size} bytes (loaded)`);
+                        } else {
+                            // File is small enough, read it all
+                            base64Content = readFileSync(historyPath, 'utf-8');
+                            console.log(`[TaskSpawner] Loaded complete Base64 history from file for ${task.id}: ${fileSize} bytes`);
+                        }
                     }
 
                     // Decode base64 to buffer

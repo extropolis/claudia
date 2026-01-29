@@ -123,8 +123,10 @@ export function createAnthropicProxy(config: AnthropicProxyConfig): Router {
 
                 clearTimeout(timeoutId);
 
-                // Log SAP AI Core response
-                console.log(`[AnthropicProxy] ✅ SAP AI CORE RESPONSE: ${response.status} ${response.statusText}`);
+                // Only log non-200 responses or non-streaming requests to reduce noise
+                if (!response.ok || !stream) {
+                    console.log(`[AnthropicProxy] ${response.ok ? '✅' : '❌'} SAP AI CORE RESPONSE: ${response.status} ${response.statusText}`);
+                }
 
                 // Copy response headers (except transfer-encoding)
                 for (const [key, value] of response.headers.entries()) {

@@ -80,11 +80,64 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
         }
     };
 
+    const fitTerminal = () => {
+        if (!fitAddonRef.current || !terminalRef.current || !xtermRef.current) return;
+
+        // Check if container has valid dimensions
+        if (terminalRef.current.clientWidth === 0 || terminalRef.current.clientHeight === 0) {
+            return;
+        }
+
+        try {
+            fitAddonRef.current.fit();
+            // Force a full refresh to fix any rendering artifacts
+            const rows = xtermRef.current.rows;
+            xtermRef.current.refresh(0, rows - 1);
+        } catch (err) {
+            console.warn('Failed to fit terminal:', err);
+        }
+    };
+
+    const debouncedFitTerminal = () => {
+        if (resizeDebounceRef.current) {
+            window.clearTimeout(resizeDebounceRef.current);
+        }
+        resizeDebounceRef.current = window.setTimeout(() => {
+            fitTerminal();
+            resizeDebounceRef.current = null;
+        }, 100); // 100ms debounce
+    };
+
+    // Initial fit sequence - try multiple times to ensure we catch layout updates
+    // This is critical for fixing the "text wrapping" issue on load
+    const attemptFit = (attempts = 0) => {
+        if (attempts > 10) return; // Give up after ~1s (10 * 100ms)
+
+        if (terminalRef.current && (terminalRef.current.clientWidth > 0 && terminalRef.current.clientHeight > 0)) {
+            fitTerminal();
+            // Even if successful, try again shortly to ensure font metrics are loaded
+            if (attempts < 3) {
+                setTimeout(() => attemptFit(attempts + 1), 100);
+            }
+        } else {
+            // Retry if no dimensions yet
+            setTimeout(() => attemptFit(attempts + 1), 100);
+        }
+    };
+
     useEffect(() => {
         if (!terminalRef.current) return;
 
         // Reset user scroll state when task changes (new terminal instance)
         userHasScrolledRef.current = false;
+
+        // CRITICAL: Clear any existing terminal content from the DOM container
+        // This prevents visual artifacts when switching between tasks
+        // The container may have leftover canvas/elements from a previous terminal instance
+        // that wasn't properly cleaned up due to React's async nature
+        while (terminalRef.current.firstChild) {
+            terminalRef.current.removeChild(terminalRef.current.firstChild);
+        }
 
         // Create terminal instance
         const term = new Terminal({
@@ -149,39 +202,21 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
         xtermRef.current = term;
         fitAddonRef.current = fitAddon;
 
-        // Helper to safely fit terminal (with debouncing for resize events)
-        const fitTerminal = () => {
-            if (!fitAddonRef.current || !terminalRef.current || !xtermRef.current) return;
+        // CRITICAL: Fully reset the terminal state after opening
+        // This clears any potential garbage data from previous instances
+        // Based on xterm.js best practices for switching between terminal instances:
+        // 1. reset() - reset modes, cursor, etc.
+        // 2. clear() - clear buffer + scrollback
+        // 3. clearTextureAtlas() - force full redraw of glyphs (canvas renderer)
+        // 4. refresh() - ensure full repaint
+        term.reset();
+        term.clear();
+        term.clearTextureAtlas();
+        term.refresh(0, term.rows - 1);
 
-            // Check if container has valid dimensions
-            if (terminalRef.current.clientWidth === 0 || terminalRef.current.clientHeight === 0) {
-                return;
-            }
-
-            try {
-                fitAddonRef.current.fit();
-                // Force a full refresh to fix any rendering artifacts
-                const rows = xtermRef.current.rows;
-                xtermRef.current.refresh(0, rows - 1);
-            } catch (err) {
-                console.warn('Failed to fit terminal:', err);
-            }
-        };
-
-        // Debounced version for resize events (prevents excessive calls during drag resize)
-        const debouncedFitTerminal = () => {
-            if (resizeDebounceRef.current) {
-                window.clearTimeout(resizeDebounceRef.current);
-            }
-            resizeDebounceRef.current = window.setTimeout(() => {
-                fitTerminal();
-                resizeDebounceRef.current = null;
-            }, 100); // 100ms debounce
-        };
-
-        // Initial fit with a small delay to ensure container has dimensions
+        // Start initial fit sequence
         requestAnimationFrame(() => {
-            fitTerminal();
+            attemptFit();
             // check if terminal is still valid before focusing
             if (xtermRef.current) {
                 xtermRef.current.focus();
@@ -191,18 +226,21 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
         // Use ResizeObserver to detect container size changes (more reliable than window resize)
         // Use debounced version to prevent excessive calls during drag resize
         const resizeObserver = new ResizeObserver(() => {
+            // Immediate fit on resize to prevent visual lag
+            fitTerminal();
+            // And debounce for final polish
             debouncedFitTerminal();
         });
         resizeObserver.observe(terminalRef.current);
 
         // Also handle window resize as fallback
         const handleResize = () => {
+            fitTerminal();
             debouncedFitTerminal();
         };
         window.addEventListener('resize', handleResize);
 
         // Track output for scroll-on-settle behavior
-        let lastOutputTime = 0;
         let scrollSettleTimeout: number | null = null;
         let refreshTimeout: number | null = null;
         let isRestoringHistory = false;
@@ -266,7 +304,6 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
                     const { taskId, data } = message.payload;
                     if (taskId === task.id) {
                         term.write(data);
-                        lastOutputTime = Date.now();
                         // Schedule a refresh to fix any rendering artifacts
                         scheduleRefresh();
                         // After history restore, keep scrolling to bottom as output arrives
@@ -285,10 +322,24 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
                         hasReceivedRestore = true;
                         console.log(`[TerminalView] Received task:restore for ${taskId}, history length: ${history.length}`);
                         isRestoringHistory = true;
-                        // Fully reset terminal before restoring history to prevent duplication
-                        // Using escape sequences is more reliable than term.clear()
-                        // \x1b[2J = clear entire screen, \x1b[3J = clear scrollback, \x1b[H = move cursor home
-                        term.write('\x1b[2J\x1b[3J\x1b[H');
+
+                        // CRITICAL FIX: Fit terminal BEFORE writing history.
+                        // This ensures the rows/cols are correct for the container size before
+                        // we dump massive amounts of text. If we don't do this, xterm might
+                        // wrap text based on default dimensions (80x24) and then try to reflow
+                        // later, which causes the "messy/duplicated text" issues.
+                        fitTerminal();
+
+                        // Fully reset terminal before restoring history to prevent visual artifacts
+                        // Based on xterm.js best practices:
+                        // 1. reset() - reset modes, cursor, etc.
+                        // 2. clear() - clear buffer + scrollback
+                        // 3. clearTextureAtlas() - force full redraw of glyphs (canvas renderer)
+                        // 4. refresh() - ensure full repaint
+                        term.reset();
+                        term.clear();
+                        term.clearTextureAtlas();
+                        term.refresh(0, term.rows - 1);
                         // Write history - it goes into scrollback buffer
                         // Claude's TUI will redraw the screen but history remains scrollable
                         term.write(history, () => {
@@ -363,6 +414,7 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
 
         // Cleanup
         return () => {
+            console.log(`[TerminalView] Cleaning up terminal for task ${task.id}`);
             // Clear scroll timeouts
             scrollTimeouts.forEach(t => clearTimeout(t));
             if (scrollSettleTimeout) {
@@ -381,6 +433,12 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
                 window.clearTimeout(resizeDebounceRef.current);
                 resizeDebounceRef.current = null;
             }
+            // Clear terminal before disposal to prevent visual artifacts
+            // when a new terminal is created for a different task
+            // Use the full reset sequence before dispose
+            term.reset();
+            term.clear();
+            term.clearTextureAtlas();
             term.dispose();
             xtermRef.current = null;
             fitAddonRef.current = null;
@@ -388,26 +446,13 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
     }, [task.id, wsRef]);
 
     // Refit on task ID change (when switching between tasks)
+    // Refit on task ID change (when switching between tasks)
     useEffect(() => {
-        if (fitAddonRef.current && terminalRef.current && xtermRef.current) {
-            // Check if container has valid dimensions
-            if (terminalRef.current.clientWidth > 0 && terminalRef.current.clientHeight > 0) {
-                // Use a small timeout to let layout settle after task switch
-                const timeoutId = setTimeout(() => {
-                    try {
-                        fitAddonRef.current?.fit();
-                        // Force refresh to fix any rendering artifacts after task switch
-                        if (xtermRef.current) {
-                            const rows = xtermRef.current.rows;
-                            xtermRef.current.refresh(0, rows - 1);
-                        }
-                    } catch (e) {
-                        // Ignore fit errors during task switch
-                    }
-                }, 0);
-                return () => clearTimeout(timeoutId);
-            }
-        }
+        // Use a small timeout to let layout settle after task switch
+        const timeoutId = setTimeout(() => {
+            fitTerminal();
+        }, 0);
+        return () => clearTimeout(timeoutId);
     }, [task.id]);
 
     // Handle Resume button click - sends task:reconnect message to spawn new Claude process
@@ -458,6 +503,35 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
                         Resume
                     </button>
                 )}
+                <button
+                    className="debug-fit-button"
+                    onClick={() => {
+                        alert(`Debug Fit: Current size ${xtermRef.current?.cols}x${xtermRef.current?.rows}`);
+                        console.log('[TerminalView] Manual fit requested');
+                        fitTerminal();
+                        if (xtermRef.current) {
+                            console.log(`[TerminalView] Post-fit Dimensions: ${xtermRef.current.cols}x${xtermRef.current.rows}`);
+                            // Force send resize to backend to see if it responds
+                            if (wsRef.current?.readyState === WebSocket.OPEN) {
+                                console.log('[TerminalView] Sending forced resize to backend');
+                                wsRef.current.send(JSON.stringify({
+                                    type: 'task:resize',
+                                    payload: {
+                                        taskId: task.id,
+                                        cols: xtermRef.current.cols,
+                                        rows: xtermRef.current.rows
+                                    }
+                                }));
+                            } else {
+                                alert('WebSocket not open!');
+                            }
+                        }
+                    }}
+                    style={{ marginLeft: '8px', padding: '2px 6px', fontSize: '10px', background: '#e5a00d', border: '1px solid #555', color: '#000', cursor: 'pointer', fontWeight: 'bold' }}
+                    title="Debug: Force terminal fit and sync to backend"
+                >
+                    Debug Fit (Alert)
+                </button>
                 <span className={`terminal-state ${task.state}`}>{stateLabel}</span>
             </div>
             <div ref={terminalRef} className="terminal-container" />

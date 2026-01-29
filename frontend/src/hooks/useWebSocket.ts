@@ -2,7 +2,6 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { WSMessage, WSErrorPayload, Task, Workspace, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
 import { getWebSocketUrl, getApiBaseUrl } from '../config/api-config';
-import { sendTaskCompletionNotification } from '../utils/browserCapabilities';
 
 const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
@@ -361,8 +360,8 @@ export function useWebSocket() {
     }, []);
 
     // Task actions
-    const createTask = useCallback((prompt: string, workspaceId: string) => {
-        sendMessage('task:create', { prompt, workspaceId });
+    const createTask = useCallback((prompt: string, workspaceId: string, initialCols?: number, initialRows?: number) => {
+        sendMessage('task:create', { prompt, workspaceId, initialCols, initialRows });
     }, [sendMessage]);
 
     const selectTaskOnServer = useCallback((taskId: string) => {

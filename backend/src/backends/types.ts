@@ -3,10 +3,11 @@
  * Supports Claude Code (PTY-based) and OpenCode (HTTP API-based)
  */
 
-import { TaskState, WaitingInputType, TaskGitState } from '@claudia/shared';
+import type { TaskState, WaitingInputType, TaskGitState, BackendType } from '@claudia/shared';
 import { EventEmitter } from 'events';
 
-export type BackendType = 'claude-code' | 'opencode';
+// Re-export BackendType from shared
+export type { BackendType };
 
 /**
  * Configuration for creating a new task
