@@ -68,7 +68,7 @@ function CollapsiblePanel({ title, icon, isExpanded, onToggle, children }: Colla
 }
 
 export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProps) {
-    const { showSystemStats, setShowSystemStats } = useTaskStore();
+    const { showSystemStats, setShowSystemStats, workspaces } = useTaskStore();
     const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
         sound: false,
         behavior: false,
@@ -94,8 +94,10 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
 
     // JSON editor state
     const [mcpViewMode, setMcpViewMode] = useState<'list' | 'json'>('list');
-    const [claudeConfigJson, setClaudeConfigJson] = useState('');
+    const [globalMcpJson, setGlobalMcpJson] = useState('');
+    const [projectMcpJson, setProjectMcpJson] = useState('');
     const [claudeConfigPath, setClaudeConfigPath] = useState('');
+    const [matchedProjectPath, setMatchedProjectPath] = useState<string | null>(null);
     const [jsonEditorSaved, setJsonEditorSaved] = useState(true);
     const [jsonEditorError, setJsonEditorError] = useState<string | null>(null);
     const [skipPermissions, setSkipPermissions] = useState(false);
@@ -217,17 +219,21 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
 
     const fetchClaudeConfig = async () => {
         try {
-            const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`);
+            // Use first workspace path if available
+            const workspacePath = workspaces.length > 0 ? workspaces[0].id : '';
+            const url = workspacePath
+                ? `${getApiBaseUrl()}/api/claude-config/mcp-servers?workspace=${encodeURIComponent(workspacePath)}`
+                : `${getApiBaseUrl()}/api/claude-config/mcp-servers`;
+
+            const response = await fetch(url);
             if (response.ok) {
                 const data = await response.json();
-                // Pretty-print the JSON for editing
-                try {
-                    const parsed = JSON.parse(data.content);
-                    setClaudeConfigJson(JSON.stringify(parsed, null, 2));
-                } catch {
-                    setClaudeConfigJson(data.content);
-                }
+                // Set global MCP servers
+                setGlobalMcpJson(data.global || '{}');
+                // Set project MCP servers
+                setProjectMcpJson(data.project || '{}');
                 setClaudeConfigPath(data.path);
+                setMatchedProjectPath(data.projectPath);
                 setJsonEditorSaved(true);
                 setJsonEditorError(null);
             }
@@ -238,24 +244,40 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     };
 
     const saveClaudeConfig = async () => {
+        // Validate both JSON configs before saving
         try {
-            // Validate JSON before saving
-            const parsed = JSON.parse(claudeConfigJson);
-            if (typeof parsed !== 'object' || Array.isArray(parsed)) {
-                setJsonEditorError('mcpServers must be an object');
+            const globalParsed = JSON.parse(globalMcpJson);
+            if (typeof globalParsed !== 'object' || Array.isArray(globalParsed)) {
+                setJsonEditorError('Global mcpServers must be an object');
                 return;
             }
-            setJsonEditorError(null);
         } catch (e) {
-            setJsonEditorError(`Invalid JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
+            setJsonEditorError(`Invalid global JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
             return;
         }
+
+        try {
+            const projectParsed = JSON.parse(projectMcpJson);
+            if (typeof projectParsed !== 'object' || Array.isArray(projectParsed)) {
+                setJsonEditorError('Project mcpServers must be an object');
+                return;
+            }
+        } catch (e) {
+            setJsonEditorError(`Invalid project JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
+            return;
+        }
+
+        setJsonEditorError(null);
 
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: claudeConfigJson })
+                body: JSON.stringify({
+                    global: globalMcpJson,
+                    project: projectMcpJson,
+                    projectPath: matchedProjectPath
+                })
             });
             if (response.ok) {
                 setJsonEditorSaved(true);
@@ -270,19 +292,35 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     };
 
-    const handleJsonChange = (value: string) => {
-        setClaudeConfigJson(value);
+    const handleGlobalJsonChange = (value: string) => {
+        setGlobalMcpJson(value);
         setJsonEditorSaved(false);
         // Validate JSON as user types
         try {
             const parsed = JSON.parse(value);
             if (typeof parsed !== 'object' || Array.isArray(parsed)) {
-                setJsonEditorError('mcpServers must be an object');
+                setJsonEditorError('Global mcpServers must be an object');
             } else {
                 setJsonEditorError(null);
             }
         } catch (e) {
-            setJsonEditorError(`Invalid JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
+            setJsonEditorError(`Invalid global JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
+        }
+    };
+
+    const handleProjectJsonChange = (value: string) => {
+        setProjectMcpJson(value);
+        setJsonEditorSaved(false);
+        // Validate JSON as user types
+        try {
+            const parsed = JSON.parse(value);
+            if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+                setJsonEditorError('Project mcpServers must be an object');
+            } else {
+                setJsonEditorError(null);
+            }
+        } catch (e) {
+            setJsonEditorError(`Invalid project JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
         }
     };
 
@@ -993,15 +1031,39 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 /* JSON Editor View */
                                 <div className="mcp-json-editor">
                                     <p className="mcp-json-path">
-                                        Editing <code>mcpServers</code> in <code>{claudeConfigPath || '~/.claude.json'}</code>
+                                        Editing MCP servers in <code>{claudeConfigPath || '~/.claude.json'}</code>
                                     </p>
-                                    <textarea
-                                        className={`mcp-json-textarea ${jsonEditorError ? 'error' : ''}`}
-                                        value={claudeConfigJson}
-                                        onChange={(e) => handleJsonChange(e.target.value)}
-                                        placeholder="Loading..."
-                                        spellCheck={false}
-                                    />
+
+                                    {/* Global MCP Servers */}
+                                    <div className="mcp-json-section">
+                                        <label className="mcp-json-label">Global MCP Servers</label>
+                                        <textarea
+                                            className={`mcp-json-textarea ${jsonEditorError?.includes('global') ? 'error' : ''}`}
+                                            value={globalMcpJson}
+                                            onChange={(e) => handleGlobalJsonChange(e.target.value)}
+                                            placeholder="Loading..."
+                                            spellCheck={false}
+                                        />
+                                    </div>
+
+                                    {/* Project MCP Servers */}
+                                    <div className="mcp-json-section">
+                                        <label className="mcp-json-label">
+                                            Project MCP Servers
+                                            {matchedProjectPath && (
+                                                <span className="mcp-project-path"> ({matchedProjectPath})</span>
+                                            )}
+                                        </label>
+                                        <textarea
+                                            className={`mcp-json-textarea ${jsonEditorError?.includes('project') ? 'error' : ''}`}
+                                            value={projectMcpJson}
+                                            onChange={(e) => handleProjectJsonChange(e.target.value)}
+                                            placeholder={matchedProjectPath ? 'Loading...' : 'No project selected'}
+                                            spellCheck={false}
+                                            disabled={!matchedProjectPath}
+                                        />
+                                    </div>
+
                                     {jsonEditorError && (
                                         <div className="mcp-json-error">
                                             <AlertCircle size={14} />

@@ -1142,9 +1142,27 @@
     color: var(--text-secondary);
 }
 
+.mcp-json-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.mcp-json-label {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.mcp-project-path {
+    font-weight: 400;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+}
+
 .mcp-json-textarea {
     width: 100%;
-    min-height: 300px;
+    min-height: 150px;
     padding: 12px;
     border: 1px solid var(--border-color);
     border-radius: 8px;

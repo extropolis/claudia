@@ -1,6 +1,6 @@
 import { spawn, IPty } from 'node-pty';
 import { EventEmitter } from 'events';
-import { Task, TaskState, TaskGitState, WaitingInputType, BackendType } from '@claudia/shared';
+import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS } from '@claudia/shared';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
@@ -952,7 +952,7 @@ export class TaskSpawner extends EventEmitter {
             } else {
                 // Claude Code uses the embedded proxy server
                 // The proxy is mounted at the backend's root, so we use the backend URL
-                const backendPort = process.env.PORT || '3001';
+                const backendPort = process.env.PORT || PORTS.BACKEND;
                 taskEnv['ANTHROPIC_BASE_URL'] = `http://localhost:${backendPort}`;
                 console.log(`[TaskSpawner] Using SAP AI Core proxy at localhost:${backendPort}`);
             }
@@ -1426,11 +1426,20 @@ export class TaskSpawner extends EventEmitter {
             logger.info(`Using custom system prompt`);
         }
 
+        // Explicitly allow MCP tools to avoid deferred loading issues
+        // This ensures MCP tools are available immediately rather than being gated by experiments
+        claudeArgs.push('--allowedTools', 'mcp__playwright,mcp__ddg_search,mcp__filesystem');
+
         logger.info(`Creating task with Claude Code`, { taskId: id, workspaceId, cols: initialCols, rows: initialRows });
         logger.debug(`Command args`, { args: claudeArgs });
 
         // Get environment with API mode settings
         const taskEnv = this.getTaskEnvironment();
+        logger.info('Task environment', {
+            ANTHROPIC_BASE_URL: taskEnv['ANTHROPIC_BASE_URL'],
+            HOME: taskEnv['HOME'],
+            apiMode: this.configStore?.getApiMode()
+        });
 
         const ptyProcess = spawn('claude', claudeArgs, {
             name: 'xterm-256color',
@@ -2340,6 +2349,9 @@ export class TaskSpawner extends EventEmitter {
             if (this.configStore?.getSkipPermissions()) {
                 claudeArgs.push('--dangerously-skip-permissions');
             }
+
+            // Explicitly allow MCP tools to avoid deferred loading issues
+            claudeArgs.push('--allowedTools', 'mcp__playwright,mcp__ddg_search,mcp__filesystem');
 
             if (sessionIdToUse) {
                 claudeArgs.push('--resume', sessionIdToUse);
