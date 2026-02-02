@@ -427,8 +427,11 @@ function WorkspaceSection({
     }, []);
 
     // Append voice transcript to input when this input is focused
+    // We use a ref to track processed transcripts to prevent duplicate appending
+    const lastProcessedTranscriptRef = useRef<string>('');
     useEffect(() => {
-        if (isFocused && voiceTranscript) {
+        if (isFocused && voiceTranscript && voiceTranscript !== lastProcessedTranscriptRef.current) {
+            lastProcessedTranscriptRef.current = voiceTranscript;
             setInputValue(prev => (prev ? prev + ' ' : '') + voiceTranscript);
             consumeVoiceTranscript();
         }

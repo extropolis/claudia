@@ -67,13 +67,18 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
     }, [task.id]);
 
     // Append voice transcript to message when this input is focused
+    // We use a ref to track processed transcripts to prevent duplicate appending
+    const lastProcessedTranscriptRef = useRef<string>('');
     useEffect(() => {
-        if (isFocused && voiceTranscript) {
-            setMessage(message ? message + ' ' + voiceTranscript : voiceTranscript);
+        if (isFocused && voiceTranscript && voiceTranscript !== lastProcessedTranscriptRef.current) {
+            lastProcessedTranscriptRef.current = voiceTranscript;
+            // Get current message from store to avoid stale closure
+            const currentMessage = getTaskDraftInput(task.id);
+            setMessage(currentMessage ? currentMessage + ' ' + voiceTranscript : voiceTranscript);
             // Clear the transcript after consuming
             consumeVoiceTranscript();
         }
-    }, [isFocused, voiceTranscript, consumeVoiceTranscript, message, setMessage]);
+    }, [isFocused, voiceTranscript, consumeVoiceTranscript, setMessage, getTaskDraftInput, task.id]);
 
     // Upload image to server
     const uploadImage = async (file: File): Promise<UploadedImage | null> => {

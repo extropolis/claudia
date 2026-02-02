@@ -19,7 +19,6 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
-    const resizeDebounceRef = useRef<number | null>(null);
     const userHasScrolledRef = useRef(false); // Track if user manually scrolled up
     const [copied, setCopied] = useState(false);
     const [showLearnModal, setShowLearnModal] = useState(false);
@@ -96,16 +95,6 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
         } catch (err) {
             console.warn('Failed to fit terminal:', err);
         }
-    };
-
-    const debouncedFitTerminal = () => {
-        if (resizeDebounceRef.current) {
-            window.clearTimeout(resizeDebounceRef.current);
-        }
-        resizeDebounceRef.current = window.setTimeout(() => {
-            fitTerminal();
-            resizeDebounceRef.current = null;
-        }, 100); // 100ms debounce
     };
 
     // Initial fit sequence - try multiple times to ensure we catch layout updates

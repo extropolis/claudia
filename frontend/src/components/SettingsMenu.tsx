@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Power, PowerOff, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
 import { useTaskStore } from '../stores/taskStore';
@@ -11,12 +11,12 @@ interface SettingsMenuProps {
     initialPanel?: string;
 }
 
-interface MCPServer {
+interface MCPServerListItem {
     name: string;
-    command: string;
+    type?: 'stdio' | 'streamableHttp';
+    command?: string;
     args?: string[];
-    env?: Record<string, string>;
-    enabled: boolean;
+    url?: string;
 }
 
 interface AICoreCredentials {
@@ -68,7 +68,7 @@ function CollapsiblePanel({ title, icon, isExpanded, onToggle, children }: Colla
 }
 
 export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProps) {
-    const { showSystemStats, setShowSystemStats, workspaces } = useTaskStore();
+    const { showSystemStats, setShowSystemStats } = useTaskStore();
     const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
         sound: false,
         behavior: false,
@@ -88,16 +88,13 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     }, [isOpen, initialPanel]);
 
-    const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
     const [isAddingServer, setIsAddingServer] = useState(false);
-    const [newServer, setNewServer] = useState({ name: '', command: '', args: '' });
+    const [newServer, setNewServer] = useState({ name: '', type: 'stdio' as 'stdio' | 'streamableHttp', command: '', args: '', url: '' });
 
     // JSON editor state
     const [mcpViewMode, setMcpViewMode] = useState<'list' | 'json'>('list');
-    const [globalMcpJson, setGlobalMcpJson] = useState('');
-    const [projectMcpJson, setProjectMcpJson] = useState('');
+    const [mcpJson, setMcpJson] = useState('');
     const [claudeConfigPath, setClaudeConfigPath] = useState('');
-    const [matchedProjectPath, setMatchedProjectPath] = useState<string | null>(null);
     const [jsonEditorSaved, setJsonEditorSaved] = useState(true);
     const [jsonEditorError, setJsonEditorError] = useState<string | null>(null);
     const [skipPermissions, setSkipPermissions] = useState(false);
@@ -151,19 +148,18 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     }, [expandedPanels.backend]);
 
-    // Fetch Claude config when switching to JSON view mode
+    // Fetch Claude config when MCP panel is expanded (needed for both list and JSON view)
     useEffect(() => {
-        if (mcpViewMode === 'json' && expandedPanels.mcp) {
+        if (expandedPanels.mcp) {
             fetchClaudeConfig();
         }
-    }, [mcpViewMode, expandedPanels.mcp]);
+    }, [expandedPanels.mcp]);
 
     const fetchConfig = async () => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`);
             if (response.ok) {
                 const config = await response.json();
-                setMcpServers(config.mcpServers || []);
                 setSkipPermissions(config.skipPermissions || false);
                 setRules(config.rules || '');
                 setRulesSaved(true);
@@ -202,38 +198,36 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     };
 
-    const saveMCPServers = async (servers: MCPServer[]) => {
+    // Compute MCP servers list from JSON state (for list view)
+    const mcpServersList: MCPServerListItem[] = useMemo(() => {
+        const servers: MCPServerListItem[] = [];
+
         try {
-            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mcpServers: servers })
-            });
-            if (response.ok) {
-                setMcpServers(servers);
+            const parsedServers = JSON.parse(mcpJson || '{}');
+            for (const [name, config] of Object.entries(parsedServers)) {
+                const serverConfig = config as { type?: 'stdio' | 'streamableHttp'; command?: string; args?: string[]; url?: string };
+                servers.push({
+                    name,
+                    type: serverConfig.type || 'stdio',
+                    command: serverConfig.command || '',
+                    args: serverConfig.args || [],
+                    url: serverConfig.url || ''
+                });
             }
-        } catch (error) {
-            console.error('Failed to save MCP servers:', error);
+        } catch {
+            // Invalid JSON, ignore
         }
-    };
+
+        return servers;
+    }, [mcpJson]);
 
     const fetchClaudeConfig = async () => {
         try {
-            // Use first workspace path if available
-            const workspacePath = workspaces.length > 0 ? workspaces[0].id : '';
-            const url = workspacePath
-                ? `${getApiBaseUrl()}/api/claude-config/mcp-servers?workspace=${encodeURIComponent(workspacePath)}`
-                : `${getApiBaseUrl()}/api/claude-config/mcp-servers`;
-
-            const response = await fetch(url);
+            const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`);
             if (response.ok) {
                 const data = await response.json();
-                // Set global MCP servers
-                setGlobalMcpJson(data.global || '{}');
-                // Set project MCP servers
-                setProjectMcpJson(data.project || '{}');
+                setMcpJson(data.mcpServers || '{}');
                 setClaudeConfigPath(data.path);
-                setMatchedProjectPath(data.projectPath);
                 setJsonEditorSaved(true);
                 setJsonEditorError(null);
             }
@@ -244,26 +238,15 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     };
 
     const saveClaudeConfig = async () => {
-        // Validate both JSON configs before saving
+        // Validate JSON config before saving
         try {
-            const globalParsed = JSON.parse(globalMcpJson);
-            if (typeof globalParsed !== 'object' || Array.isArray(globalParsed)) {
-                setJsonEditorError('Global mcpServers must be an object');
+            const parsed = JSON.parse(mcpJson);
+            if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+                setJsonEditorError('mcpServers must be an object');
                 return;
             }
         } catch (e) {
-            setJsonEditorError(`Invalid global JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
-            return;
-        }
-
-        try {
-            const projectParsed = JSON.parse(projectMcpJson);
-            if (typeof projectParsed !== 'object' || Array.isArray(projectParsed)) {
-                setJsonEditorError('Project mcpServers must be an object');
-                return;
-            }
-        } catch (e) {
-            setJsonEditorError(`Invalid project JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
+            setJsonEditorError(`Invalid JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
             return;
         }
 
@@ -273,11 +256,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    global: globalMcpJson,
-                    project: projectMcpJson,
-                    projectPath: matchedProjectPath
-                })
+                body: JSON.stringify({ mcpServers: mcpJson })
             });
             if (response.ok) {
                 setJsonEditorSaved(true);
@@ -292,35 +271,19 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     };
 
-    const handleGlobalJsonChange = (value: string) => {
-        setGlobalMcpJson(value);
+    const handleJsonChange = (value: string) => {
+        setMcpJson(value);
         setJsonEditorSaved(false);
         // Validate JSON as user types
         try {
             const parsed = JSON.parse(value);
             if (typeof parsed !== 'object' || Array.isArray(parsed)) {
-                setJsonEditorError('Global mcpServers must be an object');
+                setJsonEditorError('mcpServers must be an object');
             } else {
                 setJsonEditorError(null);
             }
         } catch (e) {
-            setJsonEditorError(`Invalid global JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
-        }
-    };
-
-    const handleProjectJsonChange = (value: string) => {
-        setProjectMcpJson(value);
-        setJsonEditorSaved(false);
-        // Validate JSON as user types
-        try {
-            const parsed = JSON.parse(value);
-            if (typeof parsed !== 'object' || Array.isArray(parsed)) {
-                setJsonEditorError('Project mcpServers must be an object');
-            } else {
-                setJsonEditorError(null);
-            }
-        } catch (e) {
-            setJsonEditorError(`Invalid project JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
+            setJsonEditorError(`Invalid JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
         }
     };
 
@@ -589,32 +552,77 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         setExpandedPanels(prev => ({ ...prev, [panel]: !prev[panel] }));
     };
 
-    const handleAddServer = () => {
-        if (!newServer.name || !newServer.command) return;
+    const handleAddServer = async () => {
+        // Validate based on server type
+        if (!newServer.name) return;
+        if (newServer.type === 'streamableHttp' && !newServer.url) return;
+        if (newServer.type === 'stdio' && !newServer.command) return;
 
-        const server: MCPServer = {
-            name: newServer.name,
-            command: newServer.command,
-            args: newServer.args ? newServer.args.split(' ').filter(a => a) : [],
-            enabled: true
-        };
+        try {
+            const servers = JSON.parse(mcpJson || '{}');
 
-        const updatedServers = [...mcpServers, server];
-        saveMCPServers(updatedServers);
-        setNewServer({ name: '', command: '', args: '' });
-        setIsAddingServer(false);
+            // Add the new server based on type
+            if (newServer.type === 'streamableHttp') {
+                servers[newServer.name] = {
+                    type: 'streamableHttp',
+                    url: newServer.url
+                };
+            } else {
+                servers[newServer.name] = {
+                    command: newServer.command,
+                    args: newServer.args ? newServer.args.split(' ').filter(a => a) : []
+                };
+            }
+
+            const newJson = JSON.stringify(servers, null, 2);
+            setMcpJson(newJson);
+
+            // Save immediately
+            const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mcpServers: newJson })
+            });
+
+            if (response.ok) {
+                setNewServer({ name: '', type: 'stdio', command: '', args: '', url: '' });
+                setIsAddingServer(false);
+                setJsonEditorSaved(true);
+            } else {
+                const error = await response.json();
+                setJsonEditorError(error.error || 'Failed to save');
+            }
+        } catch (error) {
+            console.error('Failed to add MCP server:', error);
+            setJsonEditorError('Failed to add MCP server');
+        }
     };
 
-    const handleRemoveServer = (index: number) => {
-        const updatedServers = mcpServers.filter((_, i) => i !== index);
-        saveMCPServers(updatedServers);
-    };
+    const handleRemoveServer = async (serverName: string) => {
+        try {
+            const servers = JSON.parse(mcpJson || '{}');
 
-    const handleToggleServer = (index: number) => {
-        const updatedServers = mcpServers.map((server, i) =>
-            i === index ? { ...server, enabled: !server.enabled } : server
-        );
-        saveMCPServers(updatedServers);
+            // Remove the server
+            delete servers[serverName];
+
+            const newJson = JSON.stringify(servers, null, 2);
+            setMcpJson(newJson);
+
+            // Save immediately
+            const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mcpServers: newJson })
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                setJsonEditorError(error.error || 'Failed to save');
+            }
+        } catch (error) {
+            console.error('Failed to remove MCP server:', error);
+            setJsonEditorError('Failed to remove MCP server');
+        }
     };
 
     if (!isOpen) return null;
@@ -1034,33 +1042,13 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                         Editing MCP servers in <code>{claudeConfigPath || '~/.claude.json'}</code>
                                     </p>
 
-                                    {/* Global MCP Servers */}
                                     <div className="mcp-json-section">
-                                        <label className="mcp-json-label">Global MCP Servers</label>
                                         <textarea
-                                            className={`mcp-json-textarea ${jsonEditorError?.includes('global') ? 'error' : ''}`}
-                                            value={globalMcpJson}
-                                            onChange={(e) => handleGlobalJsonChange(e.target.value)}
+                                            className={`mcp-json-textarea ${jsonEditorError ? 'error' : ''}`}
+                                            value={mcpJson}
+                                            onChange={(e) => handleJsonChange(e.target.value)}
                                             placeholder="Loading..."
                                             spellCheck={false}
-                                        />
-                                    </div>
-
-                                    {/* Project MCP Servers */}
-                                    <div className="mcp-json-section">
-                                        <label className="mcp-json-label">
-                                            Project MCP Servers
-                                            {matchedProjectPath && (
-                                                <span className="mcp-project-path"> ({matchedProjectPath})</span>
-                                            )}
-                                        </label>
-                                        <textarea
-                                            className={`mcp-json-textarea ${jsonEditorError?.includes('project') ? 'error' : ''}`}
-                                            value={projectMcpJson}
-                                            onChange={(e) => handleProjectJsonChange(e.target.value)}
-                                            placeholder={matchedProjectPath ? 'Loading...' : 'No project selected'}
-                                            spellCheck={false}
-                                            disabled={!matchedProjectPath}
                                         />
                                     </div>
 
@@ -1086,29 +1074,32 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                             ) : (
                                 /* List View */
                                 <>
-                                    {mcpServers.length === 0 ? (
+                                    <p className="mcp-json-path" style={{ marginBottom: '12px' }}>
+                                        MCP servers from <code>{claudeConfigPath || '~/.claude.json'}</code>
+                                    </p>
+                                    {mcpServersList.length === 0 ? (
                                         <p className="mcp-empty-state">No MCP servers configured</p>
                                     ) : (
                                         <div className="mcp-server-list">
-                                            {mcpServers.map((server, index) => (
-                                                <div key={index} className={`mcp-server-item ${!server.enabled ? 'disabled' : ''}`}>
+                                            {mcpServersList.map((server) => (
+                                                <div key={server.name} className="mcp-server-item">
                                                     <div className="mcp-server-info">
-                                                        <span className="mcp-server-name">{server.name}</span>
+                                                        <div className="mcp-server-name-row">
+                                                            <span className="mcp-server-name">{server.name}</span>
+                                                            <span className={`mcp-server-type ${server.type === 'streamableHttp' ? 'http' : 'stdio'}`}>
+                                                                {server.type === 'streamableHttp' ? 'HTTP' : 'stdio'}
+                                                            </span>
+                                                        </div>
                                                         <span className="mcp-server-command">
-                                                            {server.command} {server.args?.join(' ')}
+                                                            {server.type === 'streamableHttp'
+                                                                ? server.url
+                                                                : `${server.command} ${server.args?.join(' ')}`}
                                                         </span>
                                                     </div>
                                                     <div className="mcp-server-actions">
                                                         <button
-                                                            className={`mcp-toggle-btn ${server.enabled ? 'enabled' : ''}`}
-                                                            onClick={() => handleToggleServer(index)}
-                                                            title={server.enabled ? 'Disable' : 'Enable'}
-                                                        >
-                                                            {server.enabled ? <Power size={16} /> : <PowerOff size={16} />}
-                                                        </button>
-                                                        <button
                                                             className="mcp-delete-btn"
-                                                            onClick={() => handleRemoveServer(index)}
+                                                            onClick={() => handleRemoveServer(server.name)}
                                                             title="Remove"
                                                         >
                                                             <Trash2 size={16} />
@@ -1128,26 +1119,60 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                                 onChange={(e) => setNewServer(prev => ({ ...prev, name: e.target.value }))}
                                                 className="mcp-input"
                                             />
-                                            <input
-                                                type="text"
-                                                placeholder="Command (e.g., npx)"
-                                                value={newServer.command}
-                                                onChange={(e) => setNewServer(prev => ({ ...prev, command: e.target.value }))}
-                                                className="mcp-input"
-                                            />
-                                            <input
-                                                type="text"
-                                                placeholder="Arguments (space-separated)"
-                                                value={newServer.args}
-                                                onChange={(e) => setNewServer(prev => ({ ...prev, args: e.target.value }))}
-                                                className="mcp-input"
-                                            />
+                                            <div className="mcp-type-selector">
+                                                <label className={`mcp-type-option ${newServer.type === 'stdio' ? 'selected' : ''}`}>
+                                                    <input
+                                                        type="radio"
+                                                        name="serverType"
+                                                        value="stdio"
+                                                        checked={newServer.type === 'stdio'}
+                                                        onChange={() => setNewServer(prev => ({ ...prev, type: 'stdio' }))}
+                                                    />
+                                                    <span>stdio (command)</span>
+                                                </label>
+                                                <label className={`mcp-type-option ${newServer.type === 'streamableHttp' ? 'selected' : ''}`}>
+                                                    <input
+                                                        type="radio"
+                                                        name="serverType"
+                                                        value="streamableHttp"
+                                                        checked={newServer.type === 'streamableHttp'}
+                                                        onChange={() => setNewServer(prev => ({ ...prev, type: 'streamableHttp' }))}
+                                                    />
+                                                    <span>HTTP (URL)</span>
+                                                </label>
+                                            </div>
+                                            {newServer.type === 'stdio' ? (
+                                                <>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Command (e.g., npx)"
+                                                        value={newServer.command}
+                                                        onChange={(e) => setNewServer(prev => ({ ...prev, command: e.target.value }))}
+                                                        className="mcp-input"
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Arguments (space-separated)"
+                                                        value={newServer.args}
+                                                        onChange={(e) => setNewServer(prev => ({ ...prev, args: e.target.value }))}
+                                                        className="mcp-input"
+                                                    />
+                                                </>
+                                            ) : (
+                                                <input
+                                                    type="text"
+                                                    placeholder="URL (e.g., http://localhost:8080/mcp)"
+                                                    value={newServer.url}
+                                                    onChange={(e) => setNewServer(prev => ({ ...prev, url: e.target.value }))}
+                                                    className="mcp-input"
+                                                />
+                                            )}
                                             <div className="mcp-add-form-actions">
                                                 <button
                                                     className="mcp-cancel-btn"
                                                     onClick={() => {
                                                         setIsAddingServer(false);
-                                                        setNewServer({ name: '', command: '', args: '' });
+                                                        setNewServer({ name: '', type: 'stdio', command: '', args: '', url: '' });
                                                     }}
                                                 >
                                                     Cancel
@@ -1155,7 +1180,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                                 <button
                                                     className="mcp-save-btn"
                                                     onClick={handleAddServer}
-                                                    disabled={!newServer.name || !newServer.command}
+                                                    disabled={!newServer.name || (newServer.type === 'stdio' ? !newServer.command : !newServer.url)}
                                                 >
                                                     Add Server
                                                 </button>
@@ -1169,6 +1194,12 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                             <Plus size={16} />
                                             Add MCP Server
                                         </button>
+                                    )}
+                                    {jsonEditorError && (
+                                        <div className="mcp-json-error" style={{ marginTop: '12px' }}>
+                                            <AlertCircle size={14} />
+                                            <span>{jsonEditorError}</span>
+                                        </div>
                                     )}
                                 </>
                             )}

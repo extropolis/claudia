@@ -1193,19 +1193,14 @@ export function createApp(basePath?: string) {
     });
 
     // Get mcpServers section from ~/.claude.json for direct editing
-    // Returns both global and project-specific MCP servers
     app.get('/api/claude-config/mcp-servers', (req, res) => {
         try {
             const homeDir = process.env.HOME || process.env.USERPROFILE || '';
             const claudeConfigPath = join(homeDir, '.claude.json');
-            const workspacePath = req.query.workspace as string;
 
             if (!existsSync(claudeConfigPath)) {
-                // Return empty mcpServers if file doesn't exist
                 return res.json({
-                    global: JSON.stringify({}, null, 2),
-                    project: JSON.stringify({}, null, 2),
-                    projectPath: null,
+                    mcpServers: JSON.stringify({}, null, 2),
                     path: claudeConfigPath,
                     exists: false
                 });
@@ -1214,30 +1209,10 @@ export function createApp(basePath?: string) {
             const fileContent = readFileSync(claudeConfigPath, 'utf-8');
             const config = JSON.parse(fileContent) as {
                 mcpServers?: Record<string, unknown>;
-                projects?: Record<string, { mcpServers?: Record<string, unknown> }>;
             };
-            const globalMcpServers = config.mcpServers || {};
-
-            // Find project-specific MCP servers if workspace is provided
-            let projectMcpServers: Record<string, unknown> = {};
-            let matchedProjectPath: string | null = null;
-
-            if (workspacePath && config.projects) {
-                // Find exact match or parent path match
-                for (const [projectPath, projectConfig] of Object.entries(config.projects)) {
-                    if (projectPath === workspacePath || workspacePath.startsWith(projectPath + '/')) {
-                        if (!matchedProjectPath || projectPath.length > matchedProjectPath.length) {
-                            matchedProjectPath = projectPath;
-                            projectMcpServers = projectConfig.mcpServers || {};
-                        }
-                    }
-                }
-            }
 
             res.json({
-                global: JSON.stringify(globalMcpServers, null, 2),
-                project: JSON.stringify(projectMcpServers, null, 2),
-                projectPath: matchedProjectPath,
+                mcpServers: JSON.stringify(config.mcpServers || {}, null, 2),
                 path: claudeConfigPath,
                 exists: true
             });
@@ -1248,47 +1223,25 @@ export function createApp(basePath?: string) {
     });
 
     // Update mcpServers section in ~/.claude.json
-    // Supports both global and project-specific MCP servers
     app.put('/api/claude-config/mcp-servers', (req, res) => {
         try {
-            const { global: globalContent, project: projectContent, projectPath } = req.body;
+            const { mcpServers: mcpServersContent } = req.body;
 
-            // Validate global content if provided
-            let globalMcpServers: Record<string, unknown> | undefined;
-            if (globalContent !== undefined) {
-                if (typeof globalContent !== 'string') {
-                    return res.status(400).json({ error: 'Global content must be a string' });
-                }
-                try {
-                    globalMcpServers = JSON.parse(globalContent);
-                    if (typeof globalMcpServers !== 'object' || Array.isArray(globalMcpServers)) {
-                        return res.status(400).json({ error: 'Global mcpServers must be an object' });
-                    }
-                } catch (parseError) {
-                    return res.status(400).json({
-                        error: 'Invalid JSON syntax in global config',
-                        details: parseError instanceof Error ? parseError.message : 'Parse error'
-                    });
-                }
+            if (typeof mcpServersContent !== 'string') {
+                return res.status(400).json({ error: 'mcpServers must be a string' });
             }
 
-            // Validate project content if provided
-            let projectMcpServers: Record<string, unknown> | undefined;
-            if (projectContent !== undefined && projectPath) {
-                if (typeof projectContent !== 'string') {
-                    return res.status(400).json({ error: 'Project content must be a string' });
+            let mcpServers: Record<string, unknown>;
+            try {
+                mcpServers = JSON.parse(mcpServersContent);
+                if (typeof mcpServers !== 'object' || Array.isArray(mcpServers)) {
+                    return res.status(400).json({ error: 'mcpServers must be an object' });
                 }
-                try {
-                    projectMcpServers = JSON.parse(projectContent);
-                    if (typeof projectMcpServers !== 'object' || Array.isArray(projectMcpServers)) {
-                        return res.status(400).json({ error: 'Project mcpServers must be an object' });
-                    }
-                } catch (parseError) {
-                    return res.status(400).json({
-                        error: 'Invalid JSON syntax in project config',
-                        details: parseError instanceof Error ? parseError.message : 'Parse error'
-                    });
-                }
+            } catch (parseError) {
+                return res.status(400).json({
+                    error: 'Invalid JSON syntax',
+                    details: parseError instanceof Error ? parseError.message : 'Parse error'
+                });
             }
 
             const homeDir = process.env.HOME || process.env.USERPROFILE || '';
@@ -1297,7 +1250,6 @@ export function createApp(basePath?: string) {
             // Read existing config or create new one
             interface ClaudeConfig {
                 mcpServers?: Record<string, unknown>;
-                projects?: Record<string, { mcpServers?: Record<string, unknown>; [key: string]: unknown }>;
                 [key: string]: unknown;
             }
             let config: ClaudeConfig = {};
@@ -1306,23 +1258,8 @@ export function createApp(basePath?: string) {
                 config = JSON.parse(fileContent);
             }
 
-            // Update global mcpServers if provided
-            if (globalMcpServers !== undefined) {
-                config.mcpServers = globalMcpServers;
-                console.log('[Server] Updated global MCP servers');
-            }
-
-            // Update project-specific mcpServers if provided
-            if (projectMcpServers !== undefined && projectPath) {
-                if (!config.projects) {
-                    config.projects = {};
-                }
-                if (!config.projects[projectPath]) {
-                    config.projects[projectPath] = {};
-                }
-                config.projects[projectPath].mcpServers = projectMcpServers;
-                console.log('[Server] Updated project MCP servers for:', projectPath);
-            }
+            config.mcpServers = mcpServers;
+            console.log('[Server] Updated MCP servers');
 
             writeFileSync(claudeConfigPath, JSON.stringify(config, null, 2), 'utf-8');
             console.log('[Server] Saved Claude config:', claudeConfigPath);

@@ -19,10 +19,15 @@ export interface ValidationResult<T> {
  */
 interface MCPServerConfig {
     name: string;
-    command: string;
+    type?: 'stdio' | 'streamableHttp';  // Default: 'stdio'
+    command?: string;  // Required for stdio, not for streamableHttp
     args?: string[];
     env?: Record<string, string>;
+    url?: string;  // Required for streamableHttp
     enabled: boolean;
+    timeout?: number;
+    autoApprove?: string[];
+    description?: string;
 }
 
 /**
@@ -84,11 +89,51 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
             if (typeof server.name !== 'string' || !server.name) {
                 return { valid: false, error: `mcpServers[${i}].name is required` };
             }
-            if (typeof server.command !== 'string' || !server.command) {
-                return { valid: false, error: `mcpServers[${i}].command is required` };
+
+            // Validate type if provided
+            const serverType = server.type as string | undefined;
+            if (serverType !== undefined && serverType !== 'stdio' && serverType !== 'streamableHttp') {
+                return { valid: false, error: `mcpServers[${i}].type must be 'stdio' or 'streamableHttp'` };
             }
+
+            // Validate based on server type
+            if (serverType === 'streamableHttp') {
+                // HTTP servers require url, not command
+                if (typeof server.url !== 'string' || !server.url) {
+                    return { valid: false, error: `mcpServers[${i}].url is required for streamableHttp type` };
+                }
+                // Validate url is a valid URL
+                try {
+                    new URL(server.url);
+                } catch {
+                    return { valid: false, error: `mcpServers[${i}].url must be a valid URL` };
+                }
+            } else {
+                // stdio servers (default) require command
+                if (typeof server.command !== 'string' || !server.command) {
+                    return { valid: false, error: `mcpServers[${i}].command is required for stdio type` };
+                }
+            }
+
             if (server.enabled !== undefined && typeof server.enabled !== 'boolean') {
                 return { valid: false, error: `mcpServers[${i}].enabled must be a boolean` };
+            }
+
+            // Validate optional fields
+            if (server.timeout !== undefined) {
+                if (typeof server.timeout !== 'number' || server.timeout <= 0) {
+                    return { valid: false, error: `mcpServers[${i}].timeout must be a positive number` };
+                }
+            }
+
+            if (server.autoApprove !== undefined) {
+                if (!Array.isArray(server.autoApprove) || !server.autoApprove.every(item => typeof item === 'string')) {
+                    return { valid: false, error: `mcpServers[${i}].autoApprove must be an array of strings` };
+                }
+            }
+
+            if (server.description !== undefined && typeof server.description !== 'string') {
+                return { valid: false, error: `mcpServers[${i}].description must be a string` };
             }
         }
         result.mcpServers = payload.mcpServers as MCPServerConfig[];
