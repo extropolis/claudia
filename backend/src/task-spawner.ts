@@ -1403,6 +1403,7 @@ export class TaskSpawner extends EventEmitter {
         initialCols?: number,
         initialRows?: number
     ): Promise<Task> {
+        console.log(`[TaskSpawner] createTaskWithClaudeCode called with workspaceId: "${workspaceId}"`);
         const id = `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
         if (gitStateBefore) {
@@ -1426,11 +1427,124 @@ export class TaskSpawner extends EventEmitter {
             logger.info(`Using custom system prompt`);
         }
 
-        // Explicitly allow MCP tools to avoid deferred loading issues
-        // This ensures MCP tools are available immediately rather than being gated by experiments
-        claudeArgs.push('--allowedTools', 'mcp__playwright,mcp__ddg_search,mcp__filesystem');
+        // Add MCP server configurations
+        // IMPORTANT: Claude doesn't automatically load MCP servers from ~/.claude.json in non-interactive mode
+        // We must explicitly pass --mcp-config to load MCP servers
+        const mcpServers = this.configStore?.getMCPServers() || [];
+        console.log(`[TaskSpawner] MCP servers from config:`, JSON.stringify(mcpServers, null, 2));
+        const enabledMcpServers = mcpServers.filter(s => s.enabled);
+        console.log(`[TaskSpawner] Enabled MCP servers: ${enabledMcpServers.length}`);
+        if (enabledMcpServers.length > 0) {
+            // Convert to the format expected by claude --mcp-config
+            // Format: { "mcpServers": { "name": { ... } } }
+            // stdio: { "command": "...", "args": [...], "env": {...} }
+            // streamableHttp: { "type": "streamableHttp", "url": "...", "timeout": ..., "autoApprove": [...] }
+            const mcpConfig: Record<string, Record<string, unknown>> = {};
+            for (const server of enabledMcpServers) {
+                const serverType = server.type || 'stdio';
+
+                if (serverType === 'streamableHttp') {
+                    // HTTP-based MCP server
+                    const config: Record<string, unknown> = {
+                        type: 'streamableHttp',
+                        url: server.url
+                    };
+                    if (server.timeout !== undefined) {
+                        config.timeout = server.timeout;
+                    }
+                    if (server.autoApprove && server.autoApprove.length > 0) {
+                        config.autoApprove = server.autoApprove;
+                    }
+                    if (server.description) {
+                        config.description = server.description;
+                    }
+                    mcpConfig[server.name] = config;
+                    console.log(`[TaskSpawner] Added HTTP MCP server: ${server.name} -> ${server.url}`);
+                } else {
+                    // stdio-based MCP server (default)
+                    const config: Record<string, unknown> = {
+                        command: server.command,
+                        args: server.args
+                    };
+                    // Only include env if it has values
+                    if (server.env && Object.keys(server.env).length > 0) {
+                        config.env = server.env;
+                    }
+                    if (server.description) {
+                        config.description = server.description;
+                    }
+                    mcpConfig[server.name] = config;
+                    console.log(`[TaskSpawner] Added stdio MCP server: ${server.name} -> ${server.command}`);
+                }
+            }
+            // Write MCP config - we use BOTH approaches for compatibility:
+            // 1. --mcp-config flag (works in -p mode)
+            // 2. .mcp.json in workspace (works in interactive mode)
+            const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
+
+            // Write to temp file for --mcp-config
+            const mcpConfigFile = `/tmp/claudia-mcp-${id}.json`;
+            writeFileSync(mcpConfigFile, mcpConfigJson);
+            console.log(`[TaskSpawner] MCP config written to: ${mcpConfigFile}`);
+            console.log(`[TaskSpawner] MCP config contents: ${mcpConfigJson}`);
+            claudeArgs.push('--mcp-config', mcpConfigFile);
+
+            // Also write .mcp.json and .claude/settings.local.json to workspace for interactive mode
+            // This is a workaround for Claude Code bug where --mcp-config doesn't work in interactive mode
+            // See: https://github.com/anthropics/claude-code/issues/22404
+            // And: https://github.com/anthropics/claude-code/issues/9189
+            console.log(`[TaskSpawner] DEBUG: About to write workspace files. workspaceId="${workspaceId}", exists=${existsSync(workspaceId)}`);
+            if (workspaceId && existsSync(workspaceId)) {
+                // Write .mcp.json - project-scoped MCP servers
+                const workspaceMcpFile = `${workspaceId}/.mcp.json`;
+                console.log(`[TaskSpawner] DEBUG: Writing to ${workspaceMcpFile}`);
+                try {
+                    writeFileSync(workspaceMcpFile, mcpConfigJson);
+                    console.log(`[TaskSpawner] Wrote MCP config to: ${workspaceMcpFile}`);
+                } catch (err) {
+                    console.error(`[TaskSpawner] Failed to write .mcp.json: ${err}`);
+                }
+
+                // Write .claude/settings.local.json to enable project MCP servers and auto-approve them
+                // This is required because project-scoped MCP servers don't trigger approval prompt
+                const claudeSettingsDir = `${workspaceId}/.claude`;
+                const claudeSettingsFile = `${claudeSettingsDir}/settings.local.json`;
+                const serverNames = enabledMcpServers.map(s => s.name);
+                const settingsContent = {
+                    permissions: {
+                        allow: ['mcp__*'],  // Allow all MCP tools
+                        deny: []
+                    },
+                    enableAllProjectMcpServers: true,
+                    enabledMcpjsonServers: serverNames
+                };
+                try {
+                    if (!existsSync(claudeSettingsDir)) {
+                        mkdirSync(claudeSettingsDir, { recursive: true });
+                    }
+                    writeFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
+                    console.log(`[TaskSpawner] Wrote Claude settings to: ${claudeSettingsFile}`);
+                } catch (err) {
+                    console.error(`[TaskSpawner] Failed to write settings.local.json: ${err}`);
+                }
+            } else {
+                console.log(`[TaskSpawner] Skipping workspace MCP files - workspaceId not valid`);
+            }
+
+            logger.info(`Added ${enabledMcpServers.length} MCP server(s)`, { servers: enabledMcpServers.map(s => s.name) });
+        } else {
+            console.log(`[TaskSpawner] WARNING: No enabled MCP servers found!`);
+        }
+
+        // Explicitly allow all MCP tools to avoid deferred loading issues
+        claudeArgs.push('--allowedTools', 'mcp__*');
+
+        // Add -- to terminate argument parsing (workaround for Claude CLI bug with --mcp-config)
+        // See: https://github.com/anthropics/claude-code/issues/22404
+        claudeArgs.push('--');
 
         logger.info(`Creating task with Claude Code`, { taskId: id, workspaceId, cols: initialCols, rows: initialRows });
+        console.log(`[TaskSpawner] Full claude command args:`, claudeArgs);
         logger.debug(`Command args`, { args: claudeArgs });
 
         // Get environment with API mode settings
@@ -2350,8 +2464,28 @@ export class TaskSpawner extends EventEmitter {
                 claudeArgs.push('--dangerously-skip-permissions');
             }
 
-            // Explicitly allow MCP tools to avoid deferred loading issues
-            claudeArgs.push('--allowedTools', 'mcp__playwright,mcp__ddg_search,mcp__filesystem');
+            // Explicitly allow all MCP tools to avoid deferred loading issues
+            claudeArgs.push('--allowedTools', 'mcp__*');
+
+            // Add MCP server configurations for reconnection
+            const mcpServers = this.configStore?.getMCPServers() || [];
+            const enabledMcpServers = mcpServers.filter(s => s.enabled);
+            if (enabledMcpServers.length > 0) {
+                const mcpConfig: Record<string, { command: string; args?: string[]; env?: Record<string, string> }> = {};
+                for (const server of enabledMcpServers) {
+                    mcpConfig[server.name] = {
+                        command: server.command,
+                        args: server.args,
+                        env: server.env
+                    };
+                }
+                // Write MCP config to a temp file for reconnection
+                const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
+                const mcpConfigFile = `/tmp/claudia-mcp-${taskId}-reconnect.json`;
+                writeFileSync(mcpConfigFile, mcpConfigJson);
+                claudeArgs.push('--mcp-config', mcpConfigFile);
+                console.log(`[TaskSpawner] Added ${enabledMcpServers.length} MCP server(s) for reconnection via ${mcpConfigFile}`);
+            }
 
             if (sessionIdToUse) {
                 claudeArgs.push('--resume', sessionIdToUse);
