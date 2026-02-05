@@ -536,7 +536,11 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
 
     private setupProcessHandlers(task: InternalTask): void {
         task.process.onData((data: string) => {
-            const buffer = Buffer.from(data, 'utf8');
+            // Filter out SAP AI Core service key warning message
+            const filteredData = this.filterServiceKeyWarning(data);
+            if (!filteredData) return; // Skip if entire chunk was just the warning
+
+            const buffer = Buffer.from(filteredData, 'utf8');
             task.outputHistory.push(buffer);
 
             // Limit history to 2MB per task
@@ -548,7 +552,7 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
             }
 
             task.lastActivity = new Date();
-            const cleanData = this.stripAnsi(data);
+            const cleanData = this.stripAnsi(filteredData);
 
             // Try to extract session ID from OpenCode output
             if (!task.sessionId) {
@@ -579,7 +583,7 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
 
             // Stream output to active task
             if (task.isActive) {
-                this.emit('task:output', task.id, data);
+                this.emit('task:output', task.id, filteredData);
             }
         });
 
@@ -670,6 +674,47 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
             .replace(/\x1b[>=]/g, '')
             .replace(/[\x00-\x09\x0B-\x1F\x7F]/g, '')
             .replace(/\r/g, '');
+    }
+
+    /**
+     * Filter out the SAP AI Core service key warning message from PTY output.
+     * The warning appears as an INFO log line like:
+     * "[timestamp] INFO (context): Found a service key in environment variable "AICORE_SERVICE_KEY"..."
+     *
+     * The terminal output contains ANSI escape sequences, so we need to match
+     * key phrases that might be split across chunks or mixed with escape codes.
+     */
+    private filterServiceKeyWarning(data: string): string {
+        // Check if this chunk contains any part of the warning message
+        // by stripping ANSI codes first for detection
+        const cleanData = this.stripAnsi(data);
+
+        // Key phrases from the warning message
+        const warningPhrases = [
+            'Found a service key in environment variable "AICORE_SERVICE_KEY"',
+            'Found a service key in environment variable \\"AICORE_SERVICE_KEY\\"',
+            'AICORE_SERVICE_KEY". Using a service key is recommended',
+            'Using a service key is recommended for local testing only',
+            'Bind the AI Core service to the application for productive usage',
+            'for productive usage.',
+            'E_KEY". Using a service key',  // Partial match when split
+        ];
+
+        // If the clean data contains any warning phrase, filter the whole chunk
+        for (const phrase of warningPhrases) {
+            if (cleanData.includes(phrase)) {
+                // Remove the entire line containing this phrase
+                // Split by newlines, filter out lines with warning content, rejoin
+                const lines = data.split(/(\r?\n)/);
+                const filteredLines = lines.filter(line => {
+                    const cleanLine = this.stripAnsi(line);
+                    return !warningPhrases.some(p => cleanLine.includes(p));
+                });
+                return filteredLines.join('');
+            }
+        }
+
+        return data;
     }
 
     private isReadyForInitialInput(str: string): boolean {

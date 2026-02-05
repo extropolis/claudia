@@ -33,6 +33,18 @@ interface MCPServerConfig {
 /**
  * Config update payload validation
  */
+// Valid SAP AI Core models
+const VALID_SAP_AI_CORE_MODELS = [
+    'anthropic--claude-4.5-opus',
+    'anthropic--claude-opus-4',
+    'anthropic--claude-sonnet-4',
+    'anthropic--claude-4.5-sonnet',
+    'anthropic--claude-3.7-sonnet',
+    'anthropic--claude-3.5-sonnet',
+    'anthropic--claude-3.5-haiku',
+    'anthropic--claude-3-opus',
+] as const;
+
 export interface ConfigUpdatePayload {
     rules?: string;
     mcpServers?: MCPServerConfig[];
@@ -50,6 +62,7 @@ export interface ConfigUpdatePayload {
         resourceGroup?: string;
         timeoutMs?: number;
     };
+    sapAiCoreModel?: string;
     backend?: 'claude-code' | 'opencode';
     opencodePort?: number;
 }
@@ -221,6 +234,17 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
             }
             result.aiCoreCredentials.timeoutMs = creds.timeoutMs;
         }
+    }
+
+    // Validate sapAiCoreModel (optional string from predefined list)
+    if (payload.sapAiCoreModel !== undefined) {
+        if (typeof payload.sapAiCoreModel !== 'string') {
+            return { valid: false, error: 'sapAiCoreModel must be a string' };
+        }
+        if (!VALID_SAP_AI_CORE_MODELS.includes(payload.sapAiCoreModel as typeof VALID_SAP_AI_CORE_MODELS[number])) {
+            return { valid: false, error: `sapAiCoreModel must be one of: ${VALID_SAP_AI_CORE_MODELS.join(', ')}` };
+        }
+        result.sapAiCoreModel = payload.sapAiCoreModel;
     }
 
     return { valid: true, data: result };

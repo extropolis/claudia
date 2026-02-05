@@ -11,6 +11,7 @@ import { sanitizePrompt } from './validation.js';
 import { createLogger } from './logger.js';
 import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
+import { getConversationHistory } from './conversation-parser.js';
 
 const logger = createLogger('[TaskSpawner]');
 
@@ -940,8 +941,10 @@ export class TaskSpawner extends EventEmitter {
                     taskEnv['AICORE_RESOURCE_GROUP'] = credentials.resourceGroup;
                 }
 
-                // Clear any inherited base URL that might interfere with OpenCode's native AI Core support
+                // Clear any inherited API keys and base URLs that might interfere with OpenCode's native AI Core support
+                delete taskEnv['ANTHROPIC_API_KEY'];
                 delete taskEnv['ANTHROPIC_BASE_URL'];
+                delete taskEnv['OPENAI_API_KEY'];
                 delete taskEnv['OPENAI_BASE_URL'];
 
                 console.log(`[TaskSpawner] Using SAP AI Core native support for OpenCode`);
@@ -1321,8 +1324,10 @@ export class TaskSpawner extends EventEmitter {
         let model: string | undefined;
         const apiMode = this.configStore?.getApiMode();
         if (apiMode === 'sap-ai-core') {
-            // Use Claude Opus 4.5 via SAP AI Core
-            model = 'anthropic/claude-opus-4-5';
+            // Get configured model from settings, default to Claude 4.5 Opus
+            const sapAiCoreModel = this.configStore?.getSapAiCoreModel() ?? 'anthropic--claude-4.5-opus';
+            // OpenCode model format for SAP AI Core: sap-ai-core/<model-name>
+            model = `sap-ai-core/${sapAiCoreModel}`;
             logger.info('Using SAP AI Core model', { model });
             // Verify environment is set correctly
             const hasServiceKey = !!taskEnv['AICORE_SERVICE_KEY'];
@@ -1443,10 +1448,10 @@ export class TaskSpawner extends EventEmitter {
             for (const server of enabledMcpServers) {
                 const serverType = server.type || 'stdio';
 
-                if (serverType === 'streamableHttp') {
+                if (serverType === 'streamableHttp' || serverType === 'http') {
                     // HTTP-based MCP server
                     const config: Record<string, unknown> = {
-                        type: 'streamableHttp',
+                        type: 'http',
                         url: server.url
                     };
                     if (server.timeout !== undefined) {
@@ -1457,6 +1462,9 @@ export class TaskSpawner extends EventEmitter {
                     }
                     if (server.description) {
                         config.description = server.description;
+                    }
+                    if (server.headers) {
+                        config.headers = server.headers;
                     }
                     mcpConfig[server.name] = config;
                     console.log(`[TaskSpawner] Added HTTP MCP server: ${server.name} -> ${server.url}`);
@@ -1543,8 +1551,8 @@ export class TaskSpawner extends EventEmitter {
         // See: https://github.com/anthropics/claude-code/issues/22404
         claudeArgs.push('--');
 
+
         logger.info(`Creating task with Claude Code`, { taskId: id, workspaceId, cols: initialCols, rows: initialRows });
-        console.log(`[TaskSpawner] Full claude command args:`, claudeArgs);
         logger.debug(`Command args`, { args: claudeArgs });
 
         // Get environment with API mode settings
@@ -1582,6 +1590,10 @@ export class TaskSpawner extends EventEmitter {
             lastOutputLength: 0,  // Initialize for state polling
             hasStartedProcessing: false,  // Will be true once output changes after prompt sent
         };
+
+
+
+
 
         this.setupProcessHandlers(task);
         this.tasks.set(id, task);
@@ -1788,11 +1800,8 @@ export class TaskSpawner extends EventEmitter {
                     task.isActive = true;
                     this.emit('tasksUpdated');
 
-                    // Send combined history: previous + current
-                    const history = this.getCombinedHistory(task);
-                    if (history) {
-                        this.emit('taskRestore', task.id, history);
-                    }
+                    // Send combined history (PTY output) first, then enhance with JSONL if needed
+                    this.sendHistoryWithConversationFallback(task);
                 }
             }
             return;
@@ -1809,11 +1818,8 @@ export class TaskSpawner extends EventEmitter {
                     this.backend.setTaskActive(taskId, true);
                 }
 
-                // Send combined history: previous + current
-                const history = this.getCombinedHistory(task);
-                if (history) {
-                    this.emit('taskRestore', task.id, history);
-                }
+                // Send combined history (PTY output) first, then enhance with JSONL if needed
+                this.sendHistoryWithConversationFallback(task);
             } else {
                 // Notify backend if using OpenCode
                 const taskBackend = this.taskBackends.get(taskId);
@@ -1821,6 +1827,43 @@ export class TaskSpawner extends EventEmitter {
                     this.backend.setTaskActive(taskId, false);
                 }
             }
+        }
+    }
+
+    /**
+     * Send task history to the client, with fallback to JSONL conversation if PTY history is missing/minimal
+     */
+    private sendHistoryWithConversationFallback(task: InternalTask): void {
+        const history = this.getCombinedHistory(task);
+
+        // Check if history is minimal (just resume message or empty)
+        const isMinimalHistory = !history || history.length < 500;
+
+        if (history) {
+            this.emit('taskRestore', task.id, history);
+        }
+
+        // If history is minimal and we have a session ID, fetch JSONL conversation and send it
+        if (isMinimalHistory && task.sessionId && task.workspaceId) {
+            logger.info('PTY history is minimal, fetching JSONL conversation', {
+                taskId: task.id,
+                sessionId: task.sessionId,
+                historyLength: history?.length || 0
+            });
+
+            this.renderConversationAsTerminal(task.workspaceId, task.sessionId).then(conversationHistory => {
+                if (conversationHistory) {
+                    logger.info('Sending JSONL conversation history', {
+                        taskId: task.id,
+                        conversationLength: conversationHistory.length
+                    });
+                    // Send the conversation history as a restore event
+                    // This will prepend to any existing history in the terminal
+                    this.emit('taskRestore', task.id, conversationHistory);
+                }
+            }).catch(err => {
+                logger.error('Failed to fetch JSONL conversation', { taskId: task.id, error: err });
+            });
         }
     }
 
@@ -1858,6 +1901,8 @@ export class TaskSpawner extends EventEmitter {
                     const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
 
                     let base64Content: string;
+                    // Base64 encoding inflates size by ~33%, so calculate raw max size
+                    const maxBase64Size = Math.floor(MAX_HISTORY_TO_SEND * 1.33);
 
                     if (isRawText) {
                         // Raw text file - read strictly the last portion as utf8
@@ -1881,8 +1926,6 @@ export class TaskSpawner extends EventEmitter {
                     } else {
                         // Base64 file (standard path)
                         // If file is larger than MAX_HISTORY_TO_SEND, only read the tail
-                        // Base64 encoding inflates size by ~33%, so calculate raw max size
-                        const maxBase64Size = Math.floor(MAX_HISTORY_TO_SEND * 1.33);
 
                         if (fileSize > maxBase64Size) {
                             // Only read the last portion of the file
@@ -1967,6 +2010,55 @@ export class TaskSpawner extends EventEmitter {
         if (parts.length === 0) return null;
 
         return Buffer.concat(parts).toString('utf8');
+    }
+
+    /**
+     * Render JSONL conversation history as terminal-like output
+     * This provides accurate history from Claude's perspective, including plan approvals
+     */
+    private async renderConversationAsTerminal(workspaceId: string, sessionId: string): Promise<string | null> {
+        try {
+            const conversation = await getConversationHistory(workspaceId, sessionId);
+            if (!conversation || conversation.messages.length === 0) {
+                return null;
+            }
+
+            const lines: string[] = [];
+            lines.push('\x1b[90m─── Conversation History (from session file) ───\x1b[0m\r\n');
+
+            for (const msg of conversation.messages) {
+                if (msg.role === 'user') {
+                    // User messages in cyan
+                    lines.push(`\x1b[36m┌─ User\x1b[0m\r\n`);
+                    // Truncate very long messages for display
+                    const content = msg.content.length > 2000
+                        ? msg.content.substring(0, 2000) + '... (truncated)'
+                        : msg.content;
+                    for (const line of content.split('\n')) {
+                        lines.push(`\x1b[36m│\x1b[0m ${line}\r\n`);
+                    }
+                    lines.push(`\x1b[36m└─\x1b[0m\r\n\r\n`);
+                } else {
+                    // Assistant messages in green
+                    lines.push(`\x1b[32m┌─ Claude\x1b[0m\r\n`);
+                    // Truncate very long messages for display
+                    const content = msg.content.length > 3000
+                        ? msg.content.substring(0, 3000) + '... (truncated)'
+                        : msg.content;
+                    for (const line of content.split('\n')) {
+                        lines.push(`\x1b[32m│\x1b[0m ${line}\r\n`);
+                    }
+                    lines.push(`\x1b[32m└─\x1b[0m\r\n\r\n`);
+                }
+            }
+
+            lines.push('\x1b[90m─── End of Conversation History ───\x1b[0m\r\n\r\n');
+
+            return lines.join('');
+        } catch (e) {
+            logger.error('Failed to render conversation history', { error: e, workspaceId, sessionId });
+            return null;
+        }
     }
 
     writeToTask(taskId: string, data: string): void {

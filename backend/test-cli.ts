@@ -876,7 +876,7 @@ class TestCLI {
 
         const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
         if (!this.config.watchOutput) {
-            console.log(`[${elapsed}s] TASK      │ Created: ${task.name}`);
+            console.log(`[${elapsed}s] TASK      │ Created: ${task.id} ("${task.prompt}")`);
         }
 
         this.lastActivityTime = Date.now();
@@ -999,7 +999,7 @@ class TestCLI {
 
         // Show state change prominently (unless watching output quietly)
         if (!this.config.watchOutput) {
-            const shortId = task.id.substring(0, 12);
+            const shortId = task.id ? task.id.substring(0, 12) : 'UNDEFINED_ID';
             const waitingType = task.waitingInputType ? ` (${task.waitingInputType})` : '';
             console.log(`[${elapsed}s] STATE     │ ${icon} ${shortId}... → ${task.state}${waitingType}`);
         }

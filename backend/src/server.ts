@@ -1123,10 +1123,16 @@ export function createApp(basePath?: string) {
         }
     });
 
-    // MCP server config type
+    // MCP server config type - supports both stdio and streamableHttp types
     interface MCPServerConfig {
-        command?: string;
-        args?: string[];
+        type?: 'stdio' | 'streamableHttp';
+        command?: string;  // For stdio
+        args?: string[];   // For stdio
+        env?: Record<string, string>;  // For stdio
+        url?: string;      // For streamableHttp
+        timeout?: number;
+        autoApprove?: string[];
+        description?: string;
         [key: string]: unknown;
     }
 
@@ -1151,21 +1157,44 @@ export function createApp(basePath?: string) {
             };
             const workspacePath = req.query.workspace as string;
 
+            // Helper to extract server config supporting both stdio and HTTP types
+            const extractServerConfig = (name: string, config: MCPServerConfig) => {
+                const serverType = config.type || 'stdio';
+                console.log(`[Server] extractServerConfig: ${name}, type=${serverType}`);
+                if (serverType === 'streamableHttp') {
+                    return {
+                        name,
+                        type: 'streamableHttp' as const,
+                        url: config.url || '',
+                        timeout: config.timeout,
+                        autoApprove: config.autoApprove,
+                        description: config.description,
+                    };
+                } else {
+                    return {
+                        name,
+                        type: 'stdio' as const,
+                        command: config.command || '',
+                        args: config.args || [],
+                        env: config.env,
+                        description: config.description,
+                    };
+                }
+            };
+
             // Extract global MCP servers
-            const globalServers: { name: string; command: string; args?: string[]; scope: 'global' }[] = [];
+            const globalServers: Array<ReturnType<typeof extractServerConfig> & { scope: 'global' }> = [];
             if (claudeConfig.mcpServers) {
                 for (const [name, config] of Object.entries(claudeConfig.mcpServers)) {
                     globalServers.push({
-                        name,
-                        command: config.command || '',
-                        args: config.args || [],
+                        ...extractServerConfig(name, config),
                         scope: 'global'
                     });
                 }
             }
 
             // Extract project-specific MCP servers if workspace path provided
-            const projectServers: { name: string; command: string; args?: string[]; scope: 'project'; projectPath: string }[] = [];
+            const projectServers: Array<ReturnType<typeof extractServerConfig> & { scope: 'project'; projectPath: string }> = [];
             if (claudeConfig.projects) {
                 for (const [projectPath, projectConfig] of Object.entries(claudeConfig.projects)) {
                     if (projectConfig.mcpServers) {
@@ -1173,9 +1202,7 @@ export function createApp(basePath?: string) {
                             // Include if no workspace filter, or if this project matches the workspace
                             if (!workspacePath || projectPath === workspacePath || workspacePath.startsWith(projectPath)) {
                                 projectServers.push({
-                                    name,
-                                    command: config.command || '',
-                                    args: config.args || [],
+                                    ...extractServerConfig(name, config),
                                     scope: 'project',
                                     projectPath
                                 });

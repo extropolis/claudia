@@ -30,6 +30,26 @@ interface AICoreCredentials {
 
 type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core';
 type BackendType = 'claude-code' | 'opencode';
+type SapAiCoreModel = 
+    | 'anthropic--claude-4.5-opus'
+    | 'anthropic--claude-opus-4'
+    | 'anthropic--claude-sonnet-4'
+    | 'anthropic--claude-4.5-sonnet'
+    | 'anthropic--claude-3.7-sonnet'
+    | 'anthropic--claude-3.5-sonnet'
+    | 'anthropic--claude-3.5-haiku'
+    | 'anthropic--claude-3-opus';
+
+const SAP_AI_CORE_MODELS: { value: SapAiCoreModel; label: string }[] = [
+    { value: 'anthropic--claude-4.5-opus', label: 'Claude 4.5 Opus' },
+    { value: 'anthropic--claude-opus-4', label: 'Claude Opus 4' },
+    { value: 'anthropic--claude-sonnet-4', label: 'Claude Sonnet 4' },
+    { value: 'anthropic--claude-4.5-sonnet', label: 'Claude 4.5 Sonnet' },
+    { value: 'anthropic--claude-3.7-sonnet', label: 'Claude 3.7 Sonnet' },
+    { value: 'anthropic--claude-3.5-sonnet', label: 'Claude 3.5 Sonnet' },
+    { value: 'anthropic--claude-3.5-haiku', label: 'Claude 3.5 Haiku' },
+    { value: 'anthropic--claude-3-opus', label: 'Claude 3 Opus' },
+];
 
 interface BackendStatus {
     backend: BackendType;
@@ -120,6 +140,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         resourceGroup: 'default',
         timeoutMs: 120000
     });
+    const [sapAiCoreModel, setSapAiCoreModel] = useState<SapAiCoreModel>('anthropic--claude-4.5-opus');
     const [aiCoreSaved, setAiCoreSaved] = useState(true);
     const [aiCoreTestStatus, setAiCoreTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [aiCoreTestMessage, setAiCoreTestMessage] = useState('');
@@ -173,6 +194,9 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 if (config.aiCoreCredentials) {
                     setAiCoreCredentials(config.aiCoreCredentials);
                 }
+                if (config.sapAiCoreModel) {
+                    setSapAiCoreModel(config.sapAiCoreModel);
+                }
                 setAiCoreSaved(true);
                 setBackend(config.backend || 'claude-code');
                 setBackendSaved(true);
@@ -196,6 +220,37 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         } finally {
             setBackendStatusLoading(false);
         }
+    };
+
+    // Backend config uses array format, but we display as object format in JSON view
+    // Convert between formats as needed
+    const arrayToObjectFormat = (servers: Array<{ name: string; type?: string; command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled?: boolean; timeout?: number; autoApprove?: string[]; description?: string }>) => {
+        const obj: Record<string, unknown> = {};
+        for (const server of servers) {
+            const { name, enabled, ...rest } = server;
+            obj[name] = rest;
+        }
+        return obj;
+    };
+
+    const objectToArrayFormat = (obj: Record<string, unknown>) => {
+        const servers: Array<{ name: string; type?: 'stdio' | 'streamableHttp'; command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled: boolean; timeout?: number; autoApprove?: string[]; description?: string }> = [];
+        for (const [name, config] of Object.entries(obj)) {
+            const serverConfig = config as Record<string, unknown>;
+            servers.push({
+                name,
+                enabled: true, // Default to enabled
+                type: (serverConfig.type as 'stdio' | 'streamableHttp') || 'stdio',
+                command: serverConfig.command as string | undefined,
+                args: serverConfig.args as string[] | undefined,
+                url: serverConfig.url as string | undefined,
+                env: serverConfig.env as Record<string, string> | undefined,
+                timeout: serverConfig.timeout as number | undefined,
+                autoApprove: serverConfig.autoApprove as string[] | undefined,
+                description: serverConfig.description as string | undefined
+            });
+        }
+        return servers;
     };
 
     // Compute MCP servers list from JSON state (for list view)
@@ -223,11 +278,15 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
 
     const fetchClaudeConfig = async () => {
         try {
-            const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`);
+            // Fetch from Claudia's config (backend/config.json) - this is what tasks actually use
+            const response = await fetch(`${getApiBaseUrl()}/api/config`);
             if (response.ok) {
-                const data = await response.json();
-                setMcpJson(data.mcpServers || '{}');
-                setClaudeConfigPath(data.path);
+                const config = await response.json();
+                const mcpServers = config.mcpServers || [];
+                // Convert array format to object format for display
+                const obj = arrayToObjectFormat(mcpServers);
+                setMcpJson(JSON.stringify(obj, null, 2));
+                setClaudeConfigPath('Claudia config (used by tasks)');
                 setJsonEditorSaved(true);
                 setJsonEditorError(null);
             }
@@ -239,8 +298,9 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
 
     const saveClaudeConfig = async () => {
         // Validate JSON config before saving
+        let parsed;
         try {
-            const parsed = JSON.parse(mcpJson);
+            parsed = JSON.parse(mcpJson);
             if (typeof parsed !== 'object' || Array.isArray(parsed)) {
                 setJsonEditorError('mcpServers must be an object');
                 return;
@@ -252,11 +312,14 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
 
         setJsonEditorError(null);
 
+        // Convert object format back to array format for backend
+        const serversArray = objectToArrayFormat(parsed);
+
         try {
-            const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mcpServers: mcpJson })
+                body: JSON.stringify({ mcpServers: serversArray })
             });
             if (response.ok) {
                 setJsonEditorSaved(true);
@@ -363,12 +426,17 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         setAiCoreTestStatus('idle');
     };
 
+    const handleSapAiCoreModelChange = (model: SapAiCoreModel) => {
+        setSapAiCoreModel(model);
+        setAiCoreSaved(false);
+    };
+
     const saveAiCoreCredentials = async () => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ aiCoreCredentials })
+                body: JSON.stringify({ aiCoreCredentials, sapAiCoreModel })
             });
             if (response.ok) {
                 setAiCoreSaved(true);
@@ -577,11 +645,12 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             const newJson = JSON.stringify(servers, null, 2);
             setMcpJson(newJson);
 
-            // Save immediately
-            const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`, {
+            // Convert to array format and save to Claudia config
+            const serversArray = objectToArrayFormat(servers);
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mcpServers: newJson })
+                body: JSON.stringify({ mcpServers: serversArray })
             });
 
             if (response.ok) {
@@ -608,11 +677,12 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             const newJson = JSON.stringify(servers, null, 2);
             setMcpJson(newJson);
 
-            // Save immediately
-            const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`, {
+            // Convert to array format and save to Claudia config
+            const serversArray = objectToArrayFormat(servers);
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mcpServers: newJson })
+                body: JSON.stringify({ mcpServers: serversArray })
             });
 
             if (!response.ok) {
@@ -951,6 +1021,21 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                                     className="aicore-input"
                                                 />
                                             </div>
+                                        </div>
+
+                                        <div className="aicore-field">
+                                            <label>Model</label>
+                                            <select
+                                                value={sapAiCoreModel}
+                                                onChange={(e) => handleSapAiCoreModelChange(e.target.value as SapAiCoreModel)}
+                                                className="aicore-input aicore-select"
+                                            >
+                                                {SAP_AI_CORE_MODELS.map((model) => (
+                                                    <option key={model.value} value={model.value}>
+                                                        {model.label}
+                                                    </option>
+                                                ))}
+                                            </select>
                                         </div>
                                     </div>
 
