@@ -34,6 +34,9 @@ cd claudia
 
 # Install dependencies
 npm install
+
+# Build the shared types package (required before first run)
+npm run build -w shared
 ```
 
 ## Running the App
@@ -99,15 +102,18 @@ claude --version
 
 ### SAP AI Core Integration (Optional)
 
-Claudia can proxy Claude API requests through SAP AI Core:
+Claudia can proxy Claude API requests through SAP AI Core. **No `.env` file is needed** — configure everything in the Settings panel:
 
-```bash
-# Set environment variables or configure in Settings menu
-export SAP_AICORE_AUTH_URL=https://xxx.authentication.xxx.hana.ondemand.com
-export SAP_AICORE_CLIENT_ID=your-client-id
-export SAP_AICORE_CLIENT_SECRET=your-client-secret
-export SAP_AICORE_BASE_URL=https://api.ai.xxx.aws.ml.hana.ondemand.com
-```
+1. Open **Settings** (⚙️) → **API Mode** → select **SAP AI Core**
+2. Enter your credentials: Auth URL, Client ID, Client Secret, Base URL
+3. Choose a model (e.g., Claude 4.5 Sonnet)
+4. Restart the server (`./start.sh`)
+
+When using the **Claude Code** backend, Claudia runs an embedded proxy that translates Anthropic API calls into SAP AI Core requests. Claude Code connects to `http://localhost:4001` with a dummy API key so it skips its login flow.
+
+When using the **OpenCode** backend, credentials are passed natively via `AICORE_SERVICE_KEY`.
+
+
 
 ## Development
 
@@ -135,3 +141,19 @@ claudia/
 └── start.sh           # Startup script
 ```
 
+## Troubleshooting
+
+### `posix_spawnp failed` when creating tasks
+
+If task creation does nothing on the frontend and the backend logs show `posix_spawnp failed`, your `node-pty` version is incompatible with your Node.js version.
+
+**Node.js v25+** requires `node-pty@1.2.0-beta.11` or later:
+
+```bash
+# Check your Node version
+node -v
+
+# If v25+, upgrade node-pty
+npm install node-pty@1.2.0-beta.11
+npm install  # re-resolve workspaces
+```

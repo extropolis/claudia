@@ -428,7 +428,23 @@ export function createApp(basePath?: string) {
                         logger.info(`Creating task with system prompt`, { hasSystemPrompt: !!systemPrompt, source: workspaceSystemPrompt ? 'workspace' : (rules ? 'rules' : 'none') });
 
                         // Pass initial dimensions if provided
-                        taskSpawner.createTask(prompt, workspaceValidation.data!, systemPrompt, initialCols, initialRows);
+                        try {
+                            await taskSpawner.createTask(prompt, workspaceValidation.data!, systemPrompt, initialCols, initialRows);
+                        } catch (err) {
+                            const errorMessage = err instanceof Error ? err.message : String(err);
+                            logger.error('Failed to create task', { error: errorMessage });
+                            if (errorMessage.includes('posix_spawnp')) {
+                                sendWSError(
+                                    ws,
+                                    'Failed to spawn process: posix_spawnp failed. This usually means node-pty is incompatible with your Node.js version. ' +
+                                    'If you are using Node.js v25+, run: npm install node-pty@1.2.0-beta.11 && npm install',
+                                    message.type,
+                                    'SPAWN_FAILED'
+                                );
+                            } else {
+                                sendWSError(ws, `Failed to create task: ${errorMessage}`, message.type, 'TASK_CREATE_FAILED');
+                            }
+                        }
                         break;
                     }
 

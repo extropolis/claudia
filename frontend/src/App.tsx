@@ -9,7 +9,7 @@ import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
 import { SystemStats } from './components/SystemStats';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle } from 'lucide-react';
 import { getApiBaseUrl } from './config/api-config';
 
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
@@ -39,7 +39,7 @@ function App() {
         wsRef
     } = useWebSocket();
 
-    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats } = useTaskStore();
+    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats, errorNotification, clearErrorNotification } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
     const selectedWorkspace = selectedTask ? workspaces.find(w => w.id === selectedTask.workspaceId) : undefined;
 
@@ -195,6 +195,14 @@ function App() {
             setShowSettings(true);
         }
     }, [aiCoreConfigured]);
+
+    // Auto-dismiss error notification after 15 seconds
+    useEffect(() => {
+        if (errorNotification) {
+            const timer = setTimeout(() => clearErrorNotification(), 15000);
+            return () => clearTimeout(timer);
+        }
+    }, [errorNotification, clearErrorNotification]);
 
     // Clear initial panel when settings is closed
     const handleSettingsClose = () => {
@@ -369,6 +377,21 @@ function App() {
                             ? 'Backend is restarting...'
                             : 'Reconnecting to backend...'}
                     </span>
+                </div>
+            )}
+
+            {/* Error notification banner */}
+            {errorNotification && (
+                <div className="error-notification-banner">
+                    <AlertTriangle size={20} />
+                    <span className="error-notification-message">{errorNotification.message}</span>
+                    <button
+                        className="error-notification-close"
+                        onClick={clearErrorNotification}
+                        title="Dismiss"
+                    >
+                        <X size={16} />
+                    </button>
                 </div>
             )}
 

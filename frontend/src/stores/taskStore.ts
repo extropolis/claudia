@@ -26,6 +26,7 @@ interface TaskStore {
     isConnected: boolean;
     isServerReloading: boolean;  // True when server is restarting (hot reload)
     isOffline: boolean;  // True when browser has no internet connection
+    errorNotification: { message: string; code?: string; timestamp: Date } | null;
 
     // Workspace state
     workspaces: Workspace[];
@@ -73,6 +74,8 @@ interface TaskStore {
     setConnected: (connected: boolean) => void;
     setServerReloading: (reloading: boolean) => void;
     setOffline: (offline: boolean) => void;
+    setErrorNotification: (message: string, code?: string) => void;
+    clearErrorNotification: () => void;
     selectTask: (id: string | null) => void;
     setTasks: (tasks: Task[]) => void;
     addTask: (task: Task) => void;
@@ -164,391 +167,394 @@ interface PersistedState {
 export const useTaskStore = create<TaskStore>()(
     persist(
         (set, get) => ({
-    // Initial state
-    tasks: new Map(),
-    archivedTasks: [],
-    showArchivedTasks: false,
-    selectedTaskId: null,
-    isConnected: false,
-    isServerReloading: false,
-    isOffline: typeof navigator !== 'undefined' ? !navigator.onLine : false,
-    workspaces: [],
-    expandedWorkspaces: new Set<string>(),
-    expandedWorkspacesInitialized: false,
-    showProjectPicker: false,
+            // Initial state
+            tasks: new Map(),
+            archivedTasks: [],
+            showArchivedTasks: false,
+            selectedTaskId: null,
+            isConnected: false,
+            isServerReloading: false,
+            isOffline: typeof navigator !== 'undefined' ? !navigator.onLine : false,
+            errorNotification: null,
+            workspaces: [],
+            expandedWorkspaces: new Set<string>(),
+            expandedWorkspacesInitialized: false,
+            showProjectPicker: false,
 
-    // Voice initial state
-    voiceEnabled: false,
-    autoSpeakResponses: false,
-    selectedVoiceName: null,
-    voiceRate: 1.0,
-    voicePitch: 1.0,
-    voiceVolume: 1.0,
+            // Voice initial state
+            voiceEnabled: false,
+            autoSpeakResponses: false,
+            selectedVoiceName: null,
+            voiceRate: 1.0,
+            voicePitch: 1.0,
+            voiceVolume: 1.0,
 
-    // Global voice mode initial state
-    globalVoiceEnabled: false,
-    focusedInputId: null,
-    voiceTranscript: '',
-    voiceInterimTranscript: '',
-    autoSendEnabled: false,
-    autoSendDelayMs: 3000,
+            // Global voice mode initial state
+            globalVoiceEnabled: false,
+            focusedInputId: null,
+            voiceTranscript: '',
+            voiceInterimTranscript: '',
+            autoSendEnabled: false,
+            autoSendDelayMs: 3000,
 
-    // Supervisor initial state
-    taskSummaries: new Map(),
+            // Supervisor initial state
+            taskSummaries: new Map(),
 
-    // Chat initial state
-    chatMessages: [],
-    chatTyping: false,
+            // Chat initial state
+            chatMessages: [],
+            chatTyping: false,
 
-    // Waiting input initial state
-    waitingInputNotifications: new Map(),
+            // Waiting input initial state
+            waitingInputNotifications: new Map(),
 
-    // Draft input initial state
-    taskDraftInputs: new Map(),
+            // Draft input initial state
+            taskDraftInputs: new Map(),
 
-    // Settings initial state
-    autoFocusOnInput: false,
-    supervisorEnabled: false,
-    aiCoreConfigured: null,
-    showSystemStats: true,
-    browserNotificationsEnabled: false,
+            // Settings initial state
+            autoFocusOnInput: false,
+            supervisorEnabled: false,
+            aiCoreConfigured: null,
+            showSystemStats: true,
+            browserNotificationsEnabled: false,
 
-    // Actions
-    setConnected: (connected) => {
-        // Clear reloading state when we reconnect
-        if (connected) {
-            set({ isConnected: connected, isServerReloading: false });
-        } else {
-            set({ isConnected: connected });
-        }
-    },
-
-    setServerReloading: (reloading) => set({ isServerReloading: reloading }),
-
-    setOffline: (offline) => set({ isOffline: offline }),
-
-    selectTask: (id) => set({ selectedTaskId: id }),
-
-    setTasks: (tasks) => {
-        const { tasks: existingTasks, selectedTaskId } = get();
-        const taskMap = new Map<string, Task>();
-        const incomingTaskIds = new Set<string>();
-
-        for (const task of tasks) {
-            incomingTaskIds.add(task.id);
-            const existing = existingTasks.get(task.id);
-
-            // If we have an existing task, compare lastActivity timestamps
-            // to keep the more recent version (prevents state regression)
-            if (existing) {
-                const existingTime = existing.lastActivity?.getTime?.() ?? 0;
-                const incomingTime = task.lastActivity?.getTime?.() ?? 0;
-
-                // Keep whichever is newer based on lastActivity
-                // If timestamps are equal or incoming has no timestamp, use incoming
-                // (backend is source of truth when timestamps match)
-                if (existingTime > incomingTime) {
-                    console.log(`[TaskStore] Keeping existing task ${task.id} (local: ${existingTime}, incoming: ${incomingTime})`);
-                    taskMap.set(task.id, existing);
+            // Actions
+            setConnected: (connected) => {
+                // Clear reloading state when we reconnect
+                if (connected) {
+                    set({ isConnected: connected, isServerReloading: false });
                 } else {
-                    taskMap.set(task.id, task);
+                    set({ isConnected: connected });
                 }
-            } else {
-                taskMap.set(task.id, task);
-            }
-        }
+            },
 
-        // Clear selectedTaskId if it's no longer in the task list
-        const newSelectedId = selectedTaskId && !taskMap.has(selectedTaskId) ? null : selectedTaskId;
-        set({ tasks: taskMap, selectedTaskId: newSelectedId });
-    },
+            setServerReloading: (reloading) => set({ isServerReloading: reloading }),
 
-    addTask: (task) => {
-        const { tasks } = get();
-        // Create new Map and add/update task
-        // (Same logic whether task exists or not)
-        const newTasks = new Map(tasks);
-        newTasks.set(task.id, task);
-        set({ tasks: newTasks });
-    },
+            setOffline: (offline) => set({ isOffline: offline }),
+            setErrorNotification: (message, code) => set({ errorNotification: { message, code, timestamp: new Date() } }),
+            clearErrorNotification: () => set({ errorNotification: null }),
 
-    updateTask: (task) => {
-        const { tasks } = get();
-        const existing = tasks.get(task.id);
+            selectTask: (id) => set({ selectedTaskId: id }),
 
-        // If we have an existing task, check if incoming is actually newer
-        // to prevent state regression from out-of-order messages
-        if (existing) {
-            const existingTime = existing.lastActivity?.getTime?.() ?? 0;
-            const incomingTime = task.lastActivity?.getTime?.() ?? 0;
+            setTasks: (tasks) => {
+                const { tasks: existingTasks, selectedTaskId } = get();
+                const taskMap = new Map<string, Task>();
+                const incomingTaskIds = new Set<string>();
 
-            // Skip update if existing is newer (prevents state regression)
-            if (existingTime > incomingTime) {
-                console.log(`[TaskStore] Skipping older update for task ${task.id} (local: ${existingTime}, incoming: ${incomingTime})`);
-                return;
-            }
+                for (const task of tasks) {
+                    incomingTaskIds.add(task.id);
+                    const existing = existingTasks.get(task.id);
 
-            // Skip update if nothing has meaningfully changed (same timestamp, same state)
-            // This prevents unnecessary re-renders when rapid updates arrive
-            if (existingTime === incomingTime &&
-                existing.state === task.state &&
-                existing.waitingInputType === task.waitingInputType) {
-                return; // No change, skip update
-            }
-        }
+                    // If we have an existing task, compare lastActivity timestamps
+                    // to keep the more recent version (prevents state regression)
+                    if (existing) {
+                        const existingTime = existing.lastActivity?.getTime?.() ?? 0;
+                        const incomingTime = task.lastActivity?.getTime?.() ?? 0;
 
-        const newTasks = new Map(tasks);
-        newTasks.set(task.id, task);
-        set({ tasks: newTasks });
-    },
-
-    deleteTask: (taskId) => {
-        const { tasks, selectedTaskId } = get();
-        const newTasks = new Map(tasks);
-        newTasks.delete(taskId);
-        const newSelectedId = selectedTaskId === taskId ? null : selectedTaskId;
-        set({ tasks: newTasks, selectedTaskId: newSelectedId });
-    },
-
-    // Archived tasks actions
-    setArchivedTasks: (tasks) => set({ archivedTasks: tasks }),
-    setShowArchivedTasks: (show) => set({ showArchivedTasks: show }),
-    removeArchivedTask: (taskId) => {
-        const { archivedTasks } = get();
-        set({ archivedTasks: archivedTasks.filter(t => t.id !== taskId) });
-    },
-
-    // Workspace actions
-    setWorkspaces: (workspaces) => {
-        const { expandedWorkspaces: currentExpanded, expandedWorkspacesInitialized, workspaces: existingWorkspaces } = get();
-
-        // Deduplicate workspaces by id (keep first occurrence)
-        const seenIds = new Set<string>();
-        const uniqueWorkspaces = workspaces.filter(w => {
-            if (seenIds.has(w.id)) {
-                console.warn('[TaskStore] Duplicate workspace filtered out:', w.id);
-                return false;
-            }
-            seenIds.add(w.id);
-            return true;
-        });
-
-        // Keep existing expanded state, only add new workspaces as expanded
-        const newExpanded = new Set(currentExpanded);
-
-        // Only expand all if this is the very first load (no persisted state was loaded)
-        // If user has persisted expanded state (even if all collapsed), respect it
-        if (!expandedWorkspacesInitialized) {
-            // First time ever - expand all workspaces
-            uniqueWorkspaces.forEach(w => newExpanded.add(w.id));
-        } else {
-            // Add any NEW workspaces as expanded (ones not in existing list)
-            const existingWorkspaceIds = new Set(existingWorkspaces.map(w => w.id));
-            uniqueWorkspaces.forEach(w => {
-                if (!existingWorkspaceIds.has(w.id)) {
-                    // This is a newly added workspace, expand it
-                    newExpanded.add(w.id);
+                        // Keep whichever is newer based on lastActivity
+                        // If timestamps are equal or incoming has no timestamp, use incoming
+                        // (backend is source of truth when timestamps match)
+                        if (existingTime > incomingTime) {
+                            console.log(`[TaskStore] Keeping existing task ${task.id} (local: ${existingTime}, incoming: ${incomingTime})`);
+                            taskMap.set(task.id, existing);
+                        } else {
+                            taskMap.set(task.id, task);
+                        }
+                    } else {
+                        taskMap.set(task.id, task);
+                    }
                 }
-            });
-        }
-        // Remove any workspaces that no longer exist
-        const workspaceIds = new Set(uniqueWorkspaces.map(w => w.id));
-        for (const id of newExpanded) {
-            if (!workspaceIds.has(id)) {
-                newExpanded.delete(id);
-            }
-        }
-        set({ workspaces: uniqueWorkspaces, expandedWorkspaces: newExpanded, expandedWorkspacesInitialized: true });
-    },
 
-    addWorkspace: (workspace) => {
-        const { workspaces, expandedWorkspaces } = get();
-        // Prevent duplicate workspaces
-        if (workspaces.some(w => w.id === workspace.id)) {
-            console.warn('[TaskStore] Workspace already exists:', workspace.id);
-            return;
-        }
-        const newExpanded = new Set(expandedWorkspaces);
-        newExpanded.add(workspace.id);
-        set({
-            workspaces: [...workspaces, workspace],
-            expandedWorkspaces: newExpanded
-        });
-    },
+                // Clear selectedTaskId if it's no longer in the task list
+                const newSelectedId = selectedTaskId && !taskMap.has(selectedTaskId) ? null : selectedTaskId;
+                set({ tasks: taskMap, selectedTaskId: newSelectedId });
+            },
 
-    removeWorkspace: (workspaceId) => {
-        const { workspaces, expandedWorkspaces } = get();
-        const newExpanded = new Set(expandedWorkspaces);
-        newExpanded.delete(workspaceId);
-        set({
-            workspaces: workspaces.filter(w => w.id !== workspaceId),
-            expandedWorkspaces: newExpanded
-        });
-    },
+            addTask: (task) => {
+                const { tasks } = get();
+                // Create new Map and add/update task
+                // (Same logic whether task exists or not)
+                const newTasks = new Map(tasks);
+                newTasks.set(task.id, task);
+                set({ tasks: newTasks });
+            },
 
-    reorderWorkspaces: (fromIndex, toIndex) => {
-        const { workspaces } = get();
-        if (fromIndex === toIndex) return;
-        if (fromIndex < 0 || fromIndex >= workspaces.length) return;
-        if (toIndex < 0 || toIndex >= workspaces.length) return;
+            updateTask: (task) => {
+                const { tasks } = get();
+                const existing = tasks.get(task.id);
 
-        const newWorkspaces = [...workspaces];
-        const [removed] = newWorkspaces.splice(fromIndex, 1);
-        newWorkspaces.splice(toIndex, 0, removed);
-        set({ workspaces: newWorkspaces });
-    },
+                // If we have an existing task, check if incoming is actually newer
+                // to prevent state regression from out-of-order messages
+                if (existing) {
+                    const existingTime = existing.lastActivity?.getTime?.() ?? 0;
+                    const incomingTime = task.lastActivity?.getTime?.() ?? 0;
 
-    toggleWorkspaceExpanded: (workspaceId) => {
-        const { expandedWorkspaces } = get();
-        const newExpanded = new Set(expandedWorkspaces);
-        if (newExpanded.has(workspaceId)) {
-            newExpanded.delete(workspaceId);
-        } else {
-            newExpanded.add(workspaceId);
-        }
-        set({ expandedWorkspaces: newExpanded });
-    },
+                    // Skip update if existing is newer (prevents state regression)
+                    if (existingTime > incomingTime) {
+                        console.log(`[TaskStore] Skipping older update for task ${task.id} (local: ${existingTime}, incoming: ${incomingTime})`);
+                        return;
+                    }
 
-    setShowProjectPicker: (show) => set({ showProjectPicker: show }),
-
-    // Task reordering within a workspace
-    reorderTasks: (workspaceId, fromIndex, toIndex) => {
-        const { tasks } = get();
-        if (fromIndex === toIndex) return;
-
-        // Get tasks for this workspace, sorted EXACTLY like the display
-        // (must match WorkspacePanel's getTasksForWorkspace sorting)
-        const workspaceTasks = Array.from(tasks.values())
-            .filter(t => t.workspaceId === workspaceId)
-            .sort((a, b) => {
-                // If both have order, sort by order (ascending)
-                if (a.order !== undefined && b.order !== undefined) {
-                    return a.order - b.order;
+                    // Skip update if nothing has meaningfully changed (same timestamp, same state)
+                    // This prevents unnecessary re-renders when rapid updates arrive
+                    if (existingTime === incomingTime &&
+                        existing.state === task.state &&
+                        existing.waitingInputType === task.waitingInputType) {
+                        return; // No change, skip update
+                    }
                 }
-                // If only one has order, it comes first
-                if (a.order !== undefined) return -1;
-                if (b.order !== undefined) return 1;
-                // Neither has order, sort by creation time (newest first)
-                return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-            });
 
-        if (fromIndex < 0 || fromIndex >= workspaceTasks.length) return;
-        if (toIndex < 0 || toIndex >= workspaceTasks.length) return;
+                const newTasks = new Map(tasks);
+                newTasks.set(task.id, task);
+                set({ tasks: newTasks });
+            },
 
-        // Reorder the array
-        const [removed] = workspaceTasks.splice(fromIndex, 1);
-        workspaceTasks.splice(toIndex, 0, removed);
+            deleteTask: (taskId) => {
+                const { tasks, selectedTaskId } = get();
+                const newTasks = new Map(tasks);
+                newTasks.delete(taskId);
+                const newSelectedId = selectedTaskId === taskId ? null : selectedTaskId;
+                set({ tasks: newTasks, selectedTaskId: newSelectedId });
+            },
 
-        // Update order values for all tasks in workspace
-        const newTasks = new Map(tasks);
-        workspaceTasks.forEach((task, index) => {
-            const updatedTask = { ...task, order: index };
-            newTasks.set(task.id, updatedTask);
-        });
+            // Archived tasks actions
+            setArchivedTasks: (tasks) => set({ archivedTasks: tasks }),
+            setShowArchivedTasks: (show) => set({ showArchivedTasks: show }),
+            removeArchivedTask: (taskId) => {
+                const { archivedTasks } = get();
+                set({ archivedTasks: archivedTasks.filter(t => t.id !== taskId) });
+            },
 
-        set({ tasks: newTasks });
-    },
+            // Workspace actions
+            setWorkspaces: (workspaces) => {
+                const { expandedWorkspaces: currentExpanded, expandedWorkspacesInitialized, workspaces: existingWorkspaces } = get();
 
-    // Voice actions
-    setVoiceEnabled: (enabled) => set({ voiceEnabled: enabled }),
-    setAutoSpeakResponses: (enabled) => set({ autoSpeakResponses: enabled }),
-    setVoiceSettings: (settings) => set({
-        selectedVoiceName: settings.voiceName,
-        voiceRate: settings.rate,
-        voicePitch: settings.pitch,
-        voiceVolume: settings.volume
-    }),
+                // Deduplicate workspaces by id (keep first occurrence)
+                const seenIds = new Set<string>();
+                const uniqueWorkspaces = workspaces.filter(w => {
+                    if (seenIds.has(w.id)) {
+                        console.warn('[TaskStore] Duplicate workspace filtered out:', w.id);
+                        return false;
+                    }
+                    seenIds.add(w.id);
+                    return true;
+                });
 
-    // Global voice mode actions
-    setGlobalVoiceEnabled: (enabled) => set({ globalVoiceEnabled: enabled }),
-    setFocusedInputId: (id) => set({ focusedInputId: id }),
-    appendVoiceTranscript: (transcript) => {
-        const { voiceTranscript } = get();
-        const newTranscript = voiceTranscript
-            ? voiceTranscript + ' ' + transcript
-            : transcript;
-        set({ voiceTranscript: newTranscript });
-    },
-    setVoiceInterimTranscript: (interim) => set({ voiceInterimTranscript: interim }),
-    clearVoiceTranscript: () => set({ voiceTranscript: '', voiceInterimTranscript: '' }),
-    consumeVoiceTranscript: () => {
-        const { voiceTranscript } = get();
-        set({ voiceTranscript: '', voiceInterimTranscript: '' });
-        return voiceTranscript;
-    },
-    setAutoSendSettings: (enabled, delayMs) => set({
-        autoSendEnabled: enabled,
-        autoSendDelayMs: delayMs
-    }),
+                // Keep existing expanded state, only add new workspaces as expanded
+                const newExpanded = new Set(currentExpanded);
 
-    // Supervisor actions
-    setTaskSummary: (summary) => {
-        const { taskSummaries } = get();
-        const newSummaries = new Map(taskSummaries);
-        newSummaries.set(summary.taskId, summary);
-        set({ taskSummaries: newSummaries });
-    },
-    clearTaskSummary: (taskId) => {
-        const { taskSummaries } = get();
-        const newSummaries = new Map(taskSummaries);
-        newSummaries.delete(taskId);
-        set({ taskSummaries: newSummaries });
-    },
+                // Only expand all if this is the very first load (no persisted state was loaded)
+                // If user has persisted expanded state (even if all collapsed), respect it
+                if (!expandedWorkspacesInitialized) {
+                    // First time ever - expand all workspaces
+                    uniqueWorkspaces.forEach(w => newExpanded.add(w.id));
+                } else {
+                    // Add any NEW workspaces as expanded (ones not in existing list)
+                    const existingWorkspaceIds = new Set(existingWorkspaces.map(w => w.id));
+                    uniqueWorkspaces.forEach(w => {
+                        if (!existingWorkspaceIds.has(w.id)) {
+                            // This is a newly added workspace, expand it
+                            newExpanded.add(w.id);
+                        }
+                    });
+                }
+                // Remove any workspaces that no longer exist
+                const workspaceIds = new Set(uniqueWorkspaces.map(w => w.id));
+                for (const id of newExpanded) {
+                    if (!workspaceIds.has(id)) {
+                        newExpanded.delete(id);
+                    }
+                }
+                set({ workspaces: uniqueWorkspaces, expandedWorkspaces: newExpanded, expandedWorkspacesInitialized: true });
+            },
 
-    // Chat actions
-    addChatMessage: (message) => {
-        const { chatMessages } = get();
-        // Avoid duplicates by checking if message already exists
-        if (!chatMessages.some(m => m.id === message.id)) {
-            set({ chatMessages: [...chatMessages, message] });
-        }
-    },
-    setChatMessages: (messages) => set({ chatMessages: messages }),
-    setChatTyping: (isTyping) => set({ chatTyping: isTyping }),
-    clearChatMessages: () => set({ chatMessages: [] }),
+            addWorkspace: (workspace) => {
+                const { workspaces, expandedWorkspaces } = get();
+                // Prevent duplicate workspaces
+                if (workspaces.some(w => w.id === workspace.id)) {
+                    console.warn('[TaskStore] Workspace already exists:', workspace.id);
+                    return;
+                }
+                const newExpanded = new Set(expandedWorkspaces);
+                newExpanded.add(workspace.id);
+                set({
+                    workspaces: [...workspaces, workspace],
+                    expandedWorkspaces: newExpanded
+                });
+            },
 
-    // Waiting input actions
-    setWaitingInput: (info) => {
-        const { waitingInputNotifications } = get();
-        const newNotifications = new Map(waitingInputNotifications);
-        newNotifications.set(info.taskId, info);
-        set({ waitingInputNotifications: newNotifications });
-    },
-    clearWaitingInput: (taskId) => {
-        const { waitingInputNotifications } = get();
-        const newNotifications = new Map(waitingInputNotifications);
-        newNotifications.delete(taskId);
-        set({ waitingInputNotifications: newNotifications });
-    },
+            removeWorkspace: (workspaceId) => {
+                const { workspaces, expandedWorkspaces } = get();
+                const newExpanded = new Set(expandedWorkspaces);
+                newExpanded.delete(workspaceId);
+                set({
+                    workspaces: workspaces.filter(w => w.id !== workspaceId),
+                    expandedWorkspaces: newExpanded
+                });
+            },
 
-    // Draft input actions
-    setTaskDraftInput: (taskId, input) => {
-        const { taskDraftInputs } = get();
-        const newDrafts = new Map(taskDraftInputs);
-        if (input) {
-            newDrafts.set(taskId, input);
-        } else {
-            newDrafts.delete(taskId);
-        }
-        set({ taskDraftInputs: newDrafts });
-    },
-    getTaskDraftInput: (taskId) => {
-        const { taskDraftInputs } = get();
-        return taskDraftInputs.get(taskId) || '';
-    },
-    clearTaskDraftInput: (taskId) => {
-        const { taskDraftInputs } = get();
-        const newDrafts = new Map(taskDraftInputs);
-        newDrafts.delete(taskId);
-        set({ taskDraftInputs: newDrafts });
-    },
+            reorderWorkspaces: (fromIndex, toIndex) => {
+                const { workspaces } = get();
+                if (fromIndex === toIndex) return;
+                if (fromIndex < 0 || fromIndex >= workspaces.length) return;
+                if (toIndex < 0 || toIndex >= workspaces.length) return;
 
-    // Settings actions
-    setAutoFocusOnInput: (enabled) => set({ autoFocusOnInput: enabled }),
-    setSupervisorEnabled: (enabled) => set({ supervisorEnabled: enabled }),
-    setAiCoreConfigured: (configured) => set({ aiCoreConfigured: configured }),
-    setShowSystemStats: (show) => set({ showSystemStats: show }),
-    setBrowserNotificationsEnabled: (enabled) => set({ browserNotificationsEnabled: enabled })
+                const newWorkspaces = [...workspaces];
+                const [removed] = newWorkspaces.splice(fromIndex, 1);
+                newWorkspaces.splice(toIndex, 0, removed);
+                set({ workspaces: newWorkspaces });
+            },
+
+            toggleWorkspaceExpanded: (workspaceId) => {
+                const { expandedWorkspaces } = get();
+                const newExpanded = new Set(expandedWorkspaces);
+                if (newExpanded.has(workspaceId)) {
+                    newExpanded.delete(workspaceId);
+                } else {
+                    newExpanded.add(workspaceId);
+                }
+                set({ expandedWorkspaces: newExpanded });
+            },
+
+            setShowProjectPicker: (show) => set({ showProjectPicker: show }),
+
+            // Task reordering within a workspace
+            reorderTasks: (workspaceId, fromIndex, toIndex) => {
+                const { tasks } = get();
+                if (fromIndex === toIndex) return;
+
+                // Get tasks for this workspace, sorted EXACTLY like the display
+                // (must match WorkspacePanel's getTasksForWorkspace sorting)
+                const workspaceTasks = Array.from(tasks.values())
+                    .filter(t => t.workspaceId === workspaceId)
+                    .sort((a, b) => {
+                        // If both have order, sort by order (ascending)
+                        if (a.order !== undefined && b.order !== undefined) {
+                            return a.order - b.order;
+                        }
+                        // If only one has order, it comes first
+                        if (a.order !== undefined) return -1;
+                        if (b.order !== undefined) return 1;
+                        // Neither has order, sort by creation time (newest first)
+                        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+                    });
+
+                if (fromIndex < 0 || fromIndex >= workspaceTasks.length) return;
+                if (toIndex < 0 || toIndex >= workspaceTasks.length) return;
+
+                // Reorder the array
+                const [removed] = workspaceTasks.splice(fromIndex, 1);
+                workspaceTasks.splice(toIndex, 0, removed);
+
+                // Update order values for all tasks in workspace
+                const newTasks = new Map(tasks);
+                workspaceTasks.forEach((task, index) => {
+                    const updatedTask = { ...task, order: index };
+                    newTasks.set(task.id, updatedTask);
+                });
+
+                set({ tasks: newTasks });
+            },
+
+            // Voice actions
+            setVoiceEnabled: (enabled) => set({ voiceEnabled: enabled }),
+            setAutoSpeakResponses: (enabled) => set({ autoSpeakResponses: enabled }),
+            setVoiceSettings: (settings) => set({
+                selectedVoiceName: settings.voiceName,
+                voiceRate: settings.rate,
+                voicePitch: settings.pitch,
+                voiceVolume: settings.volume
+            }),
+
+            // Global voice mode actions
+            setGlobalVoiceEnabled: (enabled) => set({ globalVoiceEnabled: enabled }),
+            setFocusedInputId: (id) => set({ focusedInputId: id }),
+            appendVoiceTranscript: (transcript) => {
+                const { voiceTranscript } = get();
+                const newTranscript = voiceTranscript
+                    ? voiceTranscript + ' ' + transcript
+                    : transcript;
+                set({ voiceTranscript: newTranscript });
+            },
+            setVoiceInterimTranscript: (interim) => set({ voiceInterimTranscript: interim }),
+            clearVoiceTranscript: () => set({ voiceTranscript: '', voiceInterimTranscript: '' }),
+            consumeVoiceTranscript: () => {
+                const { voiceTranscript } = get();
+                set({ voiceTranscript: '', voiceInterimTranscript: '' });
+                return voiceTranscript;
+            },
+            setAutoSendSettings: (enabled, delayMs) => set({
+                autoSendEnabled: enabled,
+                autoSendDelayMs: delayMs
+            }),
+
+            // Supervisor actions
+            setTaskSummary: (summary) => {
+                const { taskSummaries } = get();
+                const newSummaries = new Map(taskSummaries);
+                newSummaries.set(summary.taskId, summary);
+                set({ taskSummaries: newSummaries });
+            },
+            clearTaskSummary: (taskId) => {
+                const { taskSummaries } = get();
+                const newSummaries = new Map(taskSummaries);
+                newSummaries.delete(taskId);
+                set({ taskSummaries: newSummaries });
+            },
+
+            // Chat actions
+            addChatMessage: (message) => {
+                const { chatMessages } = get();
+                // Avoid duplicates by checking if message already exists
+                if (!chatMessages.some(m => m.id === message.id)) {
+                    set({ chatMessages: [...chatMessages, message] });
+                }
+            },
+            setChatMessages: (messages) => set({ chatMessages: messages }),
+            setChatTyping: (isTyping) => set({ chatTyping: isTyping }),
+            clearChatMessages: () => set({ chatMessages: [] }),
+
+            // Waiting input actions
+            setWaitingInput: (info) => {
+                const { waitingInputNotifications } = get();
+                const newNotifications = new Map(waitingInputNotifications);
+                newNotifications.set(info.taskId, info);
+                set({ waitingInputNotifications: newNotifications });
+            },
+            clearWaitingInput: (taskId) => {
+                const { waitingInputNotifications } = get();
+                const newNotifications = new Map(waitingInputNotifications);
+                newNotifications.delete(taskId);
+                set({ waitingInputNotifications: newNotifications });
+            },
+
+            // Draft input actions
+            setTaskDraftInput: (taskId, input) => {
+                const { taskDraftInputs } = get();
+                const newDrafts = new Map(taskDraftInputs);
+                if (input) {
+                    newDrafts.set(taskId, input);
+                } else {
+                    newDrafts.delete(taskId);
+                }
+                set({ taskDraftInputs: newDrafts });
+            },
+            getTaskDraftInput: (taskId) => {
+                const { taskDraftInputs } = get();
+                return taskDraftInputs.get(taskId) || '';
+            },
+            clearTaskDraftInput: (taskId) => {
+                const { taskDraftInputs } = get();
+                const newDrafts = new Map(taskDraftInputs);
+                newDrafts.delete(taskId);
+                set({ taskDraftInputs: newDrafts });
+            },
+
+            // Settings actions
+            setAutoFocusOnInput: (enabled) => set({ autoFocusOnInput: enabled }),
+            setSupervisorEnabled: (enabled) => set({ supervisorEnabled: enabled }),
+            setAiCoreConfigured: (configured) => set({ aiCoreConfigured: configured }),
+            setShowSystemStats: (show) => set({ showSystemStats: show }),
+            setBrowserNotificationsEnabled: (enabled) => set({ browserNotificationsEnabled: enabled })
         }),
         {
             name: STORAGE_KEY,

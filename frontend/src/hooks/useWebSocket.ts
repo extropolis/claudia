@@ -309,7 +309,8 @@ export function useWebSocket() {
                             code: payload.code,
                             originalType: payload.originalType
                         });
-                        // TODO: Could add a toast notification system here
+                        // Show error notification to the user
+                        useTaskStore.getState().setErrorNotification(payload.message, payload.code);
                         break;
                     }
                 }
