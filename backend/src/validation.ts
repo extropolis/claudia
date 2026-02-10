@@ -19,15 +19,16 @@ export interface ValidationResult<T> {
  */
 interface MCPServerConfig {
     name: string;
-    type?: 'stdio' | 'streamableHttp';  // Default: 'stdio'
-    command?: string;  // Required for stdio, not for streamableHttp
+    type?: 'stdio' | 'http' | 'streamableHttp';  // Default: 'stdio'
+    command?: string;  // Required for stdio, not for http/streamableHttp
     args?: string[];
     env?: Record<string, string>;
-    url?: string;  // Required for streamableHttp
+    url?: string;  // Required for http/streamableHttp
     enabled: boolean;
     timeout?: number;
     autoApprove?: string[];
     description?: string;
+    headers?: Record<string, string>;  // For http/streamableHttp
 }
 
 /**
@@ -105,12 +106,12 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
 
             // Validate type if provided
             const serverType = server.type as string | undefined;
-            if (serverType !== undefined && serverType !== 'stdio' && serverType !== 'streamableHttp') {
-                return { valid: false, error: `mcpServers[${i}].type must be 'stdio' or 'streamableHttp'` };
+            if (serverType !== undefined && serverType !== 'stdio' && serverType !== 'streamableHttp' && serverType !== 'http') {
+                return { valid: false, error: `mcpServers[${i}].type must be 'stdio', 'http', or 'streamableHttp'` };
             }
 
             // Validate based on server type
-            if (serverType === 'streamableHttp') {
+            if (serverType === 'streamableHttp' || serverType === 'http') {
                 // HTTP servers require url, not command
                 if (typeof server.url !== 'string' || !server.url) {
                     return { valid: false, error: `mcpServers[${i}].url is required for streamableHttp type` };
@@ -147,6 +148,18 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
 
             if (server.description !== undefined && typeof server.description !== 'string') {
                 return { valid: false, error: `mcpServers[${i}].description must be a string` };
+            }
+
+            // Validate headers (optional object with string values)
+            if (server.headers !== undefined) {
+                if (typeof server.headers !== 'object' || server.headers === null || Array.isArray(server.headers)) {
+                    return { valid: false, error: `mcpServers[${i}].headers must be an object` };
+                }
+                for (const [key, value] of Object.entries(server.headers)) {
+                    if (typeof value !== 'string') {
+                        return { valid: false, error: `mcpServers[${i}].headers.${key} must be a string` };
+                    }
+                }
             }
         }
         result.mcpServers = payload.mcpServers as MCPServerConfig[];

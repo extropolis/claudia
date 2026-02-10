@@ -11,16 +11,16 @@ const __dirname = dirname(__filename);
 
 export interface MCPServerConfig {
     name: string;
-    type?: 'stdio' | 'streamableHttp';  // Default: 'stdio'
-    command?: string;  // Required for stdio, not for streamableHttp
+    type?: 'stdio' | 'http' | 'streamableHttp';  // Default: 'stdio'
+    command?: string;  // Required for stdio, not for http/streamableHttp
     args?: string[];
     env?: Record<string, string>;
-    url?: string;  // Required for streamableHttp
+    url?: string;  // Required for http/streamableHttp
     enabled: boolean;
     timeout?: number;
     autoApprove?: string[];
     description?: string;
-    headers?: Record<string, string>;
+    headers?: Record<string, string>;  // For http/streamableHttp
 }
 
 export interface AICoreCredentials {

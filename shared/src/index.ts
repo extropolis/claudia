@@ -50,6 +50,12 @@ export interface Workspace {
     systemPrompt?: string;   // Custom system prompt for this workspace
 }
 
+export interface RecentWorkspace {
+    id: string;              // Full path
+    name: string;            // Folder name
+    removedAt: string;       // When it was removed from workspaces
+}
+
 export interface FileNode {
     id: string;              // Full path (unique identifier)
     name: string;            // File/folder name
@@ -110,6 +116,7 @@ export type WSMessageType =
     | 'workspace:deleted'
     | 'workspace:reordered'
     | 'workspace:updated'
+    | 'workspace:recent:list'
     // Task reordering
     | 'tasks:reordered'
     // Supervisor/Chat

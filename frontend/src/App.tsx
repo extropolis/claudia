@@ -7,6 +7,7 @@ import { SettingsMenu } from './components/SettingsMenu';
 import { GlobalVoiceManager } from './components/GlobalVoiceManager';
 import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
 import { SystemStats } from './components/SystemStats';
+import { VoiceAssistant } from './components/VoiceAssistant';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
 import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity } from 'lucide-react';
@@ -348,6 +349,13 @@ function App() {
             <ProjectPicker onSelect={handleProjectSelect} />
             <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
             <GlobalVoiceManager />
+
+            {/* OpenAI Realtime Voice Assistant */}
+            <VoiceAssistant
+                onTaskCreated={(taskId, prompt) => {
+                    console.log(`[VoiceAssistant] Task created: ${taskId} - ${prompt}`);
+                }}
+            />
 
             {/* Offline warning overlay */}
             {isOffline && (

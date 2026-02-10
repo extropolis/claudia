@@ -1801,7 +1801,7 @@ export class TaskSpawner extends EventEmitter {
                     this.emit('tasksUpdated');
 
                     // Send combined history (PTY output) first, then enhance with JSONL if needed
-                    this.sendHistoryWithConversationFallback(task);
+                    this.sendTaskHistory(task);
                 }
             }
             return;
@@ -1819,7 +1819,7 @@ export class TaskSpawner extends EventEmitter {
                 }
 
                 // Send combined history (PTY output) first, then enhance with JSONL if needed
-                this.sendHistoryWithConversationFallback(task);
+                this.sendTaskHistory(task);
             } else {
                 // Notify backend if using OpenCode
                 const taskBackend = this.taskBackends.get(taskId);
@@ -1831,39 +1831,12 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
-     * Send task history to the client, with fallback to JSONL conversation if PTY history is missing/minimal
+     * Send task history to the client
      */
-    private sendHistoryWithConversationFallback(task: InternalTask): void {
+    private sendTaskHistory(task: InternalTask): void {
         const history = this.getCombinedHistory(task);
-
-        // Check if history is minimal (just resume message or empty)
-        const isMinimalHistory = !history || history.length < 500;
-
         if (history) {
             this.emit('taskRestore', task.id, history);
-        }
-
-        // If history is minimal and we have a session ID, fetch JSONL conversation and send it
-        if (isMinimalHistory && task.sessionId && task.workspaceId) {
-            logger.info('PTY history is minimal, fetching JSONL conversation', {
-                taskId: task.id,
-                sessionId: task.sessionId,
-                historyLength: history?.length || 0
-            });
-
-            this.renderConversationAsTerminal(task.workspaceId, task.sessionId).then(conversationHistory => {
-                if (conversationHistory) {
-                    logger.info('Sending JSONL conversation history', {
-                        taskId: task.id,
-                        conversationLength: conversationHistory.length
-                    });
-                    // Send the conversation history as a restore event
-                    // This will prepend to any existing history in the terminal
-                    this.emit('taskRestore', task.id, conversationHistory);
-                }
-            }).catch(err => {
-                logger.error('Failed to fetch JSONL conversation', { taskId: task.id, error: err });
-            });
         }
     }
 

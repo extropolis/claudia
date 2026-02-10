@@ -425,6 +425,14 @@ export function useWebSocket() {
         sendMessage('workspace:systemPrompt:set', { workspaceId, systemPrompt });
     }, [sendMessage]);
 
+    const requestRecentWorkspaces = useCallback(() => {
+        sendMessage('workspace:recent:list', {});
+    }, [sendMessage]);
+
+    const clearRecentWorkspace = useCallback((workspaceId?: string) => {
+        sendMessage('workspace:recent:clear', { workspaceId });
+    }, [sendMessage]);
+
     // Supervisor actions
     const executeSupervisorAction = useCallback((taskId: string, action: SuggestedAction) => {
         sendMessage('supervisor:action', { taskId, action });
@@ -486,6 +494,8 @@ export function useWebSocket() {
         openFolder,
         openTerminal,
         setSystemPrompt,
+        requestRecentWorkspaces,
+        clearRecentWorkspace,
         executeSupervisorAction,
         requestTaskAnalysis,
         sendChatMessage,

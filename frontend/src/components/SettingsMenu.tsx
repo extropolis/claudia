@@ -13,10 +13,11 @@ interface SettingsMenuProps {
 
 interface MCPServerListItem {
     name: string;
-    type?: 'stdio' | 'streamableHttp';
+    type?: 'stdio' | 'http' | 'streamableHttp';
     command?: string;
     args?: string[];
     url?: string;
+    headers?: Record<string, string>;
 }
 
 interface AICoreCredentials {
@@ -109,7 +110,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     }, [isOpen, initialPanel]);
 
     const [isAddingServer, setIsAddingServer] = useState(false);
-    const [newServer, setNewServer] = useState({ name: '', type: 'stdio' as 'stdio' | 'streamableHttp', command: '', args: '', url: '' });
+    const [newServer, setNewServer] = useState({ name: '', type: 'stdio' as 'stdio' | 'http' | 'streamableHttp', command: '', args: '', url: '', headers: '' });
 
     // JSON editor state
     const [mcpViewMode, setMcpViewMode] = useState<'list' | 'json'>('list');
@@ -234,13 +235,13 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     };
 
     const objectToArrayFormat = (obj: Record<string, unknown>) => {
-        const servers: Array<{ name: string; type?: 'stdio' | 'streamableHttp'; command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled: boolean; timeout?: number; autoApprove?: string[]; description?: string }> = [];
+        const servers: Array<{ name: string; type?: 'stdio' | 'http' | 'streamableHttp'; command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled: boolean; timeout?: number; autoApprove?: string[]; description?: string; headers?: Record<string, string> }> = [];
         for (const [name, config] of Object.entries(obj)) {
             const serverConfig = config as Record<string, unknown>;
             servers.push({
                 name,
                 enabled: true, // Default to enabled
-                type: (serverConfig.type as 'stdio' | 'streamableHttp') || 'stdio',
+                type: (serverConfig.type as 'stdio' | 'http' | 'streamableHttp') || 'stdio',
                 command: serverConfig.command as string | undefined,
                 args: serverConfig.args as string[] | undefined,
                 url: serverConfig.url as string | undefined,
@@ -260,7 +261,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         try {
             const parsedServers = JSON.parse(mcpJson || '{}');
             for (const [name, config] of Object.entries(parsedServers)) {
-                const serverConfig = config as { type?: 'stdio' | 'streamableHttp'; command?: string; args?: string[]; url?: string };
+                const serverConfig = config as { type?: 'stdio' | 'http' | 'streamableHttp'; command?: string; args?: string[]; url?: string; headers?: Record<string, string> };
                 servers.push({
                     name,
                     type: serverConfig.type || 'stdio',

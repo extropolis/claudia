@@ -321,6 +321,18 @@ export const useTaskStore = create<TaskStore>()(
     // Workspace actions
     setWorkspaces: (workspaces) => {
         const { expandedWorkspaces: currentExpanded, expandedWorkspacesInitialized, workspaces: existingWorkspaces } = get();
+
+        // Deduplicate workspaces by id (keep first occurrence)
+        const seenIds = new Set<string>();
+        const uniqueWorkspaces = workspaces.filter(w => {
+            if (seenIds.has(w.id)) {
+                console.warn('[TaskStore] Duplicate workspace filtered out:', w.id);
+                return false;
+            }
+            seenIds.add(w.id);
+            return true;
+        });
+
         // Keep existing expanded state, only add new workspaces as expanded
         const newExpanded = new Set(currentExpanded);
 
@@ -328,11 +340,11 @@ export const useTaskStore = create<TaskStore>()(
         // If user has persisted expanded state (even if all collapsed), respect it
         if (!expandedWorkspacesInitialized) {
             // First time ever - expand all workspaces
-            workspaces.forEach(w => newExpanded.add(w.id));
+            uniqueWorkspaces.forEach(w => newExpanded.add(w.id));
         } else {
             // Add any NEW workspaces as expanded (ones not in existing list)
             const existingWorkspaceIds = new Set(existingWorkspaces.map(w => w.id));
-            workspaces.forEach(w => {
+            uniqueWorkspaces.forEach(w => {
                 if (!existingWorkspaceIds.has(w.id)) {
                     // This is a newly added workspace, expand it
                     newExpanded.add(w.id);
@@ -340,17 +352,22 @@ export const useTaskStore = create<TaskStore>()(
             });
         }
         // Remove any workspaces that no longer exist
-        const workspaceIds = new Set(workspaces.map(w => w.id));
+        const workspaceIds = new Set(uniqueWorkspaces.map(w => w.id));
         for (const id of newExpanded) {
             if (!workspaceIds.has(id)) {
                 newExpanded.delete(id);
             }
         }
-        set({ workspaces, expandedWorkspaces: newExpanded, expandedWorkspacesInitialized: true });
+        set({ workspaces: uniqueWorkspaces, expandedWorkspaces: newExpanded, expandedWorkspacesInitialized: true });
     },
 
     addWorkspace: (workspace) => {
         const { workspaces, expandedWorkspaces } = get();
+        // Prevent duplicate workspaces
+        if (workspaces.some(w => w.id === workspace.id)) {
+            console.warn('[TaskStore] Workspace already exists:', workspace.id);
+            return;
+        }
         const newExpanded = new Set(expandedWorkspaces);
         newExpanded.add(workspace.id);
         set({

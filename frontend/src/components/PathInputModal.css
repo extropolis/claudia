@@ -18,17 +18,129 @@
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
     max-width: 600px;
     width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
 }
 
 .path-input-modal h2 {
-    margin: 0 0 12px 0;
+    margin: 0 0 16px 0;
     color: #e0e0e0;
     font-size: 20px;
 }
 
+/* Recent Workspaces Section */
+.recent-workspaces-section {
+    margin-bottom: 20px;
+    border-bottom: 1px solid #404040;
+    padding-bottom: 16px;
+}
+
+.recent-workspaces-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: #b0b0b0;
+    margin: 0 0 12px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.recent-workspaces-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.recent-workspace-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    background: #1a1a1a;
+    border: 1px solid #404040;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.recent-workspace-item:hover {
+    background: #252525;
+    border-color: #3b82f6;
+}
+
+.recent-workspace-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow: hidden;
+    flex: 1;
+    min-width: 0;
+}
+
+.recent-workspace-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: #e0e0e0;
+}
+
+.recent-workspace-path {
+    font-size: 12px;
+    color: #808080;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.recent-workspace-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    margin-left: 12px;
+}
+
+.recent-workspace-time {
+    font-size: 11px;
+    color: #606060;
+}
+
+.recent-workspace-remove {
+    width: 20px;
+    height: 20px;
+    border: none;
+    background: transparent;
+    color: #606060;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: all 0.15s ease;
+}
+
+.recent-workspace-item:hover .recent-workspace-remove {
+    opacity: 1;
+}
+
+.recent-workspace-remove:hover {
+    background: #404040;
+    color: #e0e0e0;
+}
+
+/* Path Input Section */
+.path-input-section {
+    margin-top: 4px;
+}
+
 .modal-description {
     color: #b0b0b0;
-    margin-bottom: 20px;
+    margin-bottom: 16px;
     font-size: 14px;
     line-height: 1.5;
 }
