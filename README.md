@@ -29,7 +29,7 @@ https://github.com/user-attachments/assets/e0d9d9a3-77eb-45b6-ac55-984d8ec9c663
 
 ```bash
 # Clone the repository
-git clone https://github.com/thisislance98/claudia.git
+git clone https://github.concur.com/ai-experiments/claudia.git
 cd claudia
 
 # Install dependencies
