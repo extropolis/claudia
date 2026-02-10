@@ -47,6 +47,14 @@ npm run build -w shared
 
 ### Quick Start
 
+Make sure Claude Code is installed first:
+
+```bash
+claude --version
+```
+
+Then start the app:
+
 ```bash
 ./start.sh
 ```
@@ -84,15 +92,6 @@ npm run dev:frontend  # Frontend only (port 5173)
 | Frontend | 5173 |
 
 ## Configuration
-
-### Claude Code Setup
-
-Claudia spawns Claude Code CLI instances. Make sure Claude Code is installed and configured:
-
-```bash
-# Verify Claude Code is installed
-claude --version
-```
 
 ### SAP AI Core Integration (Optional)
 
