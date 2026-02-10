@@ -47,14 +47,6 @@ npm run build -w shared
 
 ### Quick Start
 
-Make sure Claude Code is installed first:
-
-```bash
-claude --version
-```
-
-Then start the app:
-
 ```bash
 ./start.sh
 ```
@@ -65,6 +57,18 @@ This will:
 3. Start the frontend dev server (port 5173)
 
 Access the UI at **http://localhost:5173**
+
+### SAP AI Core Setup
+
+On first launch, the Settings panel will open automatically. Enter your SAP AI Core credentials:
+
+1. **Auth URL** — your SAP authentication endpoint
+2. **Client ID** and **Client Secret**
+3. **Base URL** — your AI Core API endpoint
+4. Choose a model (e.g., Claude 4.5 Sonnet)
+5. Restart the server (`./start.sh`)
+
+Claudia runs an embedded proxy that translates Anthropic API calls into SAP AI Core requests, so Claude Code works without a direct Anthropic login.
 
 ### Manual Start
 
@@ -90,22 +94,6 @@ npm run dev:frontend  # Frontend only (port 5173)
 |---------|------|
 | Backend API/WebSocket | 4001 |
 | Frontend | 5173 |
-
-## Configuration
-
-### SAP AI Core Integration (Optional)
-
-Claudia can proxy Claude API requests through SAP AI Core. **No `.env` file is needed** — configure everything in the Settings panel:
-
-1. Open **Settings** (⚙️) → **API Mode** → select **SAP AI Core**
-2. Enter your credentials: Auth URL, Client ID, Client Secret, Base URL
-3. Choose a model (e.g., Claude 4.5 Sonnet)
-4. Restart the server (`./start.sh`)
-
-When using the **Claude Code** backend, Claudia runs an embedded proxy that translates Anthropic API calls into SAP AI Core requests. Claude Code connects to `http://localhost:4001` with a dummy API key so it skips its login flow.
-
-When using the **OpenCode** backend, credentials are passed natively via `AICORE_SERVICE_KEY`.
-
 
 
 ## Development
