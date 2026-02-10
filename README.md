@@ -35,6 +35,10 @@ cd claudia
 # Install dependencies
 npm install
 
+# Node.js v25+ only: upgrade node-pty for compatibility
+node -v  # check your version
+npm install node-pty@1.2.0-beta.11  # only if v25+
+
 # Build the shared types package (required before first run)
 npm run build -w shared
 ```
@@ -141,19 +145,4 @@ claudia/
 └── start.sh           # Startup script
 ```
 
-## Troubleshooting
 
-### `posix_spawnp failed` when creating tasks
-
-If task creation does nothing on the frontend and the backend logs show `posix_spawnp failed`, your `node-pty` version is incompatible with your Node.js version.
-
-**Node.js v25+** requires `node-pty@1.2.0-beta.11` or later:
-
-```bash
-# Check your Node version
-node -v
-
-# If v25+, upgrade node-pty
-npm install node-pty@1.2.0-beta.11
-npm install  # re-resolve workspaces
-```
