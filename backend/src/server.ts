@@ -17,7 +17,6 @@ import { Task, Workspace, WSMessage, WSMessageType, WSErrorPayload, ChatMessage,
 import { validateConfigUpdate, validateWorkspacePath, validateAICoreCredentials } from './validation.js';
 import { LearningsStore } from './learnings-store.js';
 import { createLogger } from './logger.js';
-import { getVoiceHandler, VoiceWSHandler } from './voice-ws-handler.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
 // - config-routes.ts: Config API routes template
@@ -49,8 +48,6 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:openTerminal',
     'workspace:systemPrompt:get',
     'workspace:systemPrompt:set',
-    'workspace:recent:list',
-    'workspace:recent:clear',
     'git:push',
     'supervisor:action',
     'supervisor:analyze',
@@ -139,11 +136,6 @@ export function createApp(basePath?: string) {
     const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore);
     // LearningsStore for RAG-based learnings
     const learningsStore = new LearningsStore(basePath, configStore);
-
-    // Initialize Voice WebSocket handler for OpenAI Realtime API integration
-    const voiceHandler = getVoiceHandler();
-    // Create a separate WebSocket server for voice on a different path
-    const voiceWss = new WebSocketServer({ noServer: true });
 
     // Helper to extract rules from CLAUDE.md (reverse sync) - async version
     async function extractRulesFromClaudeMd(workspacePath: string): Promise<string | null> {
@@ -354,79 +346,6 @@ export function createApp(basePath?: string) {
 
     supervisorChat.on('typing', (isTyping: boolean) => {
         broadcast({ type: 'supervisor:chat:typing' as WSMessageType, payload: { isTyping } });
-    });
-
-    // Initialize voice handler with callbacks for task management
-    const openaiApiKey = process.env.OPENAI_API_KEY;
-    if (openaiApiKey) {
-        voiceHandler.initialize(voiceWss, openaiApiKey, {
-            onCreateTask: async (prompt: string, workspaceId?: string) => {
-                const targetWorkspace = workspaceId || workspaceStore.getWorkspaces()[0]?.id;
-                if (!targetWorkspace) {
-                    throw new Error('No workspace available');
-                }
-                const task = await taskSpawner.createTask(prompt, targetWorkspace);
-                return { taskId: task.id };
-            },
-            onListTasks: (workspaceId?: string) => {
-                const allTasks = taskSpawner.getAllTasks();
-                if (workspaceId) {
-                    return allTasks.filter(t => t.workspaceId === workspaceId);
-                }
-                return allTasks;
-            },
-            onGetTaskStatus: (taskId: string) => {
-                // Support partial task ID matching (last 6 chars)
-                const allTasks = taskSpawner.getAllTasks();
-                const task = allTasks.find(t => t.id === taskId || t.id.endsWith(taskId));
-                return task || null;
-            },
-            onStopTask: (taskId: string) => {
-                const allTasks = taskSpawner.getAllTasks();
-                const task = allTasks.find(t => t.id === taskId || t.id.endsWith(taskId));
-                if (task) {
-                    taskSpawner.interruptTask(task.id);
-                    return true;
-                }
-                return false;
-            }
-        });
-        logger.info('Voice handler initialized with OpenAI API key');
-
-        // Wire up task completion events for voice announcements
-        taskSpawner.on('taskStateChanged', (task: Task) => {
-            if (task.state === 'idle' && voiceHandler.isActive) {
-                // Task completed - announce via voice
-                // Generate a brief summary (you could use LLM for this)
-                const summary = `The task "${task.prompt.slice(0, 50)}${task.prompt.length > 50 ? '...' : ''}" has finished.`;
-                voiceHandler.announceTaskCompletion(task.id, summary);
-            }
-        });
-    } else {
-        logger.info('Voice handler not initialized - OPENAI_API_KEY not set');
-    }
-
-    // Handle WebSocket upgrade to route between main WS and voice WS
-    server.on('upgrade', (request, socket, head) => {
-        const url = new URL(request.url || '', `http://${request.headers.host}`);
-
-        if (url.pathname === '/voice') {
-            // Route to voice WebSocket server
-            voiceWss.handleUpgrade(request, socket, head, (ws) => {
-                voiceHandler.handleConnection(ws, request);
-            });
-        } else {
-            // Route to main WebSocket server (default behavior)
-            wss.handleUpgrade(request, socket, head, (ws) => {
-                wss.emit('connection', ws, request);
-            });
-        }
-    });
-
-    // Voice WebSocket connection handling
-    voiceWss.on('connection', (ws: WebSocket, request) => {
-        logger.info('Voice WebSocket connection established');
-        voiceHandler.handleConnection(ws, request);
     });
 
     // WebSocket connection handling
@@ -690,27 +609,6 @@ export function createApp(basePath?: string) {
                         if (!workspaceId) break;
                         if (workspaceStore.deleteWorkspace(workspaceId)) {
                             broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId } });
-                        }
-                        break;
-                    }
-
-                    case 'workspace:recent:list': {
-                        // Get list of recent workspaces
-                        const recentWorkspaces = workspaceStore.getRecentWorkspaces();
-                        ws.send(JSON.stringify({
-                            type: 'workspace:recent:list' as WSMessageType,
-                            payload: { recentWorkspaces }
-                        }));
-                        break;
-                    }
-
-                    case 'workspace:recent:clear': {
-                        // Clear a recent workspace from history
-                        const { workspaceId } = payload as { workspaceId?: string };
-                        if (workspaceId) {
-                            workspaceStore.clearRecentWorkspace(workspaceId);
-                        } else {
-                            workspaceStore.clearAllRecentWorkspaces();
                         }
                         break;
                     }
@@ -1225,14 +1123,13 @@ export function createApp(basePath?: string) {
         }
     });
 
-    // MCP server config type - supports stdio, http, and streamableHttp types
+    // MCP server config type - supports both stdio and streamableHttp types
     interface MCPServerConfig {
-        type?: 'stdio' | 'http' | 'streamableHttp';
+        type?: 'stdio' | 'streamableHttp';
         command?: string;  // For stdio
         args?: string[];   // For stdio
         env?: Record<string, string>;  // For stdio
-        url?: string;      // For http/streamableHttp
-        headers?: Record<string, string>;  // For http/streamableHttp
+        url?: string;      // For streamableHttp
         timeout?: number;
         autoApprove?: string[];
         description?: string;
@@ -1260,16 +1157,15 @@ export function createApp(basePath?: string) {
             };
             const workspacePath = req.query.workspace as string;
 
-            // Helper to extract server config supporting stdio and HTTP types
+            // Helper to extract server config supporting both stdio and HTTP types
             const extractServerConfig = (name: string, config: MCPServerConfig) => {
                 const serverType = config.type || 'stdio';
                 console.log(`[Server] extractServerConfig: ${name}, type=${serverType}`);
-                if (serverType === 'streamableHttp' || serverType === 'http') {
+                if (serverType === 'streamableHttp') {
                     return {
                         name,
-                        type: serverType as 'http' | 'streamableHttp',
+                        type: 'streamableHttp' as const,
                         url: config.url || '',
-                        headers: config.headers,
                         timeout: config.timeout,
                         autoApprove: config.autoApprove,
                         description: config.description,
@@ -2075,9 +1971,6 @@ Guidelines:
             taskSpawner.saveNow();
             supervisorChat.saveChatHistoryNow();
             taskSpawner.destroy();
-
-            // Cleanup voice handler
-            voiceHandler.destroy();
 
             // Close WebSocket connections gracefully
             for (const client of clients) {
