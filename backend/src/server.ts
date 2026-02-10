@@ -15,6 +15,7 @@ import { getConversationHistory, getWorkspaceSessions } from './conversation-par
 import { createAnthropicProxy } from './anthropic-proxy/index.js';
 import { Task, Workspace, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType } from '@claudia/shared';
 import { validateConfigUpdate, validateWorkspacePath, validateAICoreCredentials } from './validation.js';
+import { LearningsStore } from './learnings-store.js';
 import { createLogger } from './logger.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
@@ -133,6 +134,8 @@ export function createApp(basePath?: string) {
     const workspaceStore = new WorkspaceStore(basePath);
     // SupervisorChat now handles both auto-analysis (formerly TaskSupervisor) and chat
     const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore);
+    // LearningsStore for RAG-based learnings
+    const learningsStore = new LearningsStore(basePath, configStore);
 
     // Helper to extract rules from CLAUDE.md (reverse sync) - async version
     async function extractRulesFromClaudeMd(workspacePath: string): Promise<string | null> {
@@ -191,8 +194,41 @@ export function createApp(basePath?: string) {
         }
     })();
 
-    // Track connected clients
+    // Track connected clients with their alive status for heartbeat
     const clients = new Set<WebSocket>();
+    const clientAliveMap = new WeakMap<WebSocket, boolean>();
+
+    // Heartbeat interval to keep WebSocket connections alive
+    const HEARTBEAT_INTERVAL_MS = 30000; // 30 seconds
+    // Track missed pongs - only terminate after multiple missed heartbeats
+    const clientMissedPongs = new WeakMap<WebSocket, number>();
+
+    const heartbeatInterval = setInterval(() => {
+        console.log(`[Server] Heartbeat check - ${clients.size} client(s) connected`);
+        for (const client of clients) {
+            if (clientAliveMap.get(client) === false) {
+                // Client didn't respond to last ping
+                const missed = (clientMissedPongs.get(client) || 0) + 1;
+                clientMissedPongs.set(client, missed);
+                console.log(`[Server] Client missed heartbeat (${missed}/3)`);
+
+                if (missed >= 3) {
+                    // Only terminate after 3 missed pongs (90 seconds of no response)
+                    console.log('[Server] Client failed 3 heartbeats, terminating connection');
+                    client.terminate();
+                    clients.delete(client);
+                    continue;
+                }
+            } else {
+                // Reset missed count on successful pong
+                clientMissedPongs.set(client, 0);
+            }
+            // Mark as not alive, will be set to true when pong received
+            clientAliveMap.set(client, false);
+            client.ping();
+            console.log('[Server] Sent ping to client');
+        }
+    }, HEARTBEAT_INTERVAL_MS);
 
     // Batched broadcast state - accumulate state changes and send periodically
     const BROADCAST_BATCH_INTERVAL_MS = 150; // Batch broadcasts every 150ms
@@ -316,6 +352,14 @@ export function createApp(basePath?: string) {
     wss.on('connection', async (ws: WebSocket) => {
         console.log('[Server] Client connected');
         clients.add(ws);
+        clientAliveMap.set(ws, true); // Mark as alive on connection
+
+        // Handle pong responses to keep connection alive
+        ws.on('pong', () => {
+            clientAliveMap.set(ws, true);
+            // Debug: log pong received
+            console.log('[Server] Pong received from client');
+        });
 
         // If reconnection is in progress, send a status message and wait
         if (taskSpawner.isReconnectInProgress()) {
@@ -364,7 +408,7 @@ export function createApp(basePath?: string) {
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId } = payload as { prompt?: string; workspaceId?: string };
+                        const { prompt, workspaceId, initialCols, initialRows } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number };
                         if (!prompt || !workspaceId) {
                             logger.error('task:create requires prompt and workspaceId');
                             sendWSError(ws, 'task:create requires prompt and workspaceId', message.type, 'MISSING_PARAMS');
@@ -382,7 +426,9 @@ export function createApp(basePath?: string) {
                         const rules = configStore.getRules();
                         const systemPrompt = workspaceSystemPrompt?.trim() || rules?.trim() || undefined;
                         logger.info(`Creating task with system prompt`, { hasSystemPrompt: !!systemPrompt, source: workspaceSystemPrompt ? 'workspace' : (rules ? 'rules' : 'none') });
-                        taskSpawner.createTask(prompt, workspaceValidation.data!, systemPrompt);
+
+                        // Pass initial dimensions if provided
+                        taskSpawner.createTask(prompt, workspaceValidation.data!, systemPrompt, initialCols, initialRows);
                         break;
                     }
 
@@ -737,9 +783,14 @@ export function createApp(basePath?: string) {
             }
         });
 
-        ws.on('close', () => {
-            console.log('[Server] Client disconnected');
+        ws.on('close', (code: number, reason: Buffer) => {
+            const reasonStr = reason.toString() || 'no reason';
+            console.log(`[Server] Client disconnected - code: ${code}, reason: ${reasonStr}`);
             clients.delete(ws);
+        });
+
+        ws.on('error', (error: Error) => {
+            console.error('[Server] WebSocket error:', error.message);
         });
     });
 
@@ -1072,10 +1123,16 @@ export function createApp(basePath?: string) {
         }
     });
 
-    // MCP server config type
+    // MCP server config type - supports both stdio and streamableHttp types
     interface MCPServerConfig {
-        command?: string;
-        args?: string[];
+        type?: 'stdio' | 'streamableHttp';
+        command?: string;  // For stdio
+        args?: string[];   // For stdio
+        env?: Record<string, string>;  // For stdio
+        url?: string;      // For streamableHttp
+        timeout?: number;
+        autoApprove?: string[];
+        description?: string;
         [key: string]: unknown;
     }
 
@@ -1100,21 +1157,44 @@ export function createApp(basePath?: string) {
             };
             const workspacePath = req.query.workspace as string;
 
+            // Helper to extract server config supporting both stdio and HTTP types
+            const extractServerConfig = (name: string, config: MCPServerConfig) => {
+                const serverType = config.type || 'stdio';
+                console.log(`[Server] extractServerConfig: ${name}, type=${serverType}`);
+                if (serverType === 'streamableHttp') {
+                    return {
+                        name,
+                        type: 'streamableHttp' as const,
+                        url: config.url || '',
+                        timeout: config.timeout,
+                        autoApprove: config.autoApprove,
+                        description: config.description,
+                    };
+                } else {
+                    return {
+                        name,
+                        type: 'stdio' as const,
+                        command: config.command || '',
+                        args: config.args || [],
+                        env: config.env,
+                        description: config.description,
+                    };
+                }
+            };
+
             // Extract global MCP servers
-            const globalServers: { name: string; command: string; args?: string[]; scope: 'global' }[] = [];
+            const globalServers: Array<ReturnType<typeof extractServerConfig> & { scope: 'global' }> = [];
             if (claudeConfig.mcpServers) {
                 for (const [name, config] of Object.entries(claudeConfig.mcpServers)) {
                     globalServers.push({
-                        name,
-                        command: config.command || '',
-                        args: config.args || [],
+                        ...extractServerConfig(name, config),
                         scope: 'global'
                     });
                 }
             }
 
             // Extract project-specific MCP servers if workspace path provided
-            const projectServers: { name: string; command: string; args?: string[]; scope: 'project'; projectPath: string }[] = [];
+            const projectServers: Array<ReturnType<typeof extractServerConfig> & { scope: 'project'; projectPath: string }> = [];
             if (claudeConfig.projects) {
                 for (const [projectPath, projectConfig] of Object.entries(claudeConfig.projects)) {
                     if (projectConfig.mcpServers) {
@@ -1122,9 +1202,7 @@ export function createApp(basePath?: string) {
                             // Include if no workspace filter, or if this project matches the workspace
                             if (!workspacePath || projectPath === workspacePath || workspacePath.startsWith(projectPath)) {
                                 projectServers.push({
-                                    name,
-                                    command: config.command || '',
-                                    args: config.args || [],
+                                    ...extractServerConfig(name, config),
                                     scope: 'project',
                                     projectPath
                                 });
@@ -1142,26 +1220,26 @@ export function createApp(basePath?: string) {
     });
 
     // Get mcpServers section from ~/.claude.json for direct editing
-    app.get('/api/claude-config/mcp-servers', (_req, res) => {
+    app.get('/api/claude-config/mcp-servers', (req, res) => {
         try {
             const homeDir = process.env.HOME || process.env.USERPROFILE || '';
             const claudeConfigPath = join(homeDir, '.claude.json');
 
             if (!existsSync(claudeConfigPath)) {
-                // Return empty mcpServers if file doesn't exist
                 return res.json({
-                    content: JSON.stringify({}, null, 2),
+                    mcpServers: JSON.stringify({}, null, 2),
                     path: claudeConfigPath,
                     exists: false
                 });
             }
 
             const fileContent = readFileSync(claudeConfigPath, 'utf-8');
-            const config = JSON.parse(fileContent);
-            const mcpServers = config.mcpServers || {};
+            const config = JSON.parse(fileContent) as {
+                mcpServers?: Record<string, unknown>;
+            };
 
             res.json({
-                content: JSON.stringify(mcpServers, null, 2),
+                mcpServers: JSON.stringify(config.mcpServers || {}, null, 2),
                 path: claudeConfigPath,
                 exists: true
             });
@@ -1174,16 +1252,15 @@ export function createApp(basePath?: string) {
     // Update mcpServers section in ~/.claude.json
     app.put('/api/claude-config/mcp-servers', (req, res) => {
         try {
-            const { content } = req.body;
+            const { mcpServers: mcpServersContent } = req.body;
 
-            if (typeof content !== 'string') {
-                return res.status(400).json({ error: 'Content must be a string' });
+            if (typeof mcpServersContent !== 'string') {
+                return res.status(400).json({ error: 'mcpServers must be a string' });
             }
 
-            // Validate JSON syntax and structure
-            let mcpServers;
+            let mcpServers: Record<string, unknown>;
             try {
-                mcpServers = JSON.parse(content);
+                mcpServers = JSON.parse(mcpServersContent);
                 if (typeof mcpServers !== 'object' || Array.isArray(mcpServers)) {
                     return res.status(400).json({ error: 'mcpServers must be an object' });
                 }
@@ -1198,17 +1275,21 @@ export function createApp(basePath?: string) {
             const claudeConfigPath = join(homeDir, '.claude.json');
 
             // Read existing config or create new one
-            let config: Record<string, unknown> = {};
+            interface ClaudeConfig {
+                mcpServers?: Record<string, unknown>;
+                [key: string]: unknown;
+            }
+            let config: ClaudeConfig = {};
             if (existsSync(claudeConfigPath)) {
                 const fileContent = readFileSync(claudeConfigPath, 'utf-8');
                 config = JSON.parse(fileContent);
             }
 
-            // Update only the mcpServers section
             config.mcpServers = mcpServers;
+            console.log('[Server] Updated MCP servers');
 
             writeFileSync(claudeConfigPath, JSON.stringify(config, null, 2), 'utf-8');
-            console.log('[Server] Updated MCP servers in Claude config:', claudeConfigPath);
+            console.log('[Server] Saved Claude config:', claudeConfigPath);
 
             res.json({ success: true, path: claudeConfigPath });
         } catch (error) {
@@ -1313,6 +1394,271 @@ export function createApp(basePath?: string) {
         }
     });
 
+    // ============================================================
+    // Embeddings API - proxies to SAP AI Core for vector embeddings
+    // ============================================================
+    app.post('/v1/embeddings', async (req, res) => {
+        try {
+            const { input, model } = req.body;
+
+            if (!input) {
+                return res.status(400).json({ error: 'Missing input text' });
+            }
+
+            // Get AI Core credentials
+            const credentials = configStore.getAICoreCredentials();
+            if (!credentials?.clientId || !credentials?.clientSecret) {
+                return res.status(400).json({ error: 'SAP AI Core credentials not configured' });
+            }
+
+            // Get access token
+            const tokenUrl = `${credentials.authUrl}/oauth/token?grant_type=client_credentials`;
+            const basicAuth = Buffer.from(`${credentials.clientId}:${credentials.clientSecret}`).toString('base64');
+
+            const tokenResponse = await fetch(tokenUrl, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Basic ${basicAuth}`,
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                }
+            });
+
+            if (!tokenResponse.ok) {
+                return res.status(500).json({ error: 'Failed to get AI Core token' });
+            }
+
+            const tokenData = await tokenResponse.json() as { access_token: string };
+
+            // Find the text-embedding-ada-002 deployment
+            const deploymentsUrl = `${credentials.baseUrl}/v2/lm/deployments`;
+            const deploymentsResponse = await fetch(deploymentsUrl, {
+                headers: {
+                    Authorization: `Bearer ${tokenData.access_token}`,
+                    'AI-Resource-Group': credentials.resourceGroup || 'default'
+                }
+            });
+
+            if (!deploymentsResponse.ok) {
+                return res.status(500).json({ error: 'Failed to get deployments' });
+            }
+
+            const deploymentsData = await deploymentsResponse.json() as { resources: any[] };
+            const embeddingDeployment = deploymentsData.resources?.find((d: any) =>
+                d.status === 'RUNNING' &&
+                d.details?.resources?.backendDetails?.model?.name === 'text-embedding-ada-002'
+            );
+
+            if (!embeddingDeployment) {
+                return res.status(400).json({ error: 'No text-embedding-ada-002 deployment found' });
+            }
+
+            // Call the embeddings endpoint
+            const embeddingsUrl = `${credentials.baseUrl}/v2/inference/deployments/${embeddingDeployment.id}/embeddings?api-version=2024-02-01`;
+            const embeddingsResponse = await fetch(embeddingsUrl, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${tokenData.access_token}`,
+                    'Content-Type': 'application/json',
+                    'AI-Resource-Group': credentials.resourceGroup || 'default'
+                },
+                body: JSON.stringify({ input })
+            });
+
+            if (!embeddingsResponse.ok) {
+                const errorText = await embeddingsResponse.text();
+                return res.status(500).json({ error: `Embeddings request failed: ${errorText}` });
+            }
+
+            const embeddingsData = await embeddingsResponse.json();
+            res.json(embeddingsData);
+        } catch (error) {
+            logger.error('Embeddings API error:', error);
+            res.status(500).json({ error: 'Failed to generate embeddings' });
+        }
+    });
+
+    // ============================================================
+    // Learnings API - RAG-based learnings management
+    // ============================================================
+
+    // Get all learnings (optionally filtered by workspace)
+    app.get('/api/learnings', (req, res) => {
+        try {
+            const { workspaceId } = req.query;
+            const learnings = learningsStore.getLearnings(workspaceId as string | undefined);
+            // Return without embedding vectors (they're large)
+            const learningsWithoutEmbeddings = learnings.map(l => ({
+                ...l,
+                embedding: undefined,
+                embeddingDimensions: l.embedding?.length || 0
+            }));
+            res.json({ learnings: learningsWithoutEmbeddings });
+        } catch (error) {
+            logger.error('Failed to get learnings:', error);
+            res.status(500).json({ error: 'Failed to get learnings' });
+        }
+    });
+
+    // Get a single learning
+    app.get('/api/learnings/:id', (req, res) => {
+        try {
+            const learning = learningsStore.getLearning(req.params.id);
+            if (!learning) {
+                return res.status(404).json({ error: 'Learning not found' });
+            }
+            res.json({
+                ...learning,
+                embedding: undefined,
+                embeddingDimensions: learning.embedding?.length || 0
+            });
+        } catch (error) {
+            logger.error('Failed to get learning:', error);
+            res.status(500).json({ error: 'Failed to get learning' });
+        }
+    });
+
+    // Add a new learning
+    app.post('/api/learnings', async (req, res) => {
+        try {
+            const { workspaceId, title, content, sourceTaskId } = req.body;
+
+            if (!workspaceId || !title || !content) {
+                return res.status(400).json({ error: 'Missing required fields: workspaceId, title, content' });
+            }
+
+            const learning = await learningsStore.addLearning({
+                workspaceId,
+                title,
+                content,
+                sourceTaskId
+            });
+
+            res.json({
+                ...learning,
+                embedding: undefined,
+                embeddingDimensions: learning.embedding?.length || 0
+            });
+        } catch (error) {
+            logger.error('Failed to add learning:', error);
+            res.status(500).json({ error: 'Failed to add learning' });
+        }
+    });
+
+    // Update a learning
+    app.put('/api/learnings/:id', async (req, res) => {
+        try {
+            const { title, content } = req.body;
+            const learning = await learningsStore.updateLearning(req.params.id, { title, content });
+            if (!learning) {
+                return res.status(404).json({ error: 'Learning not found' });
+            }
+            res.json({
+                ...learning,
+                embedding: undefined,
+                embeddingDimensions: learning.embedding?.length || 0
+            });
+        } catch (error) {
+            logger.error('Failed to update learning:', error);
+            res.status(500).json({ error: 'Failed to update learning' });
+        }
+    });
+
+    // Delete a learning
+    app.delete('/api/learnings/:id', (req, res) => {
+        try {
+            const success = learningsStore.deleteLearning(req.params.id);
+            if (!success) {
+                return res.status(404).json({ error: 'Learning not found' });
+            }
+            res.json({ success: true });
+        } catch (error) {
+            logger.error('Failed to delete learning:', error);
+            res.status(500).json({ error: 'Failed to delete learning' });
+        }
+    });
+
+    // Search learnings (semantic search)
+    app.post('/api/learnings/search', async (req, res) => {
+        try {
+            const { query, workspaceId, topK, minScore } = req.body;
+
+            if (!query) {
+                return res.status(400).json({ error: 'Missing query' });
+            }
+
+            const results = await learningsStore.searchLearnings({
+                query,
+                workspaceId,
+                topK: topK || 5,
+                minScore: minScore || 0.3
+            });
+
+            // Return without embedding vectors
+            res.json({
+                results: results.map(r => ({
+                    learning: {
+                        ...r.learning,
+                        embedding: undefined,
+                        embeddingDimensions: r.learning.embedding?.length || 0
+                    },
+                    score: r.score
+                }))
+            });
+        } catch (error) {
+            logger.error('Failed to search learnings:', error);
+            res.status(500).json({ error: 'Failed to search learnings' });
+        }
+    });
+
+    // Get learnings for a task (based on task prompt)
+    // Also returns which learnings were actually injected into this task's context
+    app.get('/api/tasks/:taskId/learnings', async (req, res) => {
+        try {
+            const { taskId } = req.params;
+            const task = taskSpawner.getTask(taskId) || taskSpawner.getDisconnectedTask(taskId);
+
+            if (!task) {
+                return res.status(404).json({ error: 'Task not found' });
+            }
+
+            // Get the learning IDs that were actually injected into this task
+            const injectedIds = taskSpawner.getTaskLearnings(taskId);
+
+            // Search for relevant learnings based on task prompt
+            const results = await learningsStore.searchLearnings({
+                query: task.prompt,
+                workspaceId: task.workspaceId,
+                topK: 5,
+                minScore: 0.3
+            });
+
+            // Format for context injection
+            const contextText = learningsStore.formatForContext(results);
+
+            // Get the actual injected learnings
+            const injectedLearnings = injectedIds.map(id => learningsStore.getLearning(id)).filter(Boolean);
+
+            res.json({
+                results: results.map(r => ({
+                    learning: {
+                        ...r.learning,
+                        embedding: undefined
+                    },
+                    score: r.score
+                })),
+                contextText,
+                injected: injectedLearnings.map(l => ({
+                    ...l,
+                    embedding: undefined
+                })),
+                injectedCount: injectedIds.length
+            });
+        } catch (error) {
+            logger.error('Failed to get task learnings:', error);
+            res.status(500).json({ error: 'Failed to get task learnings' });
+        }
+    });
+
     // Helper to sync rules to CLAUDE.md
     function syncRulesToClaudeMd(workspacePath: string, rules: string): void {
         const claudeMdPath = join(workspacePath, 'CLAUDE.md');
@@ -1345,7 +1691,9 @@ export function createApp(basePath?: string) {
     app.get('/api/tasks/:taskId/conversation', async (req, res) => {
         try {
             const { taskId } = req.params;
-            const task = taskSpawner.getTask(taskId) || taskSpawner.getDisconnectedTask(taskId);
+            const activeTask = taskSpawner.getTask(taskId);
+            const disconnectedTask = taskSpawner.getDisconnectedTask(taskId);
+            const task = activeTask || disconnectedTask;
 
             if (!task) {
                 return res.status(404).json({ error: 'Task not found' });
@@ -1361,7 +1709,14 @@ export function createApp(basePath?: string) {
                 return res.status(404).json({ error: 'Workspace not found' });
             }
 
-            const conversation = await getConversationHistory(workspace.id, task.sessionId);
+            // Determine backend type: from task, or from task backends map, or auto-detect
+            const backendType = ('backendType' in task && task.backendType)
+                ? task.backendType
+                : undefined;
+
+            logger.info('Getting conversation history', { taskId, sessionId: task.sessionId, backendType });
+
+            const conversation = await getConversationHistory(workspace.id, task.sessionId, backendType);
             if (!conversation) {
                 return res.status(404).json({ error: 'Conversation not found' });
             }
@@ -1435,7 +1790,12 @@ export function createApp(basePath?: string) {
                 return res.status(404).json({ error: 'Workspace not found' });
             }
 
-            const conversation = await getConversationHistory(workspace.id, task.sessionId);
+            // Determine backend type from task
+            const backendType = ('backendType' in task && task.backendType)
+                ? task.backendType
+                : undefined;
+
+            const conversation = await getConversationHistory(workspace.id, task.sessionId, backendType);
             if (!conversation || conversation.messages.length === 0) {
                 return res.status(404).json({ error: 'No conversation history found' });
             }
@@ -1531,6 +1891,58 @@ Guidelines:
         }
     });
 
+    // Save selected learnings from conversation analysis
+    app.post('/api/tasks/:taskId/learn/save', async (req, res) => {
+        try {
+            const { taskId } = req.params;
+            const { learnings, workspaceId } = req.body;
+
+            if (!learnings || !Array.isArray(learnings) || learnings.length === 0) {
+                return res.status(400).json({ error: 'No learnings provided' });
+            }
+
+            const task = taskSpawner.getTask(taskId) || taskSpawner.getDisconnectedTask(taskId);
+            const effectiveWorkspaceId = workspaceId || task?.workspaceId;
+
+            if (!effectiveWorkspaceId) {
+                return res.status(400).json({ error: 'Workspace ID required' });
+            }
+
+            const savedLearnings = [];
+            for (const learning of learnings) {
+                if (!learning.title || !learning.content) {
+                    continue;
+                }
+
+                try {
+                    const saved = await learningsStore.addLearning({
+                        workspaceId: effectiveWorkspaceId,
+                        title: learning.title,
+                        content: learning.content,
+                        sourceTaskId: taskId
+                    });
+                    savedLearnings.push({
+                        ...saved,
+                        embedding: undefined,
+                        embeddingDimensions: saved.embedding?.length || 0
+                    });
+                } catch (err) {
+                    logger.error('Failed to save learning:', err);
+                }
+            }
+
+            logger.info('Saved learnings from conversation', {
+                taskId,
+                count: savedLearnings.length
+            });
+
+            res.json({ saved: savedLearnings });
+        } catch (error) {
+            console.error('[Server] Failed to save learnings:', error);
+            res.status(500).json({ error: 'Failed to save learnings' });
+        }
+    });
+
     // Restart server endpoint - triggers graceful shutdown, tsx watch will restart
     app.post('/api/server/restart', (_req, res) => {
         console.log('[Server] Restart requested via API');
@@ -1545,6 +1957,9 @@ Guidelines:
     // Graceful shutdown handler
     function gracefulShutdown(signal: string): void {
         console.log(`[Server] Shutting down (${signal}), notifying clients and saving state...`);
+
+        // Clear heartbeat interval
+        clearInterval(heartbeatInterval);
 
         // Notify all connected clients that the server is reloading
         broadcast({ type: 'server:reloading' as WSMessageType, payload: {} });

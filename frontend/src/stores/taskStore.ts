@@ -30,6 +30,7 @@ interface TaskStore {
     // Workspace state
     workspaces: Workspace[];
     expandedWorkspaces: Set<string>;
+    expandedWorkspacesInitialized: boolean;  // True once persisted state is loaded or first workspaces set
     showProjectPicker: boolean;
 
     // Voice state
@@ -173,6 +174,7 @@ export const useTaskStore = create<TaskStore>()(
     isOffline: typeof navigator !== 'undefined' ? !navigator.onLine : false,
     workspaces: [],
     expandedWorkspaces: new Set<string>(),
+    expandedWorkspacesInitialized: false,
     showProjectPicker: false,
 
     // Voice initial state
@@ -228,12 +230,35 @@ export const useTaskStore = create<TaskStore>()(
     selectTask: (id) => set({ selectedTaskId: id }),
 
     setTasks: (tasks) => {
+        const { tasks: existingTasks, selectedTaskId } = get();
         const taskMap = new Map<string, Task>();
+        const incomingTaskIds = new Set<string>();
+
         for (const task of tasks) {
-            taskMap.set(task.id, task);
+            incomingTaskIds.add(task.id);
+            const existing = existingTasks.get(task.id);
+
+            // If we have an existing task, compare lastActivity timestamps
+            // to keep the more recent version (prevents state regression)
+            if (existing) {
+                const existingTime = existing.lastActivity?.getTime?.() ?? 0;
+                const incomingTime = task.lastActivity?.getTime?.() ?? 0;
+
+                // Keep whichever is newer based on lastActivity
+                // If timestamps are equal or incoming has no timestamp, use incoming
+                // (backend is source of truth when timestamps match)
+                if (existingTime > incomingTime) {
+                    console.log(`[TaskStore] Keeping existing task ${task.id} (local: ${existingTime}, incoming: ${incomingTime})`);
+                    taskMap.set(task.id, existing);
+                } else {
+                    taskMap.set(task.id, task);
+                }
+            } else {
+                taskMap.set(task.id, task);
+            }
         }
+
         // Clear selectedTaskId if it's no longer in the task list
-        const { selectedTaskId } = get();
         const newSelectedId = selectedTaskId && !taskMap.has(selectedTaskId) ? null : selectedTaskId;
         set({ tasks: taskMap, selectedTaskId: newSelectedId });
     },
@@ -251,13 +276,25 @@ export const useTaskStore = create<TaskStore>()(
         const { tasks } = get();
         const existing = tasks.get(task.id);
 
-        // Skip update if task state hasn't meaningfully changed
-        // This prevents unnecessary re-renders when rapid updates arrive
-        if (existing &&
-            existing.state === task.state &&
-            existing.waitingInputType === task.waitingInputType &&
-            existing.lastActivity?.getTime?.() === task.lastActivity?.getTime?.()) {
-            return; // No change, skip update
+        // If we have an existing task, check if incoming is actually newer
+        // to prevent state regression from out-of-order messages
+        if (existing) {
+            const existingTime = existing.lastActivity?.getTime?.() ?? 0;
+            const incomingTime = task.lastActivity?.getTime?.() ?? 0;
+
+            // Skip update if existing is newer (prevents state regression)
+            if (existingTime > incomingTime) {
+                console.log(`[TaskStore] Skipping older update for task ${task.id} (local: ${existingTime}, incoming: ${incomingTime})`);
+                return;
+            }
+
+            // Skip update if nothing has meaningfully changed (same timestamp, same state)
+            // This prevents unnecessary re-renders when rapid updates arrive
+            if (existingTime === incomingTime &&
+                existing.state === task.state &&
+                existing.waitingInputType === task.waitingInputType) {
+                return; // No change, skip update
+            }
         }
 
         const newTasks = new Map(tasks);
@@ -283,32 +320,54 @@ export const useTaskStore = create<TaskStore>()(
 
     // Workspace actions
     setWorkspaces: (workspaces) => {
-        const { expandedWorkspaces: currentExpanded } = get();
+        const { expandedWorkspaces: currentExpanded, expandedWorkspacesInitialized, workspaces: existingWorkspaces } = get();
+
+        // Deduplicate workspaces by id (keep first occurrence)
+        const seenIds = new Set<string>();
+        const uniqueWorkspaces = workspaces.filter(w => {
+            if (seenIds.has(w.id)) {
+                console.warn('[TaskStore] Duplicate workspace filtered out:', w.id);
+                return false;
+            }
+            seenIds.add(w.id);
+            return true;
+        });
+
         // Keep existing expanded state, only add new workspaces as expanded
         const newExpanded = new Set(currentExpanded);
-        // If this is the first load (no expanded workspaces), expand all
-        if (currentExpanded.size === 0) {
-            workspaces.forEach(w => newExpanded.add(w.id));
+
+        // Only expand all if this is the very first load (no persisted state was loaded)
+        // If user has persisted expanded state (even if all collapsed), respect it
+        if (!expandedWorkspacesInitialized) {
+            // First time ever - expand all workspaces
+            uniqueWorkspaces.forEach(w => newExpanded.add(w.id));
         } else {
-            // Add any new workspaces as expanded
-            workspaces.forEach(w => {
-                if (!currentExpanded.has(w.id)) {
+            // Add any NEW workspaces as expanded (ones not in existing list)
+            const existingWorkspaceIds = new Set(existingWorkspaces.map(w => w.id));
+            uniqueWorkspaces.forEach(w => {
+                if (!existingWorkspaceIds.has(w.id)) {
+                    // This is a newly added workspace, expand it
                     newExpanded.add(w.id);
                 }
             });
         }
         // Remove any workspaces that no longer exist
-        const workspaceIds = new Set(workspaces.map(w => w.id));
+        const workspaceIds = new Set(uniqueWorkspaces.map(w => w.id));
         for (const id of newExpanded) {
             if (!workspaceIds.has(id)) {
                 newExpanded.delete(id);
             }
         }
-        set({ workspaces, expandedWorkspaces: newExpanded });
+        set({ workspaces: uniqueWorkspaces, expandedWorkspaces: newExpanded, expandedWorkspacesInitialized: true });
     },
 
     addWorkspace: (workspace) => {
         const { workspaces, expandedWorkspaces } = get();
+        // Prevent duplicate workspaces
+        if (workspaces.some(w => w.id === workspace.id)) {
+            console.warn('[TaskStore] Workspace already exists:', workspace.id);
+            return;
+        }
         const newExpanded = new Set(expandedWorkspaces);
         newExpanded.add(workspace.id);
         set({
@@ -357,10 +416,21 @@ export const useTaskStore = create<TaskStore>()(
         const { tasks } = get();
         if (fromIndex === toIndex) return;
 
-        // Get tasks for this workspace, sorted by current order
+        // Get tasks for this workspace, sorted EXACTLY like the display
+        // (must match WorkspacePanel's getTasksForWorkspace sorting)
         const workspaceTasks = Array.from(tasks.values())
             .filter(t => t.workspaceId === workspaceId)
-            .sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity));
+            .sort((a, b) => {
+                // If both have order, sort by order (ascending)
+                if (a.order !== undefined && b.order !== undefined) {
+                    return a.order - b.order;
+                }
+                // If only one has order, it comes first
+                if (a.order !== undefined) return -1;
+                if (b.order !== undefined) return 1;
+                // Neither has order, sort by creation time (newest first)
+                return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+            });
 
         if (fromIndex < 0 || fromIndex >= workspaceTasks.length) return;
         if (toIndex < 0 || toIndex >= workspaceTasks.length) return;
@@ -509,6 +579,9 @@ export const useTaskStore = create<TaskStore>()(
                 const persisted = persistedState as PersistedState | undefined;
                 if (!persisted) return currentState;
 
+                // Mark as initialized if we have any persisted expanded state (even if empty array)
+                const hasPersistedExpandedState = persisted.expandedWorkspaces !== undefined;
+
                 return {
                     ...currentState,
                     selectedTaskId: persisted.selectedTaskId ?? currentState.selectedTaskId,
@@ -516,6 +589,8 @@ export const useTaskStore = create<TaskStore>()(
                     expandedWorkspaces: persisted.expandedWorkspaces
                         ? new Set(persisted.expandedWorkspaces)
                         : currentState.expandedWorkspaces,
+                    // If we have persisted expanded state, mark as initialized so we don't auto-expand all
+                    expandedWorkspacesInitialized: hasPersistedExpandedState,
                     voiceEnabled: persisted.voiceEnabled ?? currentState.voiceEnabled,
                     autoSpeakResponses: persisted.autoSpeakResponses ?? currentState.autoSpeakResponses,
                     selectedVoiceName: persisted.selectedVoiceName ?? currentState.selectedVoiceName,

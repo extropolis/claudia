@@ -51,6 +51,8 @@ interface TestConfig {
     gitPush: boolean;             // Push to GitHub
     backendStatus: boolean;       // Get backend status (no WebSocket needed)
     setBackend: string | null;    // Set backend ('claude-code' or 'opencode')
+    watchOutput: boolean;         // Stream task output to console
+    waitForIdle: boolean;         // Wait for task to become idle before exiting
 }
 
 class TestCLI {
@@ -807,7 +809,10 @@ class TestCLI {
     private handleTaskOutput(payload: { taskId: string; data: string }): void {
         this.lastActivityTime = Date.now();
 
-        if (this.config.verbose) {
+        if (this.config.watchOutput) {
+            // Stream raw output directly to console
+            process.stdout.write(payload.data);
+        } else if (this.config.verbose) {
             const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
             const preview = payload.data.substring(0, 80).replace(/\n/g, ' ');
             console.log(`[${elapsed}s] OUTPUT    │ [${payload.taskId.substring(0, 8)}...] ${preview}...`);
@@ -870,9 +875,23 @@ class TestCLI {
         this.tasks.set(task.id, task);
 
         const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
-        console.log(`[${elapsed}s] TASK      │ Created: ${task.name}`);
+        if (!this.config.watchOutput) {
+            console.log(`[${elapsed}s] TASK      │ Created: ${task.id} ("${task.prompt}")`);
+        }
 
         this.lastActivityTime = Date.now();
+
+        // If watching output, activate the task to receive output events
+        if (this.config.watchOutput && this.ws && this.ws.readyState === WebSocket.OPEN) {
+            const activateMsg = {
+                type: 'task:activate',
+                payload: { taskId: task.id }
+            };
+            this.ws.send(JSON.stringify(activateMsg));
+            if (!this.config.watchOutput) {
+                console.log(`[${elapsed}s] ACTIVATE  │ Activated task to receive output`);
+            }
+        }
     }
 
     private handleTaskUpdated(payload: { task: Task }): void {
@@ -978,12 +997,23 @@ class TestCLI {
         };
         const icon = stateIcon[task.state] || '❔';
 
-        // Show state change prominently
-        const shortId = task.id.substring(0, 12);
-        const waitingType = task.waitingInputType ? ` (${task.waitingInputType})` : '';
-        console.log(`[${elapsed}s] STATE     │ ${icon} ${shortId}... → ${task.state}${waitingType}`);
+        // Show state change prominently (unless watching output quietly)
+        if (!this.config.watchOutput) {
+            const shortId = task.id ? task.id.substring(0, 12) : 'UNDEFINED_ID';
+            const waitingType = task.waitingInputType ? ` (${task.waitingInputType})` : '';
+            console.log(`[${elapsed}s] STATE     │ ${icon} ${shortId}... → ${task.state}${waitingType}`);
+        }
 
         this.lastActivityTime = Date.now();
+
+        // Exit when task becomes idle or exited (if waiting for idle)
+        if (this.config.waitForIdle && (task.state === 'idle' || task.state === 'exited')) {
+            if (this.config.watchOutput) {
+                console.log('');
+                console.log(`\n✅ Task completed with state: ${task.state}`);
+            }
+            setTimeout(() => this.cleanup(), 500);
+        }
     }
 
     /**
@@ -1127,6 +1157,8 @@ function parseArgs(): TestConfig {
     let gitPush = false;
     let backendStatus = false;
     let setBackend: string | null = null;
+    let watchOutput = false;
+    let waitForIdle = false;
 
     for (let i = 0; i < args.length; i++) {
         switch (args[i]) {
@@ -1255,6 +1287,13 @@ function parseArgs(): TestConfig {
                 break;
             case '--set-backend':
                 setBackend = args[++i];
+                break;
+            case '--watch-output':
+            case '-o':
+                watchOutput = true;
+                break;
+            case '--wait-idle':
+                waitForIdle = true;
                 break;
             case '--help':
             case '-h':
@@ -1423,7 +1462,9 @@ Examples:
         archiveTask,
         gitPush,
         backendStatus,
-        setBackend
+        setBackend,
+        watchOutput,
+        waitForIdle
     };
 }
 

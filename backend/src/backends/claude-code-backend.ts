@@ -257,23 +257,61 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
         return this.toBackendTask(task);
     }
 
-    sendInput(taskId: string, input: string): void {
+    sendInput(taskId: string, input: string, options: { typeCharByChar?: boolean } = {}): void {
         const task = this.tasks.get(taskId);
         if (!task) return;
 
         const endsWithEnter = input.endsWith('\r') || input.endsWith('\n');
-        const hasMessageContent = input.length > 1 && endsWithEnter;
+        const hasMessageContent = input.length > 0;
 
-        if (hasMessageContent && (task.state === 'idle' || task.state === 'waiting_input')) {
-            const messageContent = input.slice(0, -1);
-            const enterKey = input.slice(-1);
+        // Ensure we handle input correctly whether it ends with newline or not
+        const messageContent = endsWithEnter ? input.slice(0, -1) : input;
+        const enterKey = endsWithEnter ? input.slice(-1) : '';
 
-            logger.debug('Writing message to task, will retry Enter if needed', { taskId });
+        // Handle character-by-character typing (for initial prompt)
+        if (options.typeCharByChar && messageContent.length > 0) {
+            // Echo the full input to output history immediately so it's visible in UI
+            const echoBuffer = Buffer.from(messageContent);
+            task.outputHistory.push(echoBuffer);
+            if (task.isActive) {
+                this.emit('task:output', task.id, messageContent);
+            }
+
+            // Type character by character to the PTY
+            let charIndex = 0;
+            const typeNextChar = () => {
+                if (charIndex < messageContent.length) {
+                    task.process.write(messageContent[charIndex]);
+                    charIndex++;
+                    setTimeout(typeNextChar, 10); // 10ms delay per char
+                } else if (enterKey) {
+                    // Send Enter after typing finishes
+                    setTimeout(() => this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey }), 200);
+                }
+            };
+            typeNextChar();
+            return;
+        }
+
+        if (hasMessageContent && (task.state === 'idle' || task.state === 'waiting_input' || task.state === 'starting')) {
+            // Echo to history immediately (UI)
+            const echoBuffer = Buffer.from(messageContent);
+            task.outputHistory.push(echoBuffer);
+            if (task.isActive) {
+                this.emit('task:output', task.id, messageContent);
+            }
+
             task.process.write(messageContent);
             task.promptSubmitAttempts = 0;
 
-            setTimeout(() => this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey }), 200);
+            setTimeout(() => this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey: enterKey || '\r' }), 200);
         } else {
+            // For single characters or non-message input, echo them too
+            const echoBuffer = Buffer.from(input);
+            task.outputHistory.push(echoBuffer);
+            if (task.isActive) {
+                this.emit('task:output', task.id, input);
+            }
             task.process.write(input);
         }
     }
@@ -549,14 +587,20 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
             }
 
             // Send initial prompt when Claude is ready
-            if (!task.initialPromptSent && task.pendingPrompt && this.isReadyForInitialInput(cleanData)) {
+            // Check accumulated history, not just the current chunk, as output might be split
+            const recentOutput = this.getRecentOutput(task, 5000);
+            if (!task.initialPromptSent && task.pendingPrompt && this.isReadyForInitialInput(recentOutput)) {
                 logger.debug('Claude ready, sending prompt', { taskId: task.id });
                 task.initialPromptSent = true;
                 const prompt = task.pendingPrompt;
                 task.pendingPrompt = null;
                 task.promptSubmitAttempts = 0;
 
-                setTimeout(() => this.sendPromptWithRetry(task, prompt), 1200);
+                // Wait longer (2.5s) to ensure CLI is fully ready and screen is stable
+                // Use typeCharByChar: true for "human-like" typing effect
+                setTimeout(() => {
+                    this.sendInput(task.id, prompt + '\r', { typeCharByChar: true });
+                }, 2500);
             }
 
             // Stream output to active task
@@ -581,27 +625,8 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
     }
 
     private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 5): void {
-        logger.debug('Writing prompt to PTY', { taskId: task.id, promptLength: prompt.length });
-
-        if (prompt.length <= 200) {
-            let charIndex = 0;
-            const charDelay = prompt.length <= 20 ? 10 : 5;
-            const writeNextChar = () => {
-                if (charIndex < prompt.length) {
-                    task.process.write(prompt[charIndex]);
-                    charIndex++;
-                    setTimeout(writeNextChar, charDelay);
-                } else {
-                    setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), 500);
-                }
-            };
-            writeNextChar();
-        } else {
-            task.process.write(prompt);
-            task.promptSubmitAttempts = 0;
-            const delayMs = Math.min(500 + Math.floor(prompt.length / 100) * 50, 1000);
-            setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), delayMs);
-        }
+        // Delegate to sendInput for consistent behavior
+        this.sendInput(task.id, prompt + '\r');
     }
 
     private sendEnterWithRetry(
@@ -631,7 +656,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
         setTimeout(() => {
             if (this.hasProcessingIndicators(task.id)) {
                 logger.debug('Processing detected after Enter', { taskId: task.id, context, attempt: task.promptSubmitAttempts });
-                if (isInitialPrompt && task.state === 'starting' && !task.hasStartedProcessing) {
+                if (task.state === 'starting' && !task.hasStartedProcessing) {
                     task.hasStartedProcessing = true;
                     task.state = 'busy';
                     this.emit('task:stateChanged', this.toBackendTask(task));
@@ -661,7 +686,8 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
         this.pendingSessionCapture.set(taskId, {
             taskId,
             workspaceId,
-            startTime: Date.now()
+            startTime: Date.now(),
+            interval: undefined, // Will be set below
         });
 
         const checkInterval = setInterval(() => {
@@ -672,11 +698,13 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
 
                 for (const file of currentFiles) {
                     if (!existingFiles.has(file)) {
+                        // Found new file
+                        const sessionFile = join(claudeDir, file);
                         const sessionId = file.replace('.jsonl', '');
-                        const task = this.tasks.get(taskId);
+                        logger.info('Captured session ID', { taskId, sessionId });
 
-                        if (task && !task.sessionId) {
-                            logger.info('Captured session for task', { taskId, sessionId });
+                        const task = this.tasks.get(taskId);
+                        if (task) {
                             task.sessionId = sessionId;
                             this.emit('task:sessionCaptured', taskId, sessionId);
                         }
@@ -686,26 +714,24 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
                     }
                 }
 
-                existingFiles = new Set(currentFiles);
-
-                const pending = this.pendingSessionCapture.get(taskId);
-                if (pending && Date.now() - pending.startTime > 30000) {
-                    logger.warn('Session capture timeout', { taskId });
+                // Timeout check (30 seconds)
+                const capture = this.pendingSessionCapture.get(taskId);
+                if (capture && Date.now() - capture.startTime > 30000) {
+                    logger.warn('Session capture timed out', { taskId });
                     this.clearSessionCapture(taskId);
                 }
-            } catch (_e) {
-                // Ignore errors during session capture
+            } catch (err) {
+                logger.error('Error identifying session file', { taskId, error: err });
             }
         }, 500);
 
-        this.sessionCaptureIntervals.set(taskId, checkInterval);
+        this.pendingSessionCapture.get(taskId)!.interval = checkInterval;
     }
 
     private clearSessionCapture(taskId: string): void {
-        const interval = this.sessionCaptureIntervals.get(taskId);
-        if (interval) {
-            clearInterval(interval);
-            this.sessionCaptureIntervals.delete(taskId);
+        const capture = this.pendingSessionCapture.get(taskId);
+        if (capture?.interval) {
+            clearInterval(capture.interval);
         }
         this.pendingSessionCapture.delete(taskId);
     }
@@ -717,14 +743,6 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
     }
 
     private extractSessionId(str: string): string | null {
-        const patterns = [
-            /session[:\s]+([a-f0-9-]{36})/i,
-            /([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i,
-        ];
-        for (const pattern of patterns) {
-            const match = str.match(pattern);
-            if (match) return match[1];
-        }
         return null;
     }
 
@@ -741,7 +759,15 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
     }
 
     private isReadyForInitialInput(str: string): boolean {
-        return str.includes('Try "') ||
+        // Claude Code ready patterns
+        return str.includes('Claude Code') ||
+            str.includes('Enter message') ||
+            str.includes('Type your message') ||
+            str.includes('ask anything') ||
+            str.includes('Sisyphus') ||
+            str.includes('Claude Opus') ||
+            str.includes('>') ||
+            str.includes('Try "') ||
             str.includes('? for shortcuts') ||
             (str.includes('───') && str.includes('❯'));
     }

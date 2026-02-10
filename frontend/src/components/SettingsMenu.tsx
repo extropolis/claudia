@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Power, PowerOff, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
 import { useTaskStore } from '../stores/taskStore';
@@ -11,12 +11,13 @@ interface SettingsMenuProps {
     initialPanel?: string;
 }
 
-interface MCPServer {
+interface MCPServerListItem {
     name: string;
-    command: string;
+    type?: 'stdio' | 'http' | 'streamableHttp';
+    command?: string;
     args?: string[];
-    env?: Record<string, string>;
-    enabled: boolean;
+    url?: string;
+    headers?: Record<string, string>;
 }
 
 interface AICoreCredentials {
@@ -30,6 +31,26 @@ interface AICoreCredentials {
 
 type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core';
 type BackendType = 'claude-code' | 'opencode';
+type SapAiCoreModel = 
+    | 'anthropic--claude-4.5-opus'
+    | 'anthropic--claude-opus-4'
+    | 'anthropic--claude-sonnet-4'
+    | 'anthropic--claude-4.5-sonnet'
+    | 'anthropic--claude-3.7-sonnet'
+    | 'anthropic--claude-3.5-sonnet'
+    | 'anthropic--claude-3.5-haiku'
+    | 'anthropic--claude-3-opus';
+
+const SAP_AI_CORE_MODELS: { value: SapAiCoreModel; label: string }[] = [
+    { value: 'anthropic--claude-4.5-opus', label: 'Claude 4.5 Opus' },
+    { value: 'anthropic--claude-opus-4', label: 'Claude Opus 4' },
+    { value: 'anthropic--claude-sonnet-4', label: 'Claude Sonnet 4' },
+    { value: 'anthropic--claude-4.5-sonnet', label: 'Claude 4.5 Sonnet' },
+    { value: 'anthropic--claude-3.7-sonnet', label: 'Claude 3.7 Sonnet' },
+    { value: 'anthropic--claude-3.5-sonnet', label: 'Claude 3.5 Sonnet' },
+    { value: 'anthropic--claude-3.5-haiku', label: 'Claude 3.5 Haiku' },
+    { value: 'anthropic--claude-3-opus', label: 'Claude 3 Opus' },
+];
 
 interface BackendStatus {
     backend: BackendType;
@@ -77,7 +98,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         mcp: false,
         permissions: false,
         rules: false,
-        supervisor: false
+        supervisor: false,
+        learnings: false
     });
 
     // Handle initial panel expansion when settings opens
@@ -87,13 +109,12 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     }, [isOpen, initialPanel]);
 
-    const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
     const [isAddingServer, setIsAddingServer] = useState(false);
-    const [newServer, setNewServer] = useState({ name: '', command: '', args: '' });
+    const [newServer, setNewServer] = useState({ name: '', type: 'stdio' as 'stdio' | 'http' | 'streamableHttp', command: '', args: '', url: '', headers: '' });
 
     // JSON editor state
     const [mcpViewMode, setMcpViewMode] = useState<'list' | 'json'>('list');
-    const [claudeConfigJson, setClaudeConfigJson] = useState('');
+    const [mcpJson, setMcpJson] = useState('');
     const [claudeConfigPath, setClaudeConfigPath] = useState('');
     const [jsonEditorSaved, setJsonEditorSaved] = useState(true);
     const [jsonEditorError, setJsonEditorError] = useState<string | null>(null);
@@ -104,6 +125,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [supervisorSystemPrompt, setSupervisorSystemPrompt] = useState('');
     const [supervisorPromptSaved, setSupervisorPromptSaved] = useState(true);
     const [autoFocusOnInput, setAutoFocusOnInput] = useState(false);
+    const [useLearnings, setUseLearnings] = useState(false);
 
     // API Mode state
     const [apiMode, setApiMode] = useState<ApiMode>('default');
@@ -119,6 +141,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         resourceGroup: 'default',
         timeoutMs: 120000
     });
+    const [sapAiCoreModel, setSapAiCoreModel] = useState<SapAiCoreModel>('anthropic--claude-4.5-opus');
     const [aiCoreSaved, setAiCoreSaved] = useState(true);
     const [aiCoreTestStatus, setAiCoreTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [aiCoreTestMessage, setAiCoreTestMessage] = useState('');
@@ -147,19 +170,18 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     }, [expandedPanels.backend]);
 
-    // Fetch Claude config when switching to JSON view mode
+    // Fetch Claude config when MCP panel is expanded (needed for both list and JSON view)
     useEffect(() => {
-        if (mcpViewMode === 'json' && expandedPanels.mcp) {
+        if (expandedPanels.mcp) {
             fetchClaudeConfig();
         }
-    }, [mcpViewMode, expandedPanels.mcp]);
+    }, [expandedPanels.mcp]);
 
     const fetchConfig = async () => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`);
             if (response.ok) {
                 const config = await response.json();
-                setMcpServers(config.mcpServers || []);
                 setSkipPermissions(config.skipPermissions || false);
                 setRules(config.rules || '');
                 setRulesSaved(true);
@@ -173,9 +195,13 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 if (config.aiCoreCredentials) {
                     setAiCoreCredentials(config.aiCoreCredentials);
                 }
+                if (config.sapAiCoreModel) {
+                    setSapAiCoreModel(config.sapAiCoreModel);
+                }
                 setAiCoreSaved(true);
                 setBackend(config.backend || 'claude-code');
                 setBackendSaved(true);
+                setUseLearnings(config.useLearnings || false);
             }
         } catch (error) {
             console.error('Failed to fetch config:', error);
@@ -197,34 +223,71 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     };
 
-    const saveMCPServers = async (servers: MCPServer[]) => {
-        try {
-            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mcpServers: servers })
-            });
-            if (response.ok) {
-                setMcpServers(servers);
-            }
-        } catch (error) {
-            console.error('Failed to save MCP servers:', error);
+    // Backend config uses array format, but we display as object format in JSON view
+    // Convert between formats as needed
+    const arrayToObjectFormat = (servers: Array<{ name: string; type?: string; command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled?: boolean; timeout?: number; autoApprove?: string[]; description?: string }>) => {
+        const obj: Record<string, unknown> = {};
+        for (const server of servers) {
+            const { name, enabled, ...rest } = server;
+            obj[name] = rest;
         }
+        return obj;
     };
+
+    const objectToArrayFormat = (obj: Record<string, unknown>) => {
+        const servers: Array<{ name: string; type?: 'stdio' | 'http' | 'streamableHttp'; command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled: boolean; timeout?: number; autoApprove?: string[]; description?: string; headers?: Record<string, string> }> = [];
+        for (const [name, config] of Object.entries(obj)) {
+            const serverConfig = config as Record<string, unknown>;
+            servers.push({
+                name,
+                enabled: true, // Default to enabled
+                type: (serverConfig.type as 'stdio' | 'http' | 'streamableHttp') || 'stdio',
+                command: serverConfig.command as string | undefined,
+                args: serverConfig.args as string[] | undefined,
+                url: serverConfig.url as string | undefined,
+                env: serverConfig.env as Record<string, string> | undefined,
+                timeout: serverConfig.timeout as number | undefined,
+                autoApprove: serverConfig.autoApprove as string[] | undefined,
+                description: serverConfig.description as string | undefined
+            });
+        }
+        return servers;
+    };
+
+    // Compute MCP servers list from JSON state (for list view)
+    const mcpServersList: MCPServerListItem[] = useMemo(() => {
+        const servers: MCPServerListItem[] = [];
+
+        try {
+            const parsedServers = JSON.parse(mcpJson || '{}');
+            for (const [name, config] of Object.entries(parsedServers)) {
+                const serverConfig = config as { type?: 'stdio' | 'http' | 'streamableHttp'; command?: string; args?: string[]; url?: string; headers?: Record<string, string> };
+                servers.push({
+                    name,
+                    type: serverConfig.type || 'stdio',
+                    command: serverConfig.command || '',
+                    args: serverConfig.args || [],
+                    url: serverConfig.url || ''
+                });
+            }
+        } catch {
+            // Invalid JSON, ignore
+        }
+
+        return servers;
+    }, [mcpJson]);
 
     const fetchClaudeConfig = async () => {
         try {
-            const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`);
+            // Fetch from Claudia's config (backend/config.json) - this is what tasks actually use
+            const response = await fetch(`${getApiBaseUrl()}/api/config`);
             if (response.ok) {
-                const data = await response.json();
-                // Pretty-print the JSON for editing
-                try {
-                    const parsed = JSON.parse(data.content);
-                    setClaudeConfigJson(JSON.stringify(parsed, null, 2));
-                } catch {
-                    setClaudeConfigJson(data.content);
-                }
-                setClaudeConfigPath(data.path);
+                const config = await response.json();
+                const mcpServers = config.mcpServers || [];
+                // Convert array format to object format for display
+                const obj = arrayToObjectFormat(mcpServers);
+                setMcpJson(JSON.stringify(obj, null, 2));
+                setClaudeConfigPath('Claudia config (used by tasks)');
                 setJsonEditorSaved(true);
                 setJsonEditorError(null);
             }
@@ -235,24 +298,29 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     };
 
     const saveClaudeConfig = async () => {
+        // Validate JSON config before saving
+        let parsed;
         try {
-            // Validate JSON before saving
-            const parsed = JSON.parse(claudeConfigJson);
+            parsed = JSON.parse(mcpJson);
             if (typeof parsed !== 'object' || Array.isArray(parsed)) {
                 setJsonEditorError('mcpServers must be an object');
                 return;
             }
-            setJsonEditorError(null);
         } catch (e) {
             setJsonEditorError(`Invalid JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
             return;
         }
 
+        setJsonEditorError(null);
+
+        // Convert object format back to array format for backend
+        const serversArray = objectToArrayFormat(parsed);
+
         try {
-            const response = await fetch(`${getApiBaseUrl()}/api/claude-config/mcp-servers`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: claudeConfigJson })
+                body: JSON.stringify({ mcpServers: serversArray })
             });
             if (response.ok) {
                 setJsonEditorSaved(true);
@@ -268,7 +336,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     };
 
     const handleJsonChange = (value: string) => {
-        setClaudeConfigJson(value);
+        setMcpJson(value);
         setJsonEditorSaved(false);
         // Validate JSON as user types
         try {
@@ -359,12 +427,17 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         setAiCoreTestStatus('idle');
     };
 
+    const handleSapAiCoreModelChange = (model: SapAiCoreModel) => {
+        setSapAiCoreModel(model);
+        setAiCoreSaved(false);
+    };
+
     const saveAiCoreCredentials = async () => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ aiCoreCredentials })
+                body: JSON.stringify({ aiCoreCredentials, sapAiCoreModel })
             });
             if (response.ok) {
                 setAiCoreSaved(true);
@@ -433,6 +506,21 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             }
         } catch (error) {
             console.error('Failed to save auto focus setting:', error);
+        }
+    };
+
+    const saveUseLearnings = async (value: boolean) => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ useLearnings: value })
+            });
+            if (response.ok) {
+                setUseLearnings(value);
+            }
+        } catch (error) {
+            console.error('Failed to save use learnings setting:', error);
         }
     };
 
@@ -533,32 +621,79 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         setExpandedPanels(prev => ({ ...prev, [panel]: !prev[panel] }));
     };
 
-    const handleAddServer = () => {
-        if (!newServer.name || !newServer.command) return;
+    const handleAddServer = async () => {
+        // Validate based on server type
+        if (!newServer.name) return;
+        if (newServer.type === 'streamableHttp' && !newServer.url) return;
+        if (newServer.type === 'stdio' && !newServer.command) return;
 
-        const server: MCPServer = {
-            name: newServer.name,
-            command: newServer.command,
-            args: newServer.args ? newServer.args.split(' ').filter(a => a) : [],
-            enabled: true
-        };
+        try {
+            const servers = JSON.parse(mcpJson || '{}');
 
-        const updatedServers = [...mcpServers, server];
-        saveMCPServers(updatedServers);
-        setNewServer({ name: '', command: '', args: '' });
-        setIsAddingServer(false);
+            // Add the new server based on type
+            if (newServer.type === 'streamableHttp') {
+                servers[newServer.name] = {
+                    type: 'streamableHttp',
+                    url: newServer.url
+                };
+            } else {
+                servers[newServer.name] = {
+                    command: newServer.command,
+                    args: newServer.args ? newServer.args.split(' ').filter(a => a) : []
+                };
+            }
+
+            const newJson = JSON.stringify(servers, null, 2);
+            setMcpJson(newJson);
+
+            // Convert to array format and save to Claudia config
+            const serversArray = objectToArrayFormat(servers);
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mcpServers: serversArray })
+            });
+
+            if (response.ok) {
+                setNewServer({ name: '', type: 'stdio', command: '', args: '', url: '' });
+                setIsAddingServer(false);
+                setJsonEditorSaved(true);
+            } else {
+                const error = await response.json();
+                setJsonEditorError(error.error || 'Failed to save');
+            }
+        } catch (error) {
+            console.error('Failed to add MCP server:', error);
+            setJsonEditorError('Failed to add MCP server');
+        }
     };
 
-    const handleRemoveServer = (index: number) => {
-        const updatedServers = mcpServers.filter((_, i) => i !== index);
-        saveMCPServers(updatedServers);
-    };
+    const handleRemoveServer = async (serverName: string) => {
+        try {
+            const servers = JSON.parse(mcpJson || '{}');
 
-    const handleToggleServer = (index: number) => {
-        const updatedServers = mcpServers.map((server, i) =>
-            i === index ? { ...server, enabled: !server.enabled } : server
-        );
-        saveMCPServers(updatedServers);
+            // Remove the server
+            delete servers[serverName];
+
+            const newJson = JSON.stringify(servers, null, 2);
+            setMcpJson(newJson);
+
+            // Convert to array format and save to Claudia config
+            const serversArray = objectToArrayFormat(servers);
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mcpServers: serversArray })
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                setJsonEditorError(error.error || 'Failed to save');
+            }
+        } catch (error) {
+            console.error('Failed to remove MCP server:', error);
+            setJsonEditorError('Failed to remove MCP server');
+        }
     };
 
     if (!isOpen) return null;
@@ -888,6 +1023,21 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                                 />
                                             </div>
                                         </div>
+
+                                        <div className="aicore-field">
+                                            <label>Model</label>
+                                            <select
+                                                value={sapAiCoreModel}
+                                                onChange={(e) => handleSapAiCoreModelChange(e.target.value as SapAiCoreModel)}
+                                                className="aicore-input aicore-select"
+                                            >
+                                                {SAP_AI_CORE_MODELS.map((model) => (
+                                                    <option key={model.value} value={model.value}>
+                                                        {model.label}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
                                     </div>
 
                                     {aiCoreTestStatus !== 'idle' && (
@@ -975,15 +1125,19 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 /* JSON Editor View */
                                 <div className="mcp-json-editor">
                                     <p className="mcp-json-path">
-                                        Editing <code>mcpServers</code> in <code>{claudeConfigPath || '~/.claude.json'}</code>
+                                        Editing MCP servers in <code>{claudeConfigPath || '~/.claude.json'}</code>
                                     </p>
-                                    <textarea
-                                        className={`mcp-json-textarea ${jsonEditorError ? 'error' : ''}`}
-                                        value={claudeConfigJson}
-                                        onChange={(e) => handleJsonChange(e.target.value)}
-                                        placeholder="Loading..."
-                                        spellCheck={false}
-                                    />
+
+                                    <div className="mcp-json-section">
+                                        <textarea
+                                            className={`mcp-json-textarea ${jsonEditorError ? 'error' : ''}`}
+                                            value={mcpJson}
+                                            onChange={(e) => handleJsonChange(e.target.value)}
+                                            placeholder="Loading..."
+                                            spellCheck={false}
+                                        />
+                                    </div>
+
                                     {jsonEditorError && (
                                         <div className="mcp-json-error">
                                             <AlertCircle size={14} />
@@ -1006,29 +1160,32 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                             ) : (
                                 /* List View */
                                 <>
-                                    {mcpServers.length === 0 ? (
+                                    <p className="mcp-json-path" style={{ marginBottom: '12px' }}>
+                                        MCP servers from <code>{claudeConfigPath || '~/.claude.json'}</code>
+                                    </p>
+                                    {mcpServersList.length === 0 ? (
                                         <p className="mcp-empty-state">No MCP servers configured</p>
                                     ) : (
                                         <div className="mcp-server-list">
-                                            {mcpServers.map((server, index) => (
-                                                <div key={index} className={`mcp-server-item ${!server.enabled ? 'disabled' : ''}`}>
+                                            {mcpServersList.map((server) => (
+                                                <div key={server.name} className="mcp-server-item">
                                                     <div className="mcp-server-info">
-                                                        <span className="mcp-server-name">{server.name}</span>
+                                                        <div className="mcp-server-name-row">
+                                                            <span className="mcp-server-name">{server.name}</span>
+                                                            <span className={`mcp-server-type ${server.type === 'streamableHttp' ? 'http' : 'stdio'}`}>
+                                                                {server.type === 'streamableHttp' ? 'HTTP' : 'stdio'}
+                                                            </span>
+                                                        </div>
                                                         <span className="mcp-server-command">
-                                                            {server.command} {server.args?.join(' ')}
+                                                            {server.type === 'streamableHttp'
+                                                                ? server.url
+                                                                : `${server.command} ${server.args?.join(' ')}`}
                                                         </span>
                                                     </div>
                                                     <div className="mcp-server-actions">
                                                         <button
-                                                            className={`mcp-toggle-btn ${server.enabled ? 'enabled' : ''}`}
-                                                            onClick={() => handleToggleServer(index)}
-                                                            title={server.enabled ? 'Disable' : 'Enable'}
-                                                        >
-                                                            {server.enabled ? <Power size={16} /> : <PowerOff size={16} />}
-                                                        </button>
-                                                        <button
                                                             className="mcp-delete-btn"
-                                                            onClick={() => handleRemoveServer(index)}
+                                                            onClick={() => handleRemoveServer(server.name)}
                                                             title="Remove"
                                                         >
                                                             <Trash2 size={16} />
@@ -1048,26 +1205,60 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                                 onChange={(e) => setNewServer(prev => ({ ...prev, name: e.target.value }))}
                                                 className="mcp-input"
                                             />
-                                            <input
-                                                type="text"
-                                                placeholder="Command (e.g., npx)"
-                                                value={newServer.command}
-                                                onChange={(e) => setNewServer(prev => ({ ...prev, command: e.target.value }))}
-                                                className="mcp-input"
-                                            />
-                                            <input
-                                                type="text"
-                                                placeholder="Arguments (space-separated)"
-                                                value={newServer.args}
-                                                onChange={(e) => setNewServer(prev => ({ ...prev, args: e.target.value }))}
-                                                className="mcp-input"
-                                            />
+                                            <div className="mcp-type-selector">
+                                                <label className={`mcp-type-option ${newServer.type === 'stdio' ? 'selected' : ''}`}>
+                                                    <input
+                                                        type="radio"
+                                                        name="serverType"
+                                                        value="stdio"
+                                                        checked={newServer.type === 'stdio'}
+                                                        onChange={() => setNewServer(prev => ({ ...prev, type: 'stdio' }))}
+                                                    />
+                                                    <span>stdio (command)</span>
+                                                </label>
+                                                <label className={`mcp-type-option ${newServer.type === 'streamableHttp' ? 'selected' : ''}`}>
+                                                    <input
+                                                        type="radio"
+                                                        name="serverType"
+                                                        value="streamableHttp"
+                                                        checked={newServer.type === 'streamableHttp'}
+                                                        onChange={() => setNewServer(prev => ({ ...prev, type: 'streamableHttp' }))}
+                                                    />
+                                                    <span>HTTP (URL)</span>
+                                                </label>
+                                            </div>
+                                            {newServer.type === 'stdio' ? (
+                                                <>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Command (e.g., npx)"
+                                                        value={newServer.command}
+                                                        onChange={(e) => setNewServer(prev => ({ ...prev, command: e.target.value }))}
+                                                        className="mcp-input"
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Arguments (space-separated)"
+                                                        value={newServer.args}
+                                                        onChange={(e) => setNewServer(prev => ({ ...prev, args: e.target.value }))}
+                                                        className="mcp-input"
+                                                    />
+                                                </>
+                                            ) : (
+                                                <input
+                                                    type="text"
+                                                    placeholder="URL (e.g., http://localhost:8080/mcp)"
+                                                    value={newServer.url}
+                                                    onChange={(e) => setNewServer(prev => ({ ...prev, url: e.target.value }))}
+                                                    className="mcp-input"
+                                                />
+                                            )}
                                             <div className="mcp-add-form-actions">
                                                 <button
                                                     className="mcp-cancel-btn"
                                                     onClick={() => {
                                                         setIsAddingServer(false);
-                                                        setNewServer({ name: '', command: '', args: '' });
+                                                        setNewServer({ name: '', type: 'stdio', command: '', args: '', url: '' });
                                                     }}
                                                 >
                                                     Cancel
@@ -1075,7 +1266,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                                 <button
                                                     className="mcp-save-btn"
                                                     onClick={handleAddServer}
-                                                    disabled={!newServer.name || !newServer.command}
+                                                    disabled={!newServer.name || (newServer.type === 'stdio' ? !newServer.command : !newServer.url)}
                                                 >
                                                     Add Server
                                                 </button>
@@ -1089,6 +1280,12 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                             <Plus size={16} />
                                             Add MCP Server
                                         </button>
+                                    )}
+                                    {jsonEditorError && (
+                                        <div className="mcp-json-error" style={{ marginTop: '12px' }}>
+                                            <AlertCircle size={14} />
+                                            <span>{jsonEditorError}</span>
+                                        </div>
                                     )}
                                 </>
                             )}
@@ -1214,6 +1411,39 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     </div>
                                 </>
                             )}
+                        </div>
+                    </CollapsiblePanel>
+
+                    <CollapsiblePanel
+                        title="Learnings (RAG)"
+                        icon={<Brain size={18} />}
+                        isExpanded={expandedPanels.learnings}
+                        onToggle={() => togglePanel('learnings')}
+                    >
+                        <div className="permissions-content">
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Use Learnings</span>
+                                    <span className="permission-description">
+                                        When enabled, relevant learnings from past conversations will be
+                                        automatically retrieved and injected into new task contexts using
+                                        semantic search (RAG).
+                                    </span>
+                                </div>
+                                <label className="toggle-switch">
+                                    <input
+                                        type="checkbox"
+                                        checked={useLearnings}
+                                        onChange={(e) => saveUseLearnings(e.target.checked)}
+                                    />
+                                    <span className="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <p className="api-config-note" style={{ marginTop: '12px' }}>
+                                To add learnings, click the "Learn" button on a completed task.
+                                Learnings are stored with embeddings and matched based on semantic
+                                similarity to new task prompts.
+                            </p>
                         </div>
                     </CollapsiblePanel>
 

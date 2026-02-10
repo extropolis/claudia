@@ -344,8 +344,10 @@ describe('taskStore', () => {
     describe('supervisor', () => {
         const mockSummary: TaskSummary = {
             taskId: 'task-1',
+            status: 'completed',
             summary: 'Task completed successfully',
-            needsFollowUp: false,
+            suggestedActions: [],
+            timestamp: new Date(),
         };
 
         it('should set task summary', () => {
@@ -368,7 +370,7 @@ describe('taskStore', () => {
             id: 'msg-1',
             role: 'user',
             content: 'Hello',
-            timestamp: new Date(),
+            timestamp: new Date().toISOString(),
         };
 
         it('should add chat message', () => {

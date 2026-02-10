@@ -5,20 +5,27 @@
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { Workspace } from '@claudia/shared';
+import { Workspace, RecentWorkspace } from '@claudia/shared';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// Re-export for convenience
+export type { RecentWorkspace };
+
 export interface WorkspaceConfig {
     workspaces: Workspace[];
     activeWorkspaceId: string | null;
+    recentWorkspaces: RecentWorkspace[];  // Workspaces that have been removed (history)
 }
 
 const DEFAULT_CONFIG: WorkspaceConfig = {
     workspaces: [],
-    activeWorkspaceId: null
+    activeWorkspaceId: null,
+    recentWorkspaces: []
 };
+
+const MAX_RECENT_WORKSPACES = 10;  // Keep only the last 10 recent workspaces
 
 export class WorkspaceStore {
     private config: WorkspaceConfig;
@@ -54,6 +61,12 @@ export class WorkspaceStore {
                 loaded.workspaces = (loaded.workspaces || []).filter(w =>
                     existsSync(w.id)
                 );
+
+                // Initialize recentWorkspaces if not present
+                if (!loaded.recentWorkspaces) {
+                    loaded.recentWorkspaces = [];
+                }
+
                 return loaded;
             }
         } catch (error) {
@@ -108,6 +121,9 @@ export class WorkspaceStore {
 
         this.config.workspaces.push(workspace);
 
+        // Remove from recent workspaces if it was there (since it's now active again)
+        this.config.recentWorkspaces = this.config.recentWorkspaces.filter(w => w.id !== resolvedPath);
+
         // Auto-set as active if first workspace
         if (this.config.workspaces.length === 1) {
             this.config.activeWorkspaceId = workspace.id;
@@ -121,7 +137,26 @@ export class WorkspaceStore {
         const index = this.config.workspaces.findIndex(w => w.id === id);
         if (index === -1) return false;
 
+        const workspace = this.config.workspaces[index];
         this.config.workspaces.splice(index, 1);
+
+        // Add to recent workspaces (only if it still exists on disk)
+        if (existsSync(id)) {
+            // Remove if already in recent (to avoid duplicates)
+            this.config.recentWorkspaces = this.config.recentWorkspaces.filter(w => w.id !== id);
+
+            // Add to the beginning of the list
+            this.config.recentWorkspaces.unshift({
+                id: workspace.id,
+                name: workspace.name,
+                removedAt: new Date().toISOString()
+            });
+
+            // Keep only the last N recent workspaces
+            if (this.config.recentWorkspaces.length > MAX_RECENT_WORKSPACES) {
+                this.config.recentWorkspaces = this.config.recentWorkspaces.slice(0, MAX_RECENT_WORKSPACES);
+            }
+        }
 
         // Clear active if deleted
         if (this.config.activeWorkspaceId === id) {
@@ -173,5 +208,28 @@ export class WorkspaceStore {
         this.saveConfig();
         console.log(`[WorkspaceStore] Updated system prompt for ${workspaceId}`);
         return true;
+    }
+
+    // Get recent workspaces (ones that were removed but still exist on disk)
+    // Filters out any that are currently in the active workspaces list
+    getRecentWorkspaces(): RecentWorkspace[] {
+        const currentIds = new Set(this.config.workspaces.map(w => w.id));
+        return this.config.recentWorkspaces
+            .filter(w => !currentIds.has(w.id) && existsSync(w.id));
+    }
+
+    // Clear a specific recent workspace from history
+    clearRecentWorkspace(id: string): boolean {
+        const index = this.config.recentWorkspaces.findIndex(w => w.id === id);
+        if (index === -1) return false;
+        this.config.recentWorkspaces.splice(index, 1);
+        this.saveConfig();
+        return true;
+    }
+
+    // Clear all recent workspaces
+    clearAllRecentWorkspaces(): void {
+        this.config.recentWorkspaces = [];
+        this.saveConfig();
     }
 }

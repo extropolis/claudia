@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
@@ -220,7 +220,7 @@ interface WorkspaceSectionProps {
     onPushToGithub: () => void;
     onSystemPrompt: () => void;
     onToggleMenu: () => void;
-    onCreateTask: (prompt: string) => void;
+    onCreateTask: (prompt: string, initialCols?: number, initialRows?: number) => void;
     // Workspace drag handlers
     onDragStart: (index: number) => void;
     onDragEnter: (index: number) => void;
@@ -427,8 +427,11 @@ function WorkspaceSection({
     }, []);
 
     // Append voice transcript to input when this input is focused
+    // We use a ref to track processed transcripts to prevent duplicate appending
+    const lastProcessedTranscriptRef = useRef<string>('');
     useEffect(() => {
-        if (isFocused && voiceTranscript) {
+        if (isFocused && voiceTranscript && voiceTranscript !== lastProcessedTranscriptRef.current) {
+            lastProcessedTranscriptRef.current = voiceTranscript;
             setInputValue(prev => (prev ? prev + ' ' : '') + voiceTranscript);
             consumeVoiceTranscript();
         }
@@ -449,7 +452,11 @@ function WorkspaceSection({
                     : `\n\n[Attached images:\n${imagePaths}]`;
                 fullMessage = inputValue + imageText;
             }
-            onCreateTask(fullMessage.trim());
+            // Estimate terminal size based on window size
+            // Typically ~9px width per char and ~18px height per line for monospace font
+            const cols = Math.floor((window.innerWidth - 400) / 9); // Subtract sidebar/padding
+            const rows = Math.floor((window.innerHeight - 100) / 18); // Subtract header/input
+            onCreateTask(fullMessage.trim(), cols, rows);
             setInputValue('');
             // Clear images after sending
             images.forEach(img => URL.revokeObjectURL(img.previewUrl));
@@ -803,7 +810,7 @@ interface WorkspacePanelProps {
     onOpenTerminal: (workspaceId: string) => void;
     onPushToGithub: (workspaceId: string) => void;
     onSetSystemPrompt: (workspaceId: string, systemPrompt: string) => void;
-    onCreateTask: (prompt: string, workspaceId: string) => void;
+    onCreateTask: (prompt: string, workspaceId: string, initialCols?: number, initialRows?: number) => void;
     onSelectTask: (taskId: string) => void;
     onRequestArchivedTasks?: () => void;
     onRestoreArchivedTask?: (taskId: string) => void;
@@ -976,9 +983,9 @@ export function WorkspacePanel({
                                 <ArchivedTaskItem
                                     key={task.id}
                                     task={task}
-                                    onContinue={onContinueArchivedTask || (() => {})}
-                                    onRestore={onRestoreArchivedTask || (() => {})}
-                                    onDelete={onDeleteArchivedTask || (() => {})}
+                                    onContinue={onContinueArchivedTask || (() => { })}
+                                    onRestore={onRestoreArchivedTask || (() => { })}
+                                    onDelete={onDeleteArchivedTask || (() => { })}
                                 />
                             ))}
                         </div>
@@ -1022,7 +1029,7 @@ export function WorkspacePanel({
                             onPushToGithub={() => onPushToGithub(workspace.id)}
                             onSystemPrompt={() => setSystemPromptWorkspace(workspace)}
                             onToggleMenu={() => setOpenMenuId(openMenuId === workspace.id ? null : workspace.id)}
-                            onCreateTask={(prompt) => onCreateTask(prompt, workspace.id)}
+                            onCreateTask={(prompt, cols, rows) => onCreateTask(prompt, workspace.id, cols, rows)}
                             onDragStart={handleDragStart}
                             onDragEnter={handleDragEnter}
                             onDragEnd={handleDragEnd}

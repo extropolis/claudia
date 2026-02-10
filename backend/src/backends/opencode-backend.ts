@@ -129,7 +129,19 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
         // Falls back to OPENCODE_MODEL env var, then to openai/gpt-4o as last resort
         const model = config.model || process.env.OPENCODE_MODEL || 'openai/gpt-4o';
         opencodeArgs.push('-m', model);
-        logger.info('Using model', { model });
+
+        // Log SAP AI Core configuration if present
+        const hasAICoreKey = !!environment['AICORE_SERVICE_KEY'];
+        const hasResourceGroup = !!environment['AICORE_RESOURCE_GROUP'];
+        logger.info('Using model', {
+            model,
+            hasAICoreKey,
+            hasResourceGroup,
+            resourceGroup: environment['AICORE_RESOURCE_GROUP']
+        });
+        if (hasAICoreKey) {
+            logger.info('OpenCode will use SAP AI Core via AICORE_SERVICE_KEY');
+        }
 
         logger.info('Creating OpenCode task (interactive)', { taskId: id, workspaceId: config.workspaceId, prompt: config.prompt });
         logger.debug('Command args', { args: opencodeArgs });
@@ -219,23 +231,61 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
         return this.toBackendTask(task);
     }
 
-    sendInput(taskId: string, input: string): void {
+    sendInput(taskId: string, input: string, options: { typeCharByChar?: boolean } = {}): void {
         const task = this.tasks.get(taskId);
         if (!task) return;
 
         const endsWithEnter = input.endsWith('\r') || input.endsWith('\n');
-        const hasMessageContent = input.length > 1 && endsWithEnter;
+        const hasMessageContent = input.length > 0;
 
-        if (hasMessageContent && (task.state === 'idle' || task.state === 'waiting_input')) {
-            const messageContent = input.slice(0, -1);
-            const enterKey = input.slice(-1);
+        // Ensure we handle input correctly whether it ends with newline or not
+        const messageContent = endsWithEnter ? input.slice(0, -1) : input;
+        const enterKey = endsWithEnter ? input.slice(-1) : '';
 
-            logger.debug('Writing message to task, will retry Enter if needed', { taskId });
+        // Handle character-by-character typing (for initial prompt)
+        if (options.typeCharByChar && messageContent.length > 0) {
+            // Echo the full input to output history immediately so it's visible in UI
+            const echoBuffer = Buffer.from(messageContent);
+            task.outputHistory.push(echoBuffer);
+            if (task.isActive) {
+                this.emit('task:output', task.id, messageContent);
+            }
+
+            // Type character by character to the PTY
+            let charIndex = 0;
+            const typeNextChar = () => {
+                if (charIndex < messageContent.length) {
+                    task.process.write(messageContent[charIndex]);
+                    charIndex++;
+                    setTimeout(typeNextChar, 10); // 10ms delay per char
+                } else if (enterKey) {
+                    // Send Enter after typing finishes
+                    setTimeout(() => this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey }), 200);
+                }
+            };
+            typeNextChar();
+            return;
+        }
+
+        if (hasMessageContent && (task.state === 'idle' || task.state === 'waiting_input' || task.state === 'starting')) {
+            // Echo to history immediately (UI)
+            const echoBuffer = Buffer.from(messageContent);
+            task.outputHistory.push(echoBuffer);
+            if (task.isActive) {
+                this.emit('task:output', task.id, messageContent);
+            }
+
             task.process.write(messageContent);
             task.promptSubmitAttempts = 0;
 
-            setTimeout(() => this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey }), 200);
+            setTimeout(() => this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey: enterKey || '\r' }), 200);
         } else {
+            // For single characters or non-message input, echo them too
+            const echoBuffer = Buffer.from(input);
+            task.outputHistory.push(echoBuffer);
+            if (task.isActive) {
+                this.emit('task:output', task.id, input);
+            }
             task.process.write(input);
         }
     }
@@ -486,7 +536,11 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
 
     private setupProcessHandlers(task: InternalTask): void {
         task.process.onData((data: string) => {
-            const buffer = Buffer.from(data, 'utf8');
+            // Filter out SAP AI Core service key warning message
+            const filteredData = this.filterServiceKeyWarning(data);
+            if (!filteredData) return; // Skip if entire chunk was just the warning
+
+            const buffer = Buffer.from(filteredData, 'utf8');
             task.outputHistory.push(buffer);
 
             // Limit history to 2MB per task
@@ -498,7 +552,7 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
             }
 
             task.lastActivity = new Date();
-            const cleanData = this.stripAnsi(data);
+            const cleanData = this.stripAnsi(filteredData);
 
             // Try to extract session ID from OpenCode output
             if (!task.sessionId) {
@@ -511,19 +565,25 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
             }
 
             // Send initial prompt when OpenCode is ready
-            if (!task.initialPromptSent && task.pendingPrompt && this.isReadyForInitialInput(cleanData)) {
+            // Check accumulated history, not just the current chunk, as output might be split
+            const recentOutput = this.getRecentOutput(task, 5000);
+            if (!task.initialPromptSent && task.pendingPrompt && this.isReadyForInitialInput(recentOutput)) {
                 logger.debug('OpenCode ready, sending prompt', { taskId: task.id });
                 task.initialPromptSent = true;
                 const prompt = task.pendingPrompt;
                 task.pendingPrompt = null;
                 task.promptSubmitAttempts = 0;
 
-                setTimeout(() => this.sendPromptWithRetry(task, prompt), 1200);
+                // Wait longer (2.5s) to ensure CLI is fully ready and screen is stable
+                // Use typeCharByChar: true for "human-like" typing effect
+                setTimeout(() => {
+                    this.sendInput(task.id, prompt + '\r', { typeCharByChar: true });
+                }, 2500);
             }
 
             // Stream output to active task
             if (task.isActive) {
-                this.emit('task:output', task.id, data);
+                this.emit('task:output', task.id, filteredData);
             }
         });
 
@@ -541,27 +601,8 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
     }
 
     private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 5): void {
-        logger.debug('Writing prompt to PTY', { taskId: task.id, promptLength: prompt.length });
-
-        if (prompt.length <= 200) {
-            let charIndex = 0;
-            const charDelay = prompt.length <= 20 ? 10 : 5;
-            const writeNextChar = () => {
-                if (charIndex < prompt.length) {
-                    task.process.write(prompt[charIndex]);
-                    charIndex++;
-                    setTimeout(writeNextChar, charDelay);
-                } else {
-                    setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), 500);
-                }
-            };
-            writeNextChar();
-        } else {
-            task.process.write(prompt);
-            task.promptSubmitAttempts = 0;
-            const delayMs = Math.min(500 + Math.floor(prompt.length / 100) * 50, 1000);
-            setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), delayMs);
-        }
+        // Delegate to sendInput for consistent behavior
+        this.sendInput(task.id, prompt + '\r');
     }
 
     private sendEnterWithRetry(
@@ -591,7 +632,7 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
         setTimeout(() => {
             if (this.hasProcessingIndicators(task.id)) {
                 logger.debug('Processing detected after Enter', { taskId: task.id, context, attempt: task.promptSubmitAttempts });
-                if (isInitialPrompt && task.state === 'starting' && !task.hasStartedProcessing) {
+                if (task.state === 'starting' && !task.hasStartedProcessing) {
                     task.hasStartedProcessing = true;
                     task.state = 'busy';
                     this.emit('task:stateChanged', this.toBackendTask(task));
@@ -635,11 +676,55 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
             .replace(/\r/g, '');
     }
 
+    /**
+     * Filter out the SAP AI Core service key warning message from PTY output.
+     * The warning appears as an INFO log line like:
+     * "[timestamp] INFO (context): Found a service key in environment variable "AICORE_SERVICE_KEY"..."
+     *
+     * The terminal output contains ANSI escape sequences, so we need to match
+     * key phrases that might be split across chunks or mixed with escape codes.
+     */
+    private filterServiceKeyWarning(data: string): string {
+        // Check if this chunk contains any part of the warning message
+        // by stripping ANSI codes first for detection
+        const cleanData = this.stripAnsi(data);
+
+        // Key phrases from the warning message
+        const warningPhrases = [
+            'Found a service key in environment variable "AICORE_SERVICE_KEY"',
+            'Found a service key in environment variable \\"AICORE_SERVICE_KEY\\"',
+            'AICORE_SERVICE_KEY". Using a service key is recommended',
+            'Using a service key is recommended for local testing only',
+            'Bind the AI Core service to the application for productive usage',
+            'for productive usage.',
+            'E_KEY". Using a service key',  // Partial match when split
+        ];
+
+        // If the clean data contains any warning phrase, filter the whole chunk
+        for (const phrase of warningPhrases) {
+            if (cleanData.includes(phrase)) {
+                // Remove the entire line containing this phrase
+                // Split by newlines, filter out lines with warning content, rejoin
+                const lines = data.split(/(\r?\n)/);
+                const filteredLines = lines.filter(line => {
+                    const cleanLine = this.stripAnsi(line);
+                    return !warningPhrases.some(p => cleanLine.includes(p));
+                });
+                return filteredLines.join('');
+            }
+        }
+
+        return data;
+    }
+
     private isReadyForInitialInput(str: string): boolean {
         // OpenCode ready patterns - adjust based on actual OpenCode TUI output
         return str.includes('opencode') ||
             str.includes('Enter message') ||
             str.includes('Type your message') ||
+            str.includes('ask anything') ||
+            str.includes('Sisyphus') ||
+            str.includes('Claude Opus') ||
             str.includes('>') ||
             str.includes('❯');
     }

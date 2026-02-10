@@ -196,10 +196,54 @@
     min-width: 0;
 }
 
+.mcp-server-name-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .mcp-server-name {
     font-size: 0.9rem;
     font-weight: 500;
     color: var(--text-primary);
+}
+
+.mcp-server-type {
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.mcp-server-type.stdio {
+    background: rgba(96, 165, 250, 0.15);
+    color: #60a5fa;
+}
+
+.mcp-server-type.http {
+    background: rgba(167, 139, 250, 0.15);
+    color: #a78bfa;
+}
+
+.mcp-server-scope {
+    font-size: 0.65rem;
+    font-weight: 500;
+    padding: 2px 6px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.mcp-server-scope.global {
+    background: rgba(96, 165, 250, 0.15);
+    color: #60a5fa;
+}
+
+.mcp-server-scope.project {
+    background: rgba(167, 139, 250, 0.15);
+    color: #a78bfa;
 }
 
 .mcp-server-command {
@@ -283,6 +327,40 @@
     border-radius: 8px;
 }
 
+.mcp-type-selector {
+    display: flex;
+    gap: 8px;
+}
+
+.mcp-type-option {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.mcp-type-option input {
+    display: none;
+}
+
+.mcp-type-option:hover {
+    border-color: var(--text-muted);
+}
+
+.mcp-type-option.selected {
+    border-color: var(--accent-secondary);
+    background: rgba(139, 92, 246, 0.1);
+    color: var(--accent-secondary);
+}
+
 .mcp-input {
     width: 100%;
     padding: 10px 12px;
@@ -301,6 +379,44 @@
 
 .mcp-input::placeholder {
     color: var(--text-muted);
+}
+
+.mcp-scope-selector {
+    display: flex;
+    gap: 8px;
+}
+
+.mcp-scope-option {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.mcp-scope-option input {
+    display: none;
+}
+
+.mcp-scope-option.selected {
+    border-color: var(--accent-secondary);
+    background: rgba(96, 165, 250, 0.1);
+    color: var(--accent-secondary);
+}
+
+.mcp-scope-option:hover:not(.selected):not(:has(input:disabled)) {
+    border-color: var(--text-muted);
+}
+
+.mcp-scope-option:has(input:disabled) {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .mcp-add-form-actions {
@@ -808,6 +924,25 @@
     color: var(--text-muted);
 }
 
+.aicore-select {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    padding-right: 36px;
+    cursor: pointer;
+}
+
+.aicore-select:focus {
+    border-color: var(--accent-secondary);
+}
+
+.aicore-select option {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    padding: 8px;
+}
+
 .aicore-row {
     display: flex;
     gap: 12px;
@@ -1142,9 +1277,27 @@
     color: var(--text-secondary);
 }
 
+.mcp-json-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.mcp-json-label {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.mcp-project-path {
+    font-weight: 400;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+}
+
 .mcp-json-textarea {
     width: 100%;
-    min-height: 300px;
+    min-height: 150px;
     padding: 12px;
     border: 1px solid var(--border-color);
     border-radius: 8px;

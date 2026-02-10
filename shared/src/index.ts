@@ -18,6 +18,16 @@ export interface TaskGitState {
     revertedAt?: string;         // ISO timestamp when reverted
 }
 
+// File diff for viewing changes
+export interface FileDiff {
+    filePath: string;
+    status: 'added' | 'modified' | 'deleted';
+    diff: string;  // unified diff format
+}
+
+// Which backend created/manages a task
+export type BackendType = 'claude-code' | 'opencode';
+
 export interface Task {
     id: string;
     prompt: string;          // The user's message that created this task
@@ -29,6 +39,8 @@ export interface Task {
     waitingInputType?: WaitingInputType; // Type of input Claude is waiting for
     systemPrompt?: string;   // Custom system prompt for this task
     order?: number;          // Display order within workspace (lower = higher in list)
+    sessionId?: string | null;      // Session ID for conversation history (null if not captured yet)
+    backendType?: BackendType; // Which backend created this task (for conversation lookup)
 }
 
 export interface Workspace {
@@ -36,6 +48,12 @@ export interface Workspace {
     name: string;            // Folder name
     createdAt: string;
     systemPrompt?: string;   // Custom system prompt for this workspace
+}
+
+export interface RecentWorkspace {
+    id: string;              // Full path
+    name: string;            // Folder name
+    removedAt: string;       // When it was removed from workspaces
 }
 
 export interface FileNode {
@@ -98,6 +116,7 @@ export type WSMessageType =
     | 'workspace:deleted'
     | 'workspace:reordered'
     | 'workspace:updated'
+    | 'workspace:recent:list'
     // Task reordering
     | 'tasks:reordered'
     // Supervisor/Chat

@@ -19,15 +19,33 @@ export interface ValidationResult<T> {
  */
 interface MCPServerConfig {
     name: string;
-    command: string;
+    type?: 'stdio' | 'http' | 'streamableHttp';  // Default: 'stdio'
+    command?: string;  // Required for stdio, not for http/streamableHttp
     args?: string[];
     env?: Record<string, string>;
+    url?: string;  // Required for http/streamableHttp
     enabled: boolean;
+    timeout?: number;
+    autoApprove?: string[];
+    description?: string;
+    headers?: Record<string, string>;  // For http/streamableHttp
 }
 
 /**
  * Config update payload validation
  */
+// Valid SAP AI Core models
+const VALID_SAP_AI_CORE_MODELS = [
+    'anthropic--claude-4.5-opus',
+    'anthropic--claude-opus-4',
+    'anthropic--claude-sonnet-4',
+    'anthropic--claude-4.5-sonnet',
+    'anthropic--claude-3.7-sonnet',
+    'anthropic--claude-3.5-sonnet',
+    'anthropic--claude-3.5-haiku',
+    'anthropic--claude-3-opus',
+] as const;
+
 export interface ConfigUpdatePayload {
     rules?: string;
     mcpServers?: MCPServerConfig[];
@@ -45,6 +63,7 @@ export interface ConfigUpdatePayload {
         resourceGroup?: string;
         timeoutMs?: number;
     };
+    sapAiCoreModel?: string;
     backend?: 'claude-code' | 'opencode';
     opencodePort?: number;
 }
@@ -84,11 +103,63 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
             if (typeof server.name !== 'string' || !server.name) {
                 return { valid: false, error: `mcpServers[${i}].name is required` };
             }
-            if (typeof server.command !== 'string' || !server.command) {
-                return { valid: false, error: `mcpServers[${i}].command is required` };
+
+            // Validate type if provided
+            const serverType = server.type as string | undefined;
+            if (serverType !== undefined && serverType !== 'stdio' && serverType !== 'streamableHttp' && serverType !== 'http') {
+                return { valid: false, error: `mcpServers[${i}].type must be 'stdio', 'http', or 'streamableHttp'` };
             }
+
+            // Validate based on server type
+            if (serverType === 'streamableHttp' || serverType === 'http') {
+                // HTTP servers require url, not command
+                if (typeof server.url !== 'string' || !server.url) {
+                    return { valid: false, error: `mcpServers[${i}].url is required for streamableHttp type` };
+                }
+                // Validate url is a valid URL
+                try {
+                    new URL(server.url);
+                } catch {
+                    return { valid: false, error: `mcpServers[${i}].url must be a valid URL` };
+                }
+            } else {
+                // stdio servers (default) require command
+                if (typeof server.command !== 'string' || !server.command) {
+                    return { valid: false, error: `mcpServers[${i}].command is required for stdio type` };
+                }
+            }
+
             if (server.enabled !== undefined && typeof server.enabled !== 'boolean') {
                 return { valid: false, error: `mcpServers[${i}].enabled must be a boolean` };
+            }
+
+            // Validate optional fields
+            if (server.timeout !== undefined) {
+                if (typeof server.timeout !== 'number' || server.timeout <= 0) {
+                    return { valid: false, error: `mcpServers[${i}].timeout must be a positive number` };
+                }
+            }
+
+            if (server.autoApprove !== undefined) {
+                if (!Array.isArray(server.autoApprove) || !server.autoApprove.every(item => typeof item === 'string')) {
+                    return { valid: false, error: `mcpServers[${i}].autoApprove must be an array of strings` };
+                }
+            }
+
+            if (server.description !== undefined && typeof server.description !== 'string') {
+                return { valid: false, error: `mcpServers[${i}].description must be a string` };
+            }
+
+            // Validate headers (optional object with string values)
+            if (server.headers !== undefined) {
+                if (typeof server.headers !== 'object' || server.headers === null || Array.isArray(server.headers)) {
+                    return { valid: false, error: `mcpServers[${i}].headers must be an object` };
+                }
+                for (const [key, value] of Object.entries(server.headers)) {
+                    if (typeof value !== 'string') {
+                        return { valid: false, error: `mcpServers[${i}].headers.${key} must be a string` };
+                    }
+                }
             }
         }
         result.mcpServers = payload.mcpServers as MCPServerConfig[];
@@ -176,6 +247,17 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
             }
             result.aiCoreCredentials.timeoutMs = creds.timeoutMs;
         }
+    }
+
+    // Validate sapAiCoreModel (optional string from predefined list)
+    if (payload.sapAiCoreModel !== undefined) {
+        if (typeof payload.sapAiCoreModel !== 'string') {
+            return { valid: false, error: 'sapAiCoreModel must be a string' };
+        }
+        if (!VALID_SAP_AI_CORE_MODELS.includes(payload.sapAiCoreModel as typeof VALID_SAP_AI_CORE_MODELS[number])) {
+            return { valid: false, error: `sapAiCoreModel must be one of: ${VALID_SAP_AI_CORE_MODELS.join(', ')}` };
+        }
+        result.sapAiCoreModel = payload.sapAiCoreModel;
     }
 
     return { valid: true, data: result };

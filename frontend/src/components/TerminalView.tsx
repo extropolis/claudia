@@ -13,14 +13,12 @@ interface TerminalViewProps {
     task: Task;
     wsRef: React.RefObject<WebSocket | null>;
     workspace?: Workspace;
-    onSetSystemPrompt?: (workspaceId: string, systemPrompt: string) => void;
 }
 
-export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: TerminalViewProps) {
+export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
-    const resizeDebounceRef = useRef<number | null>(null);
     const userHasScrolledRef = useRef(false); // Track if user manually scrolled up
     const [copied, setCopied] = useState(false);
     const [showLearnModal, setShowLearnModal] = useState(false);
@@ -81,18 +79,59 @@ export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: Term
         }
     };
 
+    const fitTerminal = () => {
+        if (!fitAddonRef.current || !terminalRef.current || !xtermRef.current) return;
+
+        // Check if container has valid dimensions
+        if (terminalRef.current.clientWidth === 0 || terminalRef.current.clientHeight === 0) {
+            return;
+        }
+
+        try {
+            fitAddonRef.current.fit();
+            // Force a full refresh to fix any rendering artifacts
+            const rows = xtermRef.current.rows;
+            xtermRef.current.refresh(0, rows - 1);
+        } catch (err) {
+            console.warn('Failed to fit terminal:', err);
+        }
+    };
+
+    // Initial fit sequence - try multiple times to ensure we catch layout updates
+    // This is critical for fixing the "text wrapping" issue on load
+    const attemptFit = (attempts = 0) => {
+        if (attempts > 10) return; // Give up after ~1s (10 * 100ms)
+
+        if (terminalRef.current && (terminalRef.current.clientWidth > 0 && terminalRef.current.clientHeight > 0)) {
+            fitTerminal();
+            // Even if successful, try again shortly to ensure font metrics are loaded
+            if (attempts < 3) {
+                setTimeout(() => attemptFit(attempts + 1), 100);
+            }
+        } else {
+            // Retry if no dimensions yet
+            setTimeout(() => attemptFit(attempts + 1), 100);
+        }
+    };
+
     useEffect(() => {
         if (!terminalRef.current) return;
 
-        // Reset user scroll state when task changes (new terminal instance)
+        // Reset user scroll state when task changes
         userHasScrolledRef.current = false;
 
-        // Create terminal instance
+        // Clear container
+        while (terminalRef.current.firstChild) {
+            terminalRef.current.removeChild(terminalRef.current.firstChild);
+        }
+
+        // Create terminal
         const term = new Terminal({
             cursorBlink: true,
             fontSize: 14,
             fontFamily: '"SF Mono", "Monaco", "Inconsolata", "Fira Code", monospace',
-            scrollback: 10000,  // Large scrollback to preserve history
+            scrollback: 10000,
+            allowProposedApi: true,
             theme: {
                 background: '#0a0a0a',
                 foreground: '#d4d4d4',
@@ -116,14 +155,13 @@ export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: Term
             },
         });
 
-        // Add addons
         const fitAddon = new FitAddon();
         const webLinksAddon = new WebLinksAddon();
 
         term.loadAddon(fitAddon);
         term.loadAddon(webLinksAddon);
 
-        // Handle terminal input - send to backend
+        // Handle input BEFORE open
         term.onData((data) => {
             if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({
@@ -133,9 +171,10 @@ export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: Term
             }
         });
 
-        // Handle terminal resize - notify backend (set up BEFORE fit() so initial size is sent)
+        // Handle resize - sync to backend
         term.onResize(({ cols, rows }) => {
             if (wsRef.current?.readyState === WebSocket.OPEN) {
+                console.log(`[TerminalView] Sending resize: ${cols}x${rows}`);
                 wsRef.current.send(JSON.stringify({
                     type: 'task:resize',
                     payload: { taskId: task.id, cols, rows }
@@ -143,196 +182,70 @@ export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: Term
             }
         });
 
-        // Open terminal in the DOM
+        // Open terminal
         term.open(terminalRef.current);
-
-        // Store references
         xtermRef.current = term;
         fitAddonRef.current = fitAddon;
 
-        // Helper to safely fit terminal (with debouncing for resize events)
-        const fitTerminal = () => {
-            if (!fitAddonRef.current || !terminalRef.current || !xtermRef.current) return;
-
-            // Check if container has valid dimensions
-            if (terminalRef.current.clientWidth === 0 || terminalRef.current.clientHeight === 0) {
-                return;
-            }
-
-            try {
-                fitAddonRef.current.fit();
-                // Force a full refresh to fix any rendering artifacts
-                const rows = xtermRef.current.rows;
-                xtermRef.current.refresh(0, rows - 1);
-            } catch (err) {
-                console.warn('Failed to fit terminal:', err);
-            }
-        };
-
-        // Debounced version for resize events (prevents excessive calls during drag resize)
-        const debouncedFitTerminal = () => {
-            if (resizeDebounceRef.current) {
-                window.clearTimeout(resizeDebounceRef.current);
-            }
-            resizeDebounceRef.current = window.setTimeout(() => {
-                fitTerminal();
-                resizeDebounceRef.current = null;
-            }, 100); // 100ms debounce
-        };
-
-        // Initial fit with a small delay to ensure container has dimensions
+        // Initial fit - Delayed to ensure DOM is ready
         requestAnimationFrame(() => {
-            fitTerminal();
-            // check if terminal is still valid before focusing
-            if (xtermRef.current) {
-                xtermRef.current.focus();
+            try {
+                fitAddon.fit();
+                // Force a resize event to ensure backend is synced even if size didn't "change" from default
+                const { cols, rows } = term;
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({
+                        type: 'task:resize',
+                        payload: { taskId: task.id, cols, rows }
+                    }));
+                }
+            } catch (e) {
+                console.error('[TerminalView] Initial fit failed:', e);
             }
         });
 
-        // Use ResizeObserver to detect container size changes (more reliable than window resize)
-        // Use debounced version to prevent excessive calls during drag resize
+        // ResizeObserver for container changes
+        let resizeTimeout: number;
         const resizeObserver = new ResizeObserver(() => {
-            debouncedFitTerminal();
+            // Debounce resize
+            if (resizeTimeout) window.clearTimeout(resizeTimeout);
+            resizeTimeout = window.setTimeout(() => {
+                if (fitAddonRef.current) {
+                    try {
+                        fitAddonRef.current.fit();
+                    } catch (e) {
+                        console.warn('[TerminalView] Resize fit failed:', e);
+                    }
+                }
+            }, 50);
         });
+
         resizeObserver.observe(terminalRef.current);
 
-        // Also handle window resize as fallback
-        const handleResize = () => {
-            debouncedFitTerminal();
+        // Window resize fallback
+        const handleWindowResize = () => {
+            if (resizeTimeout) window.clearTimeout(resizeTimeout);
+            resizeTimeout = window.setTimeout(() => {
+                fitAddonRef.current?.fit();
+            }, 50);
         };
-        window.addEventListener('resize', handleResize);
+        window.addEventListener('resize', handleWindowResize);
 
-        // Track output for scroll-on-settle behavior
-        let lastOutputTime = 0;
-        let scrollSettleTimeout: number | null = null;
-        let refreshTimeout: number | null = null;
-        let isRestoringHistory = false;
-        let hasReceivedRestore = false; // Guard against duplicate restore messages
-        const SCROLL_SETTLE_DELAY = 150; // Wait 150ms after last output to scroll
-        const REFRESH_DELAY = 200; // Refresh terminal after output burst settles
-
-        // Schedule a terminal fit + refresh after output settles (fixes rendering artifacts)
-        const scheduleRefresh = () => {
-            if (refreshTimeout) {
-                clearTimeout(refreshTimeout);
-            }
-            refreshTimeout = window.setTimeout(() => {
-                if (fitAddonRef.current && xtermRef.current) {
-                    fitAddonRef.current.fit();
-                    const rows = xtermRef.current.rows;
-                    xtermRef.current.refresh(0, rows - 1);
-                }
-                refreshTimeout = null;
-            }, REFRESH_DELAY);
-        };
-
-        // Track user scroll events to detect manual scrolling
-        term.onScroll(() => {
-            // Only mark as user-scrolled if we're past the initial restore phase
-            // and user scrolled away from bottom
-            if (!isRestoringHistory && xtermRef.current) {
-                const buffer = xtermRef.current.buffer.active;
-                const viewportTop = buffer.viewportY;
-                const maxScrollY = buffer.baseY;
-                // User has scrolled up if they're not at the bottom
-                userHasScrolledRef.current = viewportTop < maxScrollY;
-            }
-        });
-
-        // Function to scroll after output settles
-        const scheduleScrollOnSettle = () => {
-            // Don't auto-scroll if user has manually scrolled up
-            if (userHasScrolledRef.current) {
-                console.log(`[TerminalView] Skipping auto-scroll - user has scrolled up for ${task.id}`);
-                return;
-            }
-            if (scrollSettleTimeout) {
-                clearTimeout(scrollSettleTimeout);
-            }
-            scrollSettleTimeout = window.setTimeout(() => {
-                if (xtermRef.current && !userHasScrolledRef.current) {
-                    console.log(`[TerminalView] Output settled, scrolling to bottom for ${task.id}`);
-                    xtermRef.current.scrollToBottom();
-                }
-                scrollSettleTimeout = null;
-            }, SCROLL_SETTLE_DELAY);
-        };
-
-        // WebSocket message handler for this terminal
+        // Message handler
         const handleMessage = (event: MessageEvent) => {
             try {
                 const message = JSON.parse(event.data);
-
-                if (message.type === 'task:output') {
-                    const { taskId, data } = message.payload;
-                    if (taskId === task.id) {
-                        term.write(data);
-                        lastOutputTime = Date.now();
-                        // Schedule a refresh to fix any rendering artifacts
-                        scheduleRefresh();
-                        // After history restore, keep scrolling to bottom as output arrives
-                        if (isRestoringHistory) {
-                            scheduleScrollOnSettle();
-                        }
-                    }
-                } else if (message.type === 'task:restore') {
-                    const { taskId, history } = message.payload;
-                    if (taskId === task.id && history) {
-                        // Guard against duplicate restore messages
-                        if (hasReceivedRestore) {
-                            console.log(`[TerminalView] Ignoring duplicate task:restore for ${taskId}`);
-                            return;
-                        }
-                        hasReceivedRestore = true;
-                        console.log(`[TerminalView] Received task:restore for ${taskId}, history length: ${history.length}`);
-                        isRestoringHistory = true;
-                        // Fully reset terminal before restoring history to prevent duplication
-                        // Using escape sequences is more reliable than term.clear()
-                        // \x1b[2J = clear entire screen, \x1b[3J = clear scrollback, \x1b[H = move cursor home
-                        term.write('\x1b[2J\x1b[3J\x1b[H');
-                        // Write history - it goes into scrollback buffer
-                        // Claude's TUI will redraw the screen but history remains scrollable
-                        term.write(history, () => {
-                            console.log(`[TerminalView] History write complete for ${taskId}, scrolling to bottom`);
-                            // Callback fires after write is fully processed
-                            term.scrollToBottom();
-
-                            // Force multiple fit + refresh cycles to fix rendering artifacts
-                            // This mimics what happens when the user resizes the window
-                            const fitAndRefresh = () => {
-                                if (fitAddonRef.current && xtermRef.current) {
-                                    fitAddonRef.current.fit();
-                                    const rows = xtermRef.current.rows;
-                                    xtermRef.current.refresh(0, rows - 1);
-                                    xtermRef.current.scrollToBottom();
-                                }
-                            };
-
-                            // Fit immediately and then again after short delays
-                            fitAndRefresh();
-                            setTimeout(fitAndRefresh, 50);
-                            setTimeout(fitAndRefresh, 150);
-                            setTimeout(fitAndRefresh, 300);
-
-                            // Schedule additional scrolls as output continues to arrive
-                            scheduleScrollOnSettle();
-                            // Stop the restore scroll behavior after 3 seconds
-                            setTimeout(() => {
-                                isRestoringHistory = false;
-                                if (scrollSettleTimeout) {
-                                    clearTimeout(scrollSettleTimeout);
-                                    scrollSettleTimeout = null;
-                                }
-                                // Final scroll only if user hasn't scrolled up
-                                if (xtermRef.current && !userHasScrolledRef.current) {
-                                    xtermRef.current.scrollToBottom();
-                                }
-                            }, 3000);
-                        });
+                if (message.type === 'task:output' && message.payload.taskId === task.id) {
+                    term.write(message.payload.data);
+                } else if (message.type === 'task:restore' && message.payload.taskId === task.id) {
+                    const { history } = message.payload;
+                    if (history) {
+                        term.reset();
+                        term.write(history);
                     }
                 }
-            } catch (err) {
-                // Ignore parse errors
+            } catch (e) {
+                console.error('[TerminalView] Message error:', e);
             }
         };
 
@@ -340,7 +253,7 @@ export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: Term
             wsRef.current.addEventListener('message', handleMessage);
         }
 
-        // Request session restore and activate task on server
+        // Activate task
         if (wsRef.current?.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({
                 type: 'task:select',
@@ -348,39 +261,12 @@ export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: Term
             }));
         }
 
-        // Scroll to bottom when terminal mounts (with delays to catch history loads)
-        // This ensures we scroll even if the terminal:scrollToBottom event fired before mounting
-        console.log(`[TerminalView] Terminal mounted for ${task.id}, scheduling scroll to bottom`);
-        const scrollDelays = [50, 200, 500, 1000];
-        const scrollTimeouts = scrollDelays.map(delay =>
-            setTimeout(() => {
-                // Only auto-scroll if user hasn't scrolled up
-                if (xtermRef.current && !userHasScrolledRef.current) {
-                    console.log(`[TerminalView] Scrolling to bottom after ${delay}ms for ${task.id}`);
-                    xtermRef.current.scrollToBottom();
-                }
-            }, delay)
-        );
-
-        // Cleanup
         return () => {
-            // Clear scroll timeouts
-            scrollTimeouts.forEach(t => clearTimeout(t));
-            if (scrollSettleTimeout) {
-                clearTimeout(scrollSettleTimeout);
-            }
-            if (refreshTimeout) {
-                clearTimeout(refreshTimeout);
-            }
+            if (resizeTimeout) window.clearTimeout(resizeTimeout);
             resizeObserver.disconnect();
-            window.removeEventListener('resize', handleResize);
+            window.removeEventListener('resize', handleWindowResize);
             if (wsRef.current) {
                 wsRef.current.removeEventListener('message', handleMessage);
-            }
-            // Clear any pending resize debounce
-            if (resizeDebounceRef.current) {
-                window.clearTimeout(resizeDebounceRef.current);
-                resizeDebounceRef.current = null;
             }
             term.dispose();
             xtermRef.current = null;
@@ -389,26 +275,13 @@ export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: Term
     }, [task.id, wsRef]);
 
     // Refit on task ID change (when switching between tasks)
+    // Refit on task ID change (when switching between tasks)
     useEffect(() => {
-        if (fitAddonRef.current && terminalRef.current && xtermRef.current) {
-            // Check if container has valid dimensions
-            if (terminalRef.current.clientWidth > 0 && terminalRef.current.clientHeight > 0) {
-                // Use a small timeout to let layout settle after task switch
-                const timeoutId = setTimeout(() => {
-                    try {
-                        fitAddonRef.current?.fit();
-                        // Force refresh to fix any rendering artifacts after task switch
-                        if (xtermRef.current) {
-                            const rows = xtermRef.current.rows;
-                            xtermRef.current.refresh(0, rows - 1);
-                        }
-                    } catch (e) {
-                        // Ignore fit errors during task switch
-                    }
-                }, 0);
-                return () => clearTimeout(timeoutId);
-            }
-        }
+        // Use a small timeout to let layout settle after task switch
+        const timeoutId = setTimeout(() => {
+            fitTerminal();
+        }, 0);
+        return () => clearTimeout(timeoutId);
     }, [task.id]);
 
     // Handle Resume button click - sends task:reconnect message to spawn new Claude process
@@ -428,12 +301,6 @@ export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: Term
         setShowLearnModal(true);
     };
 
-    const handleSaveSystemPrompt = (newPrompt: string) => {
-        if (workspace && onSetSystemPrompt) {
-            onSetSystemPrompt(workspace.id, newPrompt);
-        }
-    };
-
     return (
         <div className="terminal-view">
             <div className="terminal-header">
@@ -445,11 +312,11 @@ export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: Term
                 >
                     {copied ? <Check size={16} /> : <Copy size={16} />}
                 </button>
-                {workspace && onSetSystemPrompt && (
+                {workspace && (
                     <button
                         className="learn-button"
                         onClick={handleLearnFromConversation}
-                        title="Learn from this conversation to improve the system prompt"
+                        title="Learn from this conversation - extracts learnings for future tasks"
                     >
                         <BookOpen size={14} />
                         Learn
@@ -475,8 +342,6 @@ export function TerminalView({ task, wsRef, workspace, onSetSystemPrompt }: Term
                     taskId={task.id}
                     workspaceId={workspace.id}
                     workspaceName={workspace.name}
-                    currentSystemPrompt={workspace.systemPrompt || ''}
-                    onSave={handleSaveSystemPrompt}
                     onClose={() => setShowLearnModal(false)}
                 />
             )}

@@ -2,7 +2,6 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { WSMessage, WSErrorPayload, Task, Workspace, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
 import { getWebSocketUrl, getApiBaseUrl } from '../config/api-config';
-import { sendTaskCompletionNotification } from '../utils/browserCapabilities';
 
 const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
@@ -56,8 +55,8 @@ export function useWebSocket() {
             reconnectAttempts.current = 0;
         };
 
-        ws.onclose = () => {
-            console.log('[WebSocket] Disconnected');
+        ws.onclose = (event) => {
+            console.log(`[WebSocket] Disconnected - code: ${event.code}, reason: ${event.reason || 'none'}, wasClean: ${event.wasClean}`);
             setConnected(false);
             // Exponential backoff: delay = min(base * 2^attempts, max)
             const delay = Math.min(
@@ -117,13 +116,16 @@ export function useWebSocket() {
                     case 'task:created': {
                         const payload = message.payload as { task: Task };
                         addTask(payload.task);
-                        // Auto-select newly created task
+                        // Auto-select newly created task (both locally and on server)
                         selectTask(payload.task.id);
+                        // IMPORTANT: Notify server that task is active so it sends the initial prompt
+                        sendMessage('task:select', { taskId: payload.task.id });
                         break;
                     }
                     case 'tasks:updated': {
                         const payload = message.payload as { tasks?: Task[] };
                         if (payload.tasks) {
+                            console.log(`[WebSocket] tasks:updated received with ${payload.tasks.length} tasks`);
                             setTasks(payload.tasks);
                         }
                         // Clear reloading state when tasks are updated (e.g. after reconnection)
@@ -358,8 +360,8 @@ export function useWebSocket() {
     }, []);
 
     // Task actions
-    const createTask = useCallback((prompt: string, workspaceId: string) => {
-        sendMessage('task:create', { prompt, workspaceId });
+    const createTask = useCallback((prompt: string, workspaceId: string, initialCols?: number, initialRows?: number) => {
+        sendMessage('task:create', { prompt, workspaceId, initialCols, initialRows });
     }, [sendMessage]);
 
     const selectTaskOnServer = useCallback((taskId: string) => {
@@ -423,6 +425,14 @@ export function useWebSocket() {
         sendMessage('workspace:systemPrompt:set', { workspaceId, systemPrompt });
     }, [sendMessage]);
 
+    const requestRecentWorkspaces = useCallback(() => {
+        sendMessage('workspace:recent:list', {});
+    }, [sendMessage]);
+
+    const clearRecentWorkspace = useCallback((workspaceId?: string) => {
+        sendMessage('workspace:recent:clear', { workspaceId });
+    }, [sendMessage]);
+
     // Supervisor actions
     const executeSupervisorAction = useCallback((taskId: string, action: SuggestedAction) => {
         sendMessage('supervisor:action', { taskId, action });
@@ -484,6 +494,8 @@ export function useWebSocket() {
         openFolder,
         openTerminal,
         setSystemPrompt,
+        requestRecentWorkspaces,
+        clearRecentWorkspace,
         executeSupervisorAction,
         requestTaskAnalysis,
         sendChatMessage,

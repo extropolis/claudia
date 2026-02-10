@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
-import { BookOpen, Loader2, Check, X, RefreshCw, AlertCircle, Square, CheckSquare } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { BookOpen, Loader2, Check, X, RefreshCw, AlertCircle, Square, CheckSquare, Brain } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import './LearnFromConversationModal.css';
 
@@ -7,9 +7,8 @@ interface LearnFromConversationModalProps {
     taskId: string;
     workspaceId: string;
     workspaceName: string;
-    currentSystemPrompt: string;
-    onSave: (prompt: string) => void;
     onClose: () => void;
+    onSaved?: (count: number) => void;
 }
 
 interface Suggestion {
@@ -27,15 +26,14 @@ export function LearnFromConversationModal({
     taskId,
     workspaceId,
     workspaceName,
-    currentSystemPrompt,
-    onSave,
-    onClose
+    onClose,
+    onSaved
 }: LearnFromConversationModalProps) {
     const [isLoading, setIsLoading] = useState(true);
+    const [isSaving, setIsSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [analysis, setAnalysis] = useState<LearningAnalysis | null>(null);
     const [selectedSuggestions, setSelectedSuggestions] = useState<Set<string>>(new Set());
-    const [showPreview, setShowPreview] = useState(false);
 
     useEffect(() => {
         analyzeConversation();
@@ -52,7 +50,6 @@ export function LearnFromConversationModal({
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    currentSystemPrompt,
                     workspaceId
                 })
             });
@@ -73,26 +70,6 @@ export function LearnFromConversationModal({
             setIsLoading(false);
         }
     };
-
-    // Build the final prompt based on selected suggestions
-    const finalPrompt = useMemo(() => {
-        if (!analysis) return currentSystemPrompt;
-
-        const selectedAdditions = analysis.suggestions
-            .filter(s => selectedSuggestions.has(s.id))
-            .map(s => s.promptAddition);
-
-        if (selectedAdditions.length === 0) {
-            return currentSystemPrompt;
-        }
-
-        const additions = selectedAdditions.join('\n');
-
-        if (currentSystemPrompt.trim()) {
-            return `${currentSystemPrompt.trim()}\n\n${additions}`;
-        }
-        return additions;
-    }, [analysis, selectedSuggestions, currentSystemPrompt]);
 
     const toggleSuggestion = (id: string) => {
         setSelectedSuggestions(prev => {
@@ -116,9 +93,50 @@ export function LearnFromConversationModal({
         setSelectedSuggestions(new Set());
     };
 
-    const handleSave = () => {
-        onSave(finalPrompt);
-        onClose();
+    const handleSave = async () => {
+        if (!analysis || selectedSuggestions.size === 0) return;
+
+        setIsSaving(true);
+        setError(null);
+
+        try {
+            // Convert suggestions to learnings format
+            const learnings = analysis.suggestions
+                .filter(s => selectedSuggestions.has(s.id))
+                .map(s => ({
+                    title: s.description,
+                    content: s.promptAddition
+                }));
+
+            const response = await fetch(`${getApiBaseUrl()}/api/tasks/${taskId}/learn/save`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    learnings,
+                    workspaceId
+                })
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || 'Failed to save learnings');
+            }
+
+            const result = await response.json();
+            console.log('Saved learnings:', result.saved?.length || 0);
+
+            if (onSaved) {
+                onSaved(result.saved?.length || learnings.length);
+            }
+            onClose();
+        } catch (err) {
+            console.error('Failed to save learnings:', err);
+            setError(err instanceof Error ? err.message : 'Failed to save learnings');
+        } finally {
+            setIsSaving(false);
+        }
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -133,7 +151,7 @@ export function LearnFromConversationModal({
         <div className="learn-modal-overlay" onClick={onClose} onKeyDown={handleKeyDown}>
             <div className="learn-modal" onClick={e => e.stopPropagation()}>
                 <div className="modal-header">
-                    <BookOpen size={20} />
+                    <Brain size={20} />
                     <h2>Learn from Conversation</h2>
                     <button className="modal-close-btn" onClick={onClose}>
                         <X size={18} />
@@ -141,7 +159,8 @@ export function LearnFromConversationModal({
                 </div>
 
                 <p className="modal-description">
-                    Analyze this conversation to improve the system prompt for <strong>{workspaceName}</strong>.
+                    Extract learnings from this conversation for <strong>{workspaceName}</strong>.
+                    These will be used to improve future task assistance via semantic search.
                 </p>
 
                 {isLoading && (
@@ -174,7 +193,7 @@ export function LearnFromConversationModal({
                         {analysis.suggestions.length > 0 && (
                             <div className="learn-section">
                                 <div className="learn-section-header">
-                                    <h3>Suggested Improvements</h3>
+                                    <h3>Learnings to Save</h3>
                                     <div className="select-actions">
                                         <button
                                             className="select-action-btn"
@@ -216,29 +235,13 @@ export function LearnFromConversationModal({
                             </div>
                         )}
 
-                        {/* Preview toggle */}
-                        <div className="learn-section">
-                            <div className="learn-section-header">
-                                <h3>Result Preview</h3>
-                                <button
-                                    className={`preview-toggle ${showPreview ? 'active' : ''}`}
-                                    onClick={() => setShowPreview(!showPreview)}
-                                >
-                                    {showPreview ? 'Hide Preview' : 'Show Preview'}
-                                </button>
-                            </div>
-
-                            {showPreview && (
-                                <div className="preview-content">
-                                    <pre className="preview-prompt">{finalPrompt || '(Empty prompt)'}</pre>
-                                </div>
-                            )}
-
-                            {!showPreview && hasChanges && (
-                                <p className="preview-summary">
-                                    {selectedSuggestions.size} of {analysis.suggestions.length} suggestion{analysis.suggestions.length !== 1 ? 's' : ''} selected
-                                </p>
-                            )}
+                        <div className="learn-info">
+                            <BookOpen size={14} />
+                            <span>
+                                Selected learnings will be stored with embeddings for semantic retrieval.
+                                When "Use Learnings" is enabled in settings, relevant learnings will be
+                                automatically injected into new task contexts.
+                            </span>
                         </div>
 
                         <div className="modal-actions">
@@ -249,10 +252,19 @@ export function LearnFromConversationModal({
                                 type="button"
                                 className="btn-primary"
                                 onClick={handleSave}
-                                disabled={!hasChanges}
+                                disabled={!hasChanges || isSaving}
                             >
-                                <Check size={14} />
-                                Apply {selectedSuggestions.size} Change{selectedSuggestions.size !== 1 ? 's' : ''}
+                                {isSaving ? (
+                                    <>
+                                        <Loader2 size={14} className="spinning" />
+                                        Saving...
+                                    </>
+                                ) : (
+                                    <>
+                                        <Check size={14} />
+                                        Save {selectedSuggestions.size} Learning{selectedSuggestions.size !== 1 ? 's' : ''}
+                                    </>
+                                )}
                             </button>
                         </div>
                     </>
@@ -260,7 +272,7 @@ export function LearnFromConversationModal({
 
                 {analysis && analysis.suggestions.length === 0 && !isLoading && (
                     <div className="learn-empty">
-                        <p>No suggestions found. The conversation didn't reveal any clear improvements for the system prompt.</p>
+                        <p>No learnings found. The conversation didn't reveal any clear patterns worth remembering.</p>
                     </div>
                 )}
 

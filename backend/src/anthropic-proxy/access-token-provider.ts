@@ -94,6 +94,7 @@ export class AccessTokenProvider {
 
         try {
             console.log('[AnthropicProxy] Fetching access token from AI Core');
+            console.log('[AnthropicProxy] Auth URL:', url);
             return await fetch(url, {
                 method: 'POST',
                 headers: {
@@ -105,6 +106,15 @@ export class AccessTokenProvider {
         } catch (error: unknown) {
             if (error instanceof Error && error.name === 'AbortError') {
                 throw new Error(`Token request timed out after ${timeoutMs}ms`);
+            }
+            // Log detailed error information
+            if (error instanceof Error) {
+                console.error('[AnthropicProxy] Fetch error details:', {
+                    name: error.name,
+                    message: error.message,
+                    cause: (error as any).cause,
+                    code: (error as any).code
+                });
             }
             throw error;
         } finally {

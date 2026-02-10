@@ -1,6 +1,6 @@
 import { spawn, IPty } from 'node-pty';
 import { EventEmitter } from 'events';
-import { Task, TaskState, TaskGitState, WaitingInputType } from '@claudia/shared';
+import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS } from '@claudia/shared';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
@@ -9,7 +9,9 @@ import { ConfigStore } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
 import { sanitizePrompt } from './validation.js';
 import { createLogger } from './logger.js';
-import { CodeBackend, BackendType, BackendTask, createBackend } from './backends/index.js';
+import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
+import { LearningsStore, LearningSearchResult } from './learnings-store.js';
+import { getConversationHistory } from './conversation-parser.js';
 
 const logger = createLogger('[TaskSpawner]');
 
@@ -143,6 +145,11 @@ export class TaskSpawner extends EventEmitter {
     /** Track which tasks use which backend (for mixed-backend scenarios during transition) */
     private taskBackends: Map<string, BackendType> = new Map();
 
+    // Learnings store for RAG-based context injection
+    private learningsStore: LearningsStore | null = null;
+    /** Track which learnings were injected into which tasks (for utility updates) */
+    private taskLearnings: Map<string, string[]> = new Map();
+
     /**
      * Creates a new TaskSpawner instance
      * @param persistencePath - Optional path for task persistence file (default: tasks.json in backend dir)
@@ -161,6 +168,9 @@ export class TaskSpawner extends EventEmitter {
         // Initialize backend based on config
         this.backendType = configStore?.getBackend() || 'claude-code';
         this.initializeBackend();
+
+        // Initialize learnings store for RAG
+        this.learningsStore = new LearningsStore(undefined, configStore || undefined);
 
         this.loadPersistedTasks();
 
@@ -578,7 +588,16 @@ export class TaskSpawner extends EventEmitter {
                     // MIGRATION: If task has outputHistory string, move it to file
                     if (persisted.outputHistory && typeof persisted.outputHistory === 'string') {
                         try {
-                            writeFileSync(this.getTaskHistoryPath(persisted.id), persisted.outputHistory);
+                            // outputHistory is likely raw text from older versions. Convert to Base64 to match new file format.
+                            // If it's already Base64, this might double-encode, but we can't easily tell without heuristics.
+                            // Given this is a migration from older version, assuming raw text is safer.
+                            let contentToWrite = persisted.outputHistory;
+                            // Heuristic: If it contains ESC char, it's definitely raw text.
+                            // Most tasks have ESC chars for colors/TUI.
+                            if (contentToWrite.includes('\x1b') || contentToWrite.includes(' ')) {
+                                contentToWrite = Buffer.from(contentToWrite, 'utf8').toString('base64');
+                            }
+                            writeFileSync(this.getTaskHistoryPath(persisted.id), contentToWrite);
                             if (process.env.DEBUG_TASKS) {
                                 console.log(`[TaskSpawner] Migrated history for task ${persisted.id} to file`);
                             }
@@ -594,6 +613,11 @@ export class TaskSpawner extends EventEmitter {
                         console.log(`[TaskSpawner] Loading task ${persisted.id}`);
                     }
                     this.disconnectedTasks.set(persisted.id, persisted);
+
+                    // Restore the taskBackends map from persisted backendType
+                    if (persisted.backendType) {
+                        this.taskBackends.set(persisted.id, persisted.backendType);
+                    }
                 }
 
                 // Load archived tasks - migrate old format if needed
@@ -610,7 +634,11 @@ export class TaskSpawner extends EventEmitter {
                                 mkdirSync(historyDir, { recursive: true });
                             }
                             try {
-                                writeFileSync(this.getArchivedHistoryPath(archived.id), archived.outputHistory);
+                                let contentToWrite = archived.outputHistory;
+                                if (contentToWrite.includes('\x1b') || contentToWrite.includes(' ')) {
+                                    contentToWrite = Buffer.from(contentToWrite, 'utf8').toString('base64');
+                                }
+                                writeFileSync(this.getArchivedHistoryPath(archived.id), contentToWrite);
                                 migratedCount++;
                             } catch (e) {
                                 console.error(`[TaskSpawner] Failed to migrate history for ${archived.id}:`, e);
@@ -889,35 +917,45 @@ export class TaskSpawner extends EventEmitter {
             }
 
             if (this.backendType === 'opencode' && credentials) {
-                // OpenCode has native SAP AI Core support via AICORE_SERVICE_KEY
-                // Format: {"clientid":"...","clientsecret":"...","url":"...","serviceurls":{"AI_API_URL":"..."}}
-                const serviceKey = {
-                    clientid: credentials.clientId,
-                    clientsecret: credentials.clientSecret,
-                    url: credentials.authUrl,
-                    serviceurls: {
-                        AI_API_URL: credentials.baseUrl
-                    }
-                };
-                taskEnv['AICORE_SERVICE_KEY'] = JSON.stringify(serviceKey);
+                // Check if AICORE_SERVICE_KEY is already set in environment
+                if (process.env.AICORE_SERVICE_KEY) {
+                    // Use the pre-configured service key from environment
+                    taskEnv['AICORE_SERVICE_KEY'] = process.env.AICORE_SERVICE_KEY;
+                    console.log(`[TaskSpawner] Using AICORE_SERVICE_KEY from environment`);
+                } else {
+                    // OpenCode has native SAP AI Core support via AICORE_SERVICE_KEY
+                    // Format: {"clientid":"...","clientsecret":"...","url":"...","serviceurls":{"AI_API_URL":"..."}}
+                    const serviceKey = {
+                        clientid: credentials.clientId,
+                        clientsecret: credentials.clientSecret,
+                        url: credentials.authUrl,
+                        serviceurls: {
+                            AI_API_URL: credentials.baseUrl
+                        }
+                    };
+                    taskEnv['AICORE_SERVICE_KEY'] = JSON.stringify(serviceKey);
+                }
 
                 // Optionally set resource group if configured
                 if (credentials.resourceGroup) {
                     taskEnv['AICORE_RESOURCE_GROUP'] = credentials.resourceGroup;
                 }
 
-                // Clear any inherited base URL that might interfere with OpenCode's native AI Core support
+                // Clear any inherited API keys and base URLs that might interfere with OpenCode's native AI Core support
+                delete taskEnv['ANTHROPIC_API_KEY'];
                 delete taskEnv['ANTHROPIC_BASE_URL'];
+                delete taskEnv['OPENAI_API_KEY'];
                 delete taskEnv['OPENAI_BASE_URL'];
 
                 console.log(`[TaskSpawner] Using SAP AI Core native support for OpenCode`);
+
                 console.log(`[TaskSpawner] AICORE_SERVICE_KEY authUrl: ${credentials.authUrl}, baseUrl: ${credentials.baseUrl}`);
             } else if (this.backendType === 'opencode' && !credentials) {
                 console.log(`[TaskSpawner] WARNING: SAP AI Core mode selected but no credentials found for OpenCode`);
             } else {
                 // Claude Code uses the embedded proxy server
                 // The proxy is mounted at the backend's root, so we use the backend URL
-                const backendPort = process.env.PORT || '3001';
+                const backendPort = process.env.PORT || PORTS.BACKEND;
                 taskEnv['ANTHROPIC_BASE_URL'] = `http://localhost:${backendPort}`;
                 console.log(`[TaskSpawner] Using SAP AI Core proxy at localhost:${backendPort}`);
             }
@@ -1200,29 +1238,69 @@ export class TaskSpawner extends EventEmitter {
      * @param systemPrompt - Optional system prompt override
      * @returns The created task object
      */
-    async createTask(prompt: string, workspaceId: string, systemPrompt?: string): Promise<Task> {
+    async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number): Promise<Task> {
         // Sanitize prompt to prevent command injection and other issues
         const sanitizedPrompt = sanitizePrompt(prompt);
-        const sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
+        let sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
 
         const gitStateBefore = await captureGitStateBefore(workspaceId);
+
+        // Search for relevant learnings and inject if enabled
+        let injectedLearnings: LearningSearchResult[] = [];
+        if (this.configStore?.getUseLearnings() && this.learningsStore) {
+            try {
+                injectedLearnings = await this.learningsStore.searchLearnings({
+                    query: sanitizedPrompt,
+                    workspaceId,
+                    topK: 5,
+                    minScore: 0.3
+                });
+
+                if (injectedLearnings.length > 0) {
+                    const learningsContext = this.learningsStore.formatForContext(injectedLearnings);
+                    logger.info('Injecting learnings into task', {
+                        count: injectedLearnings.length,
+                        scores: injectedLearnings.map(l => l.score.toFixed(3))
+                    });
+
+                    // Prepend learnings to system prompt
+                    if (sanitizedSystemPrompt) {
+                        sanitizedSystemPrompt = `${learningsContext}\n\n${sanitizedSystemPrompt}`;
+                    } else {
+                        sanitizedSystemPrompt = learningsContext;
+                    }
+                }
+            } catch (err) {
+                logger.error('Failed to search learnings:', err);
+            }
+        }
 
         // Log which backend we're using for debugging
         logger.info('createTask called', {
             backendType: this.backendType,
             hasBackend: !!this.backend,
-            configBackend: this.configStore?.getBackend()
+            configBackend: this.configStore?.getBackend(),
+            learningsInjected: injectedLearnings.length,
+            initialDims: initialCols && initialRows ? `${initialCols}x${initialRows}` : 'default'
         });
 
         // Use OpenCode backend if configured
+        let task: Task;
         if (this.backendType === 'opencode' && this.backend) {
             logger.info('Using OpenCode backend for task creation');
-            return this.createTaskWithOpenCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore);
+            task = await this.createTaskWithOpenCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore);
+        } else {
+            // Default: Use Claude Code with PTY (existing logic)
+            logger.info('Using Claude Code backend for task creation');
+            task = await this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore, initialCols, initialRows);
         }
 
-        // Default: Use Claude Code with PTY (existing logic)
-        logger.info('Using Claude Code backend for task creation');
-        return this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore);
+        // Track which learnings were injected for this task (for utility updates later)
+        if (injectedLearnings.length > 0) {
+            this.taskLearnings.set(task.id, injectedLearnings.map(l => l.learning.id));
+        }
+
+        return task;
     }
 
     /**
@@ -1246,9 +1324,18 @@ export class TaskSpawner extends EventEmitter {
         let model: string | undefined;
         const apiMode = this.configStore?.getApiMode();
         if (apiMode === 'sap-ai-core') {
-            // Use Claude Opus 4.5 via SAP AI Core
-            model = 'anthropic/claude-opus-4-5';
+            // Get configured model from settings, default to Claude 4.5 Opus
+            const sapAiCoreModel = this.configStore?.getSapAiCoreModel() ?? 'anthropic--claude-4.5-opus';
+            // OpenCode model format for SAP AI Core: sap-ai-core/<model-name>
+            model = `sap-ai-core/${sapAiCoreModel}`;
             logger.info('Using SAP AI Core model', { model });
+            // Verify environment is set correctly
+            const hasServiceKey = !!taskEnv['AICORE_SERVICE_KEY'];
+            logger.info('SAP AI Core environment check', {
+                hasServiceKey,
+                hasAnthropicBaseUrl: !!taskEnv['ANTHROPIC_BASE_URL'],
+                model
+            });
         }
 
         const backendTask = await this.backend.createTask({
@@ -1317,8 +1404,11 @@ export class TaskSpawner extends EventEmitter {
         prompt: string,
         workspaceId: string,
         systemPrompt: string | undefined,
-        gitStateBefore: Partial<TaskGitState> | null
+        gitStateBefore: Partial<TaskGitState> | null,
+        initialCols?: number,
+        initialRows?: number
     ): Promise<Task> {
+        console.log(`[TaskSpawner] createTaskWithClaudeCode called with workspaceId: "${workspaceId}"`);
         const id = `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
         if (gitStateBefore) {
@@ -1342,16 +1432,141 @@ export class TaskSpawner extends EventEmitter {
             logger.info(`Using custom system prompt`);
         }
 
-        logger.info(`Creating task with Claude Code`, { taskId: id, workspaceId });
+        // Add MCP server configurations
+        // IMPORTANT: Claude doesn't automatically load MCP servers from ~/.claude.json in non-interactive mode
+        // We must explicitly pass --mcp-config to load MCP servers
+        const mcpServers = this.configStore?.getMCPServers() || [];
+        console.log(`[TaskSpawner] MCP servers from config:`, JSON.stringify(mcpServers, null, 2));
+        const enabledMcpServers = mcpServers.filter(s => s.enabled);
+        console.log(`[TaskSpawner] Enabled MCP servers: ${enabledMcpServers.length}`);
+        if (enabledMcpServers.length > 0) {
+            // Convert to the format expected by claude --mcp-config
+            // Format: { "mcpServers": { "name": { ... } } }
+            // stdio: { "command": "...", "args": [...], "env": {...} }
+            // streamableHttp: { "type": "streamableHttp", "url": "...", "timeout": ..., "autoApprove": [...] }
+            const mcpConfig: Record<string, Record<string, unknown>> = {};
+            for (const server of enabledMcpServers) {
+                const serverType = server.type || 'stdio';
+
+                if (serverType === 'streamableHttp' || serverType === 'http') {
+                    // HTTP-based MCP server
+                    const config: Record<string, unknown> = {
+                        type: 'http',
+                        url: server.url
+                    };
+                    if (server.timeout !== undefined) {
+                        config.timeout = server.timeout;
+                    }
+                    if (server.autoApprove && server.autoApprove.length > 0) {
+                        config.autoApprove = server.autoApprove;
+                    }
+                    if (server.description) {
+                        config.description = server.description;
+                    }
+                    if (server.headers) {
+                        config.headers = server.headers;
+                    }
+                    mcpConfig[server.name] = config;
+                    console.log(`[TaskSpawner] Added HTTP MCP server: ${server.name} -> ${server.url}`);
+                } else {
+                    // stdio-based MCP server (default)
+                    const config: Record<string, unknown> = {
+                        command: server.command,
+                        args: server.args
+                    };
+                    // Only include env if it has values
+                    if (server.env && Object.keys(server.env).length > 0) {
+                        config.env = server.env;
+                    }
+                    if (server.description) {
+                        config.description = server.description;
+                    }
+                    mcpConfig[server.name] = config;
+                    console.log(`[TaskSpawner] Added stdio MCP server: ${server.name} -> ${server.command}`);
+                }
+            }
+            // Write MCP config - we use BOTH approaches for compatibility:
+            // 1. --mcp-config flag (works in -p mode)
+            // 2. .mcp.json in workspace (works in interactive mode)
+            const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
+
+            // Write to temp file for --mcp-config
+            const mcpConfigFile = `/tmp/claudia-mcp-${id}.json`;
+            writeFileSync(mcpConfigFile, mcpConfigJson);
+            console.log(`[TaskSpawner] MCP config written to: ${mcpConfigFile}`);
+            console.log(`[TaskSpawner] MCP config contents: ${mcpConfigJson}`);
+            claudeArgs.push('--mcp-config', mcpConfigFile);
+
+            // Also write .mcp.json and .claude/settings.local.json to workspace for interactive mode
+            // This is a workaround for Claude Code bug where --mcp-config doesn't work in interactive mode
+            // See: https://github.com/anthropics/claude-code/issues/22404
+            // And: https://github.com/anthropics/claude-code/issues/9189
+            console.log(`[TaskSpawner] DEBUG: About to write workspace files. workspaceId="${workspaceId}", exists=${existsSync(workspaceId)}`);
+            if (workspaceId && existsSync(workspaceId)) {
+                // Write .mcp.json - project-scoped MCP servers
+                const workspaceMcpFile = `${workspaceId}/.mcp.json`;
+                console.log(`[TaskSpawner] DEBUG: Writing to ${workspaceMcpFile}`);
+                try {
+                    writeFileSync(workspaceMcpFile, mcpConfigJson);
+                    console.log(`[TaskSpawner] Wrote MCP config to: ${workspaceMcpFile}`);
+                } catch (err) {
+                    console.error(`[TaskSpawner] Failed to write .mcp.json: ${err}`);
+                }
+
+                // Write .claude/settings.local.json to enable project MCP servers and auto-approve them
+                // This is required because project-scoped MCP servers don't trigger approval prompt
+                const claudeSettingsDir = `${workspaceId}/.claude`;
+                const claudeSettingsFile = `${claudeSettingsDir}/settings.local.json`;
+                const serverNames = enabledMcpServers.map(s => s.name);
+                const settingsContent = {
+                    permissions: {
+                        allow: ['mcp__*'],  // Allow all MCP tools
+                        deny: []
+                    },
+                    enableAllProjectMcpServers: true,
+                    enabledMcpjsonServers: serverNames
+                };
+                try {
+                    if (!existsSync(claudeSettingsDir)) {
+                        mkdirSync(claudeSettingsDir, { recursive: true });
+                    }
+                    writeFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
+                    console.log(`[TaskSpawner] Wrote Claude settings to: ${claudeSettingsFile}`);
+                } catch (err) {
+                    console.error(`[TaskSpawner] Failed to write settings.local.json: ${err}`);
+                }
+            } else {
+                console.log(`[TaskSpawner] Skipping workspace MCP files - workspaceId not valid`);
+            }
+
+            logger.info(`Added ${enabledMcpServers.length} MCP server(s)`, { servers: enabledMcpServers.map(s => s.name) });
+        } else {
+            console.log(`[TaskSpawner] WARNING: No enabled MCP servers found!`);
+        }
+
+        // Explicitly allow all MCP tools to avoid deferred loading issues
+        claudeArgs.push('--allowedTools', 'mcp__*');
+
+        // Add -- to terminate argument parsing (workaround for Claude CLI bug with --mcp-config)
+        // See: https://github.com/anthropics/claude-code/issues/22404
+        claudeArgs.push('--');
+
+
+        logger.info(`Creating task with Claude Code`, { taskId: id, workspaceId, cols: initialCols, rows: initialRows });
         logger.debug(`Command args`, { args: claudeArgs });
 
         // Get environment with API mode settings
         const taskEnv = this.getTaskEnvironment();
+        logger.info('Task environment', {
+            ANTHROPIC_BASE_URL: taskEnv['ANTHROPIC_BASE_URL'],
+            HOME: taskEnv['HOME'],
+            apiMode: this.configStore?.getApiMode()
+        });
 
         const ptyProcess = spawn('claude', claudeArgs, {
             name: 'xterm-256color',
-            cols: 120,
-            rows: 40,
+            cols: initialCols || 120, // Use provided cols or default 120 (increased from 80)
+            rows: initialRows || 40,  // Use provided rows or default 40 (increased from 24)
             cwd: workspaceId,
             env: taskEnv,
         });
@@ -1375,6 +1590,10 @@ export class TaskSpawner extends EventEmitter {
             lastOutputLength: 0,  // Initialize for state polling
             hasStartedProcessing: false,  // Will be true once output changes after prompt sent
         };
+
+
+
+
 
         this.setupProcessHandlers(task);
         this.tasks.set(id, task);
@@ -1449,6 +1668,9 @@ export class TaskSpawner extends EventEmitter {
     }
 
     private toPublicTask(task: InternalTask): Task {
+        // Get the backend type for this task (defaults to current backend if not tracked)
+        const backendType = this.taskBackends.get(task.id) || this.backendType;
+
         return {
             id: task.id,
             prompt: task.prompt,
@@ -1459,6 +1681,8 @@ export class TaskSpawner extends EventEmitter {
             gitState: task.gitState,
             waitingInputType: task.waitingInputType,
             systemPrompt: task.systemPrompt,
+            sessionId: task.sessionId || undefined,
+            backendType,
         };
     }
 
@@ -1515,16 +1739,39 @@ export class TaskSpawner extends EventEmitter {
         return this.tasks.get(taskId);
     }
 
-    getDisconnectedTask(taskId: string): { id: string; workspaceId: string; sessionId: string | null } | undefined {
+    getDisconnectedTask(taskId: string): { id: string; workspaceId: string; sessionId: string | null; prompt: string; backendType?: BackendType } | undefined {
         const persisted = this.disconnectedTasks.get(taskId);
         if (persisted) {
             return {
                 id: persisted.id,
                 workspaceId: persisted.workspaceId,
-                sessionId: persisted.sessionId
+                sessionId: persisted.sessionId,
+                prompt: persisted.prompt,
+                backendType: persisted.backendType
             };
         }
         return undefined;
+    }
+
+    /**
+     * Get the learning IDs that were injected into a task
+     */
+    getTaskLearnings(taskId: string): string[] {
+        return this.taskLearnings.get(taskId) || [];
+    }
+
+    /**
+     * Update utility scores for learnings used in a task based on outcome
+     */
+    updateTaskLearningsUtility(taskId: string, success: boolean): void {
+        const learningIds = this.taskLearnings.get(taskId);
+        if (!learningIds || !this.learningsStore) return;
+
+        for (const id of learningIds) {
+            this.learningsStore.updateUtility(id, success);
+        }
+
+        logger.info('Updated learning utilities', { taskId, success, count: learningIds.length });
     }
 
     setTaskActive(taskId: string, active: boolean): void {
@@ -1553,11 +1800,8 @@ export class TaskSpawner extends EventEmitter {
                     task.isActive = true;
                     this.emit('tasksUpdated');
 
-                    // Send combined history: previous + current
-                    const history = this.getCombinedHistory(task);
-                    if (history) {
-                        this.emit('taskRestore', task.id, history);
-                    }
+                    // Send combined history (PTY output) first, then enhance with JSONL if needed
+                    this.sendTaskHistory(task);
                 }
             }
             return;
@@ -1574,11 +1818,8 @@ export class TaskSpawner extends EventEmitter {
                     this.backend.setTaskActive(taskId, true);
                 }
 
-                // Send combined history: previous + current
-                const history = this.getCombinedHistory(task);
-                if (history) {
-                    this.emit('taskRestore', task.id, history);
-                }
+                // Send combined history (PTY output) first, then enhance with JSONL if needed
+                this.sendTaskHistory(task);
             } else {
                 // Notify backend if using OpenCode
                 const taskBackend = this.taskBackends.get(taskId);
@@ -1586,6 +1827,16 @@ export class TaskSpawner extends EventEmitter {
                     this.backend.setTaskActive(taskId, false);
                 }
             }
+        }
+    }
+
+    /**
+     * Send task history to the client
+     */
+    private sendTaskHistory(task: InternalTask): void {
+        const history = this.getCombinedHistory(task);
+        if (history) {
+            this.emit('taskRestore', task.id, history);
         }
     }
 
@@ -1611,25 +1862,58 @@ export class TaskSpawner extends EventEmitter {
                     const stat = statSync(historyPath);
                     const fileSize = stat.size;
 
-                    let base64Content: string;
+                    // Check file format (Base64 vs Raw Text) by reading a small sample
+                    const fdCheck = openSync(historyPath, 'r');
+                    const checkBuf = Buffer.alloc(Math.min(100, fileSize));
+                    const bytesReadCheck = readSync(fdCheck, checkBuf, 0, checkBuf.length, 0);
+                    closeSync(fdCheck);
 
-                    // If file is larger than MAX_HISTORY_TO_SEND, only read the tail
+                    const sample = checkBuf.subarray(0, bytesReadCheck).toString('utf8');
+                    // Heuristic: Raw terminal output contains ESC or spaces.
+                    // Base64 does not contain spaces (usually) and definitely no ESC.
+                    const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
+
+                    let base64Content: string;
                     // Base64 encoding inflates size by ~33%, so calculate raw max size
                     const maxBase64Size = Math.floor(MAX_HISTORY_TO_SEND * 1.33);
 
-                    if (fileSize > maxBase64Size) {
-                        // Only read the last portion of the file
-                        const fd = openSync(historyPath, 'r');
-                        const buffer = Buffer.alloc(maxBase64Size);
-                        const offset = fileSize - maxBase64Size;
-                        readSync(fd, buffer, 0, maxBase64Size, offset);
-                        closeSync(fd);
-                        base64Content = buffer.toString('utf-8');
-                        console.log(`[TaskSpawner] Loaded tail of history from file for ${task.id}: ${fileSize} bytes (file) -> ${maxBase64Size} bytes (loaded)`);
+                    if (isRawText) {
+                        // Raw text file - read strictly the last portion as utf8
+                        if (fileSize > MAX_HISTORY_TO_SEND) {
+                            const fd = openSync(historyPath, 'r');
+                            const buffer = Buffer.alloc(MAX_HISTORY_TO_SEND);
+                            const offset = fileSize - MAX_HISTORY_TO_SEND;
+                            readSync(fd, buffer, 0, MAX_HISTORY_TO_SEND, offset);
+                            closeSync(fd);
+                            // Since it's raw text, we treat it as the decoded content directly
+                            // But we need to pretend it was base64 for the logic below, OR change logic below.
+                            // Changing logic below is better.
+                            // Actually, let's just encode it to base64 here so the rest of the function works as is
+                            base64Content = buffer.toString('base64');
+                            console.log(`[TaskSpawner] Loaded tail of RAW history: ${fileSize} bytes -> ${MAX_HISTORY_TO_SEND} bytes`);
+                        } else {
+                            const rawContent = readFileSync(historyPath, 'utf8');
+                            base64Content = Buffer.from(rawContent, 'utf8').toString('base64');
+                            console.log(`[TaskSpawner] Loaded complete RAW history: ${fileSize} bytes`);
+                        }
                     } else {
-                        // File is small enough, read it all
-                        base64Content = readFileSync(historyPath, 'utf-8');
-                        console.log(`[TaskSpawner] Loaded complete history from file for ${task.id}: ${fileSize} bytes`);
+                        // Base64 file (standard path)
+                        // If file is larger than MAX_HISTORY_TO_SEND, only read the tail
+
+                        if (fileSize > maxBase64Size) {
+                            // Only read the last portion of the file
+                            const fd = openSync(historyPath, 'r');
+                            const buffer = Buffer.alloc(maxBase64Size);
+                            const offset = fileSize - maxBase64Size;
+                            readSync(fd, buffer, 0, maxBase64Size, offset);
+                            closeSync(fd);
+                            base64Content = buffer.toString('utf-8');
+                            console.log(`[TaskSpawner] Loaded tail of Base64 history from file for ${task.id}: ${fileSize} bytes (file) -> ${maxBase64Size} bytes (loaded)`);
+                        } else {
+                            // File is small enough, read it all
+                            base64Content = readFileSync(historyPath, 'utf-8');
+                            console.log(`[TaskSpawner] Loaded complete Base64 history from file for ${task.id}: ${fileSize} bytes`);
+                        }
                     }
 
                     // Decode base64 to buffer
@@ -1699,6 +1983,55 @@ export class TaskSpawner extends EventEmitter {
         if (parts.length === 0) return null;
 
         return Buffer.concat(parts).toString('utf8');
+    }
+
+    /**
+     * Render JSONL conversation history as terminal-like output
+     * This provides accurate history from Claude's perspective, including plan approvals
+     */
+    private async renderConversationAsTerminal(workspaceId: string, sessionId: string): Promise<string | null> {
+        try {
+            const conversation = await getConversationHistory(workspaceId, sessionId);
+            if (!conversation || conversation.messages.length === 0) {
+                return null;
+            }
+
+            const lines: string[] = [];
+            lines.push('\x1b[90m─── Conversation History (from session file) ───\x1b[0m\r\n');
+
+            for (const msg of conversation.messages) {
+                if (msg.role === 'user') {
+                    // User messages in cyan
+                    lines.push(`\x1b[36m┌─ User\x1b[0m\r\n`);
+                    // Truncate very long messages for display
+                    const content = msg.content.length > 2000
+                        ? msg.content.substring(0, 2000) + '... (truncated)'
+                        : msg.content;
+                    for (const line of content.split('\n')) {
+                        lines.push(`\x1b[36m│\x1b[0m ${line}\r\n`);
+                    }
+                    lines.push(`\x1b[36m└─\x1b[0m\r\n\r\n`);
+                } else {
+                    // Assistant messages in green
+                    lines.push(`\x1b[32m┌─ Claude\x1b[0m\r\n`);
+                    // Truncate very long messages for display
+                    const content = msg.content.length > 3000
+                        ? msg.content.substring(0, 3000) + '... (truncated)'
+                        : msg.content;
+                    for (const line of content.split('\n')) {
+                        lines.push(`\x1b[32m│\x1b[0m ${line}\r\n`);
+                    }
+                    lines.push(`\x1b[32m└─\x1b[0m\r\n\r\n`);
+                }
+            }
+
+            lines.push('\x1b[90m─── End of Conversation History ───\x1b[0m\r\n\r\n');
+
+            return lines.join('');
+        } catch (e) {
+            logger.error('Failed to render conversation history', { error: e, workspaceId, sessionId });
+            return null;
+        }
     }
 
     writeToTask(taskId: string, data: string): void {
@@ -2194,6 +2527,29 @@ export class TaskSpawner extends EventEmitter {
 
             if (this.configStore?.getSkipPermissions()) {
                 claudeArgs.push('--dangerously-skip-permissions');
+            }
+
+            // Explicitly allow all MCP tools to avoid deferred loading issues
+            claudeArgs.push('--allowedTools', 'mcp__*');
+
+            // Add MCP server configurations for reconnection
+            const mcpServers = this.configStore?.getMCPServers() || [];
+            const enabledMcpServers = mcpServers.filter(s => s.enabled);
+            if (enabledMcpServers.length > 0) {
+                const mcpConfig: Record<string, { command: string; args?: string[]; env?: Record<string, string> }> = {};
+                for (const server of enabledMcpServers) {
+                    mcpConfig[server.name] = {
+                        command: server.command,
+                        args: server.args,
+                        env: server.env
+                    };
+                }
+                // Write MCP config to a temp file for reconnection
+                const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
+                const mcpConfigFile = `/tmp/claudia-mcp-${taskId}-reconnect.json`;
+                writeFileSync(mcpConfigFile, mcpConfigJson);
+                claudeArgs.push('--mcp-config', mcpConfigFile);
+                console.log(`[TaskSpawner] Added ${enabledMcpServers.length} MCP server(s) for reconnection via ${mcpConfigFile}`);
             }
 
             if (sessionIdToUse) {

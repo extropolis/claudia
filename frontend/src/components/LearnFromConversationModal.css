@@ -358,3 +358,27 @@
     text-align: center;
     color: #808080;
 }
+
+/* Info box */
+.learn-info {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    background: rgba(59, 130, 246, 0.08);
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    border-radius: 6px;
+    margin-top: 16px;
+}
+
+.learn-info svg {
+    flex-shrink: 0;
+    color: #3b82f6;
+    margin-top: 2px;
+}
+
+.learn-info span {
+    color: #909090;
+    font-size: 13px;
+    line-height: 1.5;
+}
