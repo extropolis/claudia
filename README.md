@@ -70,16 +70,6 @@ On first launch, the Settings panel will open automatically. Enter your SAP AI C
 
 Claudia runs an embedded proxy that translates Anthropic API calls into SAP AI Core requests, so Claude Code works without a direct Anthropic login.
 
-### Manual Start
-
-```bash
-# Start both backend and frontend
-npm run dev
-
-# Or run them separately:
-npm run dev:backend   # Backend only (port 4001)
-npm run dev:frontend  # Frontend only (port 5173)
-```
 
 ## Usage
 
