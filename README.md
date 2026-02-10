@@ -69,16 +69,6 @@ npm run dev:backend   # Backend only (port 4001)
 npm run dev:frontend  # Frontend only (port 5173)
 ```
 
-### Run as Desktop App (Electron)
-
-```bash
-# Development mode
-npm run dev:electron
-
-# Build distributable
-npm run package
-```
-
 ## Usage
 
 1. **Add a Workspace** - Click "Add Workspace" and select a project directory
@@ -141,7 +131,6 @@ claudia/
 │       ├── components/
 │       └── stores/
 ├── shared/            # Shared TypeScript types
-├── electron/          # Desktop app wrapper
 └── start.sh           # Startup script
 ```
 
