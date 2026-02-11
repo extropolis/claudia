@@ -34,6 +34,13 @@ cd claudia
 
 # Install dependencies
 npm install
+
+# Node.js v25+ only: upgrade node-pty for compatibility
+node -v  # check your version
+npm install node-pty@1.2.0-beta.11  # only if v25+
+
+# Build the shared types package (required before first run)
+npm run build -w shared
 ```
 
 ## Running the App
@@ -51,26 +58,18 @@ This will:
 
 Access the UI at **http://localhost:5173**
 
-### Manual Start
+### SAP AI Core Setup
 
-```bash
-# Start both backend and frontend
-npm run dev
+On first launch, the Settings panel will open automatically. Enter your SAP AI Core credentials:
 
-# Or run them separately:
-npm run dev:backend   # Backend only (port 4001)
-npm run dev:frontend  # Frontend only (port 5173)
-```
+1. **Auth URL** — your SAP authentication endpoint
+2. **Client ID** and **Client Secret**
+3. **Base URL** — your AI Core API endpoint
+4. Choose a model (e.g., Claude 4.5 Sonnet)
+5. Restart the server (`./start.sh`)
 
-### Run as Desktop App (Electron)
+Claudia runs an embedded proxy that translates Anthropic API calls into SAP AI Core requests, so Claude Code works without a direct Anthropic login.
 
-```bash
-# Development mode
-npm run dev:electron
-
-# Build distributable
-npm run package
-```
 
 ## Usage
 
@@ -86,28 +85,6 @@ npm run package
 | Backend API/WebSocket | 4001 |
 | Frontend | 5173 |
 
-## Configuration
-
-### Claude Code Setup
-
-Claudia spawns Claude Code CLI instances. Make sure Claude Code is installed and configured:
-
-```bash
-# Verify Claude Code is installed
-claude --version
-```
-
-### SAP AI Core Integration (Optional)
-
-Claudia can proxy Claude API requests through SAP AI Core:
-
-```bash
-# Set environment variables or configure in Settings menu
-export SAP_AICORE_AUTH_URL=https://xxx.authentication.xxx.hana.ondemand.com
-export SAP_AICORE_CLIENT_ID=your-client-id
-export SAP_AICORE_CLIENT_SECRET=your-client-secret
-export SAP_AICORE_BASE_URL=https://api.ai.xxx.aws.ml.hana.ondemand.com
-```
 
 ## Development
 
@@ -131,7 +108,7 @@ claudia/
 │       ├── components/
 │       └── stores/
 ├── shared/            # Shared TypeScript types
-├── electron/          # Desktop app wrapper
 └── start.sh           # Startup script
 ```
+
 

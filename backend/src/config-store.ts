@@ -105,7 +105,7 @@ const DEFAULT_CONFIG: AppConfig = {
     supervisorEnabled: false,
     supervisorSystemPrompt: DEFAULT_SUPERVISOR_PROMPT,
     autoFocusOnInput: false,
-    apiMode: 'default',
+    apiMode: 'sap-ai-core',
     sapAiCoreModel: DEFAULT_SAP_AI_CORE_MODEL,
     backend: 'claude-code',
     opencodePort: 4096,
@@ -219,6 +219,11 @@ export class ConfigStore {
     }
 
     setAICoreCredentials(credentials: AICoreCredentials | undefined): void {
+        if (credentials) {
+            // Sanitize URLs - strip leading '=' that can come from pasting
+            credentials.authUrl = credentials.authUrl?.replace(/^=+/, '') || '';
+            credentials.baseUrl = credentials.baseUrl?.replace(/^=+/, '') || '';
+        }
         this.config.aiCoreCredentials = credentials;
         this.saveConfig();
     }

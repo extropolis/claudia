@@ -10,7 +10,13 @@
       "id": "/Users/I850333/projects/experiments/codeui",
       "name": "codeui",
       "createdAt": "2026-01-22T20:30:35.607Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/claudia",
+      "name": "claudia",
+      "createdAt": "2026-02-10T21:56:27.323Z"
     }
   ],
-  "activeWorkspaceId": "/Users/I850333/projects/experiments/codeui"
+  "activeWorkspaceId": "/Users/I850333/projects/experiments/codeui",
+  "recentWorkspaces": []
 }

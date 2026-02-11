@@ -957,6 +957,9 @@ export class TaskSpawner extends EventEmitter {
                 // The proxy is mounted at the backend's root, so we use the backend URL
                 const backendPort = process.env.PORT || PORTS.BACKEND;
                 taskEnv['ANTHROPIC_BASE_URL'] = `http://localhost:${backendPort}`;
+                // Set a dummy API key so Claude Code skips its login/auth prompt.
+                // The actual key value is irrelevant — the proxy handles auth via SAP AI Core tokens.
+                taskEnv['ANTHROPIC_API_KEY'] = 'sk-ant-dummy-sap-ai-core-proxy';
                 console.log(`[TaskSpawner] Using SAP AI Core proxy at localhost:${backendPort}`);
             }
         }
