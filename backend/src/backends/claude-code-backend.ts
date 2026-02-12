@@ -145,6 +145,11 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
             logger.info('Using custom system prompt');
         }
 
+        if (config.model) {
+            claudeArgs.push('--model', config.model);
+            logger.info('Using model', { model: config.model });
+        }
+
         logger.info('Creating task', { taskId: id, workspaceId: config.workspaceId });
         logger.debug('Command args', { args: claudeArgs });
 

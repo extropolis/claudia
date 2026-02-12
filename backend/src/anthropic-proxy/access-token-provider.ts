@@ -142,4 +142,39 @@ export class AccessTokenProvider {
         this.tokenCache.token = null;
         this.tokenCache.expiresAt = 0;
     }
+
+    /**
+     * Public method to clear the token cache (e.g., when credentials change)
+     */
+    public clearTokenCache(): void {
+        console.log('[AnthropicProxy] Clearing token cache');
+        this.clearCache();
+    }
+
+    /**
+     * Update the config (e.g., when credentials change in settings).
+     * This also clears the token cache so the next request uses the new credentials.
+     */
+    public updateConfig(config: AICorConfig): void {
+        console.log('[AnthropicProxy] Updating AccessTokenProvider config and clearing cache');
+        this.config = config;
+        this.clearCache();
+    }
+
+    /**
+     * Validate credentials by attempting to get a token
+     * Returns true if credentials are valid, false otherwise
+     */
+    public async validateCredentials(): Promise<{ valid: boolean; error?: string }> {
+        try {
+            console.log('[AnthropicProxy] Validating SAP AI Core credentials...');
+            await this.obtainFreshToken(Date.now());
+            console.log('[AnthropicProxy] Credentials are valid');
+            return { valid: true };
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error('[AnthropicProxy] Credential validation failed:', message);
+            return { valid: false, error: message };
+        }
+    }
 }

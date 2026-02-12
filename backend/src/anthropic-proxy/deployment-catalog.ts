@@ -117,6 +117,16 @@ export class DeploymentCatalog {
         this.cachedDeployments = [];
     }
 
+    /**
+     * Update config (e.g., when credentials change in settings).
+     * Also clears the deployment cache.
+     */
+    updateConfig(config: AICorConfig): void {
+        console.log('[DeploymentCatalog] Updating config and clearing cache');
+        this.config = config;
+        this.cachedDeployments = [];
+    }
+
     private createModelFromDeployment(deployment: Deployment): ModelInfo {
         const modelName = this.extractModelName(deployment);
         const externalModelName = this.toExternalModelName(modelName);

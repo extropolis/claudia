@@ -82,7 +82,7 @@ function sendWSError(ws: WebSocket, message: string, originalType?: string, code
     }));
 }
 
-export function createApp(basePath?: string) {
+export async function createApp(basePath?: string) {
     const app = express();
     const server = createServer(app);
     const wss = new WebSocketServer({ server });
@@ -94,9 +94,16 @@ export function createApp(basePath?: string) {
     // Initialize configStore first to determine API mode
     const configStore = new ConfigStore(basePath);
 
+    // Initialize LLM service with config store so it can use the correct model
+    const { initializeLLMService } = await import('./llm-service.js');
+    initializeLLMService(configStore);
+
     // Mount Anthropic Proxy based on API mode
     const apiMode = configStore.getApiMode();
     const aiCoreCredentials = configStore.getAICoreCredentials();
+
+    // Store proxy instance for cache management
+    let currentProxyInstance: ReturnType<typeof createAnthropicProxy> | null = null;
 
     // Check for env var override (legacy support)
     const envConfigured = process.env.SAP_AICORE_CLIENT_ID && process.env.SAP_AICORE_CLIENT_SECRET;
@@ -104,7 +111,7 @@ export function createApp(basePath?: string) {
     if (apiMode === 'sap-ai-core' && aiCoreCredentials?.clientId) {
         // Use credentials from config store
         console.log('[Server] API mode: sap-ai-core (from config), mounting Anthropic proxy');
-        const anthropicProxy = createAnthropicProxy({
+        currentProxyInstance = createAnthropicProxy({
             clientId: aiCoreCredentials.clientId,
             clientSecret: aiCoreCredentials.clientSecret,
             authUrl: aiCoreCredentials.authUrl,
@@ -112,11 +119,11 @@ export function createApp(basePath?: string) {
             resourceGroup: aiCoreCredentials.resourceGroup || 'default',
             requestTimeoutMs: aiCoreCredentials.timeoutMs || 120000
         });
-        app.use('/', anthropicProxy);
+        app.use('/', currentProxyInstance.router);
     } else if (envConfigured) {
         // Legacy: env vars override for SAP AI Core
         console.log('[Server] SAP AI Core configured via env vars, mounting Anthropic proxy');
-        const anthropicProxy = createAnthropicProxy({
+        currentProxyInstance = createAnthropicProxy({
             clientId: process.env.SAP_AICORE_CLIENT_ID!,
             clientSecret: process.env.SAP_AICORE_CLIENT_SECRET!,
             authUrl: process.env.SAP_AICORE_AUTH_URL || '',
@@ -124,7 +131,7 @@ export function createApp(basePath?: string) {
             resourceGroup: process.env.SAP_AICORE_RESOURCE_GROUP || 'default',
             requestTimeoutMs: parseInt(process.env.SAP_AICORE_TIMEOUT_MS || '120000', 10)
         });
-        app.use('/', anthropicProxy);
+        app.use('/', currentProxyInstance.router);
     } else {
         console.log(`[Server] API mode: ${apiMode}, Anthropic proxy not mounted`);
     }
@@ -193,6 +200,20 @@ export function createApp(basePath?: string) {
             logger.error('Failed to initialize rules from CLAUDE.md', { error: error instanceof Error ? error.message : String(error) });
         }
     })();
+
+    // On startup, sync MCP config files to all workspaces
+    // This ensures .mcp.json and .claude/settings.local.json are always up-to-date
+    // (prevents stale files from overriding global config, e.g. missing headers for HTTP servers)
+    try {
+        const workspaces = workspaceStore.getWorkspaces();
+        if (workspaces.length > 0) {
+            const workspaceIds = workspaces.map(w => w.id);
+            taskSpawner.syncWorkspaceMcpConfigs(workspaceIds);
+            logger.info('Synced MCP config to all workspaces on startup', { count: workspaceIds.length });
+        }
+    } catch (error) {
+        logger.error('Failed to sync MCP configs on startup', { error });
+    }
 
     // Track connected clients with their alive status for heartbeat
     const clients = new Set<WebSocket>();
@@ -1059,6 +1080,69 @@ export function createApp(basePath?: string) {
     });
 
     // Config API routes
+
+    // Validate SAP AI Core credentials without saving them
+    app.post('/api/config/validate-aicore', async (req, res) => {
+        try {
+            const { aiCoreCredentials } = req.body;
+
+            if (!aiCoreCredentials) {
+                return res.status(400).json({ error: 'aiCoreCredentials required' });
+            }
+
+            // Validate required fields
+            if (!aiCoreCredentials.clientId || !aiCoreCredentials.clientSecret ||
+                !aiCoreCredentials.authUrl || !aiCoreCredentials.baseUrl) {
+                return res.status(400).json({
+                    error: 'Missing required fields',
+                    details: 'clientId, clientSecret, authUrl, and baseUrl are required'
+                });
+            }
+
+            logger.info('Validating SAP AI Core credentials');
+
+            // Create temporary proxy to test credentials
+            const tempProxy = createAnthropicProxy({
+                clientId: aiCoreCredentials.clientId,
+                clientSecret: aiCoreCredentials.clientSecret,
+                authUrl: aiCoreCredentials.authUrl,
+                baseUrl: aiCoreCredentials.baseUrl,
+                resourceGroup: aiCoreCredentials.resourceGroup || 'default',
+                requestTimeoutMs: aiCoreCredentials.timeoutMs || 120000
+            });
+
+            // Attempt to validate
+            const validationResult = await tempProxy.tokenProvider.validateCredentials();
+
+            if (!validationResult.valid) {
+                logger.warn('SAP AI Core credential validation failed', { error: validationResult.error });
+                return res.status(401).json({
+                    valid: false,
+                    error: validationResult.error
+                });
+            }
+
+            // Also try to list models to ensure full access
+            try {
+                await tempProxy.deploymentCatalog.getModels();
+                logger.info('SAP AI Core credentials validated successfully');
+                res.json({ valid: true, message: 'Credentials are valid and can access deployments' });
+            } catch (error: any) {
+                logger.warn('Credentials valid but cannot list deployments', { error: error.message });
+                res.json({
+                    valid: true,
+                    warning: 'Credentials are valid but could not list deployments. You may need to check permissions or resource group.'
+                });
+            }
+        } catch (error: any) {
+            logger.error('Credential validation error', { error: error.message });
+            res.status(500).json({
+                valid: false,
+                error: 'Validation failed: ' + error.message
+            });
+        }
+    });
+
     app.get('/api/config', async (_req, res) => {
         // If rules are empty, try to sync from CLAUDE.md files
         const config = configStore.getConfig();
@@ -1120,6 +1204,62 @@ export function createApp(basePath?: string) {
                 await taskSpawner.switchBackend(newBackend);
             }
 
+            // If SAP AI Core credentials changed, validate and clear cache
+            if (validation.data!.aiCoreCredentials !== undefined) {
+                logger.info('SAP AI Core credentials changed, validating and clearing cache');
+
+                const newCredentials = validation.data!.aiCoreCredentials;
+                if (newCredentials) {
+                    // Create temporary proxy instance to validate credentials
+                    const tempProxy = createAnthropicProxy({
+                        clientId: newCredentials.clientId,
+                        clientSecret: newCredentials.clientSecret,
+                        authUrl: newCredentials.authUrl,
+                        baseUrl: newCredentials.baseUrl,
+                        resourceGroup: newCredentials.resourceGroup || 'default',
+                        requestTimeoutMs: newCredentials.timeoutMs || 120000
+                    });
+
+                    // Validate credentials
+                    const validationResult = await tempProxy.tokenProvider.validateCredentials();
+                    if (!validationResult.valid) {
+                        logger.error('Invalid SAP AI Core credentials', { error: validationResult.error });
+                        return res.status(400).json({
+                            error: 'Invalid SAP AI Core credentials',
+                            details: validationResult.error
+                        });
+                    }
+                    logger.info('SAP AI Core credentials validated successfully');
+                }
+
+                // Update config on existing proxy so it uses the new credentials
+                if (currentProxyInstance) {
+                    const newConfig = {
+                        clientId: newCredentials.clientId,
+                        clientSecret: newCredentials.clientSecret,
+                        authUrl: newCredentials.authUrl,
+                        baseUrl: newCredentials.baseUrl,
+                        resourceGroup: newCredentials.resourceGroup || 'default',
+                        requestTimeoutMs: newCredentials.timeoutMs || 120000
+                    };
+                    logger.info('Updating proxy config with new credentials');
+                    currentProxyInstance.tokenProvider.updateConfig(newConfig);
+                    currentProxyInstance.deploymentCatalog.updateConfig(newConfig);
+                } else {
+                    // No proxy mounted yet — create and mount one
+                    logger.info('No proxy mounted yet, creating new proxy with credentials');
+                    currentProxyInstance = createAnthropicProxy({
+                        clientId: newCredentials.clientId,
+                        clientSecret: newCredentials.clientSecret,
+                        authUrl: newCredentials.authUrl,
+                        baseUrl: newCredentials.baseUrl,
+                        resourceGroup: newCredentials.resourceGroup || 'default',
+                        requestTimeoutMs: newCredentials.timeoutMs || 120000
+                    });
+                    app.use('/', currentProxyInstance.router);
+                }
+            }
+
             // If rules were updated, sync to all workspace CLAUDE.md files
             if (validation.data!.rules !== undefined) {
                 const workspaces = workspaceStore.getWorkspaces();
@@ -1132,6 +1272,16 @@ export function createApp(basePath?: string) {
                 }
             }
 
+            // If MCP servers were updated, sync .mcp.json and settings.local.json to all workspaces
+            if (validation.data!.mcpServers !== undefined) {
+                const workspaces = workspaceStore.getWorkspaces();
+                if (workspaces.length > 0) {
+                    const workspaceIds = workspaces.map(w => w.id);
+                    taskSpawner.syncWorkspaceMcpConfigs(workspaceIds);
+                    logger.info('Synced MCP config to all workspaces after config update', { count: workspaceIds.length });
+                }
+            }
+
             res.json(updatedConfig);
         } catch (error) {
             logger.error('Failed to update config', { error });
@@ -1139,13 +1289,14 @@ export function createApp(basePath?: string) {
         }
     });
 
-    // MCP server config type - supports both stdio and streamableHttp types
+    // MCP server config type - supports stdio, http, and streamableHttp types
     interface MCPServerConfig {
-        type?: 'stdio' | 'streamableHttp';
+        type?: 'stdio' | 'http' | 'streamableHttp';
         command?: string;  // For stdio
         args?: string[];   // For stdio
         env?: Record<string, string>;  // For stdio
-        url?: string;      // For streamableHttp
+        url?: string;      // For http/streamableHttp
+        headers?: Record<string, string>;  // For http/streamableHttp
         timeout?: number;
         autoApprove?: string[];
         description?: string;
@@ -1173,15 +1324,15 @@ export function createApp(basePath?: string) {
             };
             const workspacePath = req.query.workspace as string;
 
-            // Helper to extract server config supporting both stdio and HTTP types
+            // Helper to extract server config supporting stdio, http, and streamableHttp types
             const extractServerConfig = (name: string, config: MCPServerConfig) => {
                 const serverType = config.type || 'stdio';
-                console.log(`[Server] extractServerConfig: ${name}, type=${serverType}`);
-                if (serverType === 'streamableHttp') {
+                if (serverType === 'streamableHttp' || serverType === 'http') {
                     return {
                         name,
-                        type: 'streamableHttp' as const,
+                        type: serverType as 'http' | 'streamableHttp',
                         url: config.url || '',
+                        headers: config.headers,
                         timeout: config.timeout,
                         autoApprove: config.autoApprove,
                         description: config.description,
@@ -1772,7 +1923,13 @@ export function createApp(basePath?: string) {
                 return res.status(400).json({ error: 'workspaceId query parameter required' });
             }
 
-            const conversation = await getConversationHistory(workspaceId, sessionId);
+            // Look up workspace to get the path
+            const workspace = workspaceStore.getWorkspaces().find(w => w.id === workspaceId);
+            if (!workspace) {
+                return res.status(404).json({ error: 'Workspace not found' });
+            }
+
+            const conversation = await getConversationHistory(workspace.id, sessionId);
             if (!conversation) {
                 return res.status(404).json({ error: 'Conversation not found' });
             }
@@ -1811,8 +1968,16 @@ export function createApp(basePath?: string) {
                 ? task.backendType
                 : undefined;
 
+            logger.info('Learn from conversation - looking up history', {
+                taskId,
+                sessionId: task.sessionId,
+                workspacePath: workspace.id,
+                backendType
+            });
+
             const conversation = await getConversationHistory(workspace.id, task.sessionId, backendType);
             if (!conversation || conversation.messages.length === 0) {
+                logger.warn('No conversation history found', { taskId, sessionId: task.sessionId, workspacePath: workspace.id });
                 return res.status(404).json({ error: 'No conversation history found' });
             }
 

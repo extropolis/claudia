@@ -14,11 +14,18 @@ export interface AnthropicProxyConfig {
     requestTimeoutMs?: number;
 }
 
+export interface AnthropicProxyInstance {
+    router: Router;
+    tokenProvider: AccessTokenProvider;
+    deploymentCatalog: DeploymentCatalog;
+}
+
 /**
  * Creates an Express router that proxies Anthropic Messages API requests
  * to SAP AI Core (AWS Bedrock Claude models).
+ * Returns both the router and the tokenProvider for cache management.
  */
-export function createAnthropicProxy(config: AnthropicProxyConfig): Router {
+export function createAnthropicProxy(config: AnthropicProxyConfig): AnthropicProxyInstance {
     const router = Router();
 
     const aiCoreConfig: AICorConfig = {
@@ -357,7 +364,7 @@ export function createAnthropicProxy(config: AnthropicProxyConfig): Router {
         res.json({ status: 'ok', proxy: 'anthropic' });
     });
 
-    return router;
+    return { router, tokenProvider, deploymentCatalog };
 }
 
 export { AccessTokenProvider } from './access-token-provider.js';

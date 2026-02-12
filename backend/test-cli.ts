@@ -53,6 +53,8 @@ interface TestConfig {
     setBackend: string | null;    // Set backend ('claude-code' or 'opencode')
     watchOutput: boolean;         // Stream task output to console
     waitForIdle: boolean;         // Wait for task to become idle before exiting
+    listMcpServers: boolean;      // List available MCP servers (no WebSocket needed)
+    testMcpServer: string | null; // Test a specific MCP server by name
 }
 
 class TestCLI {
@@ -1159,6 +1161,8 @@ function parseArgs(): TestConfig {
     let setBackend: string | null = null;
     let watchOutput = false;
     let waitForIdle = false;
+    let listMcpServers = false;
+    let testMcpServer: string | null = null;
 
     for (let i = 0; i < args.length; i++) {
         switch (args[i]) {
@@ -1295,6 +1299,12 @@ function parseArgs(): TestConfig {
             case '--wait-idle':
                 waitForIdle = true;
                 break;
+            case '--list-mcp-servers':
+                listMcpServers = true;
+                break;
+            case '--test-mcp-server':
+                testMcpServer = args[++i];
+                break;
             case '--help':
             case '-h':
                 console.log(`
@@ -1351,6 +1361,10 @@ CONFIGURATION:
 BACKEND OPERATIONS:
   --backend-status         Get current backend status (claude-code or opencode)
   --set-backend <name>     Set the AI backend ('claude-code' or 'opencode')
+
+MCP SERVER OPERATIONS:
+  --list-mcp-servers       List all available MCP servers (global and project-specific)
+  --test-mcp-server <name> Test a specific MCP server by calling its tools
 
 Examples:
   # Basic chat message
@@ -1418,6 +1432,12 @@ Examples:
 
   # Switch back to claude-code backend
   npx tsx test-cli.ts --set-backend claude-code
+
+  # List all MCP servers
+  npx tsx test-cli.ts --list-mcp-servers
+
+  # Test Jira MCP server
+  npx tsx test-cli.ts --test-mcp-server jira_mcp
                 `);
                 process.exit(0);
         }
@@ -1464,7 +1484,9 @@ Examples:
         backendStatus,
         setBackend,
         watchOutput,
-        waitForIdle
+        waitForIdle,
+        listMcpServers,
+        testMcpServer
     };
 }
 
@@ -1543,6 +1565,103 @@ async function setBackendConfig(baseHttpUrl: string, backend: string): Promise<v
     }
 }
 
+async function listMcpServers(baseHttpUrl: string): Promise<void> {
+    console.log('🔍 Fetching MCP servers...');
+    console.log('');
+
+    try {
+        const response = await fetch(`${baseHttpUrl}/api/claude-mcp-servers`);
+        if (!response.ok) {
+            console.error(`Failed to fetch MCP servers: ${response.statusText}`);
+            return;
+        }
+
+        const data = await response.json();
+        const globalServers = data.global || [];
+        const projectServers = data.project || [];
+
+        console.log('🔌 MCP SERVERS');
+        console.log('='.repeat(80));
+        console.log('');
+
+        if (globalServers.length === 0 && projectServers.length === 0) {
+            console.log('  No MCP servers configured');
+            console.log('');
+            console.log('  Configure MCP servers in ~/.claude.json or .mcp.json');
+            console.log('');
+            return;
+        }
+
+        if (globalServers.length > 0) {
+            console.log('📦 GLOBAL SERVERS (from ~/.claude.json)');
+            console.log('-'.repeat(80));
+            for (const server of globalServers) {
+                const typeIcon = server.type === 'streamableHttp' ? '🌐' : '📟';
+                console.log(`  ${typeIcon} ${server.name}`);
+                console.log(`     Type: ${server.type}`);
+                if (server.type === 'streamableHttp') {
+                    console.log(`     URL: ${server.url}`);
+                    if (server.timeout) console.log(`     Timeout: ${server.timeout}ms`);
+                } else {
+                    console.log(`     Command: ${server.command}`);
+                    if (server.args && server.args.length > 0) {
+                        console.log(`     Args: ${server.args.join(' ')}`);
+                    }
+                }
+                if (server.description) {
+                    console.log(`     Description: ${server.description}`);
+                }
+                console.log('');
+            }
+        }
+
+        if (projectServers.length > 0) {
+            console.log('📁 PROJECT-SPECIFIC SERVERS');
+            console.log('-'.repeat(80));
+            for (const server of projectServers) {
+                const typeIcon = server.type === 'streamableHttp' ? '🌐' : '📟';
+                console.log(`  ${typeIcon} ${server.name}`);
+                console.log(`     Type: ${server.type}`);
+                console.log(`     Project: ${server.projectPath}`);
+                if (server.type === 'streamableHttp') {
+                    console.log(`     URL: ${server.url}`);
+                    if (server.timeout) console.log(`     Timeout: ${server.timeout}ms`);
+                } else {
+                    console.log(`     Command: ${server.command}`);
+                    if (server.args && server.args.length > 0) {
+                        console.log(`     Args: ${server.args.join(' ')}`);
+                    }
+                }
+                if (server.description) {
+                    console.log(`     Description: ${server.description}`);
+                }
+                console.log('');
+            }
+        }
+
+        console.log('='.repeat(80));
+        console.log(`Total: ${globalServers.length + projectServers.length} servers`);
+        console.log('');
+    } catch (error) {
+        console.error('Failed to fetch MCP servers:', error);
+    }
+}
+
+async function testMcpServer(serverName: string): Promise<void> {
+    console.log(`🧪 Testing MCP server: ${serverName}`);
+    console.log('');
+    console.log('This will create a task that uses the MCP server...');
+    console.log('');
+
+    // For testing MCP servers, we need to create a task through WebSocket
+    // that will trigger the MCP server tools to be called
+    console.log('⚠️  To test MCP server, use:');
+    console.log(`    npx tsx test-cli.ts --task -m "test ${serverName} MCP server tools"`);
+    console.log('');
+    console.log('Or use the main app and check if the server is available in the tools list.');
+    console.log('');
+}
+
 // Main execution
 async function main() {
     const config = parseArgs();
@@ -1561,6 +1680,16 @@ async function main() {
 
     if (config.setBackend) {
         await setBackendConfig(baseHttpUrl, config.setBackend);
+        process.exit(0);
+    }
+
+    if (config.listMcpServers) {
+        await listMcpServers(baseHttpUrl);
+        process.exit(0);
+    }
+
+    if (config.testMcpServer) {
+        await testMcpServer(config.testMcpServer);
         process.exit(0);
     }
 

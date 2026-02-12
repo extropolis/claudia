@@ -239,9 +239,13 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
                     term.write(message.payload.data);
                 } else if (message.type === 'task:restore' && message.payload.taskId === task.id) {
                     const { history } = message.payload;
+                    console.log(`[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}`);
                     if (history) {
                         term.reset();
                         term.write(history);
+                        console.log(`[TerminalView] History written to terminal for ${task.id}`);
+                    } else {
+                        console.warn(`[TerminalView] task:restore received but history is empty for ${task.id}`);
                     }
                 }
             } catch (e) {

@@ -269,6 +269,100 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Build the MCP config object from the current config store settings.
+     * Returns null if no enabled MCP servers are found.
+     */
+    private buildMcpConfig(): { mcpConfig: Record<string, Record<string, unknown>>; enabledMcpServers: { name: string }[] } | null {
+        const mcpServers = this.configStore?.getMCPServers() || [];
+        const enabledMcpServers = mcpServers.filter(s => s.enabled);
+        if (enabledMcpServers.length === 0) return null;
+
+        const mcpConfig: Record<string, Record<string, unknown>> = {};
+        for (const server of enabledMcpServers) {
+            const serverType = server.type || 'stdio';
+
+            if (serverType === 'streamableHttp' || serverType === 'http') {
+                const config: Record<string, unknown> = {
+                    type: 'http',
+                    url: server.url
+                };
+                if (server.timeout !== undefined) config.timeout = server.timeout;
+                if (server.autoApprove && server.autoApprove.length > 0) config.autoApprove = server.autoApprove;
+                if (server.description) config.description = server.description;
+                if (server.headers) config.headers = server.headers;
+                mcpConfig[server.name] = config;
+            } else {
+                const config: Record<string, unknown> = {
+                    command: server.command,
+                    args: server.args
+                };
+                if (server.env && Object.keys(server.env).length > 0) config.env = server.env;
+                if (server.description) config.description = server.description;
+                mcpConfig[server.name] = config;
+            }
+        }
+
+        return { mcpConfig, enabledMcpServers };
+    }
+
+    /**
+     * Sync MCP config files (.mcp.json and .claude/settings.local.json) to workspace directories.
+     * Call this on server startup and when MCP config is updated to prevent stale files.
+     * @param workspaceIds - List of workspace directory paths to sync. All must exist on disk.
+     */
+    syncWorkspaceMcpConfigs(workspaceIds: string[]): void {
+        const result = this.buildMcpConfig();
+        if (!result) {
+            logger.info('No enabled MCP servers, skipping workspace sync');
+            return;
+        }
+
+        const { mcpConfig, enabledMcpServers } = result;
+        const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
+        const serverNames = enabledMcpServers.map(s => s.name);
+
+        const settingsContent = {
+            permissions: {
+                allow: ['mcp__*'],
+                deny: []
+            },
+            enableAllProjectMcpServers: true,
+            enabledMcpjsonServers: serverNames
+        };
+
+        for (const workspaceId of workspaceIds) {
+            if (!existsSync(workspaceId)) {
+                logger.warn('Workspace does not exist, skipping MCP sync', { workspaceId });
+                continue;
+            }
+
+            // Write .mcp.json
+            const workspaceMcpFile = `${workspaceId}/.mcp.json`;
+            try {
+                writeFileSync(workspaceMcpFile, mcpConfigJson);
+                logger.info('Synced .mcp.json', { workspaceId });
+            } catch (err) {
+                logger.error('Failed to write .mcp.json', { workspaceId, error: err });
+            }
+
+            // Write .claude/settings.local.json
+            const claudeSettingsDir = `${workspaceId}/.claude`;
+            const claudeSettingsFile = `${claudeSettingsDir}/settings.local.json`;
+            try {
+                if (!existsSync(claudeSettingsDir)) {
+                    mkdirSync(claudeSettingsDir, { recursive: true });
+                }
+                writeFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
+                logger.info('Synced settings.local.json', { workspaceId });
+            } catch (err) {
+                logger.error('Failed to write settings.local.json', { workspaceId, error: err });
+            }
+        }
+
+        logger.info(`Synced MCP config to ${workspaceIds.length} workspace(s)`, { servers: serverNames });
+    }
+
+    /**
      * Get the current backend type
      */
     getBackendType(): BackendType {
@@ -1435,116 +1529,49 @@ export class TaskSpawner extends EventEmitter {
             logger.info(`Using custom system prompt`);
         }
 
+        // Add model selection for SAP AI Core mode
+        const apiMode = this.configStore?.getApiMode();
+        if (apiMode === 'sap-ai-core') {
+            const sapAiCoreModel = this.configStore?.getSapAiCoreModel() ?? 'anthropic--claude-4.5-opus';
+            // Map SAP AI Core internal model name to Anthropic API model name for Claude Code
+            const sapToAnthropicMap: Record<string, string> = {
+                'anthropic--claude-4.5-opus': 'claude-4-5-opus',
+                'anthropic--claude-opus-4': 'claude-opus-4-20250514',
+                'anthropic--claude-sonnet-4': 'claude-sonnet-4-20250514',
+                'anthropic--claude-4.5-sonnet': 'claude-sonnet-4-5-20250929',
+                'anthropic--claude-3.7-sonnet': 'claude-3-7-sonnet-20250219',
+                'anthropic--claude-3.5-sonnet': 'claude-3-5-sonnet-latest',
+                'anthropic--claude-3.5-haiku': 'claude-3-5-haiku-20241022',
+                'anthropic--claude-3-opus': 'claude-3-opus-20240229',
+            };
+            const model = sapToAnthropicMap[sapAiCoreModel] || sapAiCoreModel;
+            claudeArgs.push('--model', model);
+            logger.info(`Using SAP AI Core model`, { sapModel: sapAiCoreModel, anthropicModel: model });
+        }
+
         // Add MCP server configurations
         // IMPORTANT: Claude doesn't automatically load MCP servers from ~/.claude.json in non-interactive mode
         // We must explicitly pass --mcp-config to load MCP servers
-        const mcpServers = this.configStore?.getMCPServers() || [];
-        console.log(`[TaskSpawner] MCP servers from config:`, JSON.stringify(mcpServers, null, 2));
-        const enabledMcpServers = mcpServers.filter(s => s.enabled);
-        console.log(`[TaskSpawner] Enabled MCP servers: ${enabledMcpServers.length}`);
-        if (enabledMcpServers.length > 0) {
-            // Convert to the format expected by claude --mcp-config
-            // Format: { "mcpServers": { "name": { ... } } }
-            // stdio: { "command": "...", "args": [...], "env": {...} }
-            // streamableHttp: { "type": "streamableHttp", "url": "...", "timeout": ..., "autoApprove": [...] }
-            const mcpConfig: Record<string, Record<string, unknown>> = {};
-            for (const server of enabledMcpServers) {
-                const serverType = server.type || 'stdio';
-
-                if (serverType === 'streamableHttp' || serverType === 'http') {
-                    // HTTP-based MCP server
-                    const config: Record<string, unknown> = {
-                        type: 'http',
-                        url: server.url
-                    };
-                    if (server.timeout !== undefined) {
-                        config.timeout = server.timeout;
-                    }
-                    if (server.autoApprove && server.autoApprove.length > 0) {
-                        config.autoApprove = server.autoApprove;
-                    }
-                    if (server.description) {
-                        config.description = server.description;
-                    }
-                    if (server.headers) {
-                        config.headers = server.headers;
-                    }
-                    mcpConfig[server.name] = config;
-                    console.log(`[TaskSpawner] Added HTTP MCP server: ${server.name} -> ${server.url}`);
-                } else {
-                    // stdio-based MCP server (default)
-                    const config: Record<string, unknown> = {
-                        command: server.command,
-                        args: server.args
-                    };
-                    // Only include env if it has values
-                    if (server.env && Object.keys(server.env).length > 0) {
-                        config.env = server.env;
-                    }
-                    if (server.description) {
-                        config.description = server.description;
-                    }
-                    mcpConfig[server.name] = config;
-                    console.log(`[TaskSpawner] Added stdio MCP server: ${server.name} -> ${server.command}`);
-                }
-            }
-            // Write MCP config - we use BOTH approaches for compatibility:
-            // 1. --mcp-config flag (works in -p mode)
-            // 2. .mcp.json in workspace (works in interactive mode)
+        const mcpResult = this.buildMcpConfig();
+        if (mcpResult) {
+            const { mcpConfig, enabledMcpServers } = mcpResult;
             const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
 
             // Write to temp file for --mcp-config
             const mcpConfigFile = `/tmp/claudia-mcp-${id}.json`;
             writeFileSync(mcpConfigFile, mcpConfigJson);
-            console.log(`[TaskSpawner] MCP config written to: ${mcpConfigFile}`);
-            console.log(`[TaskSpawner] MCP config contents: ${mcpConfigJson}`);
+            logger.info(`MCP config written to: ${mcpConfigFile}`);
+            logger.debug(`MCP config contents: ${mcpConfigJson}`);
             claudeArgs.push('--mcp-config', mcpConfigFile);
 
             // Also write .mcp.json and .claude/settings.local.json to workspace for interactive mode
             // This is a workaround for Claude Code bug where --mcp-config doesn't work in interactive mode
             // See: https://github.com/anthropics/claude-code/issues/22404
-            // And: https://github.com/anthropics/claude-code/issues/9189
-            console.log(`[TaskSpawner] DEBUG: About to write workspace files. workspaceId="${workspaceId}", exists=${existsSync(workspaceId)}`);
-            if (workspaceId && existsSync(workspaceId)) {
-                // Write .mcp.json - project-scoped MCP servers
-                const workspaceMcpFile = `${workspaceId}/.mcp.json`;
-                console.log(`[TaskSpawner] DEBUG: Writing to ${workspaceMcpFile}`);
-                try {
-                    writeFileSync(workspaceMcpFile, mcpConfigJson);
-                    console.log(`[TaskSpawner] Wrote MCP config to: ${workspaceMcpFile}`);
-                } catch (err) {
-                    console.error(`[TaskSpawner] Failed to write .mcp.json: ${err}`);
-                }
-
-                // Write .claude/settings.local.json to enable project MCP servers and auto-approve them
-                // This is required because project-scoped MCP servers don't trigger approval prompt
-                const claudeSettingsDir = `${workspaceId}/.claude`;
-                const claudeSettingsFile = `${claudeSettingsDir}/settings.local.json`;
-                const serverNames = enabledMcpServers.map(s => s.name);
-                const settingsContent = {
-                    permissions: {
-                        allow: ['mcp__*'],  // Allow all MCP tools
-                        deny: []
-                    },
-                    enableAllProjectMcpServers: true,
-                    enabledMcpjsonServers: serverNames
-                };
-                try {
-                    if (!existsSync(claudeSettingsDir)) {
-                        mkdirSync(claudeSettingsDir, { recursive: true });
-                    }
-                    writeFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
-                    console.log(`[TaskSpawner] Wrote Claude settings to: ${claudeSettingsFile}`);
-                } catch (err) {
-                    console.error(`[TaskSpawner] Failed to write settings.local.json: ${err}`);
-                }
-            } else {
-                console.log(`[TaskSpawner] Skipping workspace MCP files - workspaceId not valid`);
-            }
+            this.syncWorkspaceMcpConfigs([workspaceId]);
 
             logger.info(`Added ${enabledMcpServers.length} MCP server(s)`, { servers: enabledMcpServers.map(s => s.name) });
         } else {
-            console.log(`[TaskSpawner] WARNING: No enabled MCP servers found!`);
+            logger.warn('No enabled MCP servers found!');
         }
 
         // Explicitly allow all MCP tools to avoid deferred loading issues
@@ -1781,15 +1808,27 @@ export class TaskSpawner extends EventEmitter {
         if (active) {
             // Clear decoded history from all other tasks to free memory
             // This prevents memory buildup when rapidly switching between tasks
+            // Use a longer delay (30 seconds) to avoid clearing history for tasks the user is actively working with
+            setTimeout(() => {
+                for (const task of this.tasks.values()) {
+                    // Only clear if task is still inactive AND hasn't been recently active
+                    // This prevents clearing history for tasks you're switching between
+                    const timeSinceLastActivity = Date.now() - task.lastActivity.getTime();
+                    const isRecentlyActive = timeSinceLastActivity < 60000; // 60 seconds
+
+                    if (task.id !== taskId && !task.isActive && !isRecentlyActive && task.previousHistory) {
+                        task.previousHistory = undefined;
+                        // Also clear lazyHistoryBase64 if it exists (legacy)
+                        task.lazyHistoryBase64 = undefined;
+                        console.log(`[TaskSpawner] Freed memory for inactive task ${task.id} (last active ${Math.round(timeSinceLastActivity / 1000)}s ago)`);
+                    }
+                }
+            }, 30000); // 30 second delay - long enough for active task switching
+
+            // Mark all other tasks as inactive immediately (don't wait for the timeout)
             for (const task of this.tasks.values()) {
-                task.isActive = false;
-                // If this task has decoded history but isn't the one being activated,
-                // clear it to free memory. We can reload from disk later.
-                if (task.id !== taskId && task.previousHistory) {
-                    task.previousHistory = undefined;
-                    // Also clear lazyHistoryBase64 if it exists (legacy)
-                    task.lazyHistoryBase64 = undefined;
-                    console.log(`[TaskSpawner] Freed memory for inactive task ${task.id}`);
+                if (task.id !== taskId) {
+                    task.isActive = false;
                 }
             }
         }

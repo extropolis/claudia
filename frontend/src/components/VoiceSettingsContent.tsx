@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Volume2, Mic, Radio, Clock } from 'lucide-react';
 import { useTaskStore } from '../stores/taskStore';
 import { useSpeechSynthesis } from '../hooks/useSpeechSynthesis';
@@ -28,7 +28,10 @@ export function VoiceSettingsContent() {
     const [localPitch, setLocalPitch] = useState(voicePitch);
     const [localVolume, setLocalVolume] = useState(voiceVolume);
     const [localAutoSendDelay, setLocalAutoSendDelay] = useState(autoSendDelayMs / 1000);
-    const [hasChanges, setHasChanges] = useState(false);
+
+    // Debounce timers
+    const voiceTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const autoSendTimerRef = useRef<NodeJS.Timeout | null>(null);
 
     useEffect(() => {
         if (!localVoice && voices.length > 0) {
@@ -37,25 +40,63 @@ export function VoiceSettingsContent() {
         }
     }, [voices, localVoice]);
 
-    useEffect(() => {
-        const changed =
-            localVoice !== (selectedVoiceName || '') ||
-            localRate !== voiceRate ||
-            localPitch !== voicePitch ||
-            localVolume !== voiceVolume ||
-            localAutoSendDelay !== autoSendDelayMs / 1000;
-        setHasChanges(changed);
-    }, [localVoice, localRate, localPitch, localVolume, localAutoSendDelay, selectedVoiceName, voiceRate, voicePitch, voiceVolume, autoSendDelayMs]);
-
-    const handleSave = () => {
+    const saveVoiceSettings = useCallback((voice: string, rate: number, pitch: number, volume: number) => {
         setVoiceSettings({
-            voiceName: localVoice || null,
-            rate: localRate,
-            pitch: localPitch,
-            volume: localVolume
+            voiceName: voice || null,
+            rate,
+            pitch,
+            volume
         });
-        setAutoSendSettings(autoSendEnabled, localAutoSendDelay * 1000);
-        setHasChanges(false);
+    }, [setVoiceSettings]);
+
+    const handleVoiceChange = (voice: string) => {
+        setLocalVoice(voice);
+        // Save immediately for dropdowns
+        saveVoiceSettings(voice, localRate, localPitch, localVolume);
+    };
+
+    const handleRateChange = (rate: number) => {
+        setLocalRate(rate);
+        // Auto-save with debounce
+        if (voiceTimerRef.current) {
+            clearTimeout(voiceTimerRef.current);
+        }
+        voiceTimerRef.current = setTimeout(() => {
+            saveVoiceSettings(localVoice, rate, localPitch, localVolume);
+        }, 500);
+    };
+
+    const handlePitchChange = (pitch: number) => {
+        setLocalPitch(pitch);
+        // Auto-save with debounce
+        if (voiceTimerRef.current) {
+            clearTimeout(voiceTimerRef.current);
+        }
+        voiceTimerRef.current = setTimeout(() => {
+            saveVoiceSettings(localVoice, localRate, pitch, localVolume);
+        }, 500);
+    };
+
+    const handleVolumeChange = (volume: number) => {
+        setLocalVolume(volume);
+        // Auto-save with debounce
+        if (voiceTimerRef.current) {
+            clearTimeout(voiceTimerRef.current);
+        }
+        voiceTimerRef.current = setTimeout(() => {
+            saveVoiceSettings(localVoice, localRate, localPitch, volume);
+        }, 500);
+    };
+
+    const handleAutoSendDelayChange = (delay: number) => {
+        setLocalAutoSendDelay(delay);
+        // Auto-save with debounce
+        if (autoSendTimerRef.current) {
+            clearTimeout(autoSendTimerRef.current);
+        }
+        autoSendTimerRef.current = setTimeout(() => {
+            setAutoSendSettings(autoSendEnabled, delay * 1000);
+        }, 500);
     };
 
     const handleTest = () => {
@@ -117,7 +158,7 @@ export function VoiceSettingsContent() {
                         max="5"
                         step="0.5"
                         value={localAutoSendDelay}
-                        onChange={(e) => setLocalAutoSendDelay(parseFloat(e.target.value))}
+                        onChange={(e) => handleAutoSendDelayChange(parseFloat(e.target.value))}
                         className="slider"
                     />
                     <div className="slider-labels">
@@ -175,7 +216,7 @@ export function VoiceSettingsContent() {
                 </label>
                 <select
                     value={localVoice}
-                    onChange={(e) => setLocalVoice(e.target.value)}
+                    onChange={(e) => handleVoiceChange(e.target.value)}
                     className="voice-select"
                     disabled={voices.length === 0}
                 >
@@ -201,7 +242,7 @@ export function VoiceSettingsContent() {
                     max="2"
                     step="0.1"
                     value={localRate}
-                    onChange={(e) => setLocalRate(parseFloat(e.target.value))}
+                    onChange={(e) => handleRateChange(parseFloat(e.target.value))}
                     className="slider"
                 />
                 <div className="slider-labels">
@@ -221,7 +262,7 @@ export function VoiceSettingsContent() {
                     max="2"
                     step="0.1"
                     value={localPitch}
-                    onChange={(e) => setLocalPitch(parseFloat(e.target.value))}
+                    onChange={(e) => handlePitchChange(parseFloat(e.target.value))}
                     className="slider"
                 />
                 <div className="slider-labels">
@@ -241,7 +282,7 @@ export function VoiceSettingsContent() {
                     max="1"
                     step="0.1"
                     value={localVolume}
-                    onChange={(e) => setLocalVolume(parseFloat(e.target.value))}
+                    onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
                     className="slider"
                 />
                 <div className="slider-labels">
@@ -254,16 +295,6 @@ export function VoiceSettingsContent() {
                 <Volume2 size={16} />
                 Test Voice
             </button>
-
-            <div className="voice-settings-footer">
-                <button
-                    onClick={handleSave}
-                    className="save-voice-button"
-                    disabled={!hasChanges}
-                >
-                    Save Voice Settings
-                </button>
-            </div>
         </div>
     );
 }
