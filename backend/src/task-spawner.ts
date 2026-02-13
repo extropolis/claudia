@@ -1636,6 +1636,7 @@ export class TaskSpawner extends EventEmitter {
     }
 
     private setupProcessHandlers(task: InternalTask): void {
+        console.log(`[TaskSpawner] setupProcessHandlers: Setting up onData for task ${task.id}, pid=${task.process.pid}`);
         task.process.onData((data: string) => {
             const buffer = Buffer.from(data, 'utf8');
             task.outputHistory.push(buffer);
@@ -1676,6 +1677,8 @@ export class TaskSpawner extends EventEmitter {
             // Stream output to active task
             if (task.isActive) {
                 this.emit('taskOutput', task.id, data);
+            } else {
+                console.log(`[TaskSpawner] Output received for ${task.id} but isActive=${task.isActive}, dropping output`);
             }
         });
 
@@ -1833,9 +1836,19 @@ export class TaskSpawner extends EventEmitter {
             }
         }
 
+        console.log(`[TaskSpawner] setTaskActive called: taskId=${taskId}, active=${active}, inTasks=${this.tasks.has(taskId)}, inDisconnected=${this.disconnectedTasks.has(taskId)}`);
         if (active && this.disconnectedTasks.has(taskId)) {
             console.log(`[TaskSpawner] Auto-reconnecting task ${taskId}`);
-            const reconnectedTask = this.reconnectTask(taskId);
+            let reconnectedTask: Task | null = null;
+            try {
+                reconnectedTask = this.reconnectTask(taskId);
+            } catch (error) {
+                logger.error('Failed to reconnect task during activation', {
+                    taskId,
+                    error: error instanceof Error ? error.message : String(error)
+                });
+                return;
+            }
             if (reconnectedTask) {
                 const task = this.tasks.get(taskId);
                 if (task) {
@@ -1850,8 +1863,10 @@ export class TaskSpawner extends EventEmitter {
         }
 
         const task = this.tasks.get(taskId);
+        console.log(`[TaskSpawner] setTaskActive: taskId=${taskId}, active=${active}, taskFound=${!!task}, currentIsActive=${task?.isActive}, ptyPid=${task?.process?.pid}`);
         if (task) {
             task.isActive = active;
+            console.log(`[TaskSpawner] Set task.isActive to ${active} for ${taskId}`);
 
             if (active) {
                 // Notify backend if using OpenCode
@@ -2077,8 +2092,30 @@ export class TaskSpawner extends EventEmitter {
     }
 
     writeToTask(taskId: string, data: string): void {
-        const task = this.tasks.get(taskId);
-        if (!task) return;
+        let task = this.tasks.get(taskId);
+        console.log(`[TaskSpawner] writeToTask: taskId=${taskId}, taskFound=${!!task}, ptyPid=${task?.process?.pid}, isActive=${task?.isActive}`);
+
+        // If task not found in active tasks, check if it's disconnected and needs reconnecting
+        if (!task) {
+            if (this.disconnectedTasks.has(taskId)) {
+                console.log(`[TaskSpawner] Task ${taskId} is disconnected, auto-reconnecting before write`);
+                const reconnectedTask = this.reconnectTask(taskId);
+                if (reconnectedTask) {
+                    task = this.tasks.get(taskId);
+                    if (task) {
+                        task.isActive = true;
+                        this.emit('tasksUpdated');
+                        // Give the PTY a moment to initialize before writing
+                        setTimeout(() => this.writeToTask(taskId, data), 500);
+                        return;
+                    }
+                }
+                console.log(`[TaskSpawner] Failed to reconnect task ${taskId} for write`);
+            } else {
+                console.log(`[TaskSpawner] Cannot write to task ${taskId}: task not found`);
+            }
+            return;
+        }
 
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
@@ -2111,16 +2148,38 @@ export class TaskSpawner extends EventEmitter {
 
     resizeTask(taskId: string, cols: number, rows: number): void {
         const task = this.tasks.get(taskId);
-        if (!task) return;
+        if (!task) {
+            // Silently ignore resize for disconnected tasks (will reconnect on select)
+            return;
+        }
 
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
         if (taskBackend === 'opencode' && this.backend) {
-            this.backend.resizeTask(taskId, cols, rows);
+            try {
+                this.backend.resizeTask(taskId, cols, rows);
+            } catch (error) {
+                logger.warn('Ignoring backend resize failure', {
+                    taskId,
+                    cols,
+                    rows,
+                    error: error instanceof Error ? error.message : String(error)
+                });
+            }
             return;
         }
 
-        task.process.resize(cols, rows);
+        try {
+            task.process.resize(cols, rows);
+        } catch (error) {
+            // PTY can exit between task lookup and resize; ignore noisy race.
+            logger.warn('Ignoring PTY resize failure', {
+                taskId,
+                cols,
+                rows,
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
     }
 
     interruptTask(taskId: string): boolean {
@@ -2674,8 +2733,10 @@ export class TaskSpawner extends EventEmitter {
             continuationSent: false,
         };
 
+        console.log(`[TaskSpawner] reconnectTask: Setting up process handlers for ${task.id}, ptyPid=${ptyProcess.pid}`);
         this.setupProcessHandlers(task);
         this.tasks.set(task.id, task);
+        console.log(`[TaskSpawner] reconnectTask: Task ${task.id} added to tasks map`);
 
         this.disconnectedTasks.delete(taskId);
         this.scheduleSave();

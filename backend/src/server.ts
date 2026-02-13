@@ -402,6 +402,7 @@ export async function createApp(basePath?: string) {
         }));
 
         ws.on('message', async (data: Buffer) => {
+            let messageTypeForError: string | undefined;
             try {
                 let parsed: unknown;
                 try {
@@ -419,6 +420,7 @@ export async function createApp(basePath?: string) {
                 }
 
                 const message = parsed;
+                messageTypeForError = message.type;
                 // Only log non-frequent message types to avoid spam
                 if (message.type !== 'task:input' && message.type !== 'task:resize') {
                     logger.info(`Received message`, { type: message.type });
@@ -472,7 +474,15 @@ export async function createApp(basePath?: string) {
                     case 'task:select': {
                         // Switch active task (for terminal viewing)
                         const { taskId } = payload as { taskId?: string };
-                        if (taskId) taskSpawner.setTaskActive(taskId, true);
+                        if (taskId) {
+                            try {
+                                taskSpawner.setTaskActive(taskId, true);
+                            } catch (error) {
+                                const errorMessage = error instanceof Error ? error.message : String(error);
+                                logger.error('Failed to activate task', { taskId, error: errorMessage });
+                                sendWSError(ws, `Failed to activate task: ${errorMessage}`, message.type, 'TASK_SELECT_FAILED');
+                            }
+                        }
                         break;
                     }
 
@@ -527,9 +537,18 @@ export async function createApp(basePath?: string) {
                         // Reconnect to a disconnected task
                         const { taskId } = payload as { taskId?: string };
                         if (!taskId) break;
-                        const task = taskSpawner.reconnectTask(taskId);
-                        if (task) {
-                            broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+                        try {
+                            const task = taskSpawner.reconnectTask(taskId);
+                            if (task) {
+                                // Ensure reconnected task becomes active so output is streamed
+                                // and history is restored immediately.
+                                taskSpawner.setTaskActive(taskId, true);
+                                broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+                            }
+                        } catch (error) {
+                            const errorMessage = error instanceof Error ? error.message : String(error);
+                            logger.error('Failed to reconnect task', { taskId, error: errorMessage });
+                            sendWSError(ws, `Failed to reconnect task: ${errorMessage}`, message.type, 'TASK_RECONNECT_FAILED');
                         }
                         break;
                     }
@@ -815,8 +834,12 @@ export async function createApp(basePath?: string) {
                     }
                 }
             } catch (err) {
-                logger.error('Error handling message', { error: err instanceof Error ? err.message : String(err) });
-                sendWSError(ws, 'Internal server error processing request', undefined, 'INTERNAL_ERROR');
+                logger.error('Error handling message', {
+                    type: messageTypeForError,
+                    error: err instanceof Error ? err.message : String(err),
+                    stack: err instanceof Error ? err.stack : undefined
+                });
+                sendWSError(ws, 'Internal server error processing request', messageTypeForError, 'INTERNAL_ERROR');
             }
         });
 
