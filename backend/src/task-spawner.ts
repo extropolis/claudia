@@ -983,6 +983,9 @@ export class TaskSpawner extends EventEmitter {
     private getTaskEnvironment(): { [key: string]: string } {
         const taskEnv = { ...process.env } as { [key: string]: string };
 
+        // Remove CLAUDECODE env var to prevent "nested session" detection in Claude Code CLI
+        delete taskEnv['CLAUDECODE'];
+
         if (!this.configStore) return taskEnv;
 
         const apiMode = this.configStore.getApiMode();
@@ -1637,7 +1640,12 @@ export class TaskSpawner extends EventEmitter {
 
     private setupProcessHandlers(task: InternalTask): void {
         console.log(`[TaskSpawner] setupProcessHandlers: Setting up onData for task ${task.id}, pid=${task.process.pid}`);
+
         task.process.onData((data: string) => {
+            if (process.env.DEBUG_PTY === 'true') { // Force verbose for debug
+                console.log(`[TaskSpawner] PTY Output from ${task.id} (PID ${task.process.pid}): ${JSON.stringify(data.substring(0, 50))}`);
+            }
+
             const buffer = Buffer.from(data, 'utf8');
             task.outputHistory.push(buffer);
 
@@ -2099,6 +2107,7 @@ export class TaskSpawner extends EventEmitter {
         if (!task) {
             if (this.disconnectedTasks.has(taskId)) {
                 console.log(`[TaskSpawner] Task ${taskId} is disconnected, auto-reconnecting before write`);
+                console.log(`[TaskSpawner] Input length: ${data.length}, Data preview: ${JSON.stringify(data.substring(0, 50))}`);
                 const reconnectedTask = this.reconnectTask(taskId);
                 if (reconnectedTask) {
                     task = this.tasks.get(taskId);
@@ -2120,9 +2129,13 @@ export class TaskSpawner extends EventEmitter {
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
         if (taskBackend === 'opencode' && this.backend) {
+            console.log(`[TaskSpawner] Writing to OpenCode backend for task ${taskId}`);
             this.backend.sendInput(taskId, data);
             return;
         }
+
+        console.log(`[TaskSpawner] Writing to Claude Code PTY for task ${taskId} (PID: ${task.process.pid})`);
+        console.log(`[TaskSpawner] Data to write: ${JSON.stringify(data)}`);
 
         // Claude Code PTY-based input handling
         // Check if this is a message with Enter at the end (from input bar)
@@ -2578,7 +2591,10 @@ export class TaskSpawner extends EventEmitter {
         // Determine which backend was used to create this task
         // Use persisted backendType, fallback to 'claude-code' for backwards compatibility
         const taskBackendType = persisted.backendType || 'claude-code';
+
         console.log(`[TaskSpawner] Reconnecting task ${taskId} using ${taskBackendType} backend`);
+        console.log(`[TaskSpawner] Persisted session ID: ${persisted.sessionId}`);
+
 
         // Get environment with API mode settings
         const taskEnv = this.getTaskEnvironment();
@@ -2599,6 +2615,7 @@ export class TaskSpawner extends EventEmitter {
                 this.scheduleSave();
             }
         }
+
 
         if (taskBackendType === 'opencode') {
             // Use OpenCode backend for reconnection
@@ -2634,23 +2651,13 @@ export class TaskSpawner extends EventEmitter {
             claudeArgs.push('--allowedTools', 'mcp__*');
 
             // Add MCP server configurations for reconnection
-            const mcpServers = this.configStore?.getMCPServers() || [];
-            const enabledMcpServers = mcpServers.filter(s => s.enabled);
-            if (enabledMcpServers.length > 0) {
-                const mcpConfig: Record<string, { command: string; args?: string[]; env?: Record<string, string> }> = {};
-                for (const server of enabledMcpServers) {
-                    mcpConfig[server.name] = {
-                        command: server.command,
-                        args: server.args,
-                        env: server.env
-                    };
-                }
-                // Write MCP config to a temp file for reconnection
-                const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
+            const mcpResult = this.buildMcpConfig();
+            if (mcpResult) {
+                const mcpConfigJson = JSON.stringify({ mcpServers: mcpResult.mcpConfig }, null, 2);
                 const mcpConfigFile = `/tmp/claudia-mcp-${taskId}-reconnect.json`;
                 writeFileSync(mcpConfigFile, mcpConfigJson);
                 claudeArgs.push('--mcp-config', mcpConfigFile);
-                console.log(`[TaskSpawner] Added ${enabledMcpServers.length} MCP server(s) for reconnection via ${mcpConfigFile}`);
+                console.log(`[TaskSpawner] Added ${mcpResult.enabledMcpServers.length} MCP server(s) for reconnection via ${mcpConfigFile}`);
             }
 
             if (sessionIdToUse) {
@@ -2670,37 +2677,26 @@ export class TaskSpawner extends EventEmitter {
         }
 
         console.log(`[TaskSpawner] Process spawned for task ${taskId}, PID: ${ptyProcess.pid}`);
+        console.log(`[TaskSpawner] PTY Details: cols=${ptyProcess.cols}, rows=${ptyProcess.rows}`);
+
 
         const now = new Date();
 
         // Use lazy loading for history to prevent memory exhaustion during startup
         // History will be loaded from file only when task is selected (setTaskActive)
         // Check if history file exists
-        let lazyHistoryBase64: string | undefined;
+        // Clear old history file on reconnect to prevent stale error output
+        // (e.g. from previous crashed reconnection attempts) from showing up
         try {
             const historyPath = this.getTaskHistoryPath(taskId);
             if (existsSync(historyPath)) {
-                // Just flag that we have history, don't read it yet!
-                // We'll read it "on demand" in getCombinedHistory or when needed
-                // For now, we set a placeholder to indicate history exists
-                // BUT wait: logic below expects lazyHistoryBase64 to BE the content.
-                // We need to change getCombinedHistory to read from file if this is a "file path" or special marker.
-                // Alternatively, read it here? NO, that defeats the purpose of avoiding 30MB load.
-                // WE MUST READ IT LAZILY.
-
-                // Let's modify getCombinedHistory to handle reading from file.
-                // For this refactor, we'll store a special marker or changed InternalTask interface? 
-                // Currently InternalTask has lazyHistoryBase64 as string. 
-                // Let's treat it as NULL here, and modify getCombinedHistory to check file.
-                lazyHistoryBase64 = undefined;
-                console.log(`[TaskSpawner] Task ${taskId} has history file (lazy load enabled)`);
-            } else if (persisted.outputHistory) {
-                // Fallback for tasks not yet migrated (should happen in loadPersistedTasks though)
-                lazyHistoryBase64 = persisted.outputHistory;
+                unlinkSync(historyPath);
+                console.log(`[TaskSpawner] Cleared old history file for ${taskId} on reconnect`);
             }
         } catch (e) {
-            console.error(`[TaskSpawner] Failed to check history file for ${taskId}:`, e);
+            console.error(`[TaskSpawner] Failed to clear history file for ${taskId}:`, e);
         }
+        const lazyHistoryBase64: string | undefined = undefined;
 
         // Create a separator message for the live output stream
         const resumeMessage = persisted.sessionId
@@ -2775,5 +2771,96 @@ export class TaskSpawner extends EventEmitter {
             this.saveDebounceTimer = null;
         }
         this.saveTasks();
+    }
+
+    /**
+     * Disconnect a task (simulate server restart or connection loss)
+     * Kills the process but keeps the task state as 'disconnected'
+     */
+    disconnectTask(taskId: string): boolean {
+        const task = this.tasks.get(taskId);
+        if (!task) {
+            // Already disconnected or doesn't exist?
+            if (this.disconnectedTasks.has(taskId)) return true;
+            return false;
+        }
+
+        console.log(`[TaskSpawner] Disconnecting task ${taskId} (simulating restart)`);
+
+        // Kill the process
+        try {
+            task.process.kill();
+        } catch (e) {
+            console.error(`[TaskSpawner] Failed to kill process for ${taskId}:`, e);
+        }
+
+        // Create persisted task entry
+        const persisted: PersistedTask = {
+            id: task.id,
+            prompt: task.prompt,
+            workspaceId: task.workspaceId,
+            createdAt: task.createdAt,
+            lastActivity: task.lastActivity,
+            lastState: task.state,
+            sessionId: task.sessionId,
+            // We don't save full history to memory here, it's already on disk/in memory
+            backendType: this.taskBackends.get(task.id) || 'claude-code',
+            outputHistory: undefined, // Will be lazy loaded
+            gitState: undefined,
+            systemPrompt: undefined,
+            wasInterrupted: true, // Mark as interrupted so it shows correct state on resume
+            shouldContinue: false,
+        };
+
+        this.disconnectedTasks.set(taskId, persisted);
+        this.tasks.delete(taskId);
+
+        this.scheduleSave();
+        this.emit('taskStateChanged', { ...this.toPublicTask(task), state: 'disconnected' });
+        this.emit('tasksUpdated');
+
+        return true;
+    }
+
+    /**
+     * Clear all tasks (active, disconnected, archived) and delete their data
+     */
+    clearAllTasks(): void {
+        console.log('[TaskSpawner] Clearing ALL tasks');
+
+        // 1. Kill all active tasks
+        for (const task of this.tasks.values()) {
+            try {
+                task.process.kill();
+            } catch (e) { }
+        }
+        this.tasks.clear();
+
+        // 2. Clear persisted maps
+        this.disconnectedTasks.clear();
+        this.archivedTasks.clear();
+
+        // 3. Delete tasks.json
+        try {
+            if (existsSync(this.statePath)) {
+                unlinkSync(this.statePath);
+            }
+        } catch (e) {
+            console.error('[TaskSpawner] Failed to delete tasks.json', e);
+        }
+
+        // 4. Delete all history files in task-histories
+        try {
+            if (existsSync(this.historyDir)) {
+                const files = readdirSync(this.historyDir);
+                for (const file of files) {
+                    unlinkSync(join(this.historyDir, file));
+                }
+            }
+        } catch (e) {
+            console.error('[TaskSpawner] Failed to clear history directory', e);
+        }
+
+        this.emit('tasksUpdated');
     }
 }
