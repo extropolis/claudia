@@ -91,6 +91,7 @@ interface InternalTask extends Task {
     shouldContinue?: boolean; // True if this is a reconnected task that should auto-continue
     continuationSent?: boolean; // True if continuation prompt has been sent
     consecutiveOutputChanges?: number; // Count of consecutive polls with output changes (for idle→busy debouncing)
+    inactiveOutputLogged?: boolean; // True if we've already logged the "dropping output" message for this inactive state
 }
 
 /**
@@ -1685,8 +1686,14 @@ export class TaskSpawner extends EventEmitter {
             // Stream output to active task
             if (task.isActive) {
                 this.emit('taskOutput', task.id, data);
+                // Reset the flag when task becomes active again
+                task.inactiveOutputLogged = false;
             } else {
-                console.log(`[TaskSpawner] Output received for ${task.id} but isActive=${task.isActive}, dropping output`);
+                // Only log once per inactive period to avoid log spam
+                if (!task.inactiveOutputLogged) {
+                    console.log(`[TaskSpawner] Output received for ${task.id} but isActive=false, dropping output (subsequent drops will be silent)`);
+                    task.inactiveOutputLogged = true;
+                }
             }
         });
 
@@ -2645,6 +2652,25 @@ export class TaskSpawner extends EventEmitter {
 
             if (this.configStore?.getSkipPermissions()) {
                 claudeArgs.push('--dangerously-skip-permissions');
+            }
+
+            // Add model selection for SAP AI Core mode (same as createTask)
+            const apiMode = this.configStore?.getApiMode();
+            if (apiMode === 'sap-ai-core') {
+                const sapAiCoreModel = this.configStore?.getSapAiCoreModel() ?? 'anthropic--claude-4.5-opus';
+                const sapToAnthropicMap: Record<string, string> = {
+                    'anthropic--claude-4.5-opus': 'claude-4-5-opus',
+                    'anthropic--claude-opus-4': 'claude-opus-4-20250514',
+                    'anthropic--claude-sonnet-4': 'claude-sonnet-4-20250514',
+                    'anthropic--claude-4.5-sonnet': 'claude-sonnet-4-5-20250929',
+                    'anthropic--claude-3.7-sonnet': 'claude-3-7-sonnet-20250219',
+                    'anthropic--claude-3.5-sonnet': 'claude-3-5-sonnet-latest',
+                    'anthropic--claude-3.5-haiku': 'claude-3-5-haiku-20241022',
+                    'anthropic--claude-3-opus': 'claude-3-opus-20240229',
+                };
+                const model = sapToAnthropicMap[sapAiCoreModel] || sapAiCoreModel;
+                claudeArgs.push('--model', model);
+                console.log(`[TaskSpawner] Reconnect using SAP AI Core model`, { sapModel: sapAiCoreModel, anthropicModel: model });
             }
 
             // Explicitly allow all MCP tools to avoid deferred loading issues

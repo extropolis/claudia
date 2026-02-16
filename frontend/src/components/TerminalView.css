@@ -13,6 +13,9 @@
     padding: 8px 16px;
     background: #1a1a1a;
     border-bottom: 1px solid #333;
+    flex-shrink: 0;
+    max-height: 80px;
+    overflow: hidden;
 }
 
 .terminal-title {
@@ -20,12 +23,13 @@
     color: #d4d4d4;
     font-family: "SF Mono", "Monaco", "Inconsolata", "Fira Code", monospace;
     flex: 1;
-    /* Limit to 3 lines max */
+    /* Limit to 2 lines max */
     display: -webkit-box;
-    -webkit-line-clamp: 3;
+    -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
     line-height: 1.4;
+    max-height: calc(2 * 1.4em);
 }
 
 .copy-button {

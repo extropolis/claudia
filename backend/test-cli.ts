@@ -55,6 +55,8 @@ interface TestConfig {
     waitForIdle: boolean;         // Wait for task to become idle before exiting
     listMcpServers: boolean;      // List available MCP servers (no WebSocket needed)
     testMcpServer: string | null; // Test a specific MCP server by name
+    disconnectTask: boolean;      // Disconnect a task
+    reconnectTask: boolean;       // Reconnect a task
 }
 
 class TestCLI {
@@ -138,6 +140,12 @@ class TestCLI {
                     setTimeout(() => this.cleanup(), 2000);
                 } else if (this.config.setProject && this.config.projectPath) {
                     this.sendSetProject(this.config.projectPath);
+                    setTimeout(() => this.cleanup(), 1000);
+                } else if (this.config.disconnectTask && this.config.taskId) {
+                    this.sendDisconnectTask(this.config.taskId);
+                    setTimeout(() => this.cleanup(), 1000);
+                } else if (this.config.reconnectTask && this.config.taskId) {
+                    this.sendReconnectTask(this.config.taskId);
                     setTimeout(() => this.cleanup(), 1000);
                 } else if (this.config.testClear) {
                     // Test clear functionality
@@ -278,7 +286,7 @@ class TestCLI {
             type: 'task:create',
             payload: {
                 prompt: description,
-                workspaceId: this.config.workspaceId
+                workspaceId: this.config.workspaceId || process.cwd()
             }
         };
 
@@ -591,6 +599,38 @@ class TestCLI {
         };
 
         console.log(`🚀 Pushing to GitHub for workspace ${workspaceId}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendDisconnectTask(taskId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot disconnect task: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'task:disconnect',
+            payload: { taskId }
+        };
+
+        console.log(`🔌 Disconnecting task ${taskId}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendReconnectTask(taskId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot reconnect task: WebSocket not connected');
+            return;
+        }
+
+        // To reconnect, we essentially just "select" the task again or set it as active
+        // The backend handles reconnection logic when a task is set as active
+        const message = {
+            type: 'task:select',
+            payload: { taskId }
+        };
+
+        console.log(`Checking if task needs reconnect: setting active ${taskId}...`);
         this.ws.send(JSON.stringify(message));
     }
 
@@ -1163,9 +1203,12 @@ function parseArgs(): TestConfig {
     let waitForIdle = false;
     let listMcpServers = false;
     let testMcpServer: string | null = null;
+    let disconnectTask = false;
+    let reconnectTask = false;
 
     for (let i = 0; i < args.length; i++) {
-        switch (args[i]) {
+        const arg = args[i];
+        switch (arg) {
             case '--url':
                 backendUrl = args[++i];
                 break;
@@ -1305,6 +1348,12 @@ function parseArgs(): TestConfig {
             case '--test-mcp-server':
                 testMcpServer = args[++i];
                 break;
+            case '--disconnect':
+                disconnectTask = true;
+                break;
+            case '--reconnect':
+                reconnectTask = true;
+                break;
             case '--help':
             case '-h':
                 console.log(`
@@ -1333,6 +1382,8 @@ TASK OPERATIONS:
   --list-tasks             List all tasks with their status
   --view-files             View code files for a task (requires --task-id)
   --archive-task           Archive a task (requires --task-id)
+  --disconnect             Disconnect a task (requires --task-id)
+  --reconnect              Reconnect a task (requires --task-id)
 
 ARCHIVED TASK OPERATIONS:
   --list-archived          List all archived tasks
@@ -1486,7 +1537,9 @@ Examples:
         watchOutput,
         waitForIdle,
         listMcpServers,
-        testMcpServer
+        testMcpServer,
+        disconnectTask,
+        reconnectTask,
     };
 }
 

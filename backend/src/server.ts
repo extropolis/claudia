@@ -53,7 +53,9 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'supervisor:analyze',
     'supervisor:chat:message',
     'supervisor:chat:history',
-    'supervisor:chat:clear'
+    'supervisor:chat:clear',
+    'task:disconnect',
+    'task:clear'
 ]);
 
 // WebSocket message validation
@@ -516,6 +518,22 @@ export async function createApp(basePath?: string) {
                         } else {
                             console.error('[Server] task:destroy missing taskId');
                         }
+
+                        break;
+                    }
+
+                    case 'task:disconnect': {
+                        // Disconnect a task (simulate server restart)
+                        const { taskId } = payload as { taskId?: string };
+                        if (taskId) {
+                            taskSpawner.disconnectTask(taskId);
+                        }
+                        break;
+                    }
+
+                    case 'task:clear': {
+                        // Clear all tasks
+                        taskSpawner.clearAllTasks();
                         break;
                     }
 

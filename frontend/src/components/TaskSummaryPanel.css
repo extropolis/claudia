@@ -6,6 +6,10 @@
     margin: 8px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
     animation: slideIn 0.3s ease-out;
+    max-height: 300px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
 
 @keyframes slideIn {
@@ -26,6 +30,7 @@
     margin-bottom: 10px;
     padding-bottom: 8px;
     border-bottom: 1px solid #3a3a5a;
+    flex-shrink: 0;
 }
 
 .bot-icon {
@@ -85,8 +90,10 @@
 
 .summary-content {
     margin-bottom: 12px;
-    max-height: 200px;
+    max-height: 150px;
     overflow-y: auto;
+    flex-shrink: 1;
+    min-height: 0;
 }
 
 /* Custom scrollbar for summary content */
@@ -129,6 +136,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
+    flex-shrink: 0;
 }
 
 .action-btn {
