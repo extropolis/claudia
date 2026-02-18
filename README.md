@@ -11,19 +11,14 @@ A web-based UI for managing multiple Claude Code CLI instances simultaneously. C
 - **Real-Time Terminal** - Full terminal emulation with xterm.js and WebSocket streaming
 - **Workspace Organization** - Group tasks by project directories
 - **Voice Input** - Web Speech API integration for hands-free interaction
-- **AI Supervisor** - Optional AI-powered task analysis and chat interface
 - **Git Integration** - Track changes and revert task modifications
 - **Task Persistence** - Tasks survive server restarts with automatic reconnection
-
-
-https://github.com/user-attachments/assets/e0d9d9a3-77eb-45b6-ac55-984d8ec9c663
-
 
 ## Prerequisites
 
 - **Node.js** 18+
 - **npm** 9+
-- **Claude Code CLI** - Install from [claude.ai/download](https://claude.ai/download)
+- **Claude Code CLI** - Install from [Claude Code Quickstart](https://code.claude.com/docs/en/quickstart). You may need to sign up for a free account initially, but you can switch to SAP AI Core in Settings.
 
 ## Installation
 
@@ -60,21 +55,20 @@ Access the UI at **http://localhost:5173**
 
 ### SAP AI Core Setup
 
-On first launch, the Settings panel will open automatically. Enter your SAP AI Core credentials:
+On first launch, the Settings panel will open automatically. Enter your SAP AI Core credentials (if you need credentials, ask in the [@ask-ai-blueprint](https://sap.slack.com/channels/ask-ai-blueprint) Slack channel):
 
 1. **Auth URL** — your SAP authentication endpoint
 2. **Client ID** and **Client Secret**
 3. **Base URL** — your AI Core API endpoint
 4. Choose a model (e.g., Claude 4.5 Sonnet)
-5. Restart the server (`./start.sh`)
 
 Claudia runs an embedded proxy that translates Anthropic API calls into SAP AI Core requests, so Claude Code works without a direct Anthropic login.
 
 
 ## Usage
 
-1. **Add a Workspace** - Click "Add Workspace" and select a project directory
-2. **Create a Task** - Click the "+" button in a workspace panel and enter your prompt
+1. **Add a Workspace** - Click the **+** button in the top right corner and enter the path to your project directory
+2. **Create a Task** - Use the text box at the bottom of the workspace panel to enter your prompt and start a new task
 3. **Monitor Progress** - Watch the real-time terminal output as Claude works
 4. **Interact** - Send follow-up messages or interrupt tasks as needed
 
@@ -111,4 +105,9 @@ claudia/
 └── start.sh           # Startup script
 ```
 
+## Support
 
+If you have any issues or questions:
+
+- **Email**: lance.hughes@sap.com
+- **Slack**: [#claudia-support](https://sap.slack.com/channels/claudia-support)
