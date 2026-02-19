@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ConfigStore } from '../config-store.js';
 import { appendFileSync } from 'fs';
+import { reportUsage } from '../usage-reporter.js';
 
 const LOG_FILE = '/tmp/hyperspace-requests.log';
 
@@ -97,6 +98,76 @@ export function createHyperspaceProxy(configStore: ConfigStore): HyperspaceProxy
                 }
             }
 
+            // Sanitize tools for the Hyperspace proxy.
+            // The proxy only accepts the flat Anthropic tool format:
+            //   { name, description, input_schema, cache_control? }
+            // Claude Code may send tools in a "custom" wrapper format:
+            //   { type: "custom", custom: { name, description, input_schema, defer_loading, ... } }
+            // or with extra MCP properties like defer_loading at the top level.
+            // We must unwrap and strip these before forwarding.
+            if (cleanBody.tools && Array.isArray(cleanBody.tools)) {
+                const allowedToolFields = new Set([
+                    'name', 'description', 'input_schema', 'cache_control', 'type',
+                ]);
+                let sanitizedCount = 0;
+                cleanBody.tools = (cleanBody.tools as Record<string, unknown>[]).map((tool) => {
+                    let flat: Record<string, unknown>;
+
+                    // Unwrap type:"custom" wrapper → flat format
+                    if (tool.type === 'custom' && tool.custom && typeof tool.custom === 'object') {
+                        const inner = tool.custom as Record<string, unknown>;
+                        flat = {};
+                        for (const [k, v] of Object.entries(inner)) {
+                            if (allowedToolFields.has(k)) {
+                                flat[k] = v;
+                            } else {
+                                sanitizedCount++;
+                            }
+                        }
+                    } else {
+                        // Already flat – keep only allowed fields
+                        flat = {};
+                        for (const [k, v] of Object.entries(tool)) {
+                            if (allowedToolFields.has(k)) {
+                                flat[k] = v;
+                            } else {
+                                sanitizedCount++;
+                            }
+                        }
+                    }
+
+                    // Strip scope from cache_control (same issue as Bedrock)
+                    if (flat.cache_control && typeof flat.cache_control === 'object') {
+                        const cc = flat.cache_control as Record<string, unknown>;
+                        if (cc.scope) {
+                            const { scope: _scope, ...restCC } = cc;
+                            flat.cache_control = restCC;
+                            sanitizedCount++;
+                        }
+                    }
+
+                    return flat;
+                });
+                if (sanitizedCount > 0) {
+                    logToFile(`[${requestId}] Sanitized ${sanitizedCount} unsupported tool fields`);
+                    console.log(`[HyperspaceProxy ${requestId}] Sanitized ${sanitizedCount} unsupported tool fields`);
+                }
+            }
+
+            // Sanitize system blocks: strip scope from cache_control
+            if (cleanBody.system && Array.isArray(cleanBody.system)) {
+                cleanBody.system = (cleanBody.system as Record<string, unknown>[]).map((block) => {
+                    if (block.cache_control && typeof block.cache_control === 'object') {
+                        const cc = block.cache_control as Record<string, unknown>;
+                        if (cc.scope) {
+                            const { scope, ...restCC } = cc;
+                            return { ...block, cache_control: restCC };
+                        }
+                    }
+                    return block;
+                });
+            }
+
             // Forward headers that Anthropic expects
             const forwardHeaders: Record<string, string> = {
                 'Content-Type': 'application/json',
@@ -145,12 +216,26 @@ export function createHyperspaceProxy(configStore: ConfigStore): HyperspaceProxy
                 const reader = proxyResponse.body.getReader();
                 const decoder = new TextDecoder();
 
+                // Token tracking for usage reporting
+                let inputTokens = 0;
+                let outputTokens = 0;
+                const modelForUsage = hyperspaceConfig.model || req.body.model;
+
                 try {
                     let chunkCount = 0;
                     while (true) {
                         const { done, value } = await reader.read();
                         if (done) {
                             console.log(`[HyperspaceProxy ${requestId}] Stream complete after ${chunkCount} chunks`);
+                            // Report usage at end of stream
+                            if (inputTokens > 0 || outputTokens > 0) {
+                                console.log(`[HyperspaceProxy ${requestId}] Reporting usage: input=${inputTokens}, output=${outputTokens}`);
+                                reportUsage({
+                                    tokensInput: inputTokens,
+                                    tokensOutput: outputTokens,
+                                    model: modelForUsage,
+                                }).catch(() => {}); // fire-and-forget
+                            }
                             break;
                         }
 
@@ -168,6 +253,15 @@ export function createHyperspaceProxy(configStore: ConfigStore): HyperspaceProxy
 
                                 try {
                                     const event = JSON.parse(data);
+
+                                    // Track token usage from SSE events
+                                    if (event.type === 'message_start' && event.message?.usage) {
+                                        inputTokens = event.message.usage.input_tokens || 0;
+                                        logToFile(`[${requestId}] input_tokens=${inputTokens}`);
+                                    } else if (event.type === 'message_delta' && event.usage) {
+                                        outputTokens = event.usage.output_tokens || 0;
+                                        logToFile(`[${requestId}] output_tokens=${outputTokens}`);
+                                    }
 
                                     // Inject the configured model name into message_start events
                                     if (event.type === 'message_start' && hyperspaceConfig.model) {
@@ -187,12 +281,33 @@ export function createHyperspaceProxy(configStore: ConfigStore): HyperspaceProxy
                     res.end();
                 } catch (error) {
                     console.error(`[HyperspaceProxy ${requestId}] Stream processing error:`, error);
+                    // Still try to report usage on error
+                    if (inputTokens > 0 || outputTokens > 0) {
+                        reportUsage({
+                            tokensInput: inputTokens,
+                            tokensOutput: outputTokens,
+                            model: modelForUsage,
+                        }).catch(() => {});
+                    }
                     res.end();
                 }
             } else {
                 console.log(`[HyperspaceProxy ${requestId}] Processing non-streaming response`);
                 // Non-streaming response - inject model info
                 const responseData = await proxyResponse.json();
+                const modelForUsage = hyperspaceConfig.model || req.body.model;
+
+                // Report token usage for non-streaming responses
+                if (responseData.usage) {
+                    const inputTokens = responseData.usage.input_tokens || 0;
+                    const outputTokens = responseData.usage.output_tokens || 0;
+                    console.log(`[HyperspaceProxy ${requestId}] Reporting usage: input=${inputTokens}, output=${outputTokens}`);
+                    reportUsage({
+                        tokensInput: inputTokens,
+                        tokensOutput: outputTokens,
+                        model: modelForUsage,
+                    }).catch(() => {}); // fire-and-forget
+                }
 
                 // Inject the configured model name
                 if (hyperspaceConfig.model) {

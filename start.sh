@@ -20,14 +20,19 @@ LOCK_FILE="/tmp/claudia-server.lock"
 if [ -f "$LOCK_FILE" ]; then
     LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
     if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
-        echo "❌ Claudia is already running (PID: $LOCK_PID)"
-        echo "   If you want to restart, first kill the existing instance:"
-        echo "   pkill -f 'npm run dev' or kill $LOCK_PID"
-        exit 1
-    else
-        # Stale lock file, remove it
-        rm -f "$LOCK_FILE"
+        echo "🔄 Claudia is already running (PID: $LOCK_PID), killing it first..."
+        kill "$LOCK_PID" 2>/dev/null || true
+        # Wait for it to die
+        sleep 2
+        # Force kill if still running
+        if kill -0 "$LOCK_PID" 2>/dev/null; then
+            echo "   Force killing..."
+            kill -9 "$LOCK_PID" 2>/dev/null || true
+            sleep 1
+        fi
     fi
+    # Remove lock file (stale or just killed)
+    rm -f "$LOCK_FILE"
 fi
 
 # Create lock file with our PID
