@@ -55,7 +55,28 @@ export const SAP_AI_CORE_MODELS: { value: SapAiCoreModel; label: string }[] = [
 ];
 
 // API mode determines how Claude Code connects to Anthropic's API
-export type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core';
+export type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core' | 'hyperspace-proxy';
+
+// Hyperspace AI Proxy configuration
+export interface HyperspaceProxyConfig {
+    proxyUrl: string;  // Default: http://localhost:6655
+    apiKey: string;    // ANTHROPIC_AUTH_TOKEN
+    model: string;     // Custom model name (e.g., anthropic--claude-4.5-sonnet)
+    alwaysThinkingEnabled: boolean;
+}
+
+// Default Hyperspace proxy models
+export const HYPERSPACE_PROXY_MODELS: { value: string; label: string }[] = [
+    { value: 'anthropic--claude-4.5-opus', label: 'Claude 4.5 Opus' },
+    { value: 'anthropic--claude-opus-4', label: 'Claude Opus 4' },
+    { value: 'anthropic--claude-sonnet-4', label: 'Claude Sonnet 4' },
+    { value: 'anthropic--claude-4.5-sonnet', label: 'Claude 4.5 Sonnet' },
+    { value: 'anthropic--claude-3.7-sonnet', label: 'Claude 3.7 Sonnet' },
+    { value: 'anthropic--claude-3.5-sonnet', label: 'Claude 3.5 Sonnet' },
+    { value: 'anthropic--claude-4.5-haiku', label: 'Claude 4.5 Haiku' },
+    { value: 'anthropic--claude-3.5-haiku', label: 'Claude 3.5 Haiku' },
+    { value: 'anthropic--claude-3-opus', label: 'Claude 3 Opus' },
+];
 
 export interface AppConfig {
     mcpServers: MCPServerConfig[];
@@ -71,6 +92,7 @@ export interface AppConfig {
     backend: BackendType;  // Which AI backend to use (claude-code or opencode)
     opencodePort?: number;  // Port for OpenCode server (default: 4096)
     useLearnings: boolean;  // Use RAG-based learnings injection for tasks
+    hyperspaceProxy?: HyperspaceProxyConfig;  // Hyperspace AI Proxy configuration
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are an AI supervisor monitoring coding tasks. Your job is to:
@@ -98,6 +120,13 @@ const DEFAULT_MCP_SERVERS: MCPServerConfig[] = [
 
 const DEFAULT_SAP_AI_CORE_MODEL: SapAiCoreModel = 'anthropic--claude-4.5-opus';
 
+const DEFAULT_HYPERSPACE_PROXY: HyperspaceProxyConfig = {
+    proxyUrl: 'http://localhost:6655',
+    apiKey: '',
+    model: 'anthropic--claude-4.5-sonnet',
+    alwaysThinkingEnabled: false
+};
+
 const DEFAULT_CONFIG: AppConfig = {
     mcpServers: DEFAULT_MCP_SERVERS,
     skipPermissions: false,
@@ -109,7 +138,8 @@ const DEFAULT_CONFIG: AppConfig = {
     sapAiCoreModel: DEFAULT_SAP_AI_CORE_MODEL,
     backend: 'claude-code',
     opencodePort: 4096,
-    useLearnings: false
+    useLearnings: false,
+    hyperspaceProxy: DEFAULT_HYPERSPACE_PROXY
 };
 
 export class ConfigStore {
@@ -147,7 +177,8 @@ export class ConfigStore {
                     customAnthropicApiKey: loaded.customAnthropicApiKey,
                     backend: loaded.backend ?? 'claude-code',
                     opencodePort: loaded.opencodePort ?? 4096,
-                    useLearnings: loaded.useLearnings ?? false
+                    useLearnings: loaded.useLearnings ?? false,
+                    hyperspaceProxy: loaded.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY
                 };
             }
         } catch (error) {
@@ -209,6 +240,9 @@ export class ConfigStore {
         }
         if (updates.useLearnings !== undefined) {
             this.config.useLearnings = updates.useLearnings;
+        }
+        if (updates.hyperspaceProxy !== undefined) {
+            this.config.hyperspaceProxy = updates.hyperspaceProxy;
         }
         this.saveConfig();
         return this.getConfig();
@@ -305,6 +339,15 @@ export class ConfigStore {
 
     setUseLearnings(useLearnings: boolean): void {
         this.config.useLearnings = useLearnings;
+        this.saveConfig();
+    }
+
+    getHyperspaceProxy(): HyperspaceProxyConfig {
+        return this.config.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY;
+    }
+
+    setHyperspaceProxy(config: HyperspaceProxyConfig): void {
+        this.config.hyperspaceProxy = config;
         this.saveConfig();
     }
 }

@@ -566,7 +566,11 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
     }
 
     private setupProcessHandlers(task: InternalTask): void {
-        task.process.onData((data: string) => {
+        task.process.onData((rawData: string) => {
+            // Filter out auth conflict warning in SAP AI Core proxy mode
+            const data = this.filterAuthConflictWarning(rawData);
+            if (!data) return; // Entire chunk was warning content
+
             const buffer = Buffer.from(data, 'utf8');
             task.outputHistory.push(buffer);
 
@@ -749,6 +753,42 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
 
     private extractSessionId(str: string): string | null {
         return null;
+    }
+
+    /**
+     * Filter out the Claude Code auth conflict warning from PTY output.
+     * This warning appears when ANTHROPIC_API_KEY is set alongside a claude.ai login token,
+     * which is expected in SAP AI Core proxy mode (we set a dummy API key).
+     */
+    private filterAuthConflictWarning(data: string): string {
+        const cleanData = this.stripAnsi(data);
+
+        const warningPhrases = [
+            'Auth conflict:',
+            'Auth conflict',
+            'Both a token (claude.ai) and an API key (ANTHROPIC_API_KEY) are set',
+            'Both a token',
+            'CLAUDE_CODE_OAUTH_TOKEN',
+            'ANTHROPIC_AUTH_TOKEN',
+            'This may lead to unexpected behavior',
+            'Trying to use claude.ai? Unset the ANTHROPIC_API_KEY',
+            'Trying to use ANTHROPIC_API_KEY? claude /logout',
+            'Trying to use ANTHROPIC_AUTH_TOKEN?',
+            'sign out of claude.ai',
+        ];
+
+        for (const phrase of warningPhrases) {
+            if (cleanData.includes(phrase)) {
+                const lines = data.split(/(\r?\n)/);
+                const filteredLines = lines.filter(line => {
+                    const cleanLine = this.stripAnsi(line);
+                    return !warningPhrases.some(p => cleanLine.includes(p));
+                });
+                return filteredLines.join('');
+            }
+        }
+
+        return data;
     }
 
     private stripAnsi(str: string): string {

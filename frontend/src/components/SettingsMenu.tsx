@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain } from 'lucide-react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, RefreshCw } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
 import { useTaskStore } from '../stores/taskStore';
@@ -29,9 +29,9 @@ interface AICoreCredentials {
     timeoutMs: number;
 }
 
-type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core';
+type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core' | 'hyperspace-proxy';
 type BackendType = 'claude-code' | 'opencode';
-type SapAiCoreModel = 
+type SapAiCoreModel =
     | 'anthropic--claude-4.5-opus'
     | 'anthropic--claude-opus-4'
     | 'anthropic--claude-sonnet-4'
@@ -51,6 +51,14 @@ const SAP_AI_CORE_MODELS: { value: SapAiCoreModel; label: string }[] = [
     { value: 'anthropic--claude-3.5-haiku', label: 'Claude 3.5 Haiku' },
     { value: 'anthropic--claude-3-opus', label: 'Claude 3 Opus' },
 ];
+
+interface HyperspaceProxyConfig {
+    proxyUrl: string;
+    apiKey: string;
+    model: string;
+    alwaysThinkingEnabled: boolean;
+}
+
 
 interface BackendStatus {
     backend: BackendType;
@@ -146,6 +154,18 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [aiCoreTestStatus, setAiCoreTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [aiCoreTestMessage, setAiCoreTestMessage] = useState('');
 
+    // Hyperspace AI Proxy state
+    const [hyperspaceProxy, setHyperspaceProxy] = useState<HyperspaceProxyConfig>({
+        proxyUrl: 'http://localhost:6655',
+        apiKey: '',
+        model: '',
+        alwaysThinkingEnabled: false
+    });
+    const [hyperspaceUseCustomModel, setHyperspaceUseCustomModel] = useState(false);
+    const [hyperspaceModels, setHyperspaceModels] = useState<{ value: string; label: string }[]>([]);
+    const [hyperspaceModelsLoading, setHyperspaceModelsLoading] = useState(false);
+    const hyperspaceTimerRef = useRef<NodeJS.Timeout | null>(null);
+
     // Custom API key test state
     const [customApiKeyTestStatus, setCustomApiKeyTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [customApiKeyTestMessage, setCustomApiKeyTestMessage] = useState('');
@@ -180,6 +200,63 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     }, [expandedPanels.mcp]);
 
+    const fetchHyperspaceModels = useCallback(async (proxyUrl: string, apiKey: string) => {
+        if (!proxyUrl || !apiKey) {
+            setHyperspaceModels([]);
+            return;
+        }
+
+        setHyperspaceModelsLoading(true);
+        try {
+            // Call backend proxy to avoid CORS issues
+            const response = await fetch(`${getApiBaseUrl()}/api/hyperspace/models`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ proxyUrl, apiKey })
+            });
+
+            if (response.ok) {
+                const result = await response.json();
+                if (result.success && result.data?.data) {
+                    const models = result.data.data.map((m: { id: string; display_name: string }) => ({
+                        value: m.id,
+                        label: m.display_name || m.id
+                    }));
+                    setHyperspaceModels(models);
+
+                    // If no model is selected yet and we have models, select the first one
+                    // Also save to backend so the selection persists
+                    if (models.length > 0) {
+                        setHyperspaceProxy(prev => {
+                            if (!prev.model || !models.find((m: { value: string }) => m.value === prev.model)) {
+                                const updated = { ...prev, model: models[0].value };
+                                // Save the auto-selected model to backend
+                                fetch(`${getApiBaseUrl()}/api/config`, {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ hyperspaceProxy: updated })
+                                }).catch(err => console.error('Failed to save auto-selected model:', err));
+                                return updated;
+                            }
+                            return prev;
+                        });
+                    }
+                } else {
+                    console.error('Failed to fetch Hyperspace models:', result.error);
+                    setHyperspaceModels([]);
+                }
+            } else {
+                console.error('Failed to fetch Hyperspace models:', response.status);
+                setHyperspaceModels([]);
+            }
+        } catch (error) {
+            console.error('Failed to fetch Hyperspace models:', error);
+            setHyperspaceModels([]);
+        } finally {
+            setHyperspaceModelsLoading(false);
+        }
+    }, []);
+
     const fetchConfig = async () => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`);
@@ -197,6 +274,13 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 }
                 if (config.sapAiCoreModel) {
                     setSapAiCoreModel(config.sapAiCoreModel);
+                }
+                if (config.hyperspaceProxy) {
+                    setHyperspaceProxy(config.hyperspaceProxy);
+                    // If we have an API key, fetch the available models
+                    if (config.hyperspaceProxy.apiKey && config.hyperspaceProxy.proxyUrl) {
+                        fetchHyperspaceModels(config.hyperspaceProxy.proxyUrl, config.hyperspaceProxy.apiKey);
+                    }
                 }
                 setBackend(config.backend || 'claude-code');
                 setUseLearnings(config.useLearnings || false);
@@ -593,6 +677,39 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     }, []);
 
+    const saveHyperspaceProxy = useCallback(async (config: HyperspaceProxyConfig) => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ hyperspaceProxy: config })
+            });
+            if (!response.ok) {
+                console.error('Failed to save Hyperspace proxy config');
+            }
+        } catch (error) {
+            console.error('Failed to save Hyperspace proxy config:', error);
+        }
+    }, []);
+
+    const handleHyperspaceChange = (field: keyof HyperspaceProxyConfig, value: string | boolean) => {
+        const updatedConfig = { ...hyperspaceProxy, [field]: value };
+        setHyperspaceProxy(updatedConfig);
+
+        // Auto-save with debounce
+        if (hyperspaceTimerRef.current) {
+            clearTimeout(hyperspaceTimerRef.current);
+        }
+        hyperspaceTimerRef.current = setTimeout(() => {
+            saveHyperspaceProxy(updatedConfig);
+
+            // Fetch models when API key or proxy URL changes
+            if (field === 'apiKey' || field === 'proxyUrl') {
+                fetchHyperspaceModels(updatedConfig.proxyUrl, updatedConfig.apiKey);
+            }
+        }, 1000);
+    };
+
     const handleApiModeChange = (mode: ApiMode) => {
         setApiMode(mode);
         // Reset test statuses when mode changes
@@ -603,6 +720,20 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
 
         // Save immediately for radio buttons
         saveApiMode(mode, customAnthropicApiKey);
+
+        // Also save hyperspace config immediately if switching to hyperspace mode
+        // to ensure any pending changes are persisted, and fetch models
+        if (mode === 'hyperspace-proxy') {
+            if (hyperspaceTimerRef.current) {
+                clearTimeout(hyperspaceTimerRef.current);
+            }
+            saveHyperspaceProxy(hyperspaceProxy);
+
+            // Auto-fetch models when switching to hyperspace mode
+            if (hyperspaceProxy.apiKey && hyperspaceProxy.proxyUrl) {
+                fetchHyperspaceModels(hyperspaceProxy.proxyUrl, hyperspaceProxy.apiKey);
+            }
+        }
     };
 
     const handleCustomApiKeyChange = (key: string) => {
@@ -939,6 +1070,22 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                         </span>
                                     </div>
                                 </label>
+
+                                <label className={`api-mode-option ${apiMode === 'hyperspace-proxy' ? 'selected' : ''}`}>
+                                    <input
+                                        type="radio"
+                                        name="apiMode"
+                                        value="hyperspace-proxy"
+                                        checked={apiMode === 'hyperspace-proxy'}
+                                        onChange={() => handleApiModeChange('hyperspace-proxy')}
+                                    />
+                                    <div className="api-mode-content">
+                                        <span className="api-mode-title">Hyperspace AI Proxy</span>
+                                        <span className="api-mode-description">
+                                            Use the HAI proxy (requires hai proxy start running)
+                                        </span>
+                                    </div>
+                                </label>
                             </div>
 
                             {/* Custom Anthropic API Key fields */}
@@ -1089,6 +1236,116 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                             {aiCoreTestStatus === 'testing' ? 'Testing...' : 'Test Connection'}
                                         </button>
                                     </div>
+                                </div>
+                            )}
+
+                            {/* Hyperspace AI Proxy fields */}
+                            {apiMode === 'hyperspace-proxy' && (
+                                <div className="api-mode-fields">
+                                    <div className="aicore-form">
+                                        <div className="aicore-field">
+                                            <label>Proxy URL</label>
+                                            <input
+                                                type="text"
+                                                value={hyperspaceProxy.proxyUrl}
+                                                onChange={(e) => handleHyperspaceChange('proxyUrl', e.target.value)}
+                                                placeholder="http://localhost:6655"
+                                                className="aicore-input"
+                                            />
+                                        </div>
+
+                                        <div className="aicore-field">
+                                            <label>API Key</label>
+                                            <input
+                                                type="password"
+                                                value={hyperspaceProxy.apiKey}
+                                                onChange={(e) => handleHyperspaceChange('apiKey', e.target.value)}
+                                                placeholder="Your API key from hai proxy terminal"
+                                                className="aicore-input"
+                                            />
+                                        </div>
+
+                                        <div className="aicore-field">
+                                            <label>Model</label>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                                {!hyperspaceUseCustomModel ? (
+                                                    <div className="hyperspace-model-row">
+                                                        <div className="hyperspace-model-select-wrapper">
+                                                            <select
+                                                                value={hyperspaceProxy.model}
+                                                                onChange={(e) => handleHyperspaceChange('model', e.target.value)}
+                                                                className={`aicore-input aicore-select ${!hyperspaceProxy.apiKey ? 'disabled-muted' : ''}`}
+                                                                disabled={hyperspaceModelsLoading || !hyperspaceProxy.apiKey}
+                                                            >
+                                                                {!hyperspaceProxy.apiKey && (
+                                                                    <option value="">Add API key to load models</option>
+                                                                )}
+                                                                {hyperspaceProxy.apiKey && hyperspaceModels.length === 0 && !hyperspaceModelsLoading && (
+                                                                    <option value="">No models loaded</option>
+                                                                )}
+                                                                {hyperspaceModelsLoading && (
+                                                                    <option value="">Loading models...</option>
+                                                                )}
+                                                                {hyperspaceModels.map((model) => (
+                                                                    <option key={model.value} value={model.value}>
+                                                                        {model.label}
+                                                                    </option>
+                                                                ))}
+                                                            </select>
+                                                            {hyperspaceModelsLoading && (
+                                                                <Loader2 size={14} className="spinning" style={{ position: 'absolute', right: '30px', top: '50%', transform: 'translateY(-50%)' }} />
+                                                            )}
+                                                        </div>
+                                                        <button
+                                                            className="hyperspace-refresh-btn"
+                                                            onClick={() => fetchHyperspaceModels(hyperspaceProxy.proxyUrl, hyperspaceProxy.apiKey)}
+                                                            disabled={!hyperspaceProxy.apiKey || !hyperspaceProxy.proxyUrl || hyperspaceModelsLoading}
+                                                            title="Refresh models"
+                                                        >
+                                                            <RefreshCw size={16} className={hyperspaceModelsLoading ? 'spinning' : ''} />
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    <input
+                                                        type="text"
+                                                        value={hyperspaceProxy.model}
+                                                        onChange={(e) => handleHyperspaceChange('model', e.target.value)}
+                                                        placeholder="e.g., anthropic--claude-4.5-sonnet"
+                                                        className="aicore-input"
+                                                    />
+                                                )}
+                                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={hyperspaceUseCustomModel}
+                                                        onChange={(e) => setHyperspaceUseCustomModel(e.target.checked)}
+                                                    />
+                                                    Enter custom model name
+                                                </label>
+                                            </div>
+                                        </div>
+
+                                        <div className="permission-item" style={{ marginTop: '12px' }}>
+                                            <div className="permission-info">
+                                                <span className="permission-label">Always Thinking Mode</span>
+                                                <span className="permission-description">
+                                                    Enable extended thinking for all prompts
+                                                </span>
+                                            </div>
+                                            <label className="toggle-switch">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={hyperspaceProxy.alwaysThinkingEnabled}
+                                                    onChange={(e) => handleHyperspaceChange('alwaysThinkingEnabled', e.target.checked)}
+                                                />
+                                                <span className="toggle-slider"></span>
+                                            </label>
+                                        </div>
+                                    </div>
+
+                                    <p className="api-config-note" style={{ marginTop: '12px' }}>
+                                        Make sure <code style={{ fontSize: '0.75rem', padding: '2px 4px', background: 'var(--bg-tertiary)', borderRadius: '3px' }}>hai proxy start</code> is running before using this mode.
+                                    </p>
                                 </div>
                             )}
 
@@ -1415,6 +1672,39 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                         </div>
                     </CollapsiblePanel>
 
+                </div>
+
+                <div className="settings-menu-footer">
+                    <button className="settings-done-btn" onClick={() => {
+                        // Flush any pending debounced saves before closing
+                        if (hyperspaceTimerRef.current) {
+                            clearTimeout(hyperspaceTimerRef.current);
+                            saveHyperspaceProxy(hyperspaceProxy);
+                        }
+                        if (apiModeTimerRef.current) {
+                            clearTimeout(apiModeTimerRef.current);
+                            saveApiMode(apiMode, customAnthropicApiKey);
+                        }
+                        if (aiCoreTimerRef.current) {
+                            clearTimeout(aiCoreTimerRef.current);
+                            saveAiCoreCredentials(aiCoreCredentials, sapAiCoreModel);
+                        }
+                        if (rulesTimerRef.current) {
+                            clearTimeout(rulesTimerRef.current);
+                            saveRules(rules);
+                        }
+                        if (supervisorPromptTimerRef.current) {
+                            clearTimeout(supervisorPromptTimerRef.current);
+                            saveSupervisorPrompt(supervisorSystemPrompt);
+                        }
+                        if (mcpJsonTimerRef.current) {
+                            clearTimeout(mcpJsonTimerRef.current);
+                            saveClaudeConfig(mcpJson);
+                        }
+                        onClose();
+                    }}>
+                        Done
+                    </button>
                 </div>
             </div>
         </div>

@@ -157,7 +157,8 @@ export class AccessTokenProvider {
      */
     public updateConfig(config: AICorConfig): void {
         console.log('[AnthropicProxy] Updating AccessTokenProvider config and clearing cache');
-        this.config = config;
+        // Mutate in place so any closures that captured this.config also see the update
+        Object.assign(this.config, config);
         this.clearCache();
     }
 

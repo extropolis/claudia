@@ -957,6 +957,41 @@ export class TaskSpawner extends EventEmitter {
         this.pendingSessionCapture.delete(taskId);
     }
 
+    /**
+     * Filter out the Claude Code auth conflict warning from PTY output.
+     * This warning appears when ANTHROPIC_API_KEY is set alongside a claude.ai login token,
+     * which is expected in SAP AI Core proxy mode (we set a dummy API key).
+     */
+    private filterAuthConflictWarning(data: string): string {
+        const cleanData = this.stripAnsi(data);
+
+        const warningPhrases = [
+            'Auth conflict',
+            'Both a token (claude.ai) and an API key (ANTHROPIC_API_KEY) are set',
+            'Both a token',
+            'CLAUDE_CODE_OAUTH_TOKEN',
+            'ANTHROPIC_AUTH_TOKEN',
+            'This may lead to unexpected behavior',
+            'Trying to use claude.ai? Unset the ANTHROPIC_API_KEY',
+            'Trying to use ANTHROPIC_API_KEY?',
+            'Trying to use ANTHROPIC_AUTH_TOKEN?',
+            'sign out of claude.ai',
+        ];
+
+        for (const phrase of warningPhrases) {
+            if (cleanData.includes(phrase)) {
+                const lines = data.split(/(\r?\n)/);
+                const filteredLines = lines.filter(line => {
+                    const cleanLine = this.stripAnsi(line);
+                    return !warningPhrases.some(p => cleanLine.includes(p));
+                });
+                return filteredLines.join('');
+            }
+        }
+
+        return data;
+    }
+
     private stripAnsi(str: string): string {
         return str
             .replace(/\x1b\[[0-9;]*m/g, '')
@@ -998,6 +1033,32 @@ export class TaskSpawner extends EventEmitter {
                 taskEnv['ANTHROPIC_API_KEY'] = apiKey;
                 console.log(`[TaskSpawner] Using custom Anthropic API key`);
             }
+        } else if (apiMode === 'hyperspace-proxy') {
+            // Hyperspace AI Proxy (HAI) mode
+            // Route through Claudia's backend proxy (like SAP AI Core) so we can
+            // transform responses to inject the correct model information
+            const backendPort = process.env.PORT || PORTS.BACKEND;
+            taskEnv['ANTHROPIC_BASE_URL'] = `http://localhost:${backendPort}/hyperspace`;
+            // Set a dummy API key - the proxy will handle the actual authentication
+            taskEnv['ANTHROPIC_API_KEY'] = 'sk-ant-dummy-hyperspace-proxy';
+
+            // Set the configured model for ALL tiers to prevent Claude Code from
+            // sending requests with default Anthropic model names (which the
+            // Hyperspace proxy won't recognize, causing errors/retries/rate limiting)
+            const hyperspaceConfig = this.configStore.getHyperspaceProxy();
+            if (hyperspaceConfig?.model) {
+                taskEnv['ANTHROPIC_MODEL'] = hyperspaceConfig.model;
+                taskEnv['ANTHROPIC_DEFAULT_SONNET_MODEL'] = hyperspaceConfig.model;
+                taskEnv['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = hyperspaceConfig.model;
+                taskEnv['ANTHROPIC_DEFAULT_OPUS_MODEL'] = hyperspaceConfig.model;
+                console.log(`[TaskSpawner] Set Hyperspace model env vars to: ${hyperspaceConfig.model}`);
+                console.log(`[TaskSpawner] ANTHROPIC_MODEL=${taskEnv['ANTHROPIC_MODEL']}`);
+                console.log(`[TaskSpawner] ANTHROPIC_DEFAULT_SONNET_MODEL=${taskEnv['ANTHROPIC_DEFAULT_SONNET_MODEL']}`);
+                console.log(`[TaskSpawner] ANTHROPIC_DEFAULT_HAIKU_MODEL=${taskEnv['ANTHROPIC_DEFAULT_HAIKU_MODEL']}`);
+                console.log(`[TaskSpawner] ANTHROPIC_DEFAULT_OPUS_MODEL=${taskEnv['ANTHROPIC_DEFAULT_OPUS_MODEL']}`);
+            }
+
+            console.log(`[TaskSpawner] Using Hyperspace AI Proxy through backend at localhost:${backendPort}/hyperspace, model: ${hyperspaceConfig?.model || 'default'}`);
         } else if (apiMode === 'sap-ai-core') {
             let credentials = this.configStore.getAICoreCredentials();
 
@@ -1551,6 +1612,16 @@ export class TaskSpawner extends EventEmitter {
             const model = sapToAnthropicMap[sapAiCoreModel] || sapAiCoreModel;
             claudeArgs.push('--model', model);
             logger.info(`Using SAP AI Core model`, { sapModel: sapAiCoreModel, anthropicModel: model });
+        } else if (apiMode === 'hyperspace-proxy') {
+            // Get the model from Hyperspace proxy config
+            const hyperspaceConfig = this.configStore?.getHyperspaceProxy();
+            if (hyperspaceConfig?.model) {
+                // Pass the HAI-format model name directly — the Hyperspace proxy
+                // expects HAI format (e.g., 'anthropic--claude-4.5-opus'), not
+                // Anthropic API format (e.g., 'claude-4-5-opus').
+                claudeArgs.push('--model', hyperspaceConfig.model);
+                logger.info(`Using Hyperspace proxy model`, { model: hyperspaceConfig.model });
+            }
         }
 
         // Add MCP server configurations
@@ -1642,7 +1713,11 @@ export class TaskSpawner extends EventEmitter {
     private setupProcessHandlers(task: InternalTask): void {
         console.log(`[TaskSpawner] setupProcessHandlers: Setting up onData for task ${task.id}, pid=${task.process.pid}`);
 
-        task.process.onData((data: string) => {
+        task.process.onData((rawData: string) => {
+            // Filter out auth conflict warning (appears when ANTHROPIC_API_KEY + claude.ai token coexist)
+            const data = this.filterAuthConflictWarning(rawData);
+            if (!data) return;
+
             if (process.env.DEBUG_PTY === 'true') { // Force verbose for debug
                 console.log(`[TaskSpawner] PTY Output from ${task.id} (PID ${task.process.pid}): ${JSON.stringify(data.substring(0, 50))}`);
             }
@@ -2654,7 +2729,7 @@ export class TaskSpawner extends EventEmitter {
                 claudeArgs.push('--dangerously-skip-permissions');
             }
 
-            // Add model selection for SAP AI Core mode (same as createTask)
+            // Add model selection based on API mode (same as createTask)
             const apiMode = this.configStore?.getApiMode();
             if (apiMode === 'sap-ai-core') {
                 const sapAiCoreModel = this.configStore?.getSapAiCoreModel() ?? 'anthropic--claude-4.5-opus';
@@ -2671,6 +2746,12 @@ export class TaskSpawner extends EventEmitter {
                 const model = sapToAnthropicMap[sapAiCoreModel] || sapAiCoreModel;
                 claudeArgs.push('--model', model);
                 console.log(`[TaskSpawner] Reconnect using SAP AI Core model`, { sapModel: sapAiCoreModel, anthropicModel: model });
+            } else if (apiMode === 'hyperspace-proxy') {
+                const hyperspaceConfig = this.configStore?.getHyperspaceProxy();
+                if (hyperspaceConfig?.model) {
+                    claudeArgs.push('--model', hyperspaceConfig.model);
+                    console.log(`[TaskSpawner] Reconnect using Hyperspace proxy model: ${hyperspaceConfig.model}`);
+                }
             }
 
             // Explicitly allow all MCP tools to avoid deferred loading issues

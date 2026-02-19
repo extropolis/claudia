@@ -13,6 +13,8 @@ import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { createAnthropicProxy } from './anthropic-proxy/index.js';
+import { createHyperspaceProxy } from './hyperspace-proxy/index.js';
+import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType } from '@claudia/shared';
 import { validateConfigUpdate, validateWorkspacePath, validateAICoreCredentials } from './validation.js';
 import { LearningsStore } from './learnings-store.js';
@@ -106,6 +108,12 @@ export async function createApp(basePath?: string) {
 
     // Store proxy instance for cache management
     let currentProxyInstance: ReturnType<typeof createAnthropicProxy> | null = null;
+
+    // Always mount the Hyperspace proxy - it reads config on each request
+    // so it works as soon as the user sets apiMode to hyperspace-proxy
+    console.log('[Server] Mounting Hyperspace proxy at /hyperspace');
+    const hyperspaceProxyInstance = createHyperspaceProxy(configStore);
+    app.use('/hyperspace', hyperspaceProxyInstance.router);
 
     // Check for env var override (legacy support)
     const envConfigured = process.env.SAP_AICORE_CLIENT_ID && process.env.SAP_AICORE_CLIENT_SECRET;
@@ -877,6 +885,15 @@ export async function createApp(basePath?: string) {
         res.json({ status: 'ok' });
     });
 
+    // Usage tracking — receives the unique user ID from the frontend
+    app.post('/api/user-id', (req, res) => {
+        const { userId } = req.body as { userId?: string };
+        if (userId && typeof userId === 'string' && userId.length > 0) {
+            setUserId(userId);
+        }
+        res.json({ ok: true });
+    });
+
     // Image upload configuration
     const uploadsDir = join(basePath || process.cwd(), 'uploads');
     if (!existsSync(uploadsDir)) {
@@ -1284,8 +1301,7 @@ export async function createApp(basePath?: string) {
                         requestTimeoutMs: newCredentials.timeoutMs || 120000
                     };
                     logger.info('Updating proxy config with new credentials');
-                    currentProxyInstance.tokenProvider.updateConfig(newConfig);
-                    currentProxyInstance.deploymentCatalog.updateConfig(newConfig);
+                    currentProxyInstance.updateConfig(newConfig);
                 } else {
                     // No proxy mounted yet — create and mount one
                     logger.info('No proxy mounted yet, creating new proxy with credentials');
@@ -1594,6 +1610,50 @@ export async function createApp(basePath?: string) {
             }
         } catch (error: unknown) {
             console.error('[Server] Error testing AI Core credentials:', error);
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({
+                success: false,
+                error: `Server error: ${message}`
+            });
+        }
+    });
+
+    // Fetch models from Hyperspace AI Proxy (proxied to avoid CORS)
+    app.post('/api/hyperspace/models', async (req, res) => {
+        try {
+            const { proxyUrl, apiKey } = req.body;
+
+            if (!proxyUrl || !apiKey) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Missing proxyUrl or apiKey'
+                });
+            }
+
+            // Build the models endpoint URL
+            let baseUrl = proxyUrl;
+            if (!baseUrl.endsWith('/')) baseUrl += '/';
+            if (!baseUrl.includes('anthropic')) baseUrl += 'anthropic/';
+            const modelsUrl = `${baseUrl}v1/models`;
+
+            const response = await fetch(modelsUrl, {
+                headers: {
+                    'x-api-key': apiKey
+                }
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                res.json({ success: true, data });
+            } else {
+                const errorText = await response.text();
+                res.json({
+                    success: false,
+                    error: `Failed to fetch models: ${response.status} - ${errorText}`
+                });
+            }
+        } catch (error: unknown) {
+            console.error('[Server] Error fetching Hyperspace models:', error);
             const message = error instanceof Error ? error.message : String(error);
             res.status(500).json({
                 success: false,

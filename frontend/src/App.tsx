@@ -147,6 +147,26 @@ function App() {
         }
     }, [chatPanelWidth]);
 
+    // Generate or retrieve a unique user ID for usage tracking and send to backend
+    useEffect(() => {
+        try {
+            let userId = localStorage.getItem('claudia_user_id');
+            if (!userId) {
+                userId = crypto.randomUUID();
+                localStorage.setItem('claudia_user_id', userId);
+                console.log('[App] Generated new usage tracking ID:', userId);
+            }
+            // Register with backend so the proxy can tag API calls
+            fetch(`${getApiBaseUrl()}/api/user-id`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId }),
+            }).catch(() => {}); // fire-and-forget
+        } catch {
+            // Silently fail — tracking is non-critical
+        }
+    }, []);
+
     const handleProjectSelect = (path: string) => {
         createWorkspace(path);
         setShowProjectPicker(false);

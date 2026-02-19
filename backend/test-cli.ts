@@ -1494,6 +1494,13 @@ Examples:
         }
     }
 
+    // When creating a task, auto-enable watchOutput and waitForIdle for better testing UX
+    if (createTask) {
+        watchOutput = true;
+        waitForIdle = true;
+        console.log('📌 Task creation mode: auto-enabled --watch-output and --wait-idle');
+    }
+
     return {
         backendUrl,
         testMessage,

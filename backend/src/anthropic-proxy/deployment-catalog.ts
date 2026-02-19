@@ -123,7 +123,8 @@ export class DeploymentCatalog {
      */
     updateConfig(config: AICorConfig): void {
         console.log('[DeploymentCatalog] Updating config and clearing cache');
-        this.config = config;
+        // Mutate in place so any closures that captured this.config also see the update
+        Object.assign(this.config, config);
         this.cachedDeployments = [];
     }
 

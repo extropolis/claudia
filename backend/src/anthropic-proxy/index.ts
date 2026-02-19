@@ -4,6 +4,8 @@ import { AccessTokenProvider, AICorConfig } from './access-token-provider.js';
 import { DeploymentCatalog } from './deployment-catalog.js';
 import { RequestTransformer } from './request-transformer.js';
 import { StreamTransformer } from './stream-transformer.js';
+import { UsageInterceptor } from './usage-interceptor.js';
+import { reportUsage } from '../usage-reporter.js';
 
 export interface AnthropicProxyConfig {
     clientId: string;
@@ -18,6 +20,7 @@ export interface AnthropicProxyInstance {
     router: Router;
     tokenProvider: AccessTokenProvider;
     deploymentCatalog: DeploymentCatalog;
+    updateConfig: (config: AnthropicProxyConfig) => void;
 }
 
 /**
@@ -156,6 +159,7 @@ export function createAnthropicProxy(config: AnthropicProxyConfig): AnthropicPro
                     res.setHeader('Connection', 'keep-alive');
 
                     const streamTransformer = new StreamTransformer();
+                    const usageInterceptor = new UsageInterceptor(model);
                     const sourceStream = Readable.fromWeb(response.body as any);
 
                     // Error handling
@@ -173,18 +177,32 @@ export function createAnthropicProxy(config: AnthropicProxyConfig): AnthropicPro
                         }
                     });
 
+                    usageInterceptor.on('error', (error) => {
+                        console.error('[AnthropicProxy] Usage interceptor error:', error);
+                    });
+
                     res.on('close', () => {
                         // Silently clean up streams on client disconnect (normal behavior)
                         sourceStream.destroy();
                         streamTransformer.destroy();
+                        usageInterceptor.destroy();
                     });
 
-                    sourceStream.pipe(streamTransformer).pipe(res);
+                    // Pipeline: source → SSE transformer → usage capture → response
+                    sourceStream.pipe(streamTransformer).pipe(usageInterceptor).pipe(res);
                 } else {
                     // Non-stream response
                     const data = await response.text();
                     try {
                         const json = JSON.parse(data);
+                        // Report token usage for non-streaming responses
+                        if (json.usage) {
+                            reportUsage({
+                                tokensInput: json.usage.input_tokens || 0,
+                                tokensOutput: json.usage.output_tokens || 0,
+                                model,
+                            }).catch(() => {}); // fire-and-forget
+                        }
                         res.json(json);
                     } catch {
                         res.send(data);
@@ -364,7 +382,19 @@ export function createAnthropicProxy(config: AnthropicProxyConfig): AnthropicPro
         res.json({ status: 'ok', proxy: 'anthropic' });
     });
 
-    return { router, tokenProvider, deploymentCatalog };
+    const updateConfig = (newConfig: AnthropicProxyConfig): void => {
+        aiCoreConfig.clientId = newConfig.clientId;
+        aiCoreConfig.clientSecret = newConfig.clientSecret;
+        aiCoreConfig.authUrl = newConfig.authUrl;
+        aiCoreConfig.baseUrl = newConfig.baseUrl;
+        aiCoreConfig.resourceGroup = newConfig.resourceGroup || 'default';
+        aiCoreConfig.requestTimeoutMs = newConfig.requestTimeoutMs || 120000;
+        tokenProvider.updateConfig(aiCoreConfig);
+        deploymentCatalog.updateConfig(aiCoreConfig);
+        console.log('[AnthropicProxy] Config updated, baseUrl:', aiCoreConfig.baseUrl);
+    };
+
+    return { router, tokenProvider, deploymentCatalog, updateConfig };
 }
 
 export { AccessTokenProvider } from './access-token-provider.js';
