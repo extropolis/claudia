@@ -25,7 +25,7 @@ setInterval(() => {
 }, 2000);
 
 
-const { server, taskSpawner, gracefulShutdown } = createApp();
+const { server, taskSpawner, gracefulShutdown } = await createApp();
 
 console.log(`[Index] Starting server on port ${PORT}...`);
 let httpServer: ReturnType<typeof server.listen> | undefined;

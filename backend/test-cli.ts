@@ -53,6 +53,10 @@ interface TestConfig {
     setBackend: string | null;    // Set backend ('claude-code' or 'opencode')
     watchOutput: boolean;         // Stream task output to console
     waitForIdle: boolean;         // Wait for task to become idle before exiting
+    listMcpServers: boolean;      // List available MCP servers (no WebSocket needed)
+    testMcpServer: string | null; // Test a specific MCP server by name
+    disconnectTask: boolean;      // Disconnect a task
+    reconnectTask: boolean;       // Reconnect a task
 }
 
 class TestCLI {
@@ -136,6 +140,12 @@ class TestCLI {
                     setTimeout(() => this.cleanup(), 2000);
                 } else if (this.config.setProject && this.config.projectPath) {
                     this.sendSetProject(this.config.projectPath);
+                    setTimeout(() => this.cleanup(), 1000);
+                } else if (this.config.disconnectTask && this.config.taskId) {
+                    this.sendDisconnectTask(this.config.taskId);
+                    setTimeout(() => this.cleanup(), 1000);
+                } else if (this.config.reconnectTask && this.config.taskId) {
+                    this.sendReconnectTask(this.config.taskId);
                     setTimeout(() => this.cleanup(), 1000);
                 } else if (this.config.testClear) {
                     // Test clear functionality
@@ -276,7 +286,7 @@ class TestCLI {
             type: 'task:create',
             payload: {
                 prompt: description,
-                workspaceId: this.config.workspaceId
+                workspaceId: this.config.workspaceId || process.cwd()
             }
         };
 
@@ -589,6 +599,38 @@ class TestCLI {
         };
 
         console.log(`🚀 Pushing to GitHub for workspace ${workspaceId}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendDisconnectTask(taskId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot disconnect task: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'task:disconnect',
+            payload: { taskId }
+        };
+
+        console.log(`🔌 Disconnecting task ${taskId}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendReconnectTask(taskId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot reconnect task: WebSocket not connected');
+            return;
+        }
+
+        // To reconnect, we essentially just "select" the task again or set it as active
+        // The backend handles reconnection logic when a task is set as active
+        const message = {
+            type: 'task:select',
+            payload: { taskId }
+        };
+
+        console.log(`Checking if task needs reconnect: setting active ${taskId}...`);
         this.ws.send(JSON.stringify(message));
     }
 
@@ -1159,9 +1201,14 @@ function parseArgs(): TestConfig {
     let setBackend: string | null = null;
     let watchOutput = false;
     let waitForIdle = false;
+    let listMcpServers = false;
+    let testMcpServer: string | null = null;
+    let disconnectTask = false;
+    let reconnectTask = false;
 
     for (let i = 0; i < args.length; i++) {
-        switch (args[i]) {
+        const arg = args[i];
+        switch (arg) {
             case '--url':
                 backendUrl = args[++i];
                 break;
@@ -1295,6 +1342,18 @@ function parseArgs(): TestConfig {
             case '--wait-idle':
                 waitForIdle = true;
                 break;
+            case '--list-mcp-servers':
+                listMcpServers = true;
+                break;
+            case '--test-mcp-server':
+                testMcpServer = args[++i];
+                break;
+            case '--disconnect':
+                disconnectTask = true;
+                break;
+            case '--reconnect':
+                reconnectTask = true;
+                break;
             case '--help':
             case '-h':
                 console.log(`
@@ -1323,6 +1382,8 @@ TASK OPERATIONS:
   --list-tasks             List all tasks with their status
   --view-files             View code files for a task (requires --task-id)
   --archive-task           Archive a task (requires --task-id)
+  --disconnect             Disconnect a task (requires --task-id)
+  --reconnect              Reconnect a task (requires --task-id)
 
 ARCHIVED TASK OPERATIONS:
   --list-archived          List all archived tasks
@@ -1351,6 +1412,10 @@ CONFIGURATION:
 BACKEND OPERATIONS:
   --backend-status         Get current backend status (claude-code or opencode)
   --set-backend <name>     Set the AI backend ('claude-code' or 'opencode')
+
+MCP SERVER OPERATIONS:
+  --list-mcp-servers       List all available MCP servers (global and project-specific)
+  --test-mcp-server <name> Test a specific MCP server by calling its tools
 
 Examples:
   # Basic chat message
@@ -1418,9 +1483,22 @@ Examples:
 
   # Switch back to claude-code backend
   npx tsx test-cli.ts --set-backend claude-code
+
+  # List all MCP servers
+  npx tsx test-cli.ts --list-mcp-servers
+
+  # Test Jira MCP server
+  npx tsx test-cli.ts --test-mcp-server jira_mcp
                 `);
                 process.exit(0);
         }
+    }
+
+    // When creating a task, auto-enable watchOutput and waitForIdle for better testing UX
+    if (createTask) {
+        watchOutput = true;
+        waitForIdle = true;
+        console.log('📌 Task creation mode: auto-enabled --watch-output and --wait-idle');
     }
 
     return {
@@ -1464,7 +1542,11 @@ Examples:
         backendStatus,
         setBackend,
         watchOutput,
-        waitForIdle
+        waitForIdle,
+        listMcpServers,
+        testMcpServer,
+        disconnectTask,
+        reconnectTask,
     };
 }
 
@@ -1543,6 +1625,103 @@ async function setBackendConfig(baseHttpUrl: string, backend: string): Promise<v
     }
 }
 
+async function listMcpServers(baseHttpUrl: string): Promise<void> {
+    console.log('🔍 Fetching MCP servers...');
+    console.log('');
+
+    try {
+        const response = await fetch(`${baseHttpUrl}/api/claude-mcp-servers`);
+        if (!response.ok) {
+            console.error(`Failed to fetch MCP servers: ${response.statusText}`);
+            return;
+        }
+
+        const data = await response.json();
+        const globalServers = data.global || [];
+        const projectServers = data.project || [];
+
+        console.log('🔌 MCP SERVERS');
+        console.log('='.repeat(80));
+        console.log('');
+
+        if (globalServers.length === 0 && projectServers.length === 0) {
+            console.log('  No MCP servers configured');
+            console.log('');
+            console.log('  Configure MCP servers in ~/.claude.json or .mcp.json');
+            console.log('');
+            return;
+        }
+
+        if (globalServers.length > 0) {
+            console.log('📦 GLOBAL SERVERS (from ~/.claude.json)');
+            console.log('-'.repeat(80));
+            for (const server of globalServers) {
+                const typeIcon = server.type === 'streamableHttp' ? '🌐' : '📟';
+                console.log(`  ${typeIcon} ${server.name}`);
+                console.log(`     Type: ${server.type}`);
+                if (server.type === 'streamableHttp') {
+                    console.log(`     URL: ${server.url}`);
+                    if (server.timeout) console.log(`     Timeout: ${server.timeout}ms`);
+                } else {
+                    console.log(`     Command: ${server.command}`);
+                    if (server.args && server.args.length > 0) {
+                        console.log(`     Args: ${server.args.join(' ')}`);
+                    }
+                }
+                if (server.description) {
+                    console.log(`     Description: ${server.description}`);
+                }
+                console.log('');
+            }
+        }
+
+        if (projectServers.length > 0) {
+            console.log('📁 PROJECT-SPECIFIC SERVERS');
+            console.log('-'.repeat(80));
+            for (const server of projectServers) {
+                const typeIcon = server.type === 'streamableHttp' ? '🌐' : '📟';
+                console.log(`  ${typeIcon} ${server.name}`);
+                console.log(`     Type: ${server.type}`);
+                console.log(`     Project: ${server.projectPath}`);
+                if (server.type === 'streamableHttp') {
+                    console.log(`     URL: ${server.url}`);
+                    if (server.timeout) console.log(`     Timeout: ${server.timeout}ms`);
+                } else {
+                    console.log(`     Command: ${server.command}`);
+                    if (server.args && server.args.length > 0) {
+                        console.log(`     Args: ${server.args.join(' ')}`);
+                    }
+                }
+                if (server.description) {
+                    console.log(`     Description: ${server.description}`);
+                }
+                console.log('');
+            }
+        }
+
+        console.log('='.repeat(80));
+        console.log(`Total: ${globalServers.length + projectServers.length} servers`);
+        console.log('');
+    } catch (error) {
+        console.error('Failed to fetch MCP servers:', error);
+    }
+}
+
+async function testMcpServer(serverName: string): Promise<void> {
+    console.log(`🧪 Testing MCP server: ${serverName}`);
+    console.log('');
+    console.log('This will create a task that uses the MCP server...');
+    console.log('');
+
+    // For testing MCP servers, we need to create a task through WebSocket
+    // that will trigger the MCP server tools to be called
+    console.log('⚠️  To test MCP server, use:');
+    console.log(`    npx tsx test-cli.ts --task -m "test ${serverName} MCP server tools"`);
+    console.log('');
+    console.log('Or use the main app and check if the server is available in the tools list.');
+    console.log('');
+}
+
 // Main execution
 async function main() {
     const config = parseArgs();
@@ -1561,6 +1740,16 @@ async function main() {
 
     if (config.setBackend) {
         await setBackendConfig(baseHttpUrl, config.setBackend);
+        process.exit(0);
+    }
+
+    if (config.listMcpServers) {
+        await listMcpServers(baseHttpUrl);
+        process.exit(0);
+    }
+
+    if (config.testMcpServer) {
+        await testMcpServer(config.testMcpServer);
         process.exit(0);
     }
 

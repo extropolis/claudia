@@ -91,6 +91,7 @@ interface InternalTask extends Task {
     shouldContinue?: boolean; // True if this is a reconnected task that should auto-continue
     continuationSent?: boolean; // True if continuation prompt has been sent
     consecutiveOutputChanges?: number; // Count of consecutive polls with output changes (for idle→busy debouncing)
+    inactiveOutputLogged?: boolean; // True if we've already logged the "dropping output" message for this inactive state
 }
 
 /**
@@ -266,6 +267,100 @@ export class TaskSpawner extends EventEmitter {
         }).catch(err => {
             logger.error('Failed to initialize backend', { type: this.backendType, error: err });
         });
+    }
+
+    /**
+     * Build the MCP config object from the current config store settings.
+     * Returns null if no enabled MCP servers are found.
+     */
+    private buildMcpConfig(): { mcpConfig: Record<string, Record<string, unknown>>; enabledMcpServers: { name: string }[] } | null {
+        const mcpServers = this.configStore?.getMCPServers() || [];
+        const enabledMcpServers = mcpServers.filter(s => s.enabled);
+        if (enabledMcpServers.length === 0) return null;
+
+        const mcpConfig: Record<string, Record<string, unknown>> = {};
+        for (const server of enabledMcpServers) {
+            const serverType = server.type || 'stdio';
+
+            if (serverType === 'streamableHttp' || serverType === 'http') {
+                const config: Record<string, unknown> = {
+                    type: 'http',
+                    url: server.url
+                };
+                if (server.timeout !== undefined) config.timeout = server.timeout;
+                if (server.autoApprove && server.autoApprove.length > 0) config.autoApprove = server.autoApprove;
+                if (server.description) config.description = server.description;
+                if (server.headers) config.headers = server.headers;
+                mcpConfig[server.name] = config;
+            } else {
+                const config: Record<string, unknown> = {
+                    command: server.command,
+                    args: server.args
+                };
+                if (server.env && Object.keys(server.env).length > 0) config.env = server.env;
+                if (server.description) config.description = server.description;
+                mcpConfig[server.name] = config;
+            }
+        }
+
+        return { mcpConfig, enabledMcpServers };
+    }
+
+    /**
+     * Sync MCP config files (.mcp.json and .claude/settings.local.json) to workspace directories.
+     * Call this on server startup and when MCP config is updated to prevent stale files.
+     * @param workspaceIds - List of workspace directory paths to sync. All must exist on disk.
+     */
+    syncWorkspaceMcpConfigs(workspaceIds: string[]): void {
+        const result = this.buildMcpConfig();
+        if (!result) {
+            logger.info('No enabled MCP servers, skipping workspace sync');
+            return;
+        }
+
+        const { mcpConfig, enabledMcpServers } = result;
+        const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
+        const serverNames = enabledMcpServers.map(s => s.name);
+
+        const settingsContent = {
+            permissions: {
+                allow: ['mcp__*'],
+                deny: []
+            },
+            enableAllProjectMcpServers: true,
+            enabledMcpjsonServers: serverNames
+        };
+
+        for (const workspaceId of workspaceIds) {
+            if (!existsSync(workspaceId)) {
+                logger.warn('Workspace does not exist, skipping MCP sync', { workspaceId });
+                continue;
+            }
+
+            // Write .mcp.json
+            const workspaceMcpFile = `${workspaceId}/.mcp.json`;
+            try {
+                writeFileSync(workspaceMcpFile, mcpConfigJson);
+                logger.info('Synced .mcp.json', { workspaceId });
+            } catch (err) {
+                logger.error('Failed to write .mcp.json', { workspaceId, error: err });
+            }
+
+            // Write .claude/settings.local.json
+            const claudeSettingsDir = `${workspaceId}/.claude`;
+            const claudeSettingsFile = `${claudeSettingsDir}/settings.local.json`;
+            try {
+                if (!existsSync(claudeSettingsDir)) {
+                    mkdirSync(claudeSettingsDir, { recursive: true });
+                }
+                writeFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
+                logger.info('Synced settings.local.json', { workspaceId });
+            } catch (err) {
+                logger.error('Failed to write settings.local.json', { workspaceId, error: err });
+            }
+        }
+
+        logger.info(`Synced MCP config to ${workspaceIds.length} workspace(s)`, { servers: serverNames });
     }
 
     /**
@@ -862,6 +957,41 @@ export class TaskSpawner extends EventEmitter {
         this.pendingSessionCapture.delete(taskId);
     }
 
+    /**
+     * Filter out the Claude Code auth conflict warning from PTY output.
+     * This warning appears when ANTHROPIC_API_KEY is set alongside a claude.ai login token,
+     * which is expected in SAP AI Core proxy mode (we set a dummy API key).
+     */
+    private filterAuthConflictWarning(data: string): string {
+        const cleanData = this.stripAnsi(data);
+
+        const warningPhrases = [
+            'Auth conflict',
+            'Both a token (claude.ai) and an API key (ANTHROPIC_API_KEY) are set',
+            'Both a token',
+            'CLAUDE_CODE_OAUTH_TOKEN',
+            'ANTHROPIC_AUTH_TOKEN',
+            'This may lead to unexpected behavior',
+            'Trying to use claude.ai? Unset the ANTHROPIC_API_KEY',
+            'Trying to use ANTHROPIC_API_KEY?',
+            'Trying to use ANTHROPIC_AUTH_TOKEN?',
+            'sign out of claude.ai',
+        ];
+
+        for (const phrase of warningPhrases) {
+            if (cleanData.includes(phrase)) {
+                const lines = data.split(/(\r?\n)/);
+                const filteredLines = lines.filter(line => {
+                    const cleanLine = this.stripAnsi(line);
+                    return !warningPhrases.some(p => cleanLine.includes(p));
+                });
+                return filteredLines.join('');
+            }
+        }
+
+        return data;
+    }
+
     private stripAnsi(str: string): string {
         return str
             .replace(/\x1b\[[0-9;]*m/g, '')
@@ -889,6 +1019,9 @@ export class TaskSpawner extends EventEmitter {
     private getTaskEnvironment(): { [key: string]: string } {
         const taskEnv = { ...process.env } as { [key: string]: string };
 
+        // Remove CLAUDECODE env var to prevent "nested session" detection in Claude Code CLI
+        delete taskEnv['CLAUDECODE'];
+
         if (!this.configStore) return taskEnv;
 
         const apiMode = this.configStore.getApiMode();
@@ -900,6 +1033,32 @@ export class TaskSpawner extends EventEmitter {
                 taskEnv['ANTHROPIC_API_KEY'] = apiKey;
                 console.log(`[TaskSpawner] Using custom Anthropic API key`);
             }
+        } else if (apiMode === 'hyperspace-proxy') {
+            // Hyperspace AI Proxy (HAI) mode
+            // Route through Claudia's backend proxy (like SAP AI Core) so we can
+            // transform responses to inject the correct model information
+            const backendPort = process.env.PORT || PORTS.BACKEND;
+            taskEnv['ANTHROPIC_BASE_URL'] = `http://localhost:${backendPort}/hyperspace`;
+            // Set a dummy API key - the proxy will handle the actual authentication
+            taskEnv['ANTHROPIC_API_KEY'] = 'sk-ant-dummy-hyperspace-proxy';
+
+            // Set the configured model for ALL tiers to prevent Claude Code from
+            // sending requests with default Anthropic model names (which the
+            // Hyperspace proxy won't recognize, causing errors/retries/rate limiting)
+            const hyperspaceConfig = this.configStore.getHyperspaceProxy();
+            if (hyperspaceConfig?.model) {
+                taskEnv['ANTHROPIC_MODEL'] = hyperspaceConfig.model;
+                taskEnv['ANTHROPIC_DEFAULT_SONNET_MODEL'] = hyperspaceConfig.model;
+                taskEnv['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = hyperspaceConfig.model;
+                taskEnv['ANTHROPIC_DEFAULT_OPUS_MODEL'] = hyperspaceConfig.model;
+                console.log(`[TaskSpawner] Set Hyperspace model env vars to: ${hyperspaceConfig.model}`);
+                console.log(`[TaskSpawner] ANTHROPIC_MODEL=${taskEnv['ANTHROPIC_MODEL']}`);
+                console.log(`[TaskSpawner] ANTHROPIC_DEFAULT_SONNET_MODEL=${taskEnv['ANTHROPIC_DEFAULT_SONNET_MODEL']}`);
+                console.log(`[TaskSpawner] ANTHROPIC_DEFAULT_HAIKU_MODEL=${taskEnv['ANTHROPIC_DEFAULT_HAIKU_MODEL']}`);
+                console.log(`[TaskSpawner] ANTHROPIC_DEFAULT_OPUS_MODEL=${taskEnv['ANTHROPIC_DEFAULT_OPUS_MODEL']}`);
+            }
+
+            console.log(`[TaskSpawner] Using Hyperspace AI Proxy through backend at localhost:${backendPort}/hyperspace, model: ${hyperspaceConfig?.model || 'default'}`);
         } else if (apiMode === 'sap-ai-core') {
             let credentials = this.configStore.getAICoreCredentials();
 
@@ -1435,116 +1594,59 @@ export class TaskSpawner extends EventEmitter {
             logger.info(`Using custom system prompt`);
         }
 
+        // Add model selection for SAP AI Core mode
+        const apiMode = this.configStore?.getApiMode();
+        if (apiMode === 'sap-ai-core') {
+            const sapAiCoreModel = this.configStore?.getSapAiCoreModel() ?? 'anthropic--claude-4.5-opus';
+            // Map SAP AI Core internal model name to Anthropic API model name for Claude Code
+            const sapToAnthropicMap: Record<string, string> = {
+                'anthropic--claude-4.5-opus': 'claude-4-5-opus',
+                'anthropic--claude-opus-4': 'claude-opus-4-20250514',
+                'anthropic--claude-sonnet-4': 'claude-sonnet-4-20250514',
+                'anthropic--claude-4.5-sonnet': 'claude-sonnet-4-5-20250929',
+                'anthropic--claude-3.7-sonnet': 'claude-3-7-sonnet-20250219',
+                'anthropic--claude-3.5-sonnet': 'claude-3-5-sonnet-latest',
+                'anthropic--claude-3.5-haiku': 'claude-3-5-haiku-20241022',
+                'anthropic--claude-3-opus': 'claude-3-opus-20240229',
+            };
+            const model = sapToAnthropicMap[sapAiCoreModel] || sapAiCoreModel;
+            claudeArgs.push('--model', model);
+            logger.info(`Using SAP AI Core model`, { sapModel: sapAiCoreModel, anthropicModel: model });
+        } else if (apiMode === 'hyperspace-proxy') {
+            // Get the model from Hyperspace proxy config
+            const hyperspaceConfig = this.configStore?.getHyperspaceProxy();
+            if (hyperspaceConfig?.model) {
+                // Pass the HAI-format model name directly — the Hyperspace proxy
+                // expects HAI format (e.g., 'anthropic--claude-4.5-opus'), not
+                // Anthropic API format (e.g., 'claude-4-5-opus').
+                claudeArgs.push('--model', hyperspaceConfig.model);
+                logger.info(`Using Hyperspace proxy model`, { model: hyperspaceConfig.model });
+            }
+        }
+
         // Add MCP server configurations
         // IMPORTANT: Claude doesn't automatically load MCP servers from ~/.claude.json in non-interactive mode
         // We must explicitly pass --mcp-config to load MCP servers
-        const mcpServers = this.configStore?.getMCPServers() || [];
-        console.log(`[TaskSpawner] MCP servers from config:`, JSON.stringify(mcpServers, null, 2));
-        const enabledMcpServers = mcpServers.filter(s => s.enabled);
-        console.log(`[TaskSpawner] Enabled MCP servers: ${enabledMcpServers.length}`);
-        if (enabledMcpServers.length > 0) {
-            // Convert to the format expected by claude --mcp-config
-            // Format: { "mcpServers": { "name": { ... } } }
-            // stdio: { "command": "...", "args": [...], "env": {...} }
-            // streamableHttp: { "type": "streamableHttp", "url": "...", "timeout": ..., "autoApprove": [...] }
-            const mcpConfig: Record<string, Record<string, unknown>> = {};
-            for (const server of enabledMcpServers) {
-                const serverType = server.type || 'stdio';
-
-                if (serverType === 'streamableHttp' || serverType === 'http') {
-                    // HTTP-based MCP server
-                    const config: Record<string, unknown> = {
-                        type: 'http',
-                        url: server.url
-                    };
-                    if (server.timeout !== undefined) {
-                        config.timeout = server.timeout;
-                    }
-                    if (server.autoApprove && server.autoApprove.length > 0) {
-                        config.autoApprove = server.autoApprove;
-                    }
-                    if (server.description) {
-                        config.description = server.description;
-                    }
-                    if (server.headers) {
-                        config.headers = server.headers;
-                    }
-                    mcpConfig[server.name] = config;
-                    console.log(`[TaskSpawner] Added HTTP MCP server: ${server.name} -> ${server.url}`);
-                } else {
-                    // stdio-based MCP server (default)
-                    const config: Record<string, unknown> = {
-                        command: server.command,
-                        args: server.args
-                    };
-                    // Only include env if it has values
-                    if (server.env && Object.keys(server.env).length > 0) {
-                        config.env = server.env;
-                    }
-                    if (server.description) {
-                        config.description = server.description;
-                    }
-                    mcpConfig[server.name] = config;
-                    console.log(`[TaskSpawner] Added stdio MCP server: ${server.name} -> ${server.command}`);
-                }
-            }
-            // Write MCP config - we use BOTH approaches for compatibility:
-            // 1. --mcp-config flag (works in -p mode)
-            // 2. .mcp.json in workspace (works in interactive mode)
+        const mcpResult = this.buildMcpConfig();
+        if (mcpResult) {
+            const { mcpConfig, enabledMcpServers } = mcpResult;
             const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
 
             // Write to temp file for --mcp-config
             const mcpConfigFile = `/tmp/claudia-mcp-${id}.json`;
             writeFileSync(mcpConfigFile, mcpConfigJson);
-            console.log(`[TaskSpawner] MCP config written to: ${mcpConfigFile}`);
-            console.log(`[TaskSpawner] MCP config contents: ${mcpConfigJson}`);
+            logger.info(`MCP config written to: ${mcpConfigFile}`);
+            logger.debug(`MCP config contents: ${mcpConfigJson}`);
             claudeArgs.push('--mcp-config', mcpConfigFile);
 
             // Also write .mcp.json and .claude/settings.local.json to workspace for interactive mode
             // This is a workaround for Claude Code bug where --mcp-config doesn't work in interactive mode
             // See: https://github.com/anthropics/claude-code/issues/22404
-            // And: https://github.com/anthropics/claude-code/issues/9189
-            console.log(`[TaskSpawner] DEBUG: About to write workspace files. workspaceId="${workspaceId}", exists=${existsSync(workspaceId)}`);
-            if (workspaceId && existsSync(workspaceId)) {
-                // Write .mcp.json - project-scoped MCP servers
-                const workspaceMcpFile = `${workspaceId}/.mcp.json`;
-                console.log(`[TaskSpawner] DEBUG: Writing to ${workspaceMcpFile}`);
-                try {
-                    writeFileSync(workspaceMcpFile, mcpConfigJson);
-                    console.log(`[TaskSpawner] Wrote MCP config to: ${workspaceMcpFile}`);
-                } catch (err) {
-                    console.error(`[TaskSpawner] Failed to write .mcp.json: ${err}`);
-                }
-
-                // Write .claude/settings.local.json to enable project MCP servers and auto-approve them
-                // This is required because project-scoped MCP servers don't trigger approval prompt
-                const claudeSettingsDir = `${workspaceId}/.claude`;
-                const claudeSettingsFile = `${claudeSettingsDir}/settings.local.json`;
-                const serverNames = enabledMcpServers.map(s => s.name);
-                const settingsContent = {
-                    permissions: {
-                        allow: ['mcp__*'],  // Allow all MCP tools
-                        deny: []
-                    },
-                    enableAllProjectMcpServers: true,
-                    enabledMcpjsonServers: serverNames
-                };
-                try {
-                    if (!existsSync(claudeSettingsDir)) {
-                        mkdirSync(claudeSettingsDir, { recursive: true });
-                    }
-                    writeFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
-                    console.log(`[TaskSpawner] Wrote Claude settings to: ${claudeSettingsFile}`);
-                } catch (err) {
-                    console.error(`[TaskSpawner] Failed to write settings.local.json: ${err}`);
-                }
-            } else {
-                console.log(`[TaskSpawner] Skipping workspace MCP files - workspaceId not valid`);
-            }
+            this.syncWorkspaceMcpConfigs([workspaceId]);
 
             logger.info(`Added ${enabledMcpServers.length} MCP server(s)`, { servers: enabledMcpServers.map(s => s.name) });
         } else {
-            console.log(`[TaskSpawner] WARNING: No enabled MCP servers found!`);
+            logger.warn('No enabled MCP servers found!');
         }
 
         // Explicitly allow all MCP tools to avoid deferred loading issues
@@ -1609,7 +1711,17 @@ export class TaskSpawner extends EventEmitter {
     }
 
     private setupProcessHandlers(task: InternalTask): void {
-        task.process.onData((data: string) => {
+        console.log(`[TaskSpawner] setupProcessHandlers: Setting up onData for task ${task.id}, pid=${task.process.pid}`);
+
+        task.process.onData((rawData: string) => {
+            // Filter out auth conflict warning (appears when ANTHROPIC_API_KEY + claude.ai token coexist)
+            const data = this.filterAuthConflictWarning(rawData);
+            if (!data) return;
+
+            if (process.env.DEBUG_PTY === 'true') { // Force verbose for debug
+                console.log(`[TaskSpawner] PTY Output from ${task.id} (PID ${task.process.pid}): ${JSON.stringify(data.substring(0, 50))}`);
+            }
+
             const buffer = Buffer.from(data, 'utf8');
             task.outputHistory.push(buffer);
 
@@ -1649,6 +1761,14 @@ export class TaskSpawner extends EventEmitter {
             // Stream output to active task
             if (task.isActive) {
                 this.emit('taskOutput', task.id, data);
+                // Reset the flag when task becomes active again
+                task.inactiveOutputLogged = false;
+            } else {
+                // Only log once per inactive period to avoid log spam
+                if (!task.inactiveOutputLogged) {
+                    console.log(`[TaskSpawner] Output received for ${task.id} but isActive=false, dropping output (subsequent drops will be silent)`);
+                    task.inactiveOutputLogged = true;
+                }
             }
         });
 
@@ -1781,22 +1901,44 @@ export class TaskSpawner extends EventEmitter {
         if (active) {
             // Clear decoded history from all other tasks to free memory
             // This prevents memory buildup when rapidly switching between tasks
+            // Use a longer delay (30 seconds) to avoid clearing history for tasks the user is actively working with
+            setTimeout(() => {
+                for (const task of this.tasks.values()) {
+                    // Only clear if task is still inactive AND hasn't been recently active
+                    // This prevents clearing history for tasks you're switching between
+                    const timeSinceLastActivity = Date.now() - task.lastActivity.getTime();
+                    const isRecentlyActive = timeSinceLastActivity < 60000; // 60 seconds
+
+                    if (task.id !== taskId && !task.isActive && !isRecentlyActive && task.previousHistory) {
+                        task.previousHistory = undefined;
+                        // Also clear lazyHistoryBase64 if it exists (legacy)
+                        task.lazyHistoryBase64 = undefined;
+                        console.log(`[TaskSpawner] Freed memory for inactive task ${task.id} (last active ${Math.round(timeSinceLastActivity / 1000)}s ago)`);
+                    }
+                }
+            }, 30000); // 30 second delay - long enough for active task switching
+
+            // Mark all other tasks as inactive immediately (don't wait for the timeout)
             for (const task of this.tasks.values()) {
-                task.isActive = false;
-                // If this task has decoded history but isn't the one being activated,
-                // clear it to free memory. We can reload from disk later.
-                if (task.id !== taskId && task.previousHistory) {
-                    task.previousHistory = undefined;
-                    // Also clear lazyHistoryBase64 if it exists (legacy)
-                    task.lazyHistoryBase64 = undefined;
-                    console.log(`[TaskSpawner] Freed memory for inactive task ${task.id}`);
+                if (task.id !== taskId) {
+                    task.isActive = false;
                 }
             }
         }
 
+        console.log(`[TaskSpawner] setTaskActive called: taskId=${taskId}, active=${active}, inTasks=${this.tasks.has(taskId)}, inDisconnected=${this.disconnectedTasks.has(taskId)}`);
         if (active && this.disconnectedTasks.has(taskId)) {
             console.log(`[TaskSpawner] Auto-reconnecting task ${taskId}`);
-            const reconnectedTask = this.reconnectTask(taskId);
+            let reconnectedTask: Task | null = null;
+            try {
+                reconnectedTask = this.reconnectTask(taskId);
+            } catch (error) {
+                logger.error('Failed to reconnect task during activation', {
+                    taskId,
+                    error: error instanceof Error ? error.message : String(error)
+                });
+                return;
+            }
             if (reconnectedTask) {
                 const task = this.tasks.get(taskId);
                 if (task) {
@@ -1811,8 +1953,10 @@ export class TaskSpawner extends EventEmitter {
         }
 
         const task = this.tasks.get(taskId);
+        console.log(`[TaskSpawner] setTaskActive: taskId=${taskId}, active=${active}, taskFound=${!!task}, currentIsActive=${task?.isActive}, ptyPid=${task?.process?.pid}`);
         if (task) {
             task.isActive = active;
+            console.log(`[TaskSpawner] Set task.isActive to ${active} for ${taskId}`);
 
             if (active) {
                 // Notify backend if using OpenCode
@@ -2038,15 +2182,42 @@ export class TaskSpawner extends EventEmitter {
     }
 
     writeToTask(taskId: string, data: string): void {
-        const task = this.tasks.get(taskId);
-        if (!task) return;
+        let task = this.tasks.get(taskId);
+        console.log(`[TaskSpawner] writeToTask: taskId=${taskId}, taskFound=${!!task}, ptyPid=${task?.process?.pid}, isActive=${task?.isActive}`);
+
+        // If task not found in active tasks, check if it's disconnected and needs reconnecting
+        if (!task) {
+            if (this.disconnectedTasks.has(taskId)) {
+                console.log(`[TaskSpawner] Task ${taskId} is disconnected, auto-reconnecting before write`);
+                console.log(`[TaskSpawner] Input length: ${data.length}, Data preview: ${JSON.stringify(data.substring(0, 50))}`);
+                const reconnectedTask = this.reconnectTask(taskId);
+                if (reconnectedTask) {
+                    task = this.tasks.get(taskId);
+                    if (task) {
+                        task.isActive = true;
+                        this.emit('tasksUpdated');
+                        // Give the PTY a moment to initialize before writing
+                        setTimeout(() => this.writeToTask(taskId, data), 500);
+                        return;
+                    }
+                }
+                console.log(`[TaskSpawner] Failed to reconnect task ${taskId} for write`);
+            } else {
+                console.log(`[TaskSpawner] Cannot write to task ${taskId}: task not found`);
+            }
+            return;
+        }
 
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
         if (taskBackend === 'opencode' && this.backend) {
+            console.log(`[TaskSpawner] Writing to OpenCode backend for task ${taskId}`);
             this.backend.sendInput(taskId, data);
             return;
         }
+
+        console.log(`[TaskSpawner] Writing to Claude Code PTY for task ${taskId} (PID: ${task.process.pid})`);
+        console.log(`[TaskSpawner] Data to write: ${JSON.stringify(data)}`);
 
         // Claude Code PTY-based input handling
         // Check if this is a message with Enter at the end (from input bar)
@@ -2072,16 +2243,38 @@ export class TaskSpawner extends EventEmitter {
 
     resizeTask(taskId: string, cols: number, rows: number): void {
         const task = this.tasks.get(taskId);
-        if (!task) return;
+        if (!task) {
+            // Silently ignore resize for disconnected tasks (will reconnect on select)
+            return;
+        }
 
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
         if (taskBackend === 'opencode' && this.backend) {
-            this.backend.resizeTask(taskId, cols, rows);
+            try {
+                this.backend.resizeTask(taskId, cols, rows);
+            } catch (error) {
+                logger.warn('Ignoring backend resize failure', {
+                    taskId,
+                    cols,
+                    rows,
+                    error: error instanceof Error ? error.message : String(error)
+                });
+            }
             return;
         }
 
-        task.process.resize(cols, rows);
+        try {
+            task.process.resize(cols, rows);
+        } catch (error) {
+            // PTY can exit between task lookup and resize; ignore noisy race.
+            logger.warn('Ignoring PTY resize failure', {
+                taskId,
+                cols,
+                rows,
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
     }
 
     interruptTask(taskId: string): boolean {
@@ -2480,7 +2673,10 @@ export class TaskSpawner extends EventEmitter {
         // Determine which backend was used to create this task
         // Use persisted backendType, fallback to 'claude-code' for backwards compatibility
         const taskBackendType = persisted.backendType || 'claude-code';
+
         console.log(`[TaskSpawner] Reconnecting task ${taskId} using ${taskBackendType} backend`);
+        console.log(`[TaskSpawner] Persisted session ID: ${persisted.sessionId}`);
+
 
         // Get environment with API mode settings
         const taskEnv = this.getTaskEnvironment();
@@ -2501,6 +2697,7 @@ export class TaskSpawner extends EventEmitter {
                 this.scheduleSave();
             }
         }
+
 
         if (taskBackendType === 'opencode') {
             // Use OpenCode backend for reconnection
@@ -2532,27 +2729,42 @@ export class TaskSpawner extends EventEmitter {
                 claudeArgs.push('--dangerously-skip-permissions');
             }
 
+            // Add model selection based on API mode (same as createTask)
+            const apiMode = this.configStore?.getApiMode();
+            if (apiMode === 'sap-ai-core') {
+                const sapAiCoreModel = this.configStore?.getSapAiCoreModel() ?? 'anthropic--claude-4.5-opus';
+                const sapToAnthropicMap: Record<string, string> = {
+                    'anthropic--claude-4.5-opus': 'claude-4-5-opus',
+                    'anthropic--claude-opus-4': 'claude-opus-4-20250514',
+                    'anthropic--claude-sonnet-4': 'claude-sonnet-4-20250514',
+                    'anthropic--claude-4.5-sonnet': 'claude-sonnet-4-5-20250929',
+                    'anthropic--claude-3.7-sonnet': 'claude-3-7-sonnet-20250219',
+                    'anthropic--claude-3.5-sonnet': 'claude-3-5-sonnet-latest',
+                    'anthropic--claude-3.5-haiku': 'claude-3-5-haiku-20241022',
+                    'anthropic--claude-3-opus': 'claude-3-opus-20240229',
+                };
+                const model = sapToAnthropicMap[sapAiCoreModel] || sapAiCoreModel;
+                claudeArgs.push('--model', model);
+                console.log(`[TaskSpawner] Reconnect using SAP AI Core model`, { sapModel: sapAiCoreModel, anthropicModel: model });
+            } else if (apiMode === 'hyperspace-proxy') {
+                const hyperspaceConfig = this.configStore?.getHyperspaceProxy();
+                if (hyperspaceConfig?.model) {
+                    claudeArgs.push('--model', hyperspaceConfig.model);
+                    console.log(`[TaskSpawner] Reconnect using Hyperspace proxy model: ${hyperspaceConfig.model}`);
+                }
+            }
+
             // Explicitly allow all MCP tools to avoid deferred loading issues
             claudeArgs.push('--allowedTools', 'mcp__*');
 
             // Add MCP server configurations for reconnection
-            const mcpServers = this.configStore?.getMCPServers() || [];
-            const enabledMcpServers = mcpServers.filter(s => s.enabled);
-            if (enabledMcpServers.length > 0) {
-                const mcpConfig: Record<string, { command: string; args?: string[]; env?: Record<string, string> }> = {};
-                for (const server of enabledMcpServers) {
-                    mcpConfig[server.name] = {
-                        command: server.command,
-                        args: server.args,
-                        env: server.env
-                    };
-                }
-                // Write MCP config to a temp file for reconnection
-                const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
+            const mcpResult = this.buildMcpConfig();
+            if (mcpResult) {
+                const mcpConfigJson = JSON.stringify({ mcpServers: mcpResult.mcpConfig }, null, 2);
                 const mcpConfigFile = `/tmp/claudia-mcp-${taskId}-reconnect.json`;
                 writeFileSync(mcpConfigFile, mcpConfigJson);
                 claudeArgs.push('--mcp-config', mcpConfigFile);
-                console.log(`[TaskSpawner] Added ${enabledMcpServers.length} MCP server(s) for reconnection via ${mcpConfigFile}`);
+                console.log(`[TaskSpawner] Added ${mcpResult.enabledMcpServers.length} MCP server(s) for reconnection via ${mcpConfigFile}`);
             }
 
             if (sessionIdToUse) {
@@ -2572,37 +2784,26 @@ export class TaskSpawner extends EventEmitter {
         }
 
         console.log(`[TaskSpawner] Process spawned for task ${taskId}, PID: ${ptyProcess.pid}`);
+        console.log(`[TaskSpawner] PTY Details: cols=${ptyProcess.cols}, rows=${ptyProcess.rows}`);
+
 
         const now = new Date();
 
         // Use lazy loading for history to prevent memory exhaustion during startup
         // History will be loaded from file only when task is selected (setTaskActive)
         // Check if history file exists
-        let lazyHistoryBase64: string | undefined;
+        // Clear old history file on reconnect to prevent stale error output
+        // (e.g. from previous crashed reconnection attempts) from showing up
         try {
             const historyPath = this.getTaskHistoryPath(taskId);
             if (existsSync(historyPath)) {
-                // Just flag that we have history, don't read it yet!
-                // We'll read it "on demand" in getCombinedHistory or when needed
-                // For now, we set a placeholder to indicate history exists
-                // BUT wait: logic below expects lazyHistoryBase64 to BE the content.
-                // We need to change getCombinedHistory to read from file if this is a "file path" or special marker.
-                // Alternatively, read it here? NO, that defeats the purpose of avoiding 30MB load.
-                // WE MUST READ IT LAZILY.
-
-                // Let's modify getCombinedHistory to handle reading from file.
-                // For this refactor, we'll store a special marker or changed InternalTask interface? 
-                // Currently InternalTask has lazyHistoryBase64 as string. 
-                // Let's treat it as NULL here, and modify getCombinedHistory to check file.
-                lazyHistoryBase64 = undefined;
-                console.log(`[TaskSpawner] Task ${taskId} has history file (lazy load enabled)`);
-            } else if (persisted.outputHistory) {
-                // Fallback for tasks not yet migrated (should happen in loadPersistedTasks though)
-                lazyHistoryBase64 = persisted.outputHistory;
+                unlinkSync(historyPath);
+                console.log(`[TaskSpawner] Cleared old history file for ${taskId} on reconnect`);
             }
         } catch (e) {
-            console.error(`[TaskSpawner] Failed to check history file for ${taskId}:`, e);
+            console.error(`[TaskSpawner] Failed to clear history file for ${taskId}:`, e);
         }
+        const lazyHistoryBase64: string | undefined = undefined;
 
         // Create a separator message for the live output stream
         const resumeMessage = persisted.sessionId
@@ -2635,8 +2836,10 @@ export class TaskSpawner extends EventEmitter {
             continuationSent: false,
         };
 
+        console.log(`[TaskSpawner] reconnectTask: Setting up process handlers for ${task.id}, ptyPid=${ptyProcess.pid}`);
         this.setupProcessHandlers(task);
         this.tasks.set(task.id, task);
+        console.log(`[TaskSpawner] reconnectTask: Task ${task.id} added to tasks map`);
 
         this.disconnectedTasks.delete(taskId);
         this.scheduleSave();
@@ -2675,5 +2878,96 @@ export class TaskSpawner extends EventEmitter {
             this.saveDebounceTimer = null;
         }
         this.saveTasks();
+    }
+
+    /**
+     * Disconnect a task (simulate server restart or connection loss)
+     * Kills the process but keeps the task state as 'disconnected'
+     */
+    disconnectTask(taskId: string): boolean {
+        const task = this.tasks.get(taskId);
+        if (!task) {
+            // Already disconnected or doesn't exist?
+            if (this.disconnectedTasks.has(taskId)) return true;
+            return false;
+        }
+
+        console.log(`[TaskSpawner] Disconnecting task ${taskId} (simulating restart)`);
+
+        // Kill the process
+        try {
+            task.process.kill();
+        } catch (e) {
+            console.error(`[TaskSpawner] Failed to kill process for ${taskId}:`, e);
+        }
+
+        // Create persisted task entry
+        const persisted: PersistedTask = {
+            id: task.id,
+            prompt: task.prompt,
+            workspaceId: task.workspaceId,
+            createdAt: task.createdAt,
+            lastActivity: task.lastActivity,
+            lastState: task.state,
+            sessionId: task.sessionId,
+            // We don't save full history to memory here, it's already on disk/in memory
+            backendType: this.taskBackends.get(task.id) || 'claude-code',
+            outputHistory: undefined, // Will be lazy loaded
+            gitState: undefined,
+            systemPrompt: undefined,
+            wasInterrupted: true, // Mark as interrupted so it shows correct state on resume
+            shouldContinue: false,
+        };
+
+        this.disconnectedTasks.set(taskId, persisted);
+        this.tasks.delete(taskId);
+
+        this.scheduleSave();
+        this.emit('taskStateChanged', { ...this.toPublicTask(task), state: 'disconnected' });
+        this.emit('tasksUpdated');
+
+        return true;
+    }
+
+    /**
+     * Clear all tasks (active, disconnected, archived) and delete their data
+     */
+    clearAllTasks(): void {
+        console.log('[TaskSpawner] Clearing ALL tasks');
+
+        // 1. Kill all active tasks
+        for (const task of this.tasks.values()) {
+            try {
+                task.process.kill();
+            } catch (e) { }
+        }
+        this.tasks.clear();
+
+        // 2. Clear persisted maps
+        this.disconnectedTasks.clear();
+        this.archivedTasks.clear();
+
+        // 3. Delete tasks.json
+        try {
+            if (existsSync(this.statePath)) {
+                unlinkSync(this.statePath);
+            }
+        } catch (e) {
+            console.error('[TaskSpawner] Failed to delete tasks.json', e);
+        }
+
+        // 4. Delete all history files in task-histories
+        try {
+            if (existsSync(this.historyDir)) {
+                const files = readdirSync(this.historyDir);
+                for (const file of files) {
+                    unlinkSync(join(this.historyDir, file));
+                }
+            }
+        } catch (e) {
+            console.error('[TaskSpawner] Failed to clear history directory', e);
+        }
+
+        this.emit('tasksUpdated');
     }
 }

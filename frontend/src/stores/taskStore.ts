@@ -147,6 +147,7 @@ interface PersistedState {
     selectedTaskId: string | null;
     showArchivedTasks: boolean;
     expandedWorkspaces: string[];  // Stored as array, converted to Set
+    expandedWorkspacesInitialized: boolean;  // Track if user has interacted with workspaces
     voiceEnabled: boolean;
     autoSpeakResponses: boolean;
     selectedVoiceName: string | null;
@@ -328,6 +329,13 @@ export const useTaskStore = create<TaskStore>()(
             setWorkspaces: (workspaces) => {
                 const { expandedWorkspaces: currentExpanded, expandedWorkspacesInitialized, workspaces: existingWorkspaces } = get();
 
+                console.log('[TaskStore] setWorkspaces called:', {
+                    incomingCount: workspaces.length,
+                    currentExpandedCount: currentExpanded.size,
+                    expandedWorkspacesInitialized,
+                    currentExpanded: Array.from(currentExpanded)
+                });
+
                 // Deduplicate workspaces by id (keep first occurrence)
                 const seenIds = new Set<string>();
                 const uniqueWorkspaces = workspaces.filter(w => {
@@ -345,13 +353,16 @@ export const useTaskStore = create<TaskStore>()(
                 // Only expand all if this is the very first load (no persisted state was loaded)
                 // If user has persisted expanded state (even if all collapsed), respect it
                 if (!expandedWorkspacesInitialized) {
+                    console.log('[TaskStore] First load - expanding all workspaces');
                     // First time ever - expand all workspaces
                     uniqueWorkspaces.forEach(w => newExpanded.add(w.id));
                 } else {
+                    console.log('[TaskStore] Preserving existing expansion state');
                     // Add any NEW workspaces as expanded (ones not in existing list)
                     const existingWorkspaceIds = new Set(existingWorkspaces.map(w => w.id));
                     uniqueWorkspaces.forEach(w => {
                         if (!existingWorkspaceIds.has(w.id)) {
+                            console.log('[TaskStore] New workspace detected, expanding:', w.id);
                             // This is a newly added workspace, expand it
                             newExpanded.add(w.id);
                         }
@@ -364,6 +375,8 @@ export const useTaskStore = create<TaskStore>()(
                         newExpanded.delete(id);
                     }
                 }
+
+                console.log('[TaskStore] Final expanded workspaces:', Array.from(newExpanded));
                 set({ workspaces: uniqueWorkspaces, expandedWorkspaces: newExpanded, expandedWorkspacesInitialized: true });
             },
 
@@ -564,6 +577,7 @@ export const useTaskStore = create<TaskStore>()(
                 selectedTaskId: state.selectedTaskId,
                 showArchivedTasks: state.showArchivedTasks,
                 expandedWorkspaces: Array.from(state.expandedWorkspaces),
+                expandedWorkspacesInitialized: state.expandedWorkspacesInitialized,
                 voiceEnabled: state.voiceEnabled,
                 autoSpeakResponses: state.autoSpeakResponses,
                 selectedVoiceName: state.selectedVoiceName,
@@ -583,10 +597,15 @@ export const useTaskStore = create<TaskStore>()(
             // Merge persisted state with initial state, converting arrays back to Set/Map
             merge: (persistedState, currentState) => {
                 const persisted = persistedState as PersistedState | undefined;
-                if (!persisted) return currentState;
+                if (!persisted) {
+                    console.log('[TaskStore] No persisted state found, using defaults');
+                    return currentState;
+                }
 
-                // Mark as initialized if we have any persisted expanded state (even if empty array)
-                const hasPersistedExpandedState = persisted.expandedWorkspaces !== undefined;
+                console.log('[TaskStore] Merging persisted state:', {
+                    expandedWorkspaces: persisted.expandedWorkspaces,
+                    expandedWorkspacesInitialized: persisted.expandedWorkspacesInitialized
+                });
 
                 return {
                     ...currentState,
@@ -595,8 +614,9 @@ export const useTaskStore = create<TaskStore>()(
                     expandedWorkspaces: persisted.expandedWorkspaces
                         ? new Set(persisted.expandedWorkspaces)
                         : currentState.expandedWorkspaces,
-                    // If we have persisted expanded state, mark as initialized so we don't auto-expand all
-                    expandedWorkspacesInitialized: hasPersistedExpandedState,
+                    // Use persisted initialized flag, or mark as initialized if we have any persisted expanded state
+                    expandedWorkspacesInitialized: persisted.expandedWorkspacesInitialized ??
+                        (persisted.expandedWorkspaces !== undefined),
                     voiceEnabled: persisted.voiceEnabled ?? currentState.voiceEnabled,
                     autoSpeakResponses: persisted.autoSpeakResponses ?? currentState.autoSpeakResponses,
                     selectedVoiceName: persisted.selectedVoiceName ?? currentState.selectedVoiceName,

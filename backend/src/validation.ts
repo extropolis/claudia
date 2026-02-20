@@ -53,7 +53,7 @@ export interface ConfigUpdatePayload {
     autoFocusOnInput?: boolean;
     supervisorEnabled?: boolean;
     supervisorSystemPrompt?: string;
-    apiMode?: 'default' | 'custom-anthropic' | 'sap-ai-core';
+    apiMode?: 'default' | 'custom-anthropic' | 'sap-ai-core' | 'hyperspace-proxy';
     customAnthropicApiKey?: string;
     aiCoreCredentials?: {
         clientId?: string;
@@ -66,6 +66,12 @@ export interface ConfigUpdatePayload {
     sapAiCoreModel?: string;
     backend?: 'claude-code' | 'opencode';
     opencodePort?: number;
+    hyperspaceProxy?: {
+        proxyUrl?: string;
+        apiKey?: string;
+        model?: string;
+        alwaysThinkingEnabled?: boolean;
+    };
 }
 
 /**
@@ -191,7 +197,7 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
 
     // Validate apiMode (optional enum)
     if (payload.apiMode !== undefined) {
-        const validModes = ['default', 'custom-anthropic', 'sap-ai-core'];
+        const validModes = ['default', 'custom-anthropic', 'sap-ai-core', 'hyperspace-proxy'];
         if (!validModes.includes(payload.apiMode as string)) {
             return { valid: false, error: `apiMode must be one of: ${validModes.join(', ')}` };
         }
@@ -258,6 +264,43 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
             return { valid: false, error: `sapAiCoreModel must be one of: ${VALID_SAP_AI_CORE_MODELS.join(', ')}` };
         }
         result.sapAiCoreModel = payload.sapAiCoreModel;
+    }
+
+    // Validate hyperspaceProxy (optional object)
+    if (payload.hyperspaceProxy !== undefined) {
+        if (typeof payload.hyperspaceProxy !== 'object' || payload.hyperspaceProxy === null) {
+            return { valid: false, error: 'hyperspaceProxy must be an object' };
+        }
+        const proxy = payload.hyperspaceProxy as Record<string, unknown>;
+        result.hyperspaceProxy = {};
+
+        if (proxy.proxyUrl !== undefined) {
+            if (typeof proxy.proxyUrl !== 'string') {
+                return { valid: false, error: 'hyperspaceProxy.proxyUrl must be a string' };
+            }
+            result.hyperspaceProxy.proxyUrl = proxy.proxyUrl;
+        }
+
+        if (proxy.apiKey !== undefined) {
+            if (typeof proxy.apiKey !== 'string') {
+                return { valid: false, error: 'hyperspaceProxy.apiKey must be a string' };
+            }
+            result.hyperspaceProxy.apiKey = proxy.apiKey;
+        }
+
+        if (proxy.model !== undefined) {
+            if (typeof proxy.model !== 'string') {
+                return { valid: false, error: 'hyperspaceProxy.model must be a string' };
+            }
+            result.hyperspaceProxy.model = proxy.model;
+        }
+
+        if (proxy.alwaysThinkingEnabled !== undefined) {
+            if (typeof proxy.alwaysThinkingEnabled !== 'boolean') {
+                return { valid: false, error: 'hyperspaceProxy.alwaysThinkingEnabled must be a boolean' };
+            }
+            result.hyperspaceProxy.alwaysThinkingEnabled = proxy.alwaysThinkingEnabled;
+        }
     }
 
     return { valid: true, data: result };

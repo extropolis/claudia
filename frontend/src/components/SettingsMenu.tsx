@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain } from 'lucide-react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, RefreshCw } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
 import { useTaskStore } from '../stores/taskStore';
@@ -29,9 +29,9 @@ interface AICoreCredentials {
     timeoutMs: number;
 }
 
-type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core';
+type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core' | 'hyperspace-proxy';
 type BackendType = 'claude-code' | 'opencode';
-type SapAiCoreModel = 
+type SapAiCoreModel =
     | 'anthropic--claude-4.5-opus'
     | 'anthropic--claude-opus-4'
     | 'anthropic--claude-sonnet-4'
@@ -51,6 +51,14 @@ const SAP_AI_CORE_MODELS: { value: SapAiCoreModel; label: string }[] = [
     { value: 'anthropic--claude-3.5-haiku', label: 'Claude 3.5 Haiku' },
     { value: 'anthropic--claude-3-opus', label: 'Claude 3 Opus' },
 ];
+
+interface HyperspaceProxyConfig {
+    proxyUrl: string;
+    apiKey: string;
+    model: string;
+    alwaysThinkingEnabled: boolean;
+}
+
 
 interface BackendStatus {
     backend: BackendType;
@@ -116,21 +124,22 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [mcpViewMode, setMcpViewMode] = useState<'list' | 'json'>('list');
     const [mcpJson, setMcpJson] = useState('');
     const [claudeConfigPath, setClaudeConfigPath] = useState('');
-    const [jsonEditorSaved, setJsonEditorSaved] = useState(true);
     const [jsonEditorError, setJsonEditorError] = useState<string | null>(null);
     const [skipPermissions, setSkipPermissions] = useState(false);
     const [rules, setRules] = useState('');
-    const [rulesSaved, setRulesSaved] = useState(true);
     const [supervisorEnabled, setSupervisorEnabled] = useState(false);
     const [supervisorSystemPrompt, setSupervisorSystemPrompt] = useState('');
-    const [supervisorPromptSaved, setSupervisorPromptSaved] = useState(true);
     const [autoFocusOnInput, setAutoFocusOnInput] = useState(false);
     const [useLearnings, setUseLearnings] = useState(false);
+
+    // Debounce timers
+    const rulesTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const supervisorPromptTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const mcpJsonTimerRef = useRef<NodeJS.Timeout | null>(null);
 
     // API Mode state
     const [apiMode, setApiMode] = useState<ApiMode>('default');
     const [customAnthropicApiKey, setCustomAnthropicApiKey] = useState('');
-    const [apiModeSaved, setApiModeSaved] = useState(true);
 
     // AI Core credentials state
     const [aiCoreCredentials, setAiCoreCredentials] = useState<AICoreCredentials>({
@@ -142,9 +151,20 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         timeoutMs: 120000
     });
     const [sapAiCoreModel, setSapAiCoreModel] = useState<SapAiCoreModel>('anthropic--claude-4.5-opus');
-    const [aiCoreSaved, setAiCoreSaved] = useState(true);
     const [aiCoreTestStatus, setAiCoreTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [aiCoreTestMessage, setAiCoreTestMessage] = useState('');
+
+    // Hyperspace AI Proxy state
+    const [hyperspaceProxy, setHyperspaceProxy] = useState<HyperspaceProxyConfig>({
+        proxyUrl: 'http://localhost:6655',
+        apiKey: '',
+        model: '',
+        alwaysThinkingEnabled: false
+    });
+    const [hyperspaceUseCustomModel, setHyperspaceUseCustomModel] = useState(false);
+    const [hyperspaceModels, setHyperspaceModels] = useState<{ value: string; label: string }[]>([]);
+    const [hyperspaceModelsLoading, setHyperspaceModelsLoading] = useState(false);
+    const hyperspaceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
     // Custom API key test state
     const [customApiKeyTestStatus, setCustomApiKeyTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -152,9 +172,12 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
 
     // Backend state
     const [backend, setBackend] = useState<BackendType>('claude-code');
-    const [backendSaved, setBackendSaved] = useState(true);
     const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null);
     const [backendStatusLoading, setBackendStatusLoading] = useState(false);
+
+    // Debounce timers for API settings
+    const apiModeTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const aiCoreTimerRef = useRef<NodeJS.Timeout | null>(null);
 
     useEffect(() => {
         if (isOpen) {
@@ -177,6 +200,63 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     }, [expandedPanels.mcp]);
 
+    const fetchHyperspaceModels = useCallback(async (proxyUrl: string, apiKey: string) => {
+        if (!proxyUrl || !apiKey) {
+            setHyperspaceModels([]);
+            return;
+        }
+
+        setHyperspaceModelsLoading(true);
+        try {
+            // Call backend proxy to avoid CORS issues
+            const response = await fetch(`${getApiBaseUrl()}/api/hyperspace/models`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ proxyUrl, apiKey })
+            });
+
+            if (response.ok) {
+                const result = await response.json();
+                if (result.success && result.data?.data) {
+                    const models = result.data.data.map((m: { id: string; display_name: string }) => ({
+                        value: m.id,
+                        label: m.display_name || m.id
+                    }));
+                    setHyperspaceModels(models);
+
+                    // If no model is selected yet and we have models, select the first one
+                    // Also save to backend so the selection persists
+                    if (models.length > 0) {
+                        setHyperspaceProxy(prev => {
+                            if (!prev.model || !models.find((m: { value: string }) => m.value === prev.model)) {
+                                const updated = { ...prev, model: models[0].value };
+                                // Save the auto-selected model to backend
+                                fetch(`${getApiBaseUrl()}/api/config`, {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ hyperspaceProxy: updated })
+                                }).catch(err => console.error('Failed to save auto-selected model:', err));
+                                return updated;
+                            }
+                            return prev;
+                        });
+                    }
+                } else {
+                    console.error('Failed to fetch Hyperspace models:', result.error);
+                    setHyperspaceModels([]);
+                }
+            } else {
+                console.error('Failed to fetch Hyperspace models:', response.status);
+                setHyperspaceModels([]);
+            }
+        } catch (error) {
+            console.error('Failed to fetch Hyperspace models:', error);
+            setHyperspaceModels([]);
+        } finally {
+            setHyperspaceModelsLoading(false);
+        }
+    }, []);
+
     const fetchConfig = async () => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`);
@@ -184,23 +264,25 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 const config = await response.json();
                 setSkipPermissions(config.skipPermissions || false);
                 setRules(config.rules || '');
-                setRulesSaved(true);
                 setSupervisorEnabled(config.supervisorEnabled || false);
                 setSupervisorSystemPrompt(config.supervisorSystemPrompt || '');
-                setSupervisorPromptSaved(true);
                 setAutoFocusOnInput(config.autoFocusOnInput || false);
                 setApiMode(config.apiMode || 'default');
                 setCustomAnthropicApiKey(config.customAnthropicApiKey || '');
-                setApiModeSaved(true);
                 if (config.aiCoreCredentials) {
                     setAiCoreCredentials(config.aiCoreCredentials);
                 }
                 if (config.sapAiCoreModel) {
                     setSapAiCoreModel(config.sapAiCoreModel);
                 }
-                setAiCoreSaved(true);
+                if (config.hyperspaceProxy) {
+                    setHyperspaceProxy(config.hyperspaceProxy);
+                    // If we have an API key, fetch the available models
+                    if (config.hyperspaceProxy.apiKey && config.hyperspaceProxy.proxyUrl) {
+                        fetchHyperspaceModels(config.hyperspaceProxy.proxyUrl, config.hyperspaceProxy.apiKey);
+                    }
+                }
                 setBackend(config.backend || 'claude-code');
-                setBackendSaved(true);
                 setUseLearnings(config.useLearnings || false);
             }
         } catch (error) {
@@ -208,7 +290,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     };
 
-    const fetchBackendStatus = async () => {
+    const fetchBackendStatus = useCallback(async () => {
         setBackendStatusLoading(true);
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/backend/status`);
@@ -221,20 +303,20 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         } finally {
             setBackendStatusLoading(false);
         }
-    };
+    }, []);
 
     // Backend config uses array format, but we display as object format in JSON view
     // Convert between formats as needed
-    const arrayToObjectFormat = (servers: Array<{ name: string; type?: string; command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled?: boolean; timeout?: number; autoApprove?: string[]; description?: string }>) => {
+    const arrayToObjectFormat = useCallback((servers: Array<{ name: string; type?: string; command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled?: boolean; timeout?: number; autoApprove?: string[]; description?: string }>) => {
         const obj: Record<string, unknown> = {};
         for (const server of servers) {
             const { name, enabled, ...rest } = server;
             obj[name] = rest;
         }
         return obj;
-    };
+    }, []);
 
-    const objectToArrayFormat = (obj: Record<string, unknown>) => {
+    const objectToArrayFormat = useCallback((obj: Record<string, unknown>) => {
         const servers: Array<{ name: string; type?: 'stdio' | 'http' | 'streamableHttp'; command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled: boolean; timeout?: number; autoApprove?: string[]; description?: string; headers?: Record<string, string> }> = [];
         for (const [name, config] of Object.entries(obj)) {
             const serverConfig = config as Record<string, unknown>;
@@ -252,7 +334,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             });
         }
         return servers;
-    };
+    }, []);
 
     // Compute MCP servers list from JSON state (for list view)
     const mcpServersList: MCPServerListItem[] = useMemo(() => {
@@ -277,7 +359,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         return servers;
     }, [mcpJson]);
 
-    const fetchClaudeConfig = async () => {
+    const fetchClaudeConfig = useCallback(async () => {
         try {
             // Fetch from Claudia's config (backend/config.json) - this is what tasks actually use
             const response = await fetch(`${getApiBaseUrl()}/api/config`);
@@ -288,20 +370,19 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 const obj = arrayToObjectFormat(mcpServers);
                 setMcpJson(JSON.stringify(obj, null, 2));
                 setClaudeConfigPath('Claudia config (used by tasks)');
-                setJsonEditorSaved(true);
                 setJsonEditorError(null);
             }
         } catch (error) {
             console.error('Failed to fetch MCP servers config:', error);
             setJsonEditorError('Failed to load MCP servers config');
         }
-    };
+    }, [arrayToObjectFormat]);
 
-    const saveClaudeConfig = async () => {
+    const saveClaudeConfig = useCallback(async (jsonStr: string) => {
         // Validate JSON config before saving
         let parsed;
         try {
-            parsed = JSON.parse(mcpJson);
+            parsed = JSON.parse(jsonStr);
             if (typeof parsed !== 'object' || Array.isArray(parsed)) {
                 setJsonEditorError('mcpServers must be an object');
                 return;
@@ -323,7 +404,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 body: JSON.stringify({ mcpServers: serversArray })
             });
             if (response.ok) {
-                setJsonEditorSaved(true);
                 setJsonEditorError(null);
             } else {
                 const error = await response.json();
@@ -333,22 +413,32 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             console.error('Failed to save MCP servers config:', error);
             setJsonEditorError('Failed to save MCP servers config');
         }
-    };
+    }, [objectToArrayFormat]);
 
     const handleJsonChange = (value: string) => {
         setMcpJson(value);
-        setJsonEditorSaved(false);
+
         // Validate JSON as user types
         try {
             const parsed = JSON.parse(value);
             if (typeof parsed !== 'object' || Array.isArray(parsed)) {
                 setJsonEditorError('mcpServers must be an object');
+                return; // Don't save if invalid
             } else {
                 setJsonEditorError(null);
             }
         } catch (e) {
             setJsonEditorError(`Invalid JSON: ${e instanceof Error ? e.message : 'Parse error'}`);
+            return; // Don't save if invalid
         }
+
+        // Auto-save with debounce (only if valid JSON)
+        if (mcpJsonTimerRef.current) {
+            clearTimeout(mcpJsonTimerRef.current);
+        }
+        mcpJsonTimerRef.current = setTimeout(() => {
+            saveClaudeConfig(value);
+        }, 1000);
     };
 
     const saveSkipPermissions = async (value: boolean) => {
@@ -366,24 +456,31 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     };
 
-    const saveRules = async () => {
+    const saveRules = useCallback(async (rulesText: string) => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ rules })
+                body: JSON.stringify({ rules: rulesText })
             });
-            if (response.ok) {
-                setRulesSaved(true);
+            if (!response.ok) {
+                console.error('Failed to save rules');
             }
         } catch (error) {
             console.error('Failed to save rules:', error);
         }
-    };
+    }, []);
 
     const handleRulesChange = (value: string) => {
         setRules(value);
-        setRulesSaved(false);
+
+        // Auto-save with debounce
+        if (rulesTimerRef.current) {
+            clearTimeout(rulesTimerRef.current);
+        }
+        rulesTimerRef.current = setTimeout(() => {
+            saveRules(value);
+        }, 1000);
     };
 
     const saveSupervisorEnabled = async (value: boolean) => {
@@ -401,50 +498,67 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     };
 
-    const saveSupervisorPrompt = async () => {
+    const saveSupervisorPrompt = useCallback(async (promptText: string) => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ supervisorSystemPrompt })
+                body: JSON.stringify({ supervisorSystemPrompt: promptText })
             });
-            if (response.ok) {
-                setSupervisorPromptSaved(true);
+            if (!response.ok) {
+                console.error('Failed to save supervisor prompt');
             }
         } catch (error) {
             console.error('Failed to save supervisor prompt:', error);
         }
-    };
+    }, []);
 
     const handleSupervisorPromptChange = (value: string) => {
         setSupervisorSystemPrompt(value);
-        setSupervisorPromptSaved(false);
+
+        // Auto-save with debounce
+        if (supervisorPromptTimerRef.current) {
+            clearTimeout(supervisorPromptTimerRef.current);
+        }
+        supervisorPromptTimerRef.current = setTimeout(() => {
+            saveSupervisorPrompt(value);
+        }, 1000);
     };
 
-    const handleAiCoreChange = (field: keyof AICoreCredentials, value: string | number) => {
-        setAiCoreCredentials(prev => ({ ...prev, [field]: value }));
-        setAiCoreSaved(false);
-        setAiCoreTestStatus('idle');
-    };
-
-    const handleSapAiCoreModelChange = (model: SapAiCoreModel) => {
-        setSapAiCoreModel(model);
-        setAiCoreSaved(false);
-    };
-
-    const saveAiCoreCredentials = async () => {
+    const saveAiCoreCredentials = useCallback(async (credentials: AICoreCredentials, model: SapAiCoreModel) => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ aiCoreCredentials, sapAiCoreModel })
+                body: JSON.stringify({ aiCoreCredentials: credentials, sapAiCoreModel: model })
             });
-            if (response.ok) {
-                setAiCoreSaved(true);
+            if (!response.ok) {
+                console.error('Failed to save AI Core credentials');
             }
         } catch (error) {
             console.error('Failed to save AI Core credentials:', error);
         }
+    }, []);
+
+    const handleAiCoreChange = (field: keyof AICoreCredentials, value: string | number) => {
+        const updatedCredentials = { ...aiCoreCredentials, [field]: value };
+        setAiCoreCredentials(updatedCredentials);
+        setAiCoreTestStatus('idle');
+
+        // Auto-save with debounce
+        if (aiCoreTimerRef.current) {
+            clearTimeout(aiCoreTimerRef.current);
+        }
+        aiCoreTimerRef.current = setTimeout(() => {
+            saveAiCoreCredentials(updatedCredentials, sapAiCoreModel);
+        }, 1000);
+    };
+
+    const handleSapAiCoreModelChange = (model: SapAiCoreModel) => {
+        setSapAiCoreModel(model);
+
+        // Save immediately for dropdowns
+        saveAiCoreCredentials(aiCoreCredentials, model);
     };
 
     const testAiCoreCredentials = async () => {
@@ -486,7 +600,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ aiCoreCredentials: undefined })
             });
-            setAiCoreSaved(true);
             setAiCoreTestStatus('idle');
             setAiCoreTestMessage('');
         } catch (error) {
@@ -524,60 +637,116 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     };
 
-    const handleBackendChange = (newBackend: BackendType) => {
-        setBackend(newBackend);
-        setBackendSaved(false);
-    };
-
-    const saveBackend = async () => {
+    const saveBackend = useCallback(async (backendType: BackendType) => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ backend })
+                body: JSON.stringify({ backend: backendType })
             });
             if (response.ok) {
-                setBackendSaved(true);
                 // Refresh backend status after save
                 fetchBackendStatus();
             }
         } catch (error) {
             console.error('Failed to save backend:', error);
         }
+    }, [fetchBackendStatus]);
+
+    const handleBackendChange = (newBackend: BackendType) => {
+        setBackend(newBackend);
+        // Save immediately for radio buttons
+        saveBackend(newBackend);
     };
 
-    const handleApiModeChange = (mode: ApiMode) => {
-        setApiMode(mode);
-        setApiModeSaved(false);
-        // Reset test statuses when mode changes
-        setCustomApiKeyTestStatus('idle');
-        setCustomApiKeyTestMessage('');
-        setAiCoreTestStatus('idle');
-        setAiCoreTestMessage('');
-    };
-
-    const handleCustomApiKeyChange = (key: string) => {
-        setCustomAnthropicApiKey(key);
-        setApiModeSaved(false);
-        setCustomApiKeyTestStatus('idle');
-    };
-
-    const saveApiMode = async () => {
+    const saveApiMode = useCallback(async (mode: ApiMode, apiKey: string) => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    apiMode,
-                    customAnthropicApiKey: apiMode === 'custom-anthropic' ? customAnthropicApiKey : undefined
+                    apiMode: mode,
+                    customAnthropicApiKey: mode === 'custom-anthropic' ? apiKey : undefined
                 })
             });
-            if (response.ok) {
-                setApiModeSaved(true);
+            if (!response.ok) {
+                console.error('Failed to save API mode');
             }
         } catch (error) {
             console.error('Failed to save API mode:', error);
         }
+    }, []);
+
+    const saveHyperspaceProxy = useCallback(async (config: HyperspaceProxyConfig) => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ hyperspaceProxy: config })
+            });
+            if (!response.ok) {
+                console.error('Failed to save Hyperspace proxy config');
+            }
+        } catch (error) {
+            console.error('Failed to save Hyperspace proxy config:', error);
+        }
+    }, []);
+
+    const handleHyperspaceChange = (field: keyof HyperspaceProxyConfig, value: string | boolean) => {
+        const updatedConfig = { ...hyperspaceProxy, [field]: value };
+        setHyperspaceProxy(updatedConfig);
+
+        // Auto-save with debounce
+        if (hyperspaceTimerRef.current) {
+            clearTimeout(hyperspaceTimerRef.current);
+        }
+        hyperspaceTimerRef.current = setTimeout(() => {
+            saveHyperspaceProxy(updatedConfig);
+
+            // Fetch models when API key or proxy URL changes
+            if (field === 'apiKey' || field === 'proxyUrl') {
+                fetchHyperspaceModels(updatedConfig.proxyUrl, updatedConfig.apiKey);
+            }
+        }, 1000);
+    };
+
+    const handleApiModeChange = (mode: ApiMode) => {
+        setApiMode(mode);
+        // Reset test statuses when mode changes
+        setCustomApiKeyTestStatus('idle');
+        setCustomApiKeyTestMessage('');
+        setAiCoreTestStatus('idle');
+        setAiCoreTestMessage('');
+
+        // Save immediately for radio buttons
+        saveApiMode(mode, customAnthropicApiKey);
+
+        // Also save hyperspace config immediately if switching to hyperspace mode
+        // to ensure any pending changes are persisted, and fetch models
+        if (mode === 'hyperspace-proxy') {
+            if (hyperspaceTimerRef.current) {
+                clearTimeout(hyperspaceTimerRef.current);
+            }
+            saveHyperspaceProxy(hyperspaceProxy);
+
+            // Auto-fetch models when switching to hyperspace mode
+            if (hyperspaceProxy.apiKey && hyperspaceProxy.proxyUrl) {
+                fetchHyperspaceModels(hyperspaceProxy.proxyUrl, hyperspaceProxy.apiKey);
+            }
+        }
+    };
+
+    const handleCustomApiKeyChange = (key: string) => {
+        setCustomAnthropicApiKey(key);
+        setCustomApiKeyTestStatus('idle');
+
+        // Auto-save with debounce
+        if (apiModeTimerRef.current) {
+            clearTimeout(apiModeTimerRef.current);
+        }
+        apiModeTimerRef.current = setTimeout(() => {
+            saveApiMode(apiMode, key);
+        }, 1000);
     };
 
     const testCustomApiKey = async () => {
@@ -655,9 +824,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             });
 
             if (response.ok) {
-                setNewServer({ name: '', type: 'stdio', command: '', args: '', url: '' });
+                setNewServer({ name: '', type: 'stdio', command: '', args: '', url: '', headers: '' });
                 setIsAddingServer(false);
-                setJsonEditorSaved(true);
             } else {
                 const error = await response.json();
                 setJsonEditorError(error.error || 'Failed to save');
@@ -837,19 +1005,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 </div>
                             )}
 
-                            <div className="api-mode-actions">
-                                <span className={`api-mode-status ${backendSaved ? 'saved' : 'unsaved'}`}>
-                                    {backendSaved ? 'Saved' : 'Unsaved changes'}
-                                </span>
-                                <button
-                                    className="aicore-save-btn"
-                                    onClick={saveBackend}
-                                    disabled={backendSaved}
-                                >
-                                    Save Backend
-                                </button>
-                            </div>
-
                             <p className="api-config-note">
                                 Note: Changing backends requires restarting tasks. Existing tasks will continue with their original backend.
                             </p>
@@ -912,6 +1067,22 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                         <span className="api-mode-title">SAP AI Core</span>
                                         <span className="api-mode-description">
                                             Use Claude models through your SAP AI Core deployment
+                                        </span>
+                                    </div>
+                                </label>
+
+                                <label className={`api-mode-option ${apiMode === 'hyperspace-proxy' ? 'selected' : ''}`}>
+                                    <input
+                                        type="radio"
+                                        name="apiMode"
+                                        value="hyperspace-proxy"
+                                        checked={apiMode === 'hyperspace-proxy'}
+                                        onChange={() => handleApiModeChange('hyperspace-proxy')}
+                                    />
+                                    <div className="api-mode-content">
+                                        <span className="api-mode-title">Hyperspace AI Proxy</span>
+                                        <span className="api-mode-description">
+                                            Use the HAI proxy (requires hai proxy start running)
                                         </span>
                                     </div>
                                 </label>
@@ -1064,29 +1235,119 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                         >
                                             {aiCoreTestStatus === 'testing' ? 'Testing...' : 'Test Connection'}
                                         </button>
-                                        <button
-                                            className="aicore-save-btn"
-                                            onClick={saveAiCoreCredentials}
-                                            disabled={aiCoreSaved}
-                                        >
-                                            Save Credentials
-                                        </button>
                                     </div>
                                 </div>
                             )}
 
-                            <div className="api-mode-actions">
-                                <span className={`api-mode-status ${apiModeSaved ? 'saved' : 'unsaved'}`}>
-                                    {apiModeSaved ? 'Saved' : 'Unsaved changes'}
-                                </span>
-                                <button
-                                    className="aicore-save-btn"
-                                    onClick={saveApiMode}
-                                    disabled={apiModeSaved}
-                                >
-                                    Save Mode
-                                </button>
-                            </div>
+                            {/* Hyperspace AI Proxy fields */}
+                            {apiMode === 'hyperspace-proxy' && (
+                                <div className="api-mode-fields">
+                                    <div className="aicore-form">
+                                        <div className="aicore-field">
+                                            <label>Proxy URL</label>
+                                            <input
+                                                type="text"
+                                                value={hyperspaceProxy.proxyUrl}
+                                                onChange={(e) => handleHyperspaceChange('proxyUrl', e.target.value)}
+                                                placeholder="http://localhost:6655"
+                                                className="aicore-input"
+                                            />
+                                        </div>
+
+                                        <div className="aicore-field">
+                                            <label>API Key</label>
+                                            <input
+                                                type="password"
+                                                value={hyperspaceProxy.apiKey}
+                                                onChange={(e) => handleHyperspaceChange('apiKey', e.target.value)}
+                                                placeholder="Your API key from hai proxy terminal"
+                                                className="aicore-input"
+                                            />
+                                        </div>
+
+                                        <div className="aicore-field">
+                                            <label>Model</label>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                                {!hyperspaceUseCustomModel ? (
+                                                    <div className="hyperspace-model-row">
+                                                        <div className="hyperspace-model-select-wrapper">
+                                                            <select
+                                                                value={hyperspaceProxy.model}
+                                                                onChange={(e) => handleHyperspaceChange('model', e.target.value)}
+                                                                className={`aicore-input aicore-select ${!hyperspaceProxy.apiKey ? 'disabled-muted' : ''}`}
+                                                                disabled={hyperspaceModelsLoading || !hyperspaceProxy.apiKey}
+                                                            >
+                                                                {!hyperspaceProxy.apiKey && (
+                                                                    <option value="">Add API key to load models</option>
+                                                                )}
+                                                                {hyperspaceProxy.apiKey && hyperspaceModels.length === 0 && !hyperspaceModelsLoading && (
+                                                                    <option value="">No models loaded</option>
+                                                                )}
+                                                                {hyperspaceModelsLoading && (
+                                                                    <option value="">Loading models...</option>
+                                                                )}
+                                                                {hyperspaceModels.map((model) => (
+                                                                    <option key={model.value} value={model.value}>
+                                                                        {model.label}
+                                                                    </option>
+                                                                ))}
+                                                            </select>
+                                                            {hyperspaceModelsLoading && (
+                                                                <Loader2 size={14} className="spinning" style={{ position: 'absolute', right: '30px', top: '50%', transform: 'translateY(-50%)' }} />
+                                                            )}
+                                                        </div>
+                                                        <button
+                                                            className="hyperspace-refresh-btn"
+                                                            onClick={() => fetchHyperspaceModels(hyperspaceProxy.proxyUrl, hyperspaceProxy.apiKey)}
+                                                            disabled={!hyperspaceProxy.apiKey || !hyperspaceProxy.proxyUrl || hyperspaceModelsLoading}
+                                                            title="Refresh models"
+                                                        >
+                                                            <RefreshCw size={16} className={hyperspaceModelsLoading ? 'spinning' : ''} />
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    <input
+                                                        type="text"
+                                                        value={hyperspaceProxy.model}
+                                                        onChange={(e) => handleHyperspaceChange('model', e.target.value)}
+                                                        placeholder="e.g., anthropic--claude-4.5-sonnet"
+                                                        className="aicore-input"
+                                                    />
+                                                )}
+                                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={hyperspaceUseCustomModel}
+                                                        onChange={(e) => setHyperspaceUseCustomModel(e.target.checked)}
+                                                    />
+                                                    Enter custom model name
+                                                </label>
+                                            </div>
+                                        </div>
+
+                                        <div className="permission-item" style={{ marginTop: '12px' }}>
+                                            <div className="permission-info">
+                                                <span className="permission-label">Always Thinking Mode</span>
+                                                <span className="permission-description">
+                                                    Enable extended thinking for all prompts
+                                                </span>
+                                            </div>
+                                            <label className="toggle-switch">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={hyperspaceProxy.alwaysThinkingEnabled}
+                                                    onChange={(e) => handleHyperspaceChange('alwaysThinkingEnabled', e.target.checked)}
+                                                />
+                                                <span className="toggle-slider"></span>
+                                            </label>
+                                        </div>
+                                    </div>
+
+                                    <p className="api-config-note" style={{ marginTop: '12px' }}>
+                                        Make sure <code style={{ fontSize: '0.75rem', padding: '2px 4px', background: 'var(--bg-tertiary)', borderRadius: '3px' }}>hai proxy start</code> is running before using this mode.
+                                    </p>
+                                </div>
+                            )}
 
                             <p className="api-config-note">
                                 Note: The server must be restarted after changing API mode for the changes to take effect on new tasks.
@@ -1144,18 +1405,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                             <span>{jsonEditorError}</span>
                                         </div>
                                     )}
-                                    <div className="mcp-json-actions">
-                                        <span className={`mcp-json-status ${jsonEditorSaved ? 'saved' : 'unsaved'}`}>
-                                            {jsonEditorSaved ? 'Saved' : 'Unsaved changes'}
-                                        </span>
-                                        <button
-                                            className="mcp-json-save-btn"
-                                            onClick={saveClaudeConfig}
-                                            disabled={jsonEditorSaved || !!jsonEditorError}
-                                        >
-                                            Save
-                                        </button>
-                                    </div>
                                 </div>
                             ) : (
                                 /* List View */
@@ -1258,7 +1507,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                                     className="mcp-cancel-btn"
                                                     onClick={() => {
                                                         setIsAddingServer(false);
-                                                        setNewServer({ name: '', type: 'stdio', command: '', args: '', url: '' });
+                                                        setNewServer({ name: '', type: 'stdio', command: '', args: '', url: '', headers: '' });
                                                     }}
                                                 >
                                                     Cancel
@@ -1342,18 +1591,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 placeholder="Enter rules in markdown format...&#10;&#10;Example:&#10;- Always use TypeScript&#10;- Prefer functional components&#10;- Add error handling to API calls"
                                 rows={8}
                             />
-                            <div className="rules-actions">
-                                <span className={`rules-status ${rulesSaved ? 'saved' : 'unsaved'}`}>
-                                    {rulesSaved ? 'Saved' : 'Unsaved changes'}
-                                </span>
-                                <button
-                                    className="rules-save-btn"
-                                    onClick={saveRules}
-                                    disabled={rulesSaved}
-                                >
-                                    Save Rules
-                                </button>
-                            </div>
                         </div>
                     </CollapsiblePanel>
 
@@ -1396,18 +1633,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                             placeholder="Enter system prompt for the AI supervisor...&#10;&#10;Example:&#10;Make sure tasks complete without errors and are tested."
                                             rows={10}
                                         />
-                                        <div className="supervisor-actions">
-                                            <span className={`supervisor-status ${supervisorPromptSaved ? 'saved' : 'unsaved'}`}>
-                                                {supervisorPromptSaved ? 'Saved' : 'Unsaved changes'}
-                                            </span>
-                                            <button
-                                                className="supervisor-save-btn"
-                                                onClick={saveSupervisorPrompt}
-                                                disabled={supervisorPromptSaved}
-                                            >
-                                                Save Prompt
-                                            </button>
-                                        </div>
                                     </div>
                                 </>
                             )}
@@ -1447,6 +1672,39 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                         </div>
                     </CollapsiblePanel>
 
+                </div>
+
+                <div className="settings-menu-footer">
+                    <button className="settings-done-btn" onClick={() => {
+                        // Flush any pending debounced saves before closing
+                        if (hyperspaceTimerRef.current) {
+                            clearTimeout(hyperspaceTimerRef.current);
+                            saveHyperspaceProxy(hyperspaceProxy);
+                        }
+                        if (apiModeTimerRef.current) {
+                            clearTimeout(apiModeTimerRef.current);
+                            saveApiMode(apiMode, customAnthropicApiKey);
+                        }
+                        if (aiCoreTimerRef.current) {
+                            clearTimeout(aiCoreTimerRef.current);
+                            saveAiCoreCredentials(aiCoreCredentials, sapAiCoreModel);
+                        }
+                        if (rulesTimerRef.current) {
+                            clearTimeout(rulesTimerRef.current);
+                            saveRules(rules);
+                        }
+                        if (supervisorPromptTimerRef.current) {
+                            clearTimeout(supervisorPromptTimerRef.current);
+                            saveSupervisorPrompt(supervisorSystemPrompt);
+                        }
+                        if (mcpJsonTimerRef.current) {
+                            clearTimeout(mcpJsonTimerRef.current);
+                            saveClaudeConfig(mcpJson);
+                        }
+                        onClose();
+                    }}>
+                        Done
+                    </button>
                 </div>
             </div>
         </div>
