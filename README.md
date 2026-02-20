@@ -18,9 +18,42 @@ A web-based UI for managing multiple Claude Code CLI instances simultaneously. C
 
 - **Node.js** 18+
 - **npm** 9+
-- **Claude Code CLI** - Install from [Claude Code Quickstart](https://code.claude.com/docs/en/quickstart). You may need to sign up for a free account initially, but you can switch to SAP AI Core in Settings.
+- **Claude Code CLI** - See Step 1 below
+- **HAI CLI** - Required for Hyperspace AI Proxy (production-approved)
 
-## Installation
+## Step 1: Install Claude Code CLI
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+**Windows:**
+```powershell
+irm https://claude.ai/install.ps1 | iex
+```
+
+## Step 2: Install HAI CLI
+
+Follow the official installation guide: **[Hyperspace CLI Installation](https://pages.github.tools.sap/hAIperspace/hai-docs/llm-proxy/installation/cli/#__tabbed_1_1)**
+
+## Step 3: Configure Hyperspace AI Proxy
+
+> **Note:** Hyperspace AI Proxy is the only production-approved method for using Claude at SAP.
+
+1. Configure Claude Code for the HAI proxy:
+   ```bash
+   hai configure claude-code
+   ```
+
+2. Start the proxy:
+   ```bash
+   hai proxy start
+   ```
+
+3. Copy the API key displayed in the proxy window — you'll need it for Claudia settings.
+
+## Step 4: Install Claudia
 
 ```bash
 # Clone the repository
@@ -38,7 +71,7 @@ npm install node-pty@1.2.0-beta.11  # only if v25+
 npm run build -w shared
 ```
 
-## Running the App
+## Step 5: Running the App
 
 ### Quick Start
 
@@ -53,16 +86,26 @@ This will:
 
 Access the UI at **http://localhost:5173**
 
-### SAP AI Core Setup
+### Configure Claudia Settings
 
-On first launch, the Settings panel will open automatically. Enter your SAP AI Core credentials (if you need credentials, ask in the [@ask-ai-blueprint](https://sap.slack.com/channels/ask-ai-blueprint) Slack channel):
+On first launch, the Settings panel will open automatically:
+
+1. Select **Hyperspace AI Proxy** as your provider
+2. Paste the API key from Step 3 into the API Key field
+3. Choose a model (e.g., Claude 4.5 Sonnet)
+
+### SAP AI Core Setup (Alternative - Non-Production)
+
+> **Note:** SAP AI Core is available for development/testing but is **not approved for production use**. Use Hyperspace AI Proxy for production workloads.
+
+If you need to use SAP AI Core instead, enter your credentials (ask in [@ask-ai-blueprint](https://sap.slack.com/channels/ask-ai-blueprint) Slack channel):
 
 1. **Auth URL** — your SAP authentication endpoint
 2. **Client ID** and **Client Secret**
 3. **Base URL** — your AI Core API endpoint
 4. Choose a model (e.g., Claude 4.5 Sonnet)
 
-Claudia runs an embedded proxy that translates Anthropic API calls into SAP AI Core requests, so Claude Code works without a direct Anthropic login.
+Claudia runs an embedded proxy that translates Anthropic API calls into SAP AI Core requests.
 
 
 ## Usage

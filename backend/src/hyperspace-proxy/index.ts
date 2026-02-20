@@ -168,6 +168,50 @@ export function createHyperspaceProxy(configStore: ConfigStore): HyperspaceProxy
                 });
             }
 
+            // Sanitize messages: filter unsupported content types in tool_result blocks
+            // The Anthropic API only accepts these content types: 'document', 'image', 'search_result', 'text'
+            // MCP tools (like Playwright) may return unsupported types like 'tool_reference'
+            const supportedContentTypes = new Set(['document', 'image', 'search_result', 'text']);
+            if (cleanBody.messages && Array.isArray(cleanBody.messages)) {
+                let contentFilteredCount = 0;
+                cleanBody.messages = (cleanBody.messages as Record<string, unknown>[]).map((message) => {
+                    if (!message.content || !Array.isArray(message.content)) {
+                        return message;
+                    }
+
+                    const filteredContent = (message.content as Record<string, unknown>[]).map((contentBlock) => {
+                        // Handle tool_result blocks which contain nested content
+                        if (contentBlock.type === 'tool_result' && contentBlock.content && Array.isArray(contentBlock.content)) {
+                            const originalLength = (contentBlock.content as unknown[]).length;
+                            const filteredInnerContent = (contentBlock.content as Record<string, unknown>[]).filter((innerBlock) => {
+                                const innerType = innerBlock.type as string;
+                                if (!innerType || supportedContentTypes.has(innerType)) {
+                                    return true;
+                                }
+                                contentFilteredCount++;
+                                logToFile(`[${requestId}] Filtering unsupported content type: ${innerType}`);
+                                return false;
+                            });
+
+                            // If all content was filtered, add a placeholder text block
+                            if (filteredInnerContent.length === 0 && originalLength > 0) {
+                                filteredInnerContent.push({ type: 'text', text: '[Tool result content filtered - unsupported type]' });
+                            }
+
+                            return { ...contentBlock, content: filteredInnerContent };
+                        }
+                        return contentBlock;
+                    });
+
+                    return { ...message, content: filteredContent };
+                });
+
+                if (contentFilteredCount > 0) {
+                    logToFile(`[${requestId}] Filtered ${contentFilteredCount} unsupported content blocks from messages`);
+                    console.log(`[HyperspaceProxy ${requestId}] Filtered ${contentFilteredCount} unsupported content blocks from messages`);
+                }
+            }
+
             // Forward headers that Anthropic expects
             const forwardHeaders: Record<string, string> = {
                 'Content-Type': 'application/json',
