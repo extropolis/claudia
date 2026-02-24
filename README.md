@@ -21,8 +21,11 @@ A web-based UI for managing multiple Claude Code CLI instances simultaneously. C
 - **Claude Code CLI** - See Step 1 below
 - **HAI CLI** - Required for Hyperspace AI Proxy (production-approved)
 
-## Installation Video
+## Into Video
 **[Click to view](https://sapnam-my.sharepoint.com/:v:/g/personal/lance_hughes_sap_com/IQBjFLcg7j2SSpd7WekKAY3JAenz99GB5Rha_YVVrnZNH3s?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=C08ugl)**
+
+## Installation View
+**[Click to view](https://sapnam-my.sharepoint.com/:v:/g/personal/lance_hughes_sap_com/IQBtdF4W_RhQRpFhtdsj94sWAUVO7GvONyEgYiDH0vfREEs?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=NBLmS1))**
 
 ## Step 1: Install Claude Code CLI
 
