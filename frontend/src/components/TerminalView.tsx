@@ -5,7 +5,6 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Task, Workspace } from '@claudia/shared';
 import { Copy, Check, Play, BookOpen } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
-import { LearnFromConversationModal } from './LearnFromConversationModal';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
 
@@ -21,7 +20,6 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
     const fitAddonRef = useRef<FitAddon | null>(null);
     const userHasScrolledRef = useRef(false); // Track if user manually scrolled up
     const [copied, setCopied] = useState(false);
-    const [showLearnModal, setShowLearnModal] = useState(false);
 
     // Expose scrollToBottom for external use (resets user scroll state since it's explicit)
     const scrollToBottom = (resetUserScroll = true) => {
@@ -302,7 +300,13 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
     const stateLabel = task.state === 'interrupted' ? 'INTERRUPTED' : task.state;
 
     const handleLearnFromConversation = () => {
-        setShowLearnModal(true);
+        // Send /learn command to the active Claude Code terminal session
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+                type: 'task:input',
+                payload: { taskId: task.id, input: '/learn\r' }
+            }));
+        }
     };
 
     return (
@@ -320,7 +324,7 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
                     <button
                         className="learn-button"
                         onClick={handleLearnFromConversation}
-                        title="Learn from this conversation - extracts learnings for future tasks"
+                        title="Send /learn command to Claude - rates performance and saves learnings to .claude/skills/"
                     >
                         <BookOpen size={14} />
                         Learn
@@ -341,14 +345,6 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
             <div ref={terminalRef} className="terminal-container" />
             <TaskInputBar task={task} wsRef={wsRef} />
 
-            {showLearnModal && workspace && (
-                <LearnFromConversationModal
-                    taskId={task.id}
-                    workspaceId={workspace.id}
-                    workspaceName={workspace.name}
-                    onClose={() => setShowLearnModal(false)}
-                />
-            )}
         </div>
     );
 }

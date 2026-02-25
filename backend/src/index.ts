@@ -1,9 +1,13 @@
 import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import { fileURLToPath } from 'url';
 import { createApp } from './server.js';
 import { checkClaudeCodeInstalled } from './task-spawner.js';
 import { PORTS } from '@claudia/shared';
 
-const PORT = process.env.PORT || PORTS.BACKEND;
+const PORT = process.env.CLAUDIA_BACKEND_PORT || PORTS.BACKEND;
 
 // Check if Claude Code CLI is installed before starting
 const claudeCheck = checkClaudeCodeInstalled();
@@ -17,6 +21,43 @@ if (!claudeCheck.installed) {
     process.exit(1);
 }
 console.log(`Claude Code CLI detected: ${claudeCheck.version}`);
+
+// Auto-install the /learn command to ~/.claude/commands/ so it's available in all Claude Code sessions
+function installLearnCommand() {
+    try {
+        const __filename = fileURLToPath(import.meta.url);
+        const __dirname = path.dirname(__filename);
+        const sourceFile = path.join(__dirname, 'commands', 'learn.md');
+        const commandsDir = path.join(os.homedir(), '.claude', 'commands');
+        const destFile = path.join(commandsDir, 'learn.md');
+
+        if (!fs.existsSync(sourceFile)) {
+            console.warn('[LearnCommand] Source file not found:', sourceFile);
+            return;
+        }
+
+        // Create ~/.claude/commands/ if it doesn't exist
+        fs.mkdirSync(commandsDir, { recursive: true });
+
+        const sourceContent = fs.readFileSync(sourceFile, 'utf-8');
+
+        // Only update if content has changed (avoid unnecessary writes)
+        if (fs.existsSync(destFile)) {
+            const destContent = fs.readFileSync(destFile, 'utf-8');
+            if (destContent === sourceContent) {
+                console.log('[LearnCommand] /learn command already up-to-date at', destFile);
+                return;
+            }
+        }
+
+        fs.writeFileSync(destFile, sourceContent, 'utf-8');
+        console.log('[LearnCommand] Installed /learn command to', destFile);
+    } catch (err) {
+        console.error('[LearnCommand] Failed to install /learn command:', err);
+    }
+}
+
+installLearnCommand();
 
 // Debug: Log memory usage every 2 seconds to trace OOM issues
 setInterval(() => {
