@@ -331,6 +331,7 @@ export const useTaskStore = create<TaskStore>()(
 
                 console.log('[TaskStore] setWorkspaces called:', {
                     incomingCount: workspaces.length,
+                    existingWorkspacesCount: existingWorkspaces.length,
                     currentExpandedCount: currentExpanded.size,
                     expandedWorkspacesInitialized,
                     currentExpanded: Array.from(currentExpanded)
@@ -356,14 +357,17 @@ export const useTaskStore = create<TaskStore>()(
                     console.log('[TaskStore] First load - expanding all workspaces');
                     // First time ever - expand all workspaces
                     uniqueWorkspaces.forEach(w => newExpanded.add(w.id));
+                } else if (existingWorkspaces.length === 0) {
+                    // Page refresh / server reconnect - expand all workspaces so tasks are visible
+                    console.log('[TaskStore] Page refresh - expanding all workspaces');
+                    uniqueWorkspaces.forEach(w => newExpanded.add(w.id));
                 } else {
-                    console.log('[TaskStore] Preserving existing expansion state');
-                    // Add any NEW workspaces as expanded (ones not in existing list)
+                    console.log('[TaskStore] Preserving existing expansion state (mid-session)');
+                    // Mid-session: only auto-expand workspaces that are truly new
                     const existingWorkspaceIds = new Set(existingWorkspaces.map(w => w.id));
                     uniqueWorkspaces.forEach(w => {
                         if (!existingWorkspaceIds.has(w.id)) {
-                            console.log('[TaskStore] New workspace detected, expanding:', w.id);
-                            // This is a newly added workspace, expand it
+                            console.log('[TaskStore] New workspace detected mid-session, expanding:', w.id);
                             newExpanded.add(w.id);
                         }
                     });
