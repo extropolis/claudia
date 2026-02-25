@@ -351,19 +351,10 @@ export const useTaskStore = create<TaskStore>()(
                 // Keep existing expanded state, only add new workspaces as expanded
                 const newExpanded = new Set(currentExpanded);
 
-                // Only expand all if this is the very first load (no persisted state was loaded)
-                // If user has persisted expanded state (even if all collapsed), respect it
-                if (!expandedWorkspacesInitialized) {
-                    console.log('[TaskStore] First load - expanding all workspaces');
-                    // First time ever - expand all workspaces
-                    uniqueWorkspaces.forEach(w => newExpanded.add(w.id));
-                } else if (existingWorkspaces.length === 0) {
-                    // Page refresh / server reconnect - expand all workspaces so tasks are visible
-                    console.log('[TaskStore] Page refresh - expanding all workspaces');
-                    uniqueWorkspaces.forEach(w => newExpanded.add(w.id));
-                } else {
-                    console.log('[TaskStore] Preserving existing expansion state (mid-session)');
-                    // Mid-session: only auto-expand workspaces that are truly new
+                // Default behavior: all workspaces start closed
+                // Only auto-expand truly new workspaces added mid-session
+                if (existingWorkspaces.length > 0) {
+                    console.log('[TaskStore] Mid-session update - only expanding new workspaces');
                     const existingWorkspaceIds = new Set(existingWorkspaces.map(w => w.id));
                     uniqueWorkspaces.forEach(w => {
                         if (!existingWorkspaceIds.has(w.id)) {
@@ -371,6 +362,10 @@ export const useTaskStore = create<TaskStore>()(
                             newExpanded.add(w.id);
                         }
                     });
+                } else {
+                    // First load or page refresh - respect persisted state (already in newExpanded from currentExpanded)
+                    // If no persisted state exists (first time ever), newExpanded stays empty = all closed
+                    console.log('[TaskStore] Initial load - using persisted expansion state (default: all closed)');
                 }
                 // Remove any workspaces that no longer exist
                 const workspaceIds = new Set(uniqueWorkspaces.map(w => w.id));
