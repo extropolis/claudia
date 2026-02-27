@@ -9,7 +9,7 @@ import { join } from 'path';
 import multer from 'multer';
 import { TaskSpawner } from './task-spawner.js';
 import { WorkspaceStore } from './workspace-store.js';
-import { ConfigStore } from './config-store.js';
+import { ConfigStore, AICoreCredentials } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { createAnthropicProxy } from './anthropic-proxy/index.js';
@@ -82,6 +82,24 @@ function sendWSError(ws: WebSocket, message: string, originalType?: string, code
         type: 'error' as WSMessageType,
         payload: errorPayload
     }));
+}
+
+function hasCompleteAICoreCredentials(
+    credentials: {
+        clientId?: string;
+        clientSecret?: string;
+        authUrl?: string;
+        baseUrl?: string;
+        resourceGroup?: string;
+        timeoutMs?: number;
+    } | undefined
+): credentials is AICoreCredentials {
+    return !!(
+        credentials?.clientId &&
+        credentials?.clientSecret &&
+        credentials?.authUrl &&
+        credentials?.baseUrl
+    );
 }
 
 export async function createApp(basePath?: string) {
@@ -1250,7 +1268,7 @@ export async function createApp(basePath?: string) {
                 logger.info('SAP AI Core credentials changed, validating and clearing cache');
 
                 const newCredentials = validation.data!.aiCoreCredentials;
-                if (newCredentials) {
+                if (hasCompleteAICoreCredentials(newCredentials)) {
                     // Create temporary proxy instance to validate credentials
                     const tempProxy = createAnthropicProxy({
                         clientId: newCredentials.clientId,
@@ -1271,10 +1289,15 @@ export async function createApp(basePath?: string) {
                         });
                     }
                     logger.info('SAP AI Core credentials validated successfully');
+                } else if (newCredentials) {
+                    return res.status(400).json({
+                        error: 'Invalid SAP AI Core credentials',
+                        details: 'clientId, clientSecret, authUrl, and baseUrl are required'
+                    });
                 }
 
                 // Update config on existing proxy so it uses the new credentials
-                if (currentProxyInstance) {
+                if (hasCompleteAICoreCredentials(newCredentials) && currentProxyInstance) {
                     const newConfig = {
                         clientId: newCredentials.clientId,
                         clientSecret: newCredentials.clientSecret,
@@ -1286,7 +1309,7 @@ export async function createApp(basePath?: string) {
                     logger.info('Updating proxy config with new credentials');
                     currentProxyInstance.tokenProvider.updateConfig(newConfig);
                     currentProxyInstance.deploymentCatalog.updateConfig(newConfig);
-                } else {
+                } else if (hasCompleteAICoreCredentials(newCredentials)) {
                     // No proxy mounted yet — create and mount one
                     logger.info('No proxy mounted yet, creating new proxy with credentials');
                     currentProxyInstance = createAnthropicProxy({
@@ -1680,7 +1703,7 @@ export async function createApp(basePath?: string) {
             const embeddingsData = await embeddingsResponse.json();
             res.json(embeddingsData);
         } catch (error) {
-            logger.error('Embeddings API error:', error);
+            logger.error('Embeddings API error', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to generate embeddings' });
         }
     });
@@ -1702,7 +1725,7 @@ export async function createApp(basePath?: string) {
             }));
             res.json({ learnings: learningsWithoutEmbeddings });
         } catch (error) {
-            logger.error('Failed to get learnings:', error);
+            logger.error('Failed to get learnings', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to get learnings' });
         }
     });
@@ -1720,7 +1743,7 @@ export async function createApp(basePath?: string) {
                 embeddingDimensions: learning.embedding?.length || 0
             });
         } catch (error) {
-            logger.error('Failed to get learning:', error);
+            logger.error('Failed to get learning', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to get learning' });
         }
     });
@@ -1747,7 +1770,7 @@ export async function createApp(basePath?: string) {
                 embeddingDimensions: learning.embedding?.length || 0
             });
         } catch (error) {
-            logger.error('Failed to add learning:', error);
+            logger.error('Failed to add learning', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to add learning' });
         }
     });
@@ -1766,7 +1789,7 @@ export async function createApp(basePath?: string) {
                 embeddingDimensions: learning.embedding?.length || 0
             });
         } catch (error) {
-            logger.error('Failed to update learning:', error);
+            logger.error('Failed to update learning', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to update learning' });
         }
     });
@@ -1780,7 +1803,7 @@ export async function createApp(basePath?: string) {
             }
             res.json({ success: true });
         } catch (error) {
-            logger.error('Failed to delete learning:', error);
+            logger.error('Failed to delete learning', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to delete learning' });
         }
     });
@@ -1813,7 +1836,7 @@ export async function createApp(basePath?: string) {
                 }))
             });
         } catch (error) {
-            logger.error('Failed to search learnings:', error);
+            logger.error('Failed to search learnings', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to search learnings' });
         }
     });
@@ -1862,7 +1885,7 @@ export async function createApp(basePath?: string) {
                 injectedCount: injectedIds.length
             });
         } catch (error) {
-            logger.error('Failed to get task learnings:', error);
+            logger.error('Failed to get task learnings', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to get task learnings' });
         }
     });
@@ -2149,7 +2172,7 @@ Guidelines:
                         embeddingDimensions: saved.embedding?.length || 0
                     });
                 } catch (err) {
-                    logger.error('Failed to save learning:', err);
+                    logger.error('Failed to save learning', { error: err instanceof Error ? err.message : String(err) });
                 }
             }
 

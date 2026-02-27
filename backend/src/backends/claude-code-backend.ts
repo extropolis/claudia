@@ -66,7 +66,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
 
     private tasks: Map<string, InternalTask> = new Map();
     private configStore: ConfigStore | null = null;
-    private pendingSessionCapture: Map<string, { taskId: string; workspaceId: string; startTime: number }> = new Map();
+    private pendingSessionCapture: Map<string, { taskId: string; workspaceId: string; startTime: number; interval?: NodeJS.Timeout }> = new Map();
     private sessionCaptureIntervals: Map<string, NodeJS.Timeout> = new Map();
     private statePollingInterval: NodeJS.Timeout | null = null;
     private readonly statePollingMs: number;

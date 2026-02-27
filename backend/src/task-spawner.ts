@@ -1372,7 +1372,7 @@ export class TaskSpawner extends EventEmitter {
                     }
                 }
             } catch (err) {
-                logger.error('Failed to search learnings:', err);
+                logger.error('Failed to search learnings:', { error: err instanceof Error ? err.message : String(err) });
             }
         }
 
@@ -2825,8 +2825,8 @@ export class TaskSpawner extends EventEmitter {
             id: task.id,
             prompt: task.prompt,
             workspaceId: task.workspaceId,
-            createdAt: task.createdAt,
-            lastActivity: task.lastActivity,
+            createdAt: task.createdAt.toISOString(),
+            lastActivity: task.lastActivity.toISOString(),
             lastState: task.state,
             sessionId: task.sessionId,
             // We don't save full history to memory here, it's already on disk/in memory
@@ -2868,8 +2868,8 @@ export class TaskSpawner extends EventEmitter {
 
         // 3. Delete tasks.json
         try {
-            if (existsSync(this.statePath)) {
-                unlinkSync(this.statePath);
+            if (existsSync(this.persistencePath)) {
+                unlinkSync(this.persistencePath);
             }
         } catch (e) {
             console.error('[TaskSpawner] Failed to delete tasks.json', e);
@@ -2877,10 +2877,11 @@ export class TaskSpawner extends EventEmitter {
 
         // 4. Delete all history files in task-histories
         try {
-            if (existsSync(this.historyDir)) {
-                const files = readdirSync(this.historyDir);
+            const historyDir = this.getHistoryDir();
+            if (existsSync(historyDir)) {
+                const files = readdirSync(historyDir);
                 for (const file of files) {
-                    unlinkSync(join(this.historyDir, file));
+                    unlinkSync(join(historyDir, file));
                 }
             }
         } catch (e) {

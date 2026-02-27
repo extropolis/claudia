@@ -39,7 +39,7 @@ describe('ConfigStore', () => {
             expect(config.rules).toBe('');
             expect(config.supervisorEnabled).toBe(false);
             expect(config.autoFocusOnInput).toBe(false);
-            expect(config.apiMode).toBe('default');
+            expect(config.apiMode).toBe('sap-ai-core');
             expect(Array.isArray(config.mcpServers)).toBe(true);
         });
 
@@ -229,7 +229,7 @@ describe('ConfigStore', () => {
             expect(result.rules).toBe('');
             expect(result.skipPermissions).toBe(false);
             expect(result.supervisorEnabled).toBe(false);
-            expect(result.apiMode).toBe('default');
+            expect(result.apiMode).toBe('sap-ai-core');
         });
 
         it('should persist reset to file', () => {
@@ -252,7 +252,7 @@ describe('ConfigStore', () => {
             const config = newStore.getConfig();
 
             expect(config.skipPermissions).toBe(false);
-            expect(config.apiMode).toBe('default');
+            expect(config.apiMode).toBe('sap-ai-core');
         });
 
         it('should merge partial config with defaults', () => {
