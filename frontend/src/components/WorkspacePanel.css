@@ -1205,3 +1205,70 @@
     color: var(--accent-secondary);
 }
 
+/* ===== MOBILE RESPONSIVE ===== */
+@media (max-width: 768px) {
+    /* Larger touch targets for task items */
+    .workspace-panel .task-item {
+        padding: 10px 12px;
+        min-height: 44px;
+        font-size: 0.9375rem;
+    }
+
+    .workspace-panel .task-item .task-prompt {
+        font-size: 0.9375rem;
+    }
+
+    /* Make action buttons always visible & larger on mobile (no hover) */
+    .task-action-button {
+        opacity: 1;
+        padding: 6px;
+    }
+
+    .workspace-panel .task-item .task-drag-handle {
+        opacity: 0.5;
+    }
+
+    /* Workspace header */
+    .workspace-header {
+        padding: 12px 14px;
+    }
+
+    .workspace-action-button {
+        padding: 8px;
+    }
+
+    /* Task input form */
+    .task-input-form {
+        padding: 10px 12px;
+    }
+
+    .task-input {
+        font-size: 1rem;
+        min-height: 52px;
+        padding: 12px 14px;
+    }
+
+    .task-submit-button,
+    .task-image-button,
+    .task-voice-button {
+        width: 44px;
+        height: 44px;
+    }
+
+    /* Archived tasks */
+    .archived-task-item {
+        padding: 10px 14px;
+        min-height: 44px;
+    }
+
+    .archived-task-actions {
+        opacity: 1;
+    }
+
+    /* Workspace dropdown */
+    .workspace-dropdown-item {
+        padding: 12px 16px;
+        min-height: 44px;
+    }
+}
+

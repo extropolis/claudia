@@ -2263,3 +2263,120 @@ body {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* ============================================
+   MOBILE RESPONSIVE STYLES
+   ============================================ */
+
+/* Mobile back button in header */
+.mobile-back-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  margin-right: 4px;
+  transition: background 0.15s ease;
+}
+
+.mobile-back-button:hover {
+  background: var(--bg-tertiary);
+}
+
+/* Mobile full-screen panels */
+.mobile-full {
+  width: 100% !important;
+  min-width: 0 !important;
+  flex: 1 !important;
+  border: none !important;
+}
+
+@media (max-width: 768px) {
+  /* Header */
+  .app-header {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+
+  .logo {
+    gap: 6px;
+  }
+
+  .logo h1 {
+    font-size: 1rem;
+  }
+
+  .header-controls {
+    gap: 6px;
+  }
+
+  /* Hide text labels on header buttons */
+  .header-controls .btn-label {
+    display: none;
+  }
+
+  .chat-toggle-button {
+    padding: 6px 8px;
+  }
+
+  .settings-button,
+  .restart-button {
+    padding: 6px;
+  }
+
+  /* Layout: sidebar takes full screen */
+  .app-main {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100% !important;
+    min-width: 0 !important;
+    border-right: none;
+  }
+
+  .sidebar.mobile-full {
+    flex: 1;
+  }
+
+  .main-panel {
+    width: 100%;
+  }
+
+  .main-panel.mobile-full {
+    flex: 1;
+  }
+
+  /* Hide resize handles */
+  .resize-handle {
+    display: none !important;
+  }
+
+  /* Hide chat panel sidebar entirely on mobile */
+  .chat-panel-sidebar {
+    display: none !important;
+  }
+
+  /* Empty state */
+  .empty-state-main h2 {
+    font-size: 1rem;
+  }
+
+  .empty-state-main p {
+    font-size: 0.8125rem;
+  }
+
+  /* Running tasks indicator - compact on mobile */
+  .running-tasks-indicator {
+    padding: 4px 8px;
+  }
+
+  /* Hide system stats on mobile to save header space */
+  .system-stats {
+    display: none !important;
+  }
+}

@@ -244,3 +244,39 @@
     font-size: 12px;
     padding: 4px 0;
 }
+
+/* ===== MOBILE RESPONSIVE ===== */
+@media (max-width: 768px) {
+    .task-input-bar {
+        padding: 8px 10px;
+        /* Use dynamic viewport height to avoid keyboard obscuring input */
+        padding-bottom: max(8px, env(safe-area-inset-bottom));
+    }
+
+    .task-input-container {
+        padding: 8px 10px;
+    }
+
+    .task-input-textarea {
+        font-size: 16px; /* Prevents iOS zoom on focus */
+    }
+
+    .task-input-send {
+        width: 44px;
+        height: 44px;
+    }
+
+    .task-input-upload {
+        width: 44px;
+        height: 44px;
+    }
+
+    .task-input-bar .voice-input-button {
+        width: 44px;
+        height: 44px;
+    }
+
+    .task-input-hint {
+        font-size: 10px;
+    }
+}

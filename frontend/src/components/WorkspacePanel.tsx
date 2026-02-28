@@ -3,7 +3,7 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
     Loader2, Square, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
@@ -563,6 +563,17 @@ function WorkspaceSection({
                             >
                                 <Terminal size={14} />
                                 <span>Open in Terminal</span>
+                            </button>
+                            <button
+                                className="workspace-dropdown-item"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    navigator.clipboard.writeText(workspace.id).catch(err => console.error('Failed to copy path:', err));
+                                    onToggleMenu();
+                                }}
+                            >
+                                <Copy size={14} />
+                                <span>Copy Path</span>
                             </button>
                             <button
                                 className="workspace-dropdown-item"

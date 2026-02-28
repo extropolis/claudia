@@ -1037,7 +1037,7 @@ export class TaskSpawner extends EventEmitter {
             // Hyperspace AI Proxy (HAI) mode
             // Route through Claudia's backend proxy (like SAP AI Core) so we can
             // transform responses to inject the correct model information
-            const backendPort = process.env.PORT || PORTS.BACKEND;
+            const backendPort = process.env.CLAUDIA_BACKEND_PORT || PORTS.BACKEND;
             taskEnv['ANTHROPIC_BASE_URL'] = `http://localhost:${backendPort}/hyperspace`;
             // Set a dummy API key - the proxy will handle the actual authentication
             taskEnv['ANTHROPIC_API_KEY'] = 'sk-ant-dummy-hyperspace-proxy';
@@ -1114,7 +1114,7 @@ export class TaskSpawner extends EventEmitter {
             } else {
                 // Claude Code uses the embedded proxy server
                 // The proxy is mounted at the backend's root, so we use the backend URL
-                const backendPort = process.env.PORT || PORTS.BACKEND;
+                const backendPort = process.env.CLAUDIA_BACKEND_PORT || PORTS.BACKEND;
                 taskEnv['ANTHROPIC_BASE_URL'] = `http://localhost:${backendPort}`;
                 // Set a dummy API key so Claude Code skips its login/auth prompt.
                 // The actual key value is irrelevant — the proxy handles auth via SAP AI Core tokens.

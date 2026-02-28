@@ -34,6 +34,8 @@ export interface AICoreCredentials {
 
 // Available SAP AI Core models
 export type SapAiCoreModel =
+    | 'anthropic--claude-4.6-opus'
+    | 'anthropic--claude-4.6-sonnet'
     | 'anthropic--claude-4.5-opus'
     | 'anthropic--claude-opus-4'
     | 'anthropic--claude-sonnet-4'
@@ -44,6 +46,8 @@ export type SapAiCoreModel =
     | 'anthropic--claude-3-opus';
 
 export const SAP_AI_CORE_MODELS: { value: SapAiCoreModel; label: string }[] = [
+    { value: 'anthropic--claude-4.6-opus', label: 'Claude 4.6 Opus' },
+    { value: 'anthropic--claude-4.6-sonnet', label: 'Claude 4.6 Sonnet' },
     { value: 'anthropic--claude-4.5-opus', label: 'Claude 4.5 Opus' },
     { value: 'anthropic--claude-opus-4', label: 'Claude Opus 4' },
     { value: 'anthropic--claude-sonnet-4', label: 'Claude Sonnet 4' },
@@ -95,18 +99,21 @@ export interface AppConfig {
     hyperspaceProxy?: HyperspaceProxyConfig;  // Hyperspace AI Proxy configuration
 }
 
-const DEFAULT_SUPERVISOR_PROMPT = `You are an AI supervisor monitoring coding tasks. Your job is to:
-1. Ensure tasks complete without errors
-2. Verify tasks are properly tested when appropriate
-3. Identify if follow-up actions are needed
+const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
 
-When a task completes, analyze the conversation and determine if:
-- The task was completed successfully
-- Tests were run (if applicable)
-- There are any errors or issues that need attention
-- Follow-up actions are recommended
+When a task finishes: give a 1-2 sentence summary of what was done with a touch of humor. If there are issues, briefly say what went wrong. Occasionally suggest a next step if it's obvious.
 
-If everything looks good, just confirm the task is complete. If issues exist, suggest specific next steps.`;
+Always end by asking what to do next.
+
+Be funny but not forced — dry wit, light sarcasm, the occasional pun. Think "clever coworker" not "stand-up comedian." Never let the jokes get in the way of being useful.
+
+Examples of good responses:
+- "Done — login form's in with validation. Users can no longer just vibe their way past authentication. Want me to add tests?"
+- "So that dependency doesn't want to cooperate. Version conflict. Want me to try sweet-talking a different version?"
+- "API endpoint's live and tests pass. We're basically shipping. What's next?"
+- "Task crashed. Looks like a null pointer — the code equivalent of stepping on a LEGO. Want me to dig into it?"
+
+Keep it natural, like you're the funniest person on the engineering team.`;
 
 // Default MCP servers that are included out-of-the-box
 const DEFAULT_MCP_SERVERS: MCPServerConfig[] = [
@@ -118,7 +125,7 @@ const DEFAULT_MCP_SERVERS: MCPServerConfig[] = [
     }
 ];
 
-const DEFAULT_SAP_AI_CORE_MODEL: SapAiCoreModel = 'anthropic--claude-4.5-opus';
+const DEFAULT_SAP_AI_CORE_MODEL: SapAiCoreModel = 'anthropic--claude-4.6-opus';
 
 const DEFAULT_HYPERSPACE_PROXY: HyperspaceProxyConfig = {
     proxyUrl: 'http://localhost:6655',

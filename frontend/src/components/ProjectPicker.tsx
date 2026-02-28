@@ -1,35 +1,34 @@
-import { useEffect, useCallback, useState, useRef } from 'react';
+import { useEffect, useCallback, useState, MutableRefObject } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { selectDirectory, getDirectorySelectionInfo } from '../services/filePickerService';
 import { getBrowserCapabilities } from '../utils/browserCapabilities';
 import { PathInputModal } from './PathInputModal';
 import { RecentWorkspace } from '@claudia/shared';
-import { getWebSocketUrl } from '../config/api-config';
 
 interface ProjectPickerProps {
     onSelect: (path: string) => void;
+    wsRef: MutableRefObject<WebSocket | null>;
+    requestRecentWorkspaces: () => void;
+    clearRecentWorkspace: (workspaceId?: string) => void;
 }
 
-export function ProjectPicker({ onSelect }: ProjectPickerProps) {
+export function ProjectPicker({ onSelect, wsRef, requestRecentWorkspaces, clearRecentWorkspace }: ProjectPickerProps) {
     const { showProjectPicker, setShowProjectPicker } = useTaskStore();
     const [showPathInput, setShowPathInput] = useState(false);
     const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspace[]>([]);
-    const wsRef = useRef<WebSocket | null>(null);
 
-    // Set up WebSocket listener for recent workspaces
+    // Listen for recent workspaces response on the shared WebSocket
     useEffect(() => {
-        // Only create listener when path input is shown
         if (!showPathInput) return;
 
-        // Connect to existing WebSocket or create a new connection
-        const ws = new WebSocket(getWebSocketUrl());
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            console.warn('[ProjectPicker] WebSocket not ready, cannot fetch recent workspaces');
+            return;
+        }
 
-        ws.onopen = () => {
-            console.log('[ProjectPicker] Requesting recent workspaces');
-            ws.send(JSON.stringify({ type: 'workspace:recent:list', payload: {} }));
-        };
-
-        ws.onmessage = (event) => {
+        // Listen for the response on the shared WebSocket
+        const handler = (event: MessageEvent) => {
             try {
                 const message = JSON.parse(event.data);
                 if (message.type === 'workspace:recent:list') {
@@ -41,13 +40,16 @@ export function ProjectPicker({ onSelect }: ProjectPickerProps) {
             }
         };
 
-        wsRef.current = ws;
+        ws.addEventListener('message', handler);
+
+        // Request recent workspaces through the shared connection
+        console.log('[ProjectPicker] Requesting recent workspaces via shared WebSocket');
+        requestRecentWorkspaces();
 
         return () => {
-            ws.close();
-            wsRef.current = null;
+            ws.removeEventListener('message', handler);
         };
-    }, [showPathInput]);
+    }, [showPathInput, wsRef, requestRecentWorkspaces]);
 
     const handleFolderSelect = useCallback(async () => {
         try {
@@ -109,13 +111,8 @@ export function ProjectPicker({ onSelect }: ProjectPickerProps) {
         console.log('[ProjectPicker] Removing recent workspace:', workspaceId);
         // Remove from local state immediately for responsive UI
         setRecentWorkspaces(prev => prev.filter(w => w.id !== workspaceId));
-        // Send to server
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({
-                type: 'workspace:recent:clear',
-                payload: { workspaceId }
-            }));
-        }
+        // Send to server via shared WebSocket
+        clearRecentWorkspace(workspaceId);
     };
 
     return (

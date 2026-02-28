@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, RefreshCw } from 'lucide-react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, RefreshCw, Zap } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
 import { useTaskStore } from '../stores/taskStore';
+import { useNotification } from './NotificationContainer';
 import './SettingsMenu.css';
 
 interface SettingsMenuProps {
@@ -31,17 +32,11 @@ interface AICoreCredentials {
 
 type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core' | 'hyperspace-proxy';
 type BackendType = 'claude-code' | 'opencode';
-type SapAiCoreModel =
-    | 'anthropic--claude-4.5-opus'
-    | 'anthropic--claude-opus-4'
-    | 'anthropic--claude-sonnet-4'
-    | 'anthropic--claude-4.5-sonnet'
-    | 'anthropic--claude-3.7-sonnet'
-    | 'anthropic--claude-3.5-sonnet'
-    | 'anthropic--claude-3.5-haiku'
-    | 'anthropic--claude-3-opus';
+type SapAiCoreModel = string;
 
-const SAP_AI_CORE_MODELS: { value: SapAiCoreModel; label: string }[] = [
+const SAP_AI_CORE_MODELS_FALLBACK: { value: string; label: string }[] = [
+    { value: 'anthropic--claude-4.6-opus', label: 'Claude 4.6 Opus' },
+    { value: 'anthropic--claude-4.6-sonnet', label: 'Claude 4.6 Sonnet' },
     { value: 'anthropic--claude-4.5-opus', label: 'Claude 4.5 Opus' },
     { value: 'anthropic--claude-opus-4', label: 'Claude Opus 4' },
     { value: 'anthropic--claude-sonnet-4', label: 'Claude Sonnet 4' },
@@ -98,6 +93,7 @@ function CollapsiblePanel({ title, icon, isExpanded, onToggle, children }: Colla
 
 export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProps) {
     const { showSystemStats, setShowSystemStats } = useTaskStore();
+    const { showWarning } = useNotification();
     const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
         sound: false,
         behavior: false,
@@ -119,6 +115,10 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
 
     const [isAddingServer, setIsAddingServer] = useState(false);
     const [newServer, setNewServer] = useState({ name: '', type: 'stdio' as 'stdio' | 'http' | 'streamableHttp', command: '', args: '', url: '', headers: '' });
+
+    // MCP test connection state
+    const [mcpTestStatus, setMcpTestStatus] = useState<Record<string, 'idle' | 'testing' | 'success' | 'error'>>({});
+    const [mcpTestMessages, setMcpTestMessages] = useState<Record<string, string>>({});
 
     // JSON editor state
     const [mcpViewMode, setMcpViewMode] = useState<'list' | 'json'>('list');
@@ -150,9 +150,13 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         resourceGroup: 'default',
         timeoutMs: 120000
     });
-    const [sapAiCoreModel, setSapAiCoreModel] = useState<SapAiCoreModel>('anthropic--claude-4.5-opus');
+    const [sapAiCoreModel, setSapAiCoreModel] = useState<SapAiCoreModel>('anthropic--claude-4.6-opus');
+    const [aiCoreModels, setAiCoreModels] = useState<{ value: string; label: string }[]>([]);
+    const [aiCoreModelsLoading, setAiCoreModelsLoading] = useState(false);
     const [aiCoreTestStatus, setAiCoreTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [aiCoreTestMessage, setAiCoreTestMessage] = useState('');
+    const [modelTestStatus, setModelTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+    const [modelTestResponse, setModelTestResponse] = useState('');
 
     // Hyperspace AI Proxy state
     const [hyperspaceProxy, setHyperspaceProxy] = useState<HyperspaceProxyConfig>({
@@ -271,6 +275,10 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 setCustomAnthropicApiKey(config.customAnthropicApiKey || '');
                 if (config.aiCoreCredentials) {
                     setAiCoreCredentials(config.aiCoreCredentials);
+                    // Load live models if credentials are present
+                    if (config.aiCoreCredentials.clientId) {
+                        fetchAiCoreModels();
+                    }
                 }
                 if (config.sapAiCoreModel) {
                     setSapAiCoreModel(config.sapAiCoreModel);
@@ -441,6 +449,53 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }, 1000);
     };
 
+    const testMcpConnection = useCallback(async (server: MCPServerListItem) => {
+        setMcpTestStatus(prev => ({ ...prev, [server.name]: 'testing' }));
+        setMcpTestMessages(prev => ({ ...prev, [server.name]: '' }));
+
+        try {
+            const serverConfig = {
+                name: server.name,
+                type: server.type || 'stdio',
+                command: server.command,
+                args: server.args,
+                url: server.url,
+                headers: server.headers
+            };
+
+            const response = await fetch(`${getApiBaseUrl()}/api/mcp/test`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ server: serverConfig })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                setMcpTestStatus(prev => ({ ...prev, [server.name]: 'success' }));
+                setMcpTestMessages(prev => ({ ...prev, [server.name]: result.message || 'Connected' }));
+                // Reset status after 5 seconds
+                setTimeout(() => {
+                    setMcpTestStatus(prev => ({ ...prev, [server.name]: 'idle' }));
+                }, 5000);
+            } else {
+                setMcpTestStatus(prev => ({ ...prev, [server.name]: 'error' }));
+                setMcpTestMessages(prev => ({ ...prev, [server.name]: result.error || 'Connection failed' }));
+                // Reset status after 8 seconds
+                setTimeout(() => {
+                    setMcpTestStatus(prev => ({ ...prev, [server.name]: 'idle' }));
+                }, 8000);
+            }
+        } catch (error) {
+            console.error('Failed to test MCP connection:', error);
+            setMcpTestStatus(prev => ({ ...prev, [server.name]: 'error' }));
+            setMcpTestMessages(prev => ({ ...prev, [server.name]: 'Failed to test connection' }));
+            setTimeout(() => {
+                setMcpTestStatus(prev => ({ ...prev, [server.name]: 'idle' }));
+            }, 8000);
+        }
+    }, []);
+
     const saveSkipPermissions = async (value: boolean) => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`, {
@@ -525,7 +580,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }, 1000);
     };
 
-    const saveAiCoreCredentials = useCallback(async (credentials: AICoreCredentials, model: SapAiCoreModel) => {
+    const saveAiCoreCredentials = useCallback(async (credentials: AICoreCredentials, model: string) => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`, {
                 method: 'PUT',
@@ -534,11 +589,64 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             });
             if (!response.ok) {
                 console.error('Failed to save AI Core credentials');
+            } else {
+                showWarning('API Configuration Changed', 'This change only applies to new tasks. Running tasks will continue using their original configuration.');
             }
         } catch (error) {
             console.error('Failed to save AI Core credentials:', error);
         }
+    }, [showWarning]);
+
+    const fetchAiCoreModels = useCallback(async () => {
+        setAiCoreModelsLoading(true);
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/aicore/models`);
+            const result = await response.json();
+            if (result.success && result.models?.length > 0) {
+                console.log(`[Settings] Loaded ${result.models.length} AI Core models from live deployments`);
+                setAiCoreModels(result.models);
+            } else {
+                console.warn('[Settings] Failed to load AI Core models:', result.error);
+                setAiCoreModels([]);
+            }
+        } catch (error) {
+            console.error('[Settings] Error fetching AI Core models:', error);
+            setAiCoreModels([]);
+        } finally {
+            setAiCoreModelsLoading(false);
+        }
     }, []);
+
+    // Auto-fetch live AI Core models when API panel is opened
+    useEffect(() => {
+        if (expandedPanels.api && aiCoreCredentials.clientId) {
+            fetchAiCoreModels();
+        }
+    }, [expandedPanels.api, aiCoreCredentials.clientId, fetchAiCoreModels]);
+
+    const testAiCoreModel = useCallback(async () => {
+        if (!sapAiCoreModel) return;
+        setModelTestStatus('testing');
+        setModelTestResponse('');
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/aicore/test-model`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: sapAiCoreModel })
+            });
+            const result = await response.json();
+            if (result.success) {
+                setModelTestStatus('success');
+                setModelTestResponse(result.response);
+            } else {
+                setModelTestStatus('error');
+                setModelTestResponse(result.error || 'Test failed');
+            }
+        } catch (error) {
+            setModelTestStatus('error');
+            setModelTestResponse('Failed to test model');
+        }
+    }, [sapAiCoreModel]);
 
     const handleAiCoreChange = (field: keyof AICoreCredentials, value: string | number) => {
         const updatedCredentials = { ...aiCoreCredentials, [field]: value };
@@ -554,7 +662,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }, 1000);
     };
 
-    const handleSapAiCoreModelChange = (model: SapAiCoreModel) => {
+    const handleSapAiCoreModelChange = (model: string) => {
         setSapAiCoreModel(model);
 
         // Save immediately for dropdowns
@@ -671,11 +779,13 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             });
             if (!response.ok) {
                 console.error('Failed to save API mode');
+            } else {
+                showWarning('API Configuration Changed', 'This change only applies to new tasks. Running tasks will continue using their original configuration.');
             }
         } catch (error) {
             console.error('Failed to save API mode:', error);
         }
-    }, []);
+    }, [showWarning]);
 
     const saveHyperspaceProxy = useCallback(async (config: HyperspaceProxyConfig) => {
         try {
@@ -686,11 +796,13 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             });
             if (!response.ok) {
                 console.error('Failed to save Hyperspace proxy config');
+            } else {
+                showWarning('API Configuration Changed', 'This change only applies to new tasks. Running tasks will continue using their original configuration.');
             }
         } catch (error) {
             console.error('Failed to save Hyperspace proxy config:', error);
         }
-    }, []);
+    }, [showWarning]);
 
     const handleHyperspaceChange = (field: keyof HyperspaceProxyConfig, value: string | boolean) => {
         const updatedConfig = { ...hyperspaceProxy, [field]: value };
@@ -1197,17 +1309,58 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
 
                                         <div className="aicore-field">
                                             <label>Model</label>
-                                            <select
-                                                value={sapAiCoreModel}
-                                                onChange={(e) => handleSapAiCoreModelChange(e.target.value as SapAiCoreModel)}
-                                                className="aicore-input aicore-select"
-                                            >
-                                                {SAP_AI_CORE_MODELS.map((model) => (
-                                                    <option key={model.value} value={model.value}>
-                                                        {model.label}
-                                                    </option>
-                                                ))}
-                                            </select>
+                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                                <select
+                                                    value={sapAiCoreModel}
+                                                    onChange={(e) => handleSapAiCoreModelChange(e.target.value)}
+                                                    className="aicore-input aicore-select"
+                                                    style={{ flex: 1 }}
+                                                    disabled={aiCoreModelsLoading}
+                                                >
+                                                    {aiCoreModelsLoading && (
+                                                        <option value="">Loading deployments...</option>
+                                                    )}
+                                                    {(aiCoreModels.length > 0 ? aiCoreModels : SAP_AI_CORE_MODELS_FALLBACK).map((model) => (
+                                                        <option key={model.value} value={model.value}>
+                                                            {model.label}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                                <button
+                                                    className="aicore-refresh-btn"
+                                                    onClick={fetchAiCoreModels}
+                                                    disabled={aiCoreModelsLoading || !aiCoreCredentials.clientId}
+                                                    title="Refresh deployments from AI Core"
+                                                >
+                                                    <RefreshCw size={14} className={aiCoreModelsLoading ? 'spinning' : ''} />
+                                                </button>
+                                            </div>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
+                                                {aiCoreModels.length > 0 && (
+                                                    <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                                                        {aiCoreModels.length} live deployments
+                                                    </span>
+                                                )}
+                                                <button
+                                                    className="aicore-test-model-btn"
+                                                    onClick={testAiCoreModel}
+                                                    disabled={modelTestStatus === 'testing' || !sapAiCoreModel || !aiCoreCredentials.clientId}
+                                                    title="Send a test prompt to verify the model"
+                                                >
+                                                    {modelTestStatus === 'testing' ? (
+                                                        <><Loader2 size={12} className="spinning" /> Testing...</>
+                                                    ) : (
+                                                        <>Test Model</>
+                                                    )}
+                                                </button>
+                                            </div>
+                                            {modelTestStatus !== 'idle' && modelTestResponse && (
+                                                <div className={`model-test-response ${modelTestStatus}`}>
+                                                    {modelTestStatus === 'success' && <CheckCircle size={14} />}
+                                                    {modelTestStatus === 'error' && <AlertCircle size={14} />}
+                                                    <span>{modelTestResponse}</span>
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
 
@@ -1416,32 +1569,58 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                         <p className="mcp-empty-state">No MCP servers configured</p>
                                     ) : (
                                         <div className="mcp-server-list">
-                                            {mcpServersList.map((server) => (
-                                                <div key={server.name} className="mcp-server-item">
-                                                    <div className="mcp-server-info">
-                                                        <div className="mcp-server-name-row">
-                                                            <span className="mcp-server-name">{server.name}</span>
-                                                            <span className={`mcp-server-type ${server.type === 'streamableHttp' ? 'http' : 'stdio'}`}>
-                                                                {server.type === 'streamableHttp' ? 'HTTP' : 'stdio'}
+                                            {mcpServersList.map((server) => {
+                                                const testStatus = mcpTestStatus[server.name] || 'idle';
+                                                const testMessage = mcpTestMessages[server.name] || '';
+
+                                                return (
+                                                    <div key={server.name} className="mcp-server-item">
+                                                        <div className="mcp-server-info">
+                                                            <div className="mcp-server-name-row">
+                                                                <span className="mcp-server-name">{server.name}</span>
+                                                                <span className={`mcp-server-type ${server.type === 'streamableHttp' ? 'http' : 'stdio'}`}>
+                                                                    {server.type === 'streamableHttp' ? 'HTTP' : 'stdio'}
+                                                                </span>
+                                                            </div>
+                                                            <span className="mcp-server-command">
+                                                                {server.type === 'streamableHttp'
+                                                                    ? server.url
+                                                                    : `${server.command} ${server.args?.join(' ')}`}
                                                             </span>
+                                                            {testMessage && (
+                                                                <span className={`mcp-test-message ${testStatus}`}>
+                                                                    {testMessage}
+                                                                </span>
+                                                            )}
                                                         </div>
-                                                        <span className="mcp-server-command">
-                                                            {server.type === 'streamableHttp'
-                                                                ? server.url
-                                                                : `${server.command} ${server.args?.join(' ')}`}
-                                                        </span>
+                                                        <div className="mcp-server-actions">
+                                                            <button
+                                                                className={`mcp-test-btn ${testStatus}`}
+                                                                onClick={() => testMcpConnection(server)}
+                                                                title="Test Connection"
+                                                                disabled={testStatus === 'testing'}
+                                                            >
+                                                                {testStatus === 'testing' ? (
+                                                                    <Loader2 size={16} className="animate-spin" />
+                                                                ) : testStatus === 'success' ? (
+                                                                    <CheckCircle size={16} />
+                                                                ) : testStatus === 'error' ? (
+                                                                    <AlertCircle size={16} />
+                                                                ) : (
+                                                                    <Zap size={16} />
+                                                                )}
+                                                            </button>
+                                                            <button
+                                                                className="mcp-delete-btn"
+                                                                onClick={() => handleRemoveServer(server.name)}
+                                                                title="Remove"
+                                                            >
+                                                                <Trash2 size={16} />
+                                                            </button>
+                                                        </div>
                                                     </div>
-                                                    <div className="mcp-server-actions">
-                                                        <button
-                                                            className="mcp-delete-btn"
-                                                            onClick={() => handleRemoveServer(server.name)}
-                                                            title="Remove"
-                                                        >
-                                                            <Trash2 size={16} />
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            ))}
+                                                );
+                                            })}
                                         </div>
                                     )}
 
