@@ -1,4 +1,4 @@
-import { spawn, IPty } from 'node-pty';
+import { spawn, IPty } from '@homebridge/node-pty-prebuilt-multiarch';
 import { EventEmitter } from 'events';
 import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS } from '@claudia/shared';
 import { fileURLToPath } from 'url';
