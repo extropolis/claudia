@@ -22,7 +22,6 @@ import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
 import { createLogger } from './logger.js';
-import { stripAnsi } from './task-state-detection.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
 // - config-routes.ts: Config API routes template
@@ -408,14 +407,10 @@ export async function createApp(basePath?: string) {
 
     taskSpawner.on('taskOutput', (taskId: string, data: string) => {
         broadcast({ type: 'task:output', payload: { taskId, data } });
-        // Send ANSI-stripped text for mobile text view
-        broadcast({ type: 'task:textOutput', payload: { taskId, data: stripAnsi(data) } });
     });
 
     taskSpawner.on('taskRestore', (taskId: string, history: string) => {
         broadcast({ type: 'task:restore', payload: { taskId, history } });
-        // Send ANSI-stripped restore for mobile text view
-        broadcast({ type: 'task:textRestore', payload: { taskId, history: stripAnsi(history) } });
     });
 
     taskSpawner.on('taskDestroyed', (taskId: string) => {
@@ -739,11 +734,6 @@ export async function createApp(basePath?: string) {
                             ws.send(JSON.stringify({
                                 type: 'task:restore',
                                 payload: { taskId, history }
-                            }));
-                            // Also send ANSI-stripped version for mobile text view
-                            ws.send(JSON.stringify({
-                                type: 'task:textRestore',
-                                payload: { taskId, history: stripAnsi(history) }
                             }));
                         }
                         break;
