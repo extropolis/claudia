@@ -104,6 +104,8 @@ function App() {
     const [settingsInitialPanel, setSettingsInitialPanel] = useState<string | undefined>(undefined);
     const [showChatPanel, setShowChatPanel] = useState(false);
     const [showMobileAccess, setShowMobileAccess] = useState(false);
+    const [tunnelActive, setTunnelActive] = useState(false);
+    const [tunnelLoading, setTunnelLoading] = useState(false);
     const sidebarRef = useRef<HTMLElement>(null);
     const aiCoreCheckDoneRef = useRef(false);
 
@@ -181,7 +183,7 @@ function App() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ userId }),
-            }).catch(() => {}); // fire-and-forget
+            }).catch(() => { }); // fire-and-forget
         } catch {
             // Silently fail — tracking is non-critical
         }
@@ -276,6 +278,50 @@ function App() {
         }
     };
 
+    // Check tunnel status on mount
+    useEffect(() => {
+        (async () => {
+            try {
+                const res = await fetch(`${getApiBaseUrl()}/api/tunnel/status`);
+                const data = await res.json();
+                setTunnelActive(data.active === true);
+            } catch {
+                // ignore
+            }
+        })();
+    }, []);
+
+    // Toggle tunnel: start + show modal, or stop tunnel
+    const handleMobileToggle = useCallback(async () => {
+        if (tunnelActive) {
+            try {
+                await fetch(`${getApiBaseUrl()}/api/tunnel/stop`, { method: 'POST' });
+            } catch {
+                // ignore
+            }
+            setTunnelActive(false);
+            setShowMobileAccess(false);
+        } else {
+            setShowMobileAccess(true);
+            setTunnelLoading(true);
+            try {
+                const res = await fetch(`${getApiBaseUrl()}/api/tunnel/start`, { method: 'POST' });
+                const data = await res.json();
+                if (data.error) {
+                    console.error('[Tunnel] Failed to start:', data.error);
+                    setTunnelActive(false);
+                } else {
+                    setTunnelActive(true);
+                }
+            } catch (err) {
+                console.error('[Tunnel] Failed to start:', err);
+                setTunnelActive(false);
+            } finally {
+                setTunnelLoading(false);
+            }
+        }
+    }, [tunnelActive]);
+
     // Determine what to show on mobile
     const mobileShowingTerminal = isMobile && mobileShowTerminal && selectedTask;
 
@@ -303,25 +349,26 @@ function App() {
 
                     {showSystemStats && <SystemStats />}
                     {!isMobile && supervisorEnabled && (
-                        <>
-                            <button
-                                className={`chat-toggle-button ${showChatPanel ? 'active' : ''} ${hasUnreadMessages ? 'has-messages' : ''}`}
-                                onClick={() => setShowChatPanel(!showChatPanel)}
-                                title={showChatPanel ? 'Close Chat' : 'Open Chat'}
-                            >
-                                <MessageCircle size={18} />
-                                <span className="btn-label">Chat</span>
-                                {hasUnreadMessages && <span className="message-badge">{chatMessages.length}</span>}
-                            </button>
-                            <button
-                                className="chat-toggle-button"
-                                onClick={() => setShowMobileAccess(true)}
-                                title="Mobile Voice Access"
-                            >
-                                <Smartphone size={18} />
-                                <span className="btn-label">Mobile</span>
-                            </button>
-                        </>
+                        <button
+                            className={`chat-toggle-button ${showChatPanel ? 'active' : ''} ${hasUnreadMessages ? 'has-messages' : ''}`}
+                            onClick={() => setShowChatPanel(!showChatPanel)}
+                            title={showChatPanel ? 'Close Chat' : 'Open Chat'}
+                        >
+                            <MessageCircle size={18} />
+                            <span className="btn-label">Chat</span>
+                            {hasUnreadMessages && <span className="message-badge">{chatMessages.length}</span>}
+                        </button>
+                    )}
+                    {!isMobile && (
+                        <button
+                            className={`chat-toggle-button ${tunnelActive ? 'active' : ''} ${tunnelLoading ? 'loading' : ''}`}
+                            onClick={handleMobileToggle}
+                            title={tunnelActive ? 'Stop Tunnel' : 'Start Mobile Tunnel'}
+                            disabled={tunnelLoading}
+                        >
+                            <Smartphone size={18} />
+                            <span className="btn-label">{tunnelLoading ? 'Connecting...' : 'Mobile'}</span>
+                        </button>
                     )}
                     <GlobalVoiceToggle />
                     <button
@@ -352,6 +399,7 @@ function App() {
                                 task={selectedTask!}
                                 wsRef={wsRef}
                                 workspace={selectedWorkspace}
+                                isMobile={true}
                             />
                         </section>
                     ) : (

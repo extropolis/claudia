@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { WSMessage, WSErrorPayload, Task, Workspace, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
 import { getWebSocketUrl, getApiBaseUrl, isTunnelAccess } from '../config/api-config';
+import { playTaskCompletionSound, sendTaskCompletionNotification } from '../utils/browserCapabilities';
 
 const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
@@ -44,6 +45,10 @@ export function useWebSocket() {
     const reconnectTimeoutRef = useRef<number>();
     /** Track reconnection attempts for exponential backoff */
     const reconnectAttempts = useRef<number>(0);
+    /** Track previous task states to detect busy→idle transitions */
+    const taskStatesRef = useRef<Map<string, string>>(new Map());
+    /** Flag to skip sound on initial load */
+    const initializedRef = useRef<boolean>(false);
 
     const {
         setConnected,
@@ -124,6 +129,11 @@ export function useWebSocket() {
                         if (payload.workspaces) {
                             setWorkspaces(payload.workspaces);
                         }
+                        // Seed task states from initial load (so we don't play sounds for existing idle tasks)
+                        payload.tasks.forEach((t: Task) => {
+                            taskStatesRef.current.set(t.id, t.state);
+                        });
+                        initializedRef.current = true;
                         // Clear reloading state when we get initialized
                         setServerReloading(false);
 
@@ -172,6 +182,7 @@ export function useWebSocket() {
                     case 'task:destroyed': {
                         const payload = message.payload as { taskId: string };
                         console.log(`[WebSocket] Task destroyed: ${payload.taskId}`);
+                        taskStatesRef.current.delete(payload.taskId);
                         deleteTask(payload.taskId);
                         break;
                     }
@@ -260,11 +271,22 @@ export function useWebSocket() {
                         const payload = message.payload as { task?: Task; tasks?: Task[] };
                         console.log('[WebSocket] task:stateChanged received:', payload.task?.id, 'state:', payload.task?.state);
                         if (payload.task) {
+                            const previousState = taskStatesRef.current.get(payload.task.id);
+                            // Update tracked state
+                            taskStatesRef.current.set(payload.task.id, payload.task.state);
+
                             updateTask(payload.task);
                             // Clear waiting input notification when task becomes busy OR idle
                             // (idle means Claude finished and isn't asking anything)
                             if (payload.task.state === 'busy' || payload.task.state === 'idle') {
                                 clearWaitingInput(payload.task.id);
+                            }
+
+                            // Play completion sound + browser notification on busy→idle transition
+                            if (payload.task.state === 'idle' && previousState === 'busy' && initializedRef.current) {
+                                console.log('[WebSocket] Task completed (busy→idle), playing completion sound:', payload.task.id);
+                                playTaskCompletionSound();
+                                sendTaskCompletionNotification(payload.task.prompt);
                             }
 
                             // Auto-focus on task when it completes (becomes idle) if setting is enabled

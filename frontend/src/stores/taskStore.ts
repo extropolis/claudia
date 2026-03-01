@@ -49,6 +49,7 @@ interface TaskStore {
     voiceInterimTranscript: string;
     autoSendEnabled: boolean;
     autoSendDelayMs: number;
+    deepgramApiKey: string;
 
     // Supervisor state
     taskSummaries: Map<string, TaskSummary>;
@@ -111,6 +112,7 @@ interface TaskStore {
     clearVoiceTranscript: () => void;
     consumeVoiceTranscript: () => string;
     setAutoSendSettings: (enabled: boolean, delayMs: number) => void;
+    setDeepgramApiKey: (key: string) => void;
 
     // Supervisor actions
     setTaskSummary: (summary: TaskSummary) => void;
@@ -157,6 +159,7 @@ interface PersistedState {
     globalVoiceEnabled: boolean;
     autoSendEnabled: boolean;
     autoSendDelayMs: number;
+    deepgramApiKey: string;
     autoFocusOnInput: boolean;
     supervisorEnabled: boolean;
     showSystemStats: boolean;
@@ -197,6 +200,7 @@ export const useTaskStore = create<TaskStore>()(
             voiceInterimTranscript: '',
             autoSendEnabled: false,
             autoSendDelayMs: 3000,
+            deepgramApiKey: '64070750f98b25b595b1a900ed263e3a11f11690',
 
             // Supervisor initial state
             taskSummaries: new Map(),
@@ -215,7 +219,7 @@ export const useTaskStore = create<TaskStore>()(
             autoFocusOnInput: false,
             supervisorEnabled: false,
             aiCoreConfigured: null,
-            showSystemStats: true,
+            showSystemStats: false,
             browserNotificationsEnabled: false,
 
             // Actions
@@ -498,6 +502,7 @@ export const useTaskStore = create<TaskStore>()(
                 autoSendEnabled: enabled,
                 autoSendDelayMs: delayMs
             }),
+            setDeepgramApiKey: (key) => set({ deepgramApiKey: key }),
 
             // Supervisor actions
             setTaskSummary: (summary) => {
@@ -586,6 +591,7 @@ export const useTaskStore = create<TaskStore>()(
                 globalVoiceEnabled: state.globalVoiceEnabled,
                 autoSendEnabled: state.autoSendEnabled,
                 autoSendDelayMs: state.autoSendDelayMs,
+                deepgramApiKey: state.deepgramApiKey,
                 autoFocusOnInput: state.autoFocusOnInput,
                 supervisorEnabled: state.supervisorEnabled,
                 showSystemStats: state.showSystemStats,
@@ -625,6 +631,7 @@ export const useTaskStore = create<TaskStore>()(
                     globalVoiceEnabled: persisted.globalVoiceEnabled ?? currentState.globalVoiceEnabled,
                     autoSendEnabled: persisted.autoSendEnabled ?? currentState.autoSendEnabled,
                     autoSendDelayMs: persisted.autoSendDelayMs ?? currentState.autoSendDelayMs,
+                    deepgramApiKey: persisted.deepgramApiKey ?? currentState.deepgramApiKey,
                     autoFocusOnInput: persisted.autoFocusOnInput ?? currentState.autoFocusOnInput,
                     supervisorEnabled: persisted.supervisorEnabled ?? currentState.supervisorEnabled,
                     showSystemStats: persisted.showSystemStats ?? currentState.showSystemStats,

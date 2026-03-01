@@ -3,7 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Task, Workspace } from '@claudia/shared';
-import { Copy, Check, Play, BookOpen } from 'lucide-react';
+import { Copy, Check, Play, BookOpen, ArrowDown } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
@@ -12,9 +12,10 @@ interface TerminalViewProps {
     task: Task;
     wsRef: React.RefObject<WebSocket | null>;
     workspace?: Workspace;
+    isMobile?: boolean;
 }
 
-export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
+export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewProps) {
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
@@ -390,6 +391,15 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
                         <div className="terminal-loading-spinner" />
                         <span className="terminal-loading-text">Loading session history…</span>
                     </div>
+                )}
+                {isMobile && (
+                    <button
+                        className="mobile-scroll-bottom-btn"
+                        onClick={() => scrollToBottom(true)}
+                        title="Scroll to bottom"
+                    >
+                        <ArrowDown size={20} />
+                    </button>
                 )}
             </div>
             <TaskInputBar task={task} wsRef={wsRef} />

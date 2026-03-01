@@ -23,6 +23,8 @@ export interface TunnelStatus {
     publicIp: string | null;
 }
 
+export const DEFAULT_NGROK_DOMAIN = 'winning-walleye-neat.ngrok-free.app';
+
 export class TunnelManager extends EventEmitter {
     private ngrokProcess: ChildProcess | null = null;
     private token: string | null = null;
@@ -34,11 +36,13 @@ export class TunnelManager extends EventEmitter {
     private retryTimeout: NodeJS.Timeout | null = null;
     private stopping = false;
     private port: number;
+    private domain: string;
 
-    constructor(port: number) {
+    constructor(port: number, domain?: string) {
         super();
         this.port = port;
-        logger.info('TunnelManager initialized (ngrok)', { port });
+        this.domain = domain || DEFAULT_NGROK_DOMAIN;
+        logger.info('TunnelManager initialized (ngrok)', { port, domain: this.domain });
     }
 
     /**
@@ -100,7 +104,10 @@ export class TunnelManager extends EventEmitter {
             // ignore
         }
 
-        const ngrok = spawn('ngrok', ['http', String(this.port)], {
+        const ngrokArgs = ['http', '--domain', this.domain, String(this.port)];
+        logger.info('Spawning ngrok', { args: ngrokArgs });
+
+        const ngrok = spawn('ngrok', ngrokArgs, {
             stdio: ['pipe', 'pipe', 'pipe'],
         });
 

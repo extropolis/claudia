@@ -33,6 +33,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh; /* Dynamic viewport height - accounts for mobile browser chrome */
   overflow: hidden;
 }
 
@@ -62,6 +63,31 @@ body {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+/* Sound Toggle Button */
+.sound-toggle-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.sound-toggle-button:hover {
+  background: var(--bg-tertiary);
+  color: var(--accent-secondary);
+  border-color: var(--accent-secondary);
+}
+
+.sound-toggle-button.active {
+  color: var(--accent-primary);
+  border-color: var(--accent-primary);
 }
 
 /* Settings Button */
@@ -2296,6 +2322,12 @@ body {
 }
 
 @media (max-width: 768px) {
+  /* Safe area padding for notched devices */
+  .app {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
   /* Header */
   .app-header {
     padding: 8px 12px;
@@ -2324,7 +2356,8 @@ body {
   }
 
   .settings-button,
-  .restart-button {
+  .restart-button,
+  .sound-toggle-button {
     padding: 6px;
   }
 
@@ -2349,6 +2382,8 @@ body {
 
   .main-panel.mobile-full {
     flex: 1;
+    min-height: 0; /* Allow flex item to shrink below content size */
+    overflow: hidden;
   }
 
   /* Hide resize handles */

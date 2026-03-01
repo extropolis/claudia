@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Volume2, Mic, Radio, Clock } from 'lucide-react';
+import { Volume2, Mic, Radio, Clock, Key } from 'lucide-react';
 import { useTaskStore } from '../stores/taskStore';
 import { useSpeechSynthesis } from '../hooks/useSpeechSynthesis';
 
@@ -14,11 +14,13 @@ export function VoiceSettingsContent() {
         globalVoiceEnabled,
         autoSendEnabled,
         autoSendDelayMs,
+        deepgramApiKey,
         setVoiceEnabled,
         setAutoSpeakResponses,
         setVoiceSettings,
         setGlobalVoiceEnabled,
-        setAutoSendSettings
+        setAutoSendSettings,
+        setDeepgramApiKey
     } = useTaskStore();
 
     const { voices, speak } = useSpeechSynthesis();
@@ -104,11 +106,35 @@ export function VoiceSettingsContent() {
         speak(testText);
     };
 
-    // Check if Web Speech API is supported
-    const isSpeechSupported = !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
+    // Check if microphone API is available (works on all modern browsers)
+    const isMicSupported = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    const hasApiKey = !!deepgramApiKey;
 
     return (
         <div className="voice-settings-content">
+            {/* Deepgram API Key Section */}
+            <div className="settings-section">
+                <h3 className="settings-section-title">
+                    <Key size={16} />
+                    Deepgram API Key
+                </h3>
+                <input
+                    type="password"
+                    value={deepgramApiKey}
+                    onChange={(e) => setDeepgramApiKey(e.target.value)}
+                    placeholder="Enter Deepgram API key..."
+                    className="voice-select"
+                    style={{ width: '100%', maxWidth: '100%', fontFamily: 'monospace', fontSize: '13px' }}
+                />
+                <p className="setting-description">
+                    {hasApiKey
+                        ? 'Deepgram Nova-3 will be used for voice recognition (faster & more accurate).'
+                        : 'Enter a Deepgram API key to enable voice recognition.'}
+                </p>
+            </div>
+
+            <div className="settings-divider"></div>
+
             {/* Always-Listening Voice Mode Section */}
             <div className="settings-section">
                 <h3 className="settings-section-title">
@@ -120,14 +146,16 @@ export function VoiceSettingsContent() {
                         type="checkbox"
                         checked={globalVoiceEnabled}
                         onChange={(e) => setGlobalVoiceEnabled(e.target.checked)}
-                        disabled={!isSpeechSupported}
+                        disabled={!isMicSupported || !hasApiKey}
                     />
                     <span>Enable Always-Listening Mode</span>
                 </label>
                 <p className="setting-description">
-                    {isSpeechSupported
-                        ? 'When enabled, voice input is always active. Speech routes to whichever input is focused.'
-                        : 'Voice input is not supported in this browser.'}
+                    {!isMicSupported
+                        ? 'Microphone not available in this browser.'
+                        : !hasApiKey
+                        ? 'Set a Deepgram API key above to enable voice input.'
+                        : 'When enabled, voice input is always active. Speech routes to whichever input is focused.'}
                 </p>
             </div>
 
@@ -137,7 +165,7 @@ export function VoiceSettingsContent() {
                         type="checkbox"
                         checked={autoSendEnabled}
                         onChange={(e) => setAutoSendSettings(e.target.checked, localAutoSendDelay * 1000)}
-                        disabled={!isSpeechSupported}
+                        disabled={!isMicSupported || !hasApiKey}
                     />
                     <Clock size={16} />
                     <span>Auto-send on Silence</span>

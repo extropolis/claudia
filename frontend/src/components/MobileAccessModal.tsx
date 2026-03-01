@@ -20,11 +20,8 @@ interface MobileAccessModalProps {
 
 export function MobileAccessModal({ isOpen, onClose }: MobileAccessModalProps) {
     const [status, setStatus] = useState<TunnelStatus | null>(null);
-    const [loading, setLoading] = useState(false);
     const [copied, setCopied] = useState(false);
-    const [error, setError] = useState<string | null>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const startedRef = useRef(false);
 
     const apiBase = getApiBaseUrl();
 
@@ -41,52 +38,23 @@ export function MobileAccessModal({ isOpen, onClose }: MobileAccessModalProps) {
         }
     }, [apiBase]);
 
-    // Start tunnel
-    const startTunnel = useCallback(async () => {
-        setLoading(true);
-        setError(null);
-        try {
-            const res = await fetch(`${apiBase}/api/tunnel/start`, { method: 'POST' });
-            const data = await res.json();
-            if (data.error) {
-                setError(data.error);
-            } else {
-                setStatus(data);
-            }
-        } catch (err) {
-            setError(err instanceof Error ? err.message : 'Failed to start tunnel');
-        } finally {
-            setLoading(false);
-        }
-    }, [apiBase]);
-
-    // Stop tunnel
-    const stopTunnel = useCallback(async () => {
-        try {
-            await fetch(`${apiBase}/api/tunnel/stop`, { method: 'POST' });
-            setStatus({ active: false, url: null, token: null, startedAt: null, error: null });
-        } catch (err) {
-            console.error('[MobileAccess] Failed to stop tunnel:', err);
-        }
-    }, [apiBase]);
-
-    // Auto-start tunnel when modal opens
+    // Poll for tunnel status when modal is open (tunnel may still be starting)
     useEffect(() => {
-        if (!isOpen) {
-            startedRef.current = false;
-            return;
-        }
+        if (!isOpen) return;
 
-        if (startedRef.current) return;
-        startedRef.current = true;
+        // Fetch immediately
+        fetchStatus();
 
-        (async () => {
-            const currentStatus = await fetchStatus();
-            if (!currentStatus?.active) {
-                await startTunnel();
+        // Poll every 2s until we have an active URL
+        const interval = setInterval(async () => {
+            const data = await fetchStatus();
+            if (data?.active && data?.url) {
+                clearInterval(interval);
             }
-        })();
-    }, [isOpen, fetchStatus, startTunnel]);
+        }, 2000);
+
+        return () => clearInterval(interval);
+    }, [isOpen, fetchStatus]);
 
     // Generate QR code when URL changes
     useEffect(() => {
@@ -117,14 +85,6 @@ export function MobileAccessModal({ isOpen, onClose }: MobileAccessModalProps) {
         });
     };
 
-    // Handle close - stop tunnel
-    const handleClose = async () => {
-        if (status?.active) {
-            await stopTunnel();
-        }
-        onClose();
-    };
-
     if (!isOpen) return null;
 
     const mobileUrl = status?.active && status?.url && status?.token
@@ -132,9 +92,9 @@ export function MobileAccessModal({ isOpen, onClose }: MobileAccessModalProps) {
         : '';
 
     return (
-        <div className="mobile-access-overlay" onClick={handleClose}>
+        <div className="mobile-access-overlay" onClick={onClose}>
             <div className="mobile-access-modal" onClick={e => e.stopPropagation()} style={{ position: 'relative' }}>
-                <button className="modal-close" onClick={handleClose}>
+                <button className="modal-close" onClick={onClose}>
                     <X size={18} />
                 </button>
 
@@ -145,17 +105,13 @@ export function MobileAccessModal({ isOpen, onClose }: MobileAccessModalProps) {
 
                 {/* Status */}
                 <div className="tunnel-status">
-                    <span className={`status-dot ${loading ? 'starting' : status?.active ? 'active' : error ? 'error' : 'inactive'}`} />
+                    <span className={`status-dot ${status?.active ? 'active' : 'starting'}`} />
                     <span>
-                        {loading
-                            ? 'Starting tunnel...'
-                            : status?.active
-                                ? 'Tunnel active'
-                                : error
-                                    ? `Error: ${error}`
-                                    : 'Tunnel inactive'}
+                        {status?.active
+                            ? 'Tunnel active'
+                            : 'Starting tunnel...'}
                     </span>
-                    {loading && <span className="loading-spinner" />}
+                    {!status?.active && <span className="loading-spinner" />}
                 </div>
 
                 {/* QR Code */}
@@ -164,7 +120,7 @@ export function MobileAccessModal({ isOpen, onClose }: MobileAccessModalProps) {
                         <canvas ref={canvasRef} />
                     ) : (
                         <div className="qr-placeholder">
-                            {loading ? 'Starting...' : 'No tunnel active'}
+                            Starting...
                         </div>
                     )}
                 </div>
@@ -183,8 +139,8 @@ export function MobileAccessModal({ isOpen, onClose }: MobileAccessModalProps) {
                     </div>
                 )}
 
-                {/* Tunnel password hint */}
-                {status?.active && status?.publicIp && (
+                {/* Tunnel password hint - only shown for random ngrok URLs that have an interstitial */}
+                {status?.active && status?.publicIp && status?.url && !status.url.includes('ngrok-free.app') && (
                     <div className="tunnel-password-hint">
                         <label>Tunnel Password</label>
                         <div className="tunnel-password-value">{status.publicIp}</div>
@@ -198,7 +154,9 @@ export function MobileAccessModal({ isOpen, onClose }: MobileAccessModalProps) {
                 <div className="mobile-instructions">
                     <ol>
                         <li>Scan the QR code with your phone's camera</li>
-                        <li>Enter the tunnel password shown above when prompted</li>
+                        {status?.url && !status.url.includes('ngrok-free.app') && (
+                            <li>Enter the tunnel password shown above when prompted</li>
+                        )}
                         <li>Tap the mic button to talk to the AI Supervisor</li>
                         <li>You can also type messages using the text input</li>
                     </ol>
@@ -206,16 +164,7 @@ export function MobileAccessModal({ isOpen, onClose }: MobileAccessModalProps) {
 
                 {/* Actions */}
                 <div className="mobile-access-actions">
-                    {status?.active ? (
-                        <button className="danger" onClick={stopTunnel}>
-                            Stop Tunnel
-                        </button>
-                    ) : !loading ? (
-                        <button className="primary" onClick={startTunnel}>
-                            Start Tunnel
-                        </button>
-                    ) : null}
-                    <button onClick={handleClose}>Close</button>
+                    <button onClick={onClose}>Close</button>
                 </div>
             </div>
         </div>

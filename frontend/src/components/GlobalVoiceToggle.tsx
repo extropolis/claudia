@@ -14,14 +14,15 @@ export function GlobalVoiceToggle() {
     const {
         globalVoiceEnabled,
         focusedInputId,
+        deepgramApiKey,
         setGlobalVoiceEnabled,
         clearVoiceTranscript
     } = useTaskStore();
 
-    // Check if Web Speech API is supported
+    // Check if microphone API is available and Deepgram key is configured
     const isSupported = useMemo(() => {
-        return !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
-    }, []);
+        return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) && !!deepgramApiKey;
+    }, [deepgramApiKey]);
 
     // Determine the target description for the tooltip
     const targetDescription = useMemo(() => {
@@ -45,7 +46,7 @@ export function GlobalVoiceToggle() {
             <button
                 className="global-voice-toggle unsupported"
                 disabled
-                title="Voice input not supported in this browser"
+                title={!deepgramApiKey ? "Set Deepgram API key in Voice Settings" : "Voice input not supported in this browser"}
             >
                 <MicOff size={18} />
                 <span>Voice</span>

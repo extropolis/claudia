@@ -2,7 +2,7 @@
  * Mobile Terminal Page - Self-contained HTML page for mobile task monitoring & input
  *
  * Shows tasks in an accordion view with xterm.js terminal rendering (same as desktop).
- * Connects via WebSocket. Voice input via Web Speech API, voice summaries via ElevenLabs TTS.
+ * Connects via WebSocket. Voice input via Deepgram Nova-3, voice summaries via ElevenLabs TTS.
  * Loads xterm.js + fit addon from CDN. No React or build dependencies.
  */
 
@@ -549,7 +549,7 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
     </div>
 
     <div class="no-speech-banner" id="noSpeechBanner">
-        Speech recognition not supported. Use text input.
+        Microphone not available or Deepgram API key not set. Use text input.
     </div>
 
     <div class="workspace-bar" id="workspaceBar" style="display:none;">
@@ -610,7 +610,6 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
         var ttsEnabled = true;
         var soundEnabled = true;
         var isListening = false;
-        var recognition = null;
         var accumulatedTranscript = '';
 
         // xterm theme matching the desktop app
@@ -1135,9 +1134,11 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
                     }
                     renderAccordion();
                     // Start audio keep-alive if any tasks are active
-                    if (tasks.some(function(t) { return t.state === 'busy' || t.state === 'starting'; })) {
+                    if (tasks.some(function(t) { return t.state === 'busy' || t.state === 'starting' || t.state === 'waiting_input'; })) {
                         startAudioKeepAlive();
                     }
+                    // Pre-generate the chime WAV so it's ready when needed
+                    generateChimeWav();
                     break;
 
                 case 'task:output':
@@ -1174,15 +1175,19 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
                             renderAccordion();
                         }
 
-                        // Notification sound + voice summary on completion
+                        // Notification sound + voice summary + browser notification on completion
                         if ((p.task.state === 'idle' || p.task.state === 'exited') &&
                             prevState && prevState !== 'idle' && prevState !== 'exited') {
+                            console.log('[Mobile] Task completed transition:', p.task.id, prevState, '->', p.task.state, 'soundEnabled:', soundEnabled, 'hidden:', document.hidden);
                             playNotificationSound();
+                            vibrateDevice();
+                            // Send browser notification (works even when browser is backgrounded)
+                            sendTaskCompletionNotification(p.task.prompt);
                             if (ttsEnabled) triggerVoiceSummary(p.task.id);
                         }
 
                         // Manage background audio keep-alive based on active tasks
-                        if (p.task.state === 'busy' || p.task.state === 'starting') {
+                        if (p.task.state === 'busy' || p.task.state === 'starting' || p.task.state === 'waiting_input') {
                             startAudioKeepAlive();
                         }
                     }
@@ -1288,84 +1293,264 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
             }
         });
 
-        // ===== Speech Recognition =====
-        var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        // ===== Deepgram Speech Recognition =====
+        var deepgramWs = null;
+        var mediaRecorder = null;
+        var micStream = null;
 
-        if (!SpeechRecognition) {
+        // Load Deepgram API key from localStorage (shared with main app)
+        function getDeepgramKey() {
+            try {
+                var storeData = localStorage.getItem('claudia-task-store');
+                if (storeData) {
+                    var parsed = JSON.parse(storeData);
+                    if (parsed && parsed.state && parsed.state.deepgramApiKey) {
+                        return parsed.state.deepgramApiKey;
+                    }
+                }
+            } catch(e) {
+                console.warn('[Mobile] Could not read Deepgram key from store:', e);
+            }
+            // Try dedicated mobile key
+            try {
+                var mobileKey = localStorage.getItem('claudia-mobile-deepgram-key');
+                if (mobileKey) return mobileKey;
+            } catch(e) {}
+            return '';
+        }
+
+        var deepgramApiKey = getDeepgramKey();
+
+        // Check mic support and API key
+        var hasMic = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+        if (!hasMic || !deepgramApiKey) {
             noSpeechBanner.className = 'no-speech-banner visible';
+            if (!deepgramApiKey) {
+                noSpeechBanner.textContent = 'Deepgram API key not set. Configure in desktop Voice Settings or use text input.';
+            }
             micBtn.className = 'mic-btn disabled';
-        } else {
-            recognition = new SpeechRecognition();
-            recognition.continuous = true;
-            recognition.interimResults = true;
-            recognition.lang = 'en-US';
+        }
 
-            recognition.onstart = function() {
-                isListening = true;
-                micBtn.className = 'mic-btn listening';
-            };
+        function getSupportedMimeType() {
+            var types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+            for (var i = 0; i < types.length; i++) {
+                if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(types[i])) {
+                    return types[i];
+                }
+            }
+            return '';
+        }
 
-            recognition.onresult = function(event) {
-                var interim = '';
-                var newFinal = '';
-                for (var i = event.resultIndex; i < event.results.length; i++) {
-                    if (event.results[i].isFinal) {
-                        newFinal += event.results[i][0].transcript;
-                    } else {
-                        interim += event.results[i][0].transcript;
-                    }
-                }
-                if (newFinal) {
-                    accumulatedTranscript += (accumulatedTranscript ? ' ' : '') + newFinal.trim();
-                }
-                var display = accumulatedTranscript + (interim ? ' ' + interim : '');
-                if (display.trim()) {
-                    voiceTranscript.textContent = display;
-                    voiceOverlay.className = 'voice-overlay visible';
-                }
-            };
+        function getEncoding(mimeType) {
+            if (mimeType.indexOf('opus') >= 0) return 'opus';
+            if (mimeType.indexOf('webm') >= 0) return 'webm';
+            if (mimeType.indexOf('mp4') >= 0) return 'mp4';
+            return 'linear16';
+        }
 
-            recognition.onend = function() {
-                if (isListening) {
-                    try { recognition.start(); } catch(e) {
-                        setTimeout(function() {
-                            if (isListening) {
-                                try { recognition.start(); } catch(e2) {
-                                    isListening = false;
-                                    micBtn.className = 'mic-btn';
-                                }
-                            }
-                        }, 200);
-                    }
+        function cleanupDeepgram() {
+            if (mediaRecorder) {
+                try { if (mediaRecorder.state !== 'inactive') mediaRecorder.stop(); } catch(e) {}
+                mediaRecorder = null;
+            }
+            if (deepgramWs) {
+                try {
+                    if (deepgramWs.readyState === WebSocket.OPEN) deepgramWs.send(new Uint8Array(0));
+                    deepgramWs.close();
+                } catch(e) {}
+                deepgramWs = null;
+            }
+            if (micStream) {
+                micStream.getTracks().forEach(function(t) { t.stop(); });
+                micStream = null;
+            }
+        }
+
+        function startDeepgramListening() {
+            if (isListening || !deepgramApiKey || !hasMic) return;
+
+            navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+                if (!isListening && micStream) {
+                    // Was stopped while waiting for mic
+                    stream.getTracks().forEach(function(t) { t.stop(); });
                     return;
                 }
-                micBtn.className = 'mic-btn';
-            };
+                micStream = stream;
+                isListening = true;
+                micBtn.className = 'mic-btn listening';
+                console.log('[Mobile] Mic access granted, opening Deepgram WS...');
 
-            recognition.onerror = function(event) {
-                if (event.error === 'no-speech' || event.error === 'aborted') return;
+                var mimeType = getSupportedMimeType();
+                var encoding = getEncoding(mimeType);
+                var wsUrl = 'wss://api.deepgram.com/v1/listen?model=nova-3&punctuate=true&interim_results=true&language=en&smart_format=true&encoding=' + encoding;
+
+                var ws = new WebSocket(wsUrl, ['token', deepgramApiKey]);
+                deepgramWs = ws;
+
+                ws.onopen = function() {
+                    console.log('[Mobile] Deepgram WS connected');
+                    if (!isListening) { ws.close(); return; }
+
+                    try {
+                        var opts = {};
+                        if (mimeType) opts.mimeType = mimeType;
+                        var recorder = new MediaRecorder(stream, opts);
+                        mediaRecorder = recorder;
+
+                        recorder.ondataavailable = function(event) {
+                            if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+                                ws.send(event.data);
+                            }
+                        };
+
+                        recorder.start(250);
+                        console.log('[Mobile] MediaRecorder started (250ms chunks, mimeType:', mimeType || 'default', ')');
+                    } catch(e) {
+                        console.error('[Mobile] MediaRecorder start failed:', e);
+                        isListening = false;
+                        micBtn.className = 'mic-btn';
+                        cleanupDeepgram();
+                    }
+                };
+
+                ws.onmessage = function(event) {
+                    try {
+                        var data = JSON.parse(event.data);
+                        if (data.type === 'Results') {
+                            var alt = data.channel && data.channel.alternatives && data.channel.alternatives[0];
+                            if (!alt) return;
+                            var text = alt.transcript || '';
+                            if (!text) return;
+
+                            var isFinal = data.is_final === true;
+                            console.log('[Mobile] Deepgram transcript:', text, '| is_final:', isFinal);
+
+                            if (isFinal) {
+                                accumulatedTranscript += (accumulatedTranscript ? ' ' : '') + text.trim();
+                            }
+                            var display = accumulatedTranscript + (isFinal ? '' : ' ' + text);
+                            if (display.trim()) {
+                                voiceTranscript.textContent = display;
+                                voiceOverlay.className = 'voice-overlay visible';
+                            }
+                        } else if (data.type === 'Error') {
+                            console.error('[Mobile] Deepgram error:', data);
+                        }
+                    } catch(e) {
+                        console.warn('[Mobile] Deepgram parse error:', e);
+                    }
+                };
+
+                ws.onerror = function() {
+                    console.error('[Mobile] Deepgram WS error');
+                };
+
+                ws.onclose = function(event) {
+                    console.log('[Mobile] Deepgram WS closed:', event.code, '| isListening:', isListening);
+                    // If still listening, reconnect (continuous mode)
+                    if (isListening && micStream && micStream.active) {
+                        if (mediaRecorder) {
+                            try { mediaRecorder.stop(); } catch(e) {}
+                            mediaRecorder = null;
+                        }
+                        deepgramWs = null;
+                        setTimeout(function() {
+                            if (isListening) reconnectDeepgram();
+                        }, 500);
+                    } else {
+                        isListening = false;
+                        micBtn.className = 'mic-btn';
+                    }
+                };
+
+            }).catch(function(err) {
+                console.error('[Mobile] Mic access failed:', err);
                 isListening = false;
                 micBtn.className = 'mic-btn';
+            });
+        }
+
+        function reconnectDeepgram() {
+            if (!isListening || !micStream || !micStream.active || !deepgramApiKey) return;
+            console.log('[Mobile] Reconnecting Deepgram...');
+
+            var mimeType = getSupportedMimeType();
+            var encoding = getEncoding(mimeType);
+            var wsUrl = 'wss://api.deepgram.com/v1/listen?model=nova-3&punctuate=true&interim_results=true&language=en&smart_format=true&encoding=' + encoding;
+
+            var ws = new WebSocket(wsUrl, ['token', deepgramApiKey]);
+            deepgramWs = ws;
+
+            ws.onopen = function() {
+                if (!isListening) { ws.close(); return; }
+                try {
+                    var opts = {};
+                    if (mimeType) opts.mimeType = mimeType;
+                    var recorder = new MediaRecorder(micStream, opts);
+                    mediaRecorder = recorder;
+                    recorder.ondataavailable = function(event) {
+                        if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) ws.send(event.data);
+                    };
+                    recorder.start(250);
+                    console.log('[Mobile] Deepgram reconnected, recorder restarted');
+                } catch(e) {
+                    console.error('[Mobile] Reconnect recorder failed:', e);
+                    isListening = false;
+                    micBtn.className = 'mic-btn';
+                    cleanupDeepgram();
+                }
+            };
+
+            ws.onmessage = function(event) {
+                try {
+                    var data = JSON.parse(event.data);
+                    if (data.type === 'Results') {
+                        var alt = data.channel && data.channel.alternatives && data.channel.alternatives[0];
+                        if (!alt) return;
+                        var text = alt.transcript || '';
+                        if (!text) return;
+                        if (data.is_final === true) {
+                            accumulatedTranscript += (accumulatedTranscript ? ' ' : '') + text.trim();
+                        }
+                        var display = accumulatedTranscript + (data.is_final ? '' : ' ' + text);
+                        if (display.trim()) {
+                            voiceTranscript.textContent = display;
+                            voiceOverlay.className = 'voice-overlay visible';
+                        }
+                    }
+                } catch(e) {}
+            };
+
+            ws.onerror = function() {};
+            ws.onclose = function(event) {
+                if (isListening && micStream && micStream.active) {
+                    if (mediaRecorder) { try { mediaRecorder.stop(); } catch(e) {} mediaRecorder = null; }
+                    deepgramWs = null;
+                    setTimeout(function() { if (isListening) reconnectDeepgram(); }, 1000);
+                }
             };
         }
 
+        function stopDeepgramListening() {
+            isListening = false;
+            cleanupDeepgram();
+            micBtn.className = 'mic-btn';
+        }
+
         micBtn.addEventListener('click', function() {
-            if (!recognition) return;
+            if (!hasMic || !deepgramApiKey) return;
             stopTts(true);
 
             if (isListening) {
-                isListening = false;
-                recognition.stop();
+                stopDeepgramListening();
             } else {
-                try { recognition.start(); } catch(e) {
-                    console.error('[Mobile] Mic start failed:', e);
-                }
+                startDeepgramListening();
             }
         });
 
         voiceSendBtn.addEventListener('click', function() {
             if (!accumulatedTranscript.trim()) return;
-            if (isListening) { isListening = false; try { recognition.stop(); } catch(e) {} }
+            if (isListening) stopDeepgramListening();
             sendTaskInput(accumulatedTranscript.trim());
             accumulatedTranscript = '';
             voiceOverlay.className = 'voice-overlay';
@@ -1524,8 +1709,12 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
             }
         }
 
-        // ===== Notification Sound (Web Audio API) =====
+        // ===== Notification Sound (Web Audio API + HTML Audio fallback) =====
         var audioCtx = null;
+
+        // Pre-generated notification chime as a WAV data URL (fallback for when Web Audio API is suspended)
+        // Generated at runtime on first need, cached here
+        var notificationChimeUrl = null;
 
         function getAudioContext() {
             if (!audioCtx) {
@@ -1540,21 +1729,128 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
         }
 
         // Unlock AudioContext on first user interaction (required by iOS/Android)
+        // Keep re-registering because iOS can re-suspend the context after backgrounding
         ['click', 'touchstart'].forEach(function(evt) {
-            document.body.addEventListener(evt, function ctxHandler() {
+            document.body.addEventListener(evt, function() {
                 var ctx = getAudioContext();
-                if (ctx && ctx.state !== 'suspended') {
-                    document.body.removeEventListener(evt, ctxHandler);
+                if (ctx && ctx.state === 'suspended') {
+                    ctx.resume().catch(function() {});
                 }
-            }, { once: false, passive: true });
+            }, { passive: true });
         });
 
+        /**
+         * Generate a WAV file in memory for the notification chime.
+         * Returns a blob URL that can be played via HTML Audio element.
+         * This is the fallback for when AudioContext is suspended (iOS background).
+         */
+        function generateChimeWav() {
+            if (notificationChimeUrl) return notificationChimeUrl;
+            try {
+                var sampleRate = 22050;
+                var duration = 0.9;
+                var numSamples = Math.floor(sampleRate * duration);
+                var buffer = new Float32Array(numSamples);
+
+                // Three ascending tones: C5 (523Hz), E5 (659Hz), G5 (784Hz)
+                var tones = [
+                    { freq: 523, start: 0,    end: 0.2,  vol: 0.3,  fadeEnd: 0.6 },
+                    { freq: 659, start: 0.15, end: 0.5,  vol: 0.3,  fadeEnd: 0.7 },
+                    { freq: 784, start: 0.3,  end: 0.7,  vol: 0.25, fadeEnd: 0.9 }
+                ];
+
+                for (var i = 0; i < numSamples; i++) {
+                    var t = i / sampleRate;
+                    var sample = 0;
+                    for (var j = 0; j < tones.length; j++) {
+                        var tone = tones[j];
+                        if (t >= tone.start && t <= tone.fadeEnd) {
+                            var env = 1;
+                            if (t > tone.end) {
+                                // Exponential fade out
+                                env = Math.exp(-8 * (t - tone.end) / (tone.fadeEnd - tone.end));
+                            }
+                            sample += Math.sin(2 * Math.PI * tone.freq * t) * tone.vol * env;
+                        }
+                    }
+                    buffer[i] = Math.max(-1, Math.min(1, sample));
+                }
+
+                // Encode as 16-bit PCM WAV
+                var wavLength = 44 + numSamples * 2;
+                var wavBuf = new ArrayBuffer(wavLength);
+                var view = new DataView(wavBuf);
+
+                function writeStr(offset, str) {
+                    for (var k = 0; k < str.length; k++) view.setUint8(offset + k, str.charCodeAt(k));
+                }
+
+                writeStr(0, 'RIFF');
+                view.setUint32(4, wavLength - 8, true);
+                writeStr(8, 'WAVE');
+                writeStr(12, 'fmt ');
+                view.setUint32(16, 16, true);
+                view.setUint16(20, 1, true); // PCM
+                view.setUint16(22, 1, true); // mono
+                view.setUint32(24, sampleRate, true);
+                view.setUint32(28, sampleRate * 2, true); // byte rate
+                view.setUint16(32, 2, true); // block align
+                view.setUint16(34, 16, true); // bits per sample
+                writeStr(36, 'data');
+                view.setUint32(40, numSamples * 2, true);
+
+                for (var s = 0; s < numSamples; s++) {
+                    var val = Math.max(-1, Math.min(1, buffer[s]));
+                    view.setInt16(44 + s * 2, val < 0 ? val * 0x8000 : val * 0x7FFF, true);
+                }
+
+                var blob = new Blob([wavBuf], { type: 'audio/wav' });
+                notificationChimeUrl = URL.createObjectURL(blob);
+                console.log('[Mobile] Generated notification chime WAV');
+                return notificationChimeUrl;
+            } catch (err) {
+                console.warn('[Mobile] Failed to generate chime WAV:', err);
+                return null;
+            }
+        }
+
+        /**
+         * Play notification sound using Web Audio API (preferred, lower latency).
+         * If AudioContext is suspended (common on iOS background), falls back to
+         * playing a pre-generated WAV via the already-unlocked HTML Audio element.
+         */
         function playNotificationSound() {
             if (!soundEnabled) return;
-            var ctx = getAudioContext();
-            if (!ctx) return;
 
-            console.log('[Mobile] Playing notification sound');
+            console.log('[Mobile] Playing notification sound, audioCtx state:', audioCtx ? audioCtx.state : 'none');
+
+            // Try Web Audio API first (works when page is in foreground)
+            var ctx = getAudioContext();
+            if (ctx && ctx.state === 'running') {
+                playNotificationViaWebAudio(ctx);
+                return;
+            }
+
+            // AudioContext is suspended (iOS background) - try HTML Audio fallback
+            // and also attempt to resume AudioContext for future sounds
+            if (ctx && ctx.state === 'suspended') {
+                console.log('[Mobile] AudioContext suspended, using HTML Audio fallback');
+                // Resume AudioContext in background for future calls (don't wait for it)
+                ctx.resume().then(function() {
+                    console.log('[Mobile] AudioContext resumed for future sounds, state:', ctx.state);
+                }).catch(function() {});
+                // Play via HTML Audio immediately (most reliable on iOS background)
+                playNotificationViaHtmlAudio();
+                return;
+            }
+
+            // No AudioContext available at all — use HTML Audio
+            console.log('[Mobile] No AudioContext, using HTML Audio fallback');
+            playNotificationViaHtmlAudio();
+        }
+
+        function playNotificationViaWebAudio(ctx) {
+            console.log('[Mobile] Playing notification via Web Audio API');
 
             // Two-tone chime: a pleasant ascending ding
             var now = ctx.currentTime;
@@ -1600,12 +1896,134 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
             osc3.stop(now + 0.7);
         }
 
+        /**
+         * Fallback: play notification chime via the persistent HTML Audio element.
+         * This works on iOS even when AudioContext is suspended because the Audio
+         * element was already unlocked via user interaction.
+         */
+        function playNotificationViaHtmlAudio() {
+            if (!iosAudioUnlocked) {
+                console.warn('[Mobile] HTML Audio not unlocked yet, cannot play fallback');
+                return;
+            }
+            var chimeUrl = generateChimeWav();
+            if (!chimeUrl) return;
+
+            try {
+                // Use the persistent audio element (already unlocked on iOS)
+                // But only if it's not currently playing TTS
+                if (currentAudio && ttsPlaying) {
+                    console.log('[Mobile] TTS is playing, skipping HTML Audio fallback chime');
+                    return;
+                }
+                console.log('[Mobile] Playing notification via HTML Audio fallback');
+                persistentAudio.src = chimeUrl;
+                persistentAudio.play().then(function() {
+                    console.log('[Mobile] HTML Audio fallback chime playing');
+                }).catch(function(err) {
+                    console.warn('[Mobile] HTML Audio fallback failed:', err.message);
+                });
+            } catch (err) {
+                console.warn('[Mobile] HTML Audio fallback error:', err);
+            }
+        }
+
+        // Also try vibration as a haptic hint (works on Android, no-op on iOS)
+        function vibrateDevice() {
+            try {
+                if (navigator.vibrate) {
+                    navigator.vibrate([100, 50, 100]); // short-pause-short pattern
+                }
+            } catch(e) {}
+        }
+
+        // ===== Browser Notifications (works when browser is backgrounded) =====
+        var notificationPermission = 'Notification' in window ? Notification.permission : 'unsupported';
+        console.log('[Mobile] Notification API support:', notificationPermission);
+
+        function requestNotificationPermission() {
+            if (!('Notification' in window)) {
+                console.log('[Mobile] Notification API not supported');
+                return;
+            }
+            if (Notification.permission === 'granted') {
+                notificationPermission = 'granted';
+                console.log('[Mobile] Notification permission already granted');
+                return;
+            }
+            if (Notification.permission === 'denied') {
+                console.log('[Mobile] Notification permission denied by user');
+                return;
+            }
+            // Request permission
+            Notification.requestPermission().then(function(perm) {
+                notificationPermission = perm;
+                console.log('[Mobile] Notification permission result:', perm);
+            }).catch(function(err) {
+                console.warn('[Mobile] Notification permission request failed:', err);
+            });
+        }
+
+        // Request notification permission on first user interaction
+        // (must be triggered by user gesture on mobile browsers)
+        function onFirstInteraction() {
+            requestNotificationPermission();
+            document.removeEventListener('click', onFirstInteraction);
+            document.removeEventListener('touchstart', onFirstInteraction);
+        }
+        if (notificationPermission !== 'granted' && notificationPermission !== 'denied' && notificationPermission !== 'unsupported') {
+            document.addEventListener('click', onFirstInteraction, { once: true });
+            document.addEventListener('touchstart', onFirstInteraction, { once: true });
+        }
+
+        /**
+         * Send a browser notification for task completion.
+         * Works even when the browser is in the background — the OS shows it.
+         */
+        function sendTaskCompletionNotification(taskPrompt) {
+            if (!('Notification' in window) || Notification.permission !== 'granted') {
+                console.log('[Mobile] Cannot send notification, permission:', notificationPermission);
+                return;
+            }
+            if (!soundEnabled) {
+                console.log('[Mobile] Notifications muted (sound toggle off)');
+                return;
+            }
+
+            var body = taskPrompt
+                ? (taskPrompt.length > 100 ? taskPrompt.substring(0, 100) + '...' : taskPrompt)
+                : 'A task has finished';
+
+            try {
+                var notification = new Notification('Task Complete', {
+                    body: body,
+                    tag: 'claudia-task-complete',  // Prevents duplicate notifications
+                    icon: '/claudia-icon.png',
+                    badge: '/claudia-icon.png',
+                    requireInteraction: false
+                });
+                console.log('[Mobile] Browser notification sent');
+
+                // Auto-close after 6 seconds
+                setTimeout(function() { notification.close(); }, 6000);
+
+                // Focus the page when tapped
+                notification.onclick = function() {
+                    window.focus();
+                    notification.close();
+                };
+            } catch(err) {
+                console.warn('[Mobile] Failed to send notification:', err);
+            }
+        }
+
         // Background audio keep-alive: periodically play silent audio while tasks are active
         // This prevents iOS from suspending our audio capability when the app is backgrounded
         var keepAliveInterval = null;
 
         function startAudioKeepAlive() {
             if (keepAliveInterval) return;
+            console.log('[Mobile] Starting audio keep-alive');
             keepAliveInterval = setInterval(function() {
                 var hasActiveTasks = tasks.some(function(t) {
                     return t.state === 'busy' || t.state === 'starting' || t.state === 'waiting_input';
@@ -1617,6 +2035,9 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
                 // Silent ping to keep audio context alive
                 var ctx = getAudioContext();
                 if (ctx) {
+                    if (ctx.state === 'suspended') {
+                        ctx.resume().catch(function() {});
+                    }
                     var osc = ctx.createOscillator();
                     var g = ctx.createGain();
                     g.gain.setValueAtTime(0, ctx.currentTime);
@@ -1630,11 +2051,12 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
                     persistentAudio.src = SILENT_MP3;
                     persistentAudio.play().catch(function() {});
                 }
-            }, 15000); // every 15 seconds
+            }, 5000); // every 5 seconds (was 15s, but iOS can suspend faster)
         }
 
         function stopAudioKeepAlive() {
             if (keepAliveInterval) {
+                console.log('[Mobile] Stopping audio keep-alive');
                 clearInterval(keepAliveInterval);
                 keepAliveInterval = null;
             }
