@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react';
-import { useVoiceRecognition } from '../hooks/useVoiceRecognition';
+import { useDeepgramRecognition } from '../hooks/useDeepgramRecognition';
 import { useTaskStore } from '../stores/taskStore';
 
 /**
@@ -14,6 +14,7 @@ export function GlobalVoiceManager() {
         autoSendEnabled,
         autoSendDelayMs,
         focusedInputId,
+        deepgramApiKey,
         appendVoiceTranscript,
         setVoiceInterimTranscript
     } = useTaskStore();
@@ -72,9 +73,10 @@ export function GlobalVoiceManager() {
         isListening,
         startListening,
         stopListening
-    } = useVoiceRecognition({
+    } = useDeepgramRecognition({
         continuous: true,
         interimResults: true,
+        deepgramApiKey,
         onResult: handleResult,
         onError: (error) => {
             console.warn('[GlobalVoiceManager] Voice recognition error:', error);

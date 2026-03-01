@@ -84,11 +84,20 @@
 }
 
 .notification-warning {
-    border-color: #f59e0b;
+    border-color: #d97706;
+    background: #fbbf24;
 }
 
 .notification-warning .notification-icon {
-    color: #f59e0b;
+    color: #78350f;
+}
+
+.notification-warning .notification-title {
+    color: #78350f;
+}
+
+.notification-warning .notification-message {
+    color: #451a03;
 }
 
 .notification-info {

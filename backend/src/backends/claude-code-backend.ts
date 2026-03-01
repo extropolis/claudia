@@ -3,7 +3,7 @@
  * Spawns and manages Claude Code CLI processes
  */
 
-import { spawn, IPty } from 'node-pty';
+import { spawn, IPty } from '@homebridge/node-pty-prebuilt-multiarch';
 import { EventEmitter } from 'events';
 import { execSync } from 'child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, statSync, openSync, readSync, closeSync } from 'fs';

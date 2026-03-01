@@ -1,7 +1,8 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { WSMessage, WSErrorPayload, Task, Workspace, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
-import { getWebSocketUrl, getApiBaseUrl } from '../config/api-config';
+import { getWebSocketUrl, getApiBaseUrl, isTunnelAccess } from '../config/api-config';
+import { playTaskCompletionSound, sendTaskCompletionNotification } from '../utils/browserCapabilities';
 
 const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
@@ -11,6 +12,32 @@ const RECONNECT_BASE_DELAY = 1000;
 /** Maximum reconnection delay in ms */
 const RECONNECT_MAX_DELAY = 30000;
 
+/**
+ * Warm up the tunnel connection before attempting WebSocket.
+ * Makes an HTTP request to the backend first to ensure the tunnel is
+ * responsive and any proxy layers have been initialized.
+ * Returns true if warmup succeeded, false otherwise.
+ */
+async function warmUpTunnel(): Promise<boolean> {
+    if (!isTunnelAccess()) return true; // no warmup needed for local connections
+
+    try {
+        console.log('[WebSocket] Tunnel detected, warming up HTTP connection first...');
+        const res = await fetch(`${API_URL}/api/tunnel/status`, {
+            credentials: 'include', // Ensure cookies are sent/received
+        });
+        if (res.ok) {
+            console.log('[WebSocket] Tunnel warmup succeeded');
+            return true;
+        }
+        console.warn('[WebSocket] Tunnel warmup returned status:', res.status);
+        return false;
+    } catch (err) {
+        console.warn('[WebSocket] Tunnel warmup failed:', err);
+        return false;
+    }
+}
+
 // Note: Polling removed for performance - WebSocket handles all state updates reliably
 
 export function useWebSocket() {
@@ -18,6 +45,10 @@ export function useWebSocket() {
     const reconnectTimeoutRef = useRef<number>();
     /** Track reconnection attempts for exponential backoff */
     const reconnectAttempts = useRef<number>(0);
+    /** Track previous task states to detect busy→idle transitions */
+    const taskStatesRef = useRef<Map<string, string>>(new Map());
+    /** Flag to skip sound on initial load */
+    const initializedRef = useRef<boolean>(false);
 
     const {
         setConnected,
@@ -41,9 +72,20 @@ export function useWebSocket() {
         removeArchivedTask
     } = useTaskStore();
 
-    const connect = useCallback(() => {
+    const connect = useCallback(async () => {
         if (wsRef.current?.readyState === WebSocket.OPEN ||
             wsRef.current?.readyState === WebSocket.CONNECTING) return;
+
+        // For tunnel connections, warm up with HTTP first to ensure
+        // the tunnel proxy is responsive before attempting WebSocket
+        if (isTunnelAccess()) {
+            const warmupOk = await warmUpTunnel();
+            if (!warmupOk) {
+                console.warn('[WebSocket] Tunnel warmup failed, retrying in 2s...');
+                reconnectTimeoutRef.current = window.setTimeout(connect, 2000);
+                return;
+            }
+        }
 
         console.log('[WebSocket] Connecting to', WS_URL);
         const ws = new WebSocket(WS_URL);
@@ -87,6 +129,11 @@ export function useWebSocket() {
                         if (payload.workspaces) {
                             setWorkspaces(payload.workspaces);
                         }
+                        // Seed task states from initial load (so we don't play sounds for existing idle tasks)
+                        payload.tasks.forEach((t: Task) => {
+                            taskStatesRef.current.set(t.id, t.state);
+                        });
+                        initializedRef.current = true;
                         // Clear reloading state when we get initialized
                         setServerReloading(false);
 
@@ -135,6 +182,7 @@ export function useWebSocket() {
                     case 'task:destroyed': {
                         const payload = message.payload as { taskId: string };
                         console.log(`[WebSocket] Task destroyed: ${payload.taskId}`);
+                        taskStatesRef.current.delete(payload.taskId);
                         deleteTask(payload.taskId);
                         break;
                     }
@@ -223,11 +271,22 @@ export function useWebSocket() {
                         const payload = message.payload as { task?: Task; tasks?: Task[] };
                         console.log('[WebSocket] task:stateChanged received:', payload.task?.id, 'state:', payload.task?.state);
                         if (payload.task) {
+                            const previousState = taskStatesRef.current.get(payload.task.id);
+                            // Update tracked state
+                            taskStatesRef.current.set(payload.task.id, payload.task.state);
+
                             updateTask(payload.task);
                             // Clear waiting input notification when task becomes busy OR idle
                             // (idle means Claude finished and isn't asking anything)
                             if (payload.task.state === 'busy' || payload.task.state === 'idle') {
                                 clearWaitingInput(payload.task.id);
+                            }
+
+                            // Play completion sound + browser notification on busy→idle transition
+                            if (payload.task.state === 'idle' && previousState === 'busy' && initializedRef.current) {
+                                console.log('[WebSocket] Task completed (busy→idle), playing completion sound:', payload.task.id);
+                                playTaskCompletionSound();
+                                sendTaskCompletionNotification(payload.task.prompt);
                             }
 
                             // Auto-focus on task when it completes (becomes idle) if setting is enabled

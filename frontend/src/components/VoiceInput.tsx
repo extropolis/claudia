@@ -1,6 +1,7 @@
 import { useEffect, useState, forwardRef, useImperativeHandle } from 'react';
 import { Mic, MicOff, Loader2 } from 'lucide-react';
-import { useVoiceRecognition } from '../hooks/useVoiceRecognition';
+import { useDeepgramRecognition } from '../hooks/useDeepgramRecognition';
+import { useTaskStore } from '../stores/taskStore';
 
 interface VoiceInputProps {
     onTranscript: (text: string, isFinal: boolean) => void;
@@ -18,6 +19,7 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
     ref
 ) {
     const [error, setError] = useState<string | null>(null);
+    const deepgramApiKey = useTaskStore(s => s.deepgramApiKey);
 
     const {
         isSupported,
@@ -25,9 +27,10 @@ export const VoiceInput = forwardRef<VoiceInputHandle, VoiceInputProps>(function
         startListening,
         stopListening,
         resetTranscript
-    } = useVoiceRecognition({
+    } = useDeepgramRecognition({
         continuous,
         interimResults: true,
+        deepgramApiKey,
         onResult: (transcript, isFinal) => {
             setError(null);
             onTranscript(transcript, isFinal);

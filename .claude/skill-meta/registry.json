@@ -1,0 +1,18 @@
+{
+  "skills": [
+    {
+      "id": "claude-code-skills",
+      "file": ".claude/generated-skills/claude-code-skills.md",
+      "tags": ["claude-code", "skills", "slash-commands", "configuration"],
+      "confidence": 0.90,
+      "created": "2026-02-24T12:00:00Z",
+      "last_updated": "2026-02-24T12:00:00Z",
+      "version": 1,
+      "source_conversations": 1,
+      "times_in_context": 0,
+      "avg_score_before": 7,
+      "avg_score_after": null
+    }
+  ],
+  "last_updated": "2026-02-24T12:00:00Z"
+}

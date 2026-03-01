@@ -3,9 +3,8 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Task, Workspace } from '@claudia/shared';
-import { Copy, Check, Play, BookOpen } from 'lucide-react';
+import { Copy, Check, Play, BookOpen, ArrowDown } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
-import { LearnFromConversationModal } from './LearnFromConversationModal';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
 
@@ -13,15 +12,45 @@ interface TerminalViewProps {
     task: Task;
     wsRef: React.RefObject<WebSocket | null>;
     workspace?: Workspace;
+    isMobile?: boolean;
 }
 
-export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
+export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewProps) {
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
     const userHasScrolledRef = useRef(false); // Track if user manually scrolled up
     const [copied, setCopied] = useState(false);
-    const [showLearnModal, setShowLearnModal] = useState(false);
+    const [isLoadingHistory, setIsLoadingHistory] = useState(true);
+    const [showSpinner, setShowSpinner] = useState(false);
+    const historyLoadedRef = useRef(false);
+
+    // Show spinner after a short delay to avoid flash for fast loads
+    useEffect(() => {
+        if (!isLoadingHistory) {
+            setShowSpinner(false);
+            return;
+        }
+        const spinnerDelay = setTimeout(() => {
+            if (!historyLoadedRef.current) {
+                setShowSpinner(true);
+            }
+        }, 300); // 300ms delay before showing spinner
+
+        // Safety timeout - hide spinner after 10s even if no restore received
+        const safetyTimeout = setTimeout(() => {
+            if (!historyLoadedRef.current) {
+                console.log(`[TerminalView] Safety timeout: hiding loading spinner for ${task.id}`);
+                historyLoadedRef.current = true;
+                setIsLoadingHistory(false);
+            }
+        }, 10000);
+
+        return () => {
+            clearTimeout(spinnerDelay);
+            clearTimeout(safetyTimeout);
+        };
+    }, [isLoadingHistory, task.id]);
 
     // Expose scrollToBottom for external use (resets user scroll state since it's explicit)
     const scrollToBottom = (resetUserScroll = true) => {
@@ -117,8 +146,10 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
     useEffect(() => {
         if (!terminalRef.current) return;
 
-        // Reset user scroll state when task changes
+        // Reset user scroll state and loading state when task changes
         userHasScrolledRef.current = false;
+        historyLoadedRef.current = false;
+        setIsLoadingHistory(true);
 
         // Clear container
         while (terminalRef.current.firstChild) {
@@ -237,6 +268,12 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
                 const message = JSON.parse(event.data);
                 if (message.type === 'task:output' && message.payload.taskId === task.id) {
                     term.write(message.payload.data);
+                    // Clear loading state on first output (task is live)
+                    if (!historyLoadedRef.current) {
+                        console.log(`[TerminalView] First output received, clearing loading state for ${task.id}`);
+                        historyLoadedRef.current = true;
+                        setIsLoadingHistory(false);
+                    }
                 } else if (message.type === 'task:restore' && message.payload.taskId === task.id) {
                     const { history } = message.payload;
                     console.log(`[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}`);
@@ -247,6 +284,9 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
                     } else {
                         console.warn(`[TerminalView] task:restore received but history is empty for ${task.id}`);
                     }
+                    // Clear loading state - history has been restored
+                    historyLoadedRef.current = true;
+                    setIsLoadingHistory(false);
                 }
             } catch (e) {
                 console.error('[TerminalView] Message error:', e);
@@ -302,7 +342,13 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
     const stateLabel = task.state === 'interrupted' ? 'INTERRUPTED' : task.state;
 
     const handleLearnFromConversation = () => {
-        setShowLearnModal(true);
+        // Send /learn command to the active Claude Code terminal session
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+                type: 'task:input',
+                payload: { taskId: task.id, input: '/learn\r' }
+            }));
+        }
     };
 
     return (
@@ -320,7 +366,7 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
                     <button
                         className="learn-button"
                         onClick={handleLearnFromConversation}
-                        title="Learn from this conversation - extracts learnings for future tasks"
+                        title="Send /learn command to Claude - rates performance and saves learnings to .claude/skills/"
                     >
                         <BookOpen size={14} />
                         Learn
@@ -338,17 +384,26 @@ export function TerminalView({ task, wsRef, workspace }: TerminalViewProps) {
                 )}
                 <span className={`terminal-state ${task.state}`}>{stateLabel}</span>
             </div>
-            <div ref={terminalRef} className="terminal-container" />
+            <div className="terminal-container-wrapper">
+                <div ref={terminalRef} className="terminal-container" />
+                {showSpinner && (
+                    <div className="terminal-loading-overlay">
+                        <div className="terminal-loading-spinner" />
+                        <span className="terminal-loading-text">Loading session history…</span>
+                    </div>
+                )}
+                {isMobile && (
+                    <button
+                        className="mobile-scroll-bottom-btn"
+                        onClick={() => scrollToBottom(true)}
+                        title="Scroll to bottom"
+                    >
+                        <ArrowDown size={20} />
+                    </button>
+                )}
+            </div>
             <TaskInputBar task={task} wsRef={wsRef} />
 
-            {showLearnModal && workspace && (
-                <LearnFromConversationModal
-                    taskId={task.id}
-                    workspaceId={workspace.id}
-                    workspaceName={workspace.name}
-                    onClose={() => setShowLearnModal(false)}
-                />
-            )}
         </div>
     );
 }

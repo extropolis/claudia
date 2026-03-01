@@ -103,8 +103,8 @@ echo ""
 # Start from project root
 cd "$(dirname "$0")"
 
-# Export PORT for the backend to use
-export PORT=$BACKEND_PORT
+# Export CLAUDIA_BACKEND_PORT for the backend to use
+export CLAUDIA_BACKEND_PORT=$BACKEND_PORT
 
 # Increase Node.js memory limit for backend (handles many persisted tasks + archived tasks)
 export NODE_OPTIONS="--max-old-space-size=8192"

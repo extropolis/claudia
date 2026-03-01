@@ -10,10 +10,57 @@
       "id": "/Users/I850333/projects/experiments/claudia",
       "name": "claudia",
       "createdAt": "2026-02-10T21:56:27.323Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/skynative",
+      "name": "skynative",
+      "createdAt": "2026-02-24T01:38:47.542Z",
+      "systemPrompt": "you can login to the app with username: Lance password: Butch988"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/joule_expense",
+      "name": "joule_expense",
+      "createdAt": "2026-02-24T19:00:42.686Z",
+      "systemPrompt": "here are the joule login creds: username: lance.hughes@sap.com\npassword: ILikeFish_988\n\nalways use playwright mcp to test the joule agent"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/joule-concur-expense-develop",
+      "name": "joule-concur-expense-develop",
+      "createdAt": "2026-02-24T22:26:50.506Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/noa-examples-master",
+      "name": "noa-examples-master",
+      "createdAt": "2026-03-01T01:22:40.148Z"
     }
   ],
   "activeWorkspaceId": "/Users/I850333/projects/experiments/Minecraft",
   "recentWorkspaces": [
+    {
+      "id": "/Users/I850333/projects/experiments/openclaw",
+      "name": "openclaw",
+      "removedAt": "2026-02-27T19:33:38.936Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/skill_learner",
+      "name": "skill_learner",
+      "removedAt": "2026-02-25T21:20:50.295Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/skylive",
+      "name": "skylive",
+      "removedAt": "2026-02-25T18:59:24.967Z"
+    },
+    {
+      "id": "/Users/I850333/projects/Worldcraft/Assets",
+      "name": "Assets",
+      "removedAt": "2026-02-24T17:20:50.724Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/mine",
+      "name": "mine",
+      "removedAt": "2026-02-24T01:36:47.768Z"
+    },
     {
       "id": "/Users/I850333/projects/experiments/codeui",
       "name": "codeui",

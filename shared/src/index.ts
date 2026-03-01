@@ -71,6 +71,7 @@ export interface ChatMessage {
     content: string;
     timestamp: string;
     taskId?: string;  // Optional: associated task for context
+    workspaceId?: string;  // Optional: workspace this message belongs to
 }
 
 // Task Supervisor types

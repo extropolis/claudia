@@ -36,6 +36,8 @@ interface MCPServerConfig {
  */
 // Valid SAP AI Core models
 const VALID_SAP_AI_CORE_MODELS = [
+    'anthropic--claude-4.6-opus',
+    'anthropic--claude-4.6-sonnet',
     'anthropic--claude-4.5-opus',
     'anthropic--claude-opus-4',
     'anthropic--claude-sonnet-4',

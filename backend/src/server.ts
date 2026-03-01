@@ -1,8 +1,9 @@
 import express from 'express';
-import { createServer } from 'http';
+import { createServer, request as httpRequest } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import os from 'os';
+import { spawn, ChildProcess } from 'child_process';
 import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync } from 'fs';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
@@ -15,9 +16,11 @@ import { getConversationHistory, getWorkspaceSessions } from './conversation-par
 import { createAnthropicProxy } from './anthropic-proxy/index.js';
 import { createHyperspaceProxy } from './hyperspace-proxy/index.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType } from '@claudia/shared';
+import { Task, Workspace, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, PORTS } from '@claudia/shared';
 import { validateConfigUpdate, validateWorkspacePath, validateAICoreCredentials } from './validation.js';
 import { LearningsStore } from './learnings-store.js';
+import { TunnelManager } from './tunnel-manager.js';
+import { getMobilePageHtml } from './mobile-page.js';
 import { createLogger } from './logger.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
@@ -57,7 +60,8 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'supervisor:chat:history',
     'supervisor:chat:clear',
     'task:disconnect',
-    'task:clear'
+    'task:clear',
+    'tunnel:status'
 ]);
 
 // WebSocket message validation
@@ -89,11 +93,68 @@ function sendWSError(ws: WebSocket, message: string, originalType?: string, code
 export async function createApp(basePath?: string) {
     const app = express();
     const server = createServer(app);
-    const wss = new WebSocketServer({ server });
+    // Use noServer mode so we can manually route WebSocket upgrade requests.
+    // This is critical for tunnel access: Vite HMR WebSocket connections need
+    // to be proxied to the Vite dev server, not handled by our app's WSS.
+    const wss = new WebSocketServer({ noServer: true });
 
     // Middleware
     app.use(cors());
     app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests
+
+    // TunnelManager for mobile remote access (ngrok-based, created early for middleware use)
+    const tunnelManager = new TunnelManager(PORTS.BACKEND);
+    logger.info('TunnelManager created (ngrok)');
+
+    // ===== Tunnel → React Frontend Proxy =====
+    // When accessed through the localtunnel, proxy non-API requests to the Vite
+    // dev server so the React app is served through the same origin as the backend.
+    // This lets mobile devices use the responsive React UI instead of the old
+    // standalone mobile page.
+    const VITE_ORIGIN = `http://localhost:${PORTS.FRONTEND}`;
+
+    function isTunnelHost(host: string): boolean {
+        return host.includes('.loca.lt') || host.includes('localtunnel') ||
+               host.includes('.ngrok-free.app') || host.includes('.ngrok.io') || host.includes('ngrok');
+    }
+
+    app.use((req, res, next) => {
+        const host = req.headers.host || '';
+        if (!isTunnelHost(host)) {
+            return next();
+        }
+
+        // Tunnel visitor at root without a token → redirect with token so React can auth the WS
+        if (req.path === '/' && !req.query.token) {
+            const status = tunnelManager.getStatus();
+            if (status.active && status.token) {
+                logger.info('Tunnel visitor at root, redirecting with token', { host });
+                return res.redirect(`/?token=${status.token}`);
+            }
+        }
+
+        // Let API routes, WebSocket upgrade, and /mobile (legacy) pass through
+        if (req.path.startsWith('/api/') || req.path.startsWith('/hyperspace')) {
+            return next();
+        }
+
+        // Proxy everything else to the Vite dev server (React frontend)
+        const proxyReq = httpRequest({
+            hostname: 'localhost',
+            port: PORTS.FRONTEND,
+            path: req.originalUrl,
+            method: req.method,
+            headers: { ...req.headers, host: `localhost:${PORTS.FRONTEND}` },
+        }, (proxyRes) => {
+            res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+            proxyRes.pipe(res);
+        });
+        proxyReq.on('error', (err) => {
+            logger.error('Vite proxy error', { error: err.message, path: req.path });
+            res.status(502).send('Frontend proxy error — is Vite running?');
+        });
+        req.pipe(proxyReq);
+    });
 
     // Initialize configStore first to determine API mode
     const configStore = new ConfigStore(basePath);
@@ -153,6 +214,20 @@ export async function createApp(basePath?: string) {
     const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore);
     // LearningsStore for RAG-based learnings
     const learningsStore = new LearningsStore(basePath, configStore);
+
+    // Wire up tunnel events for broadcasting
+    tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
+        logger.info('Tunnel ready, broadcasting status', { url: data.url });
+        broadcast({ type: 'tunnel:status' as WSMessageType, payload: tunnelManager.getStatus() });
+    });
+    tunnelManager.on('tunnel:error', (error: string) => {
+        logger.error('Tunnel error', { error });
+        broadcast({ type: 'tunnel:status' as WSMessageType, payload: { ...tunnelManager.getStatus(), error } });
+    });
+    tunnelManager.on('tunnel:closed', () => {
+        logger.info('Tunnel closed, broadcasting status');
+        broadcast({ type: 'tunnel:status' as WSMessageType, payload: tunnelManager.getStatus() });
+    });
 
     // Helper to extract rules from CLAUDE.md (reverse sync) - async version
     async function extractRulesFromClaudeMd(workspacePath: string): Promise<string | null> {
@@ -379,9 +454,63 @@ export async function createApp(basePath?: string) {
         broadcast({ type: 'supervisor:chat:typing' as WSMessageType, payload: { isTyping } });
     });
 
+    // ===== WebSocket Upgrade Routing =====
+    // Using noServer mode so we can selectively handle upgrades.
+    // Through the tunnel, Vite's HMR client also tries to connect a WebSocket
+    // (because the frontend is served from the same origin). We reject those
+    // non-app connections so they don't create noise or compete with the real WS.
+    server.on('upgrade', (req, socket, head) => {
+        const host = req.headers.host || '';
+        const isTunnel = host.includes('.loca.lt') || host.includes('localtunnel') ||
+                         host.includes('.ngrok-free.app') || host.includes('.ngrok.io') || host.includes('ngrok');
+        const url = new URL(req.url || '/', `http://${host || 'localhost'}`);
+
+        logger.info('WebSocket upgrade request', {
+            url: req.url,
+            host,
+            isTunnel,
+            hasToken: url.searchParams.has('token'),
+            mobile: url.searchParams.get('mobile'),
+        });
+
+        if (isTunnel) {
+            const hasToken = url.searchParams.has('token');
+            const isMobile = url.searchParams.get('mobile') === '1';
+
+            if (!hasToken && !isMobile) {
+                // Vite HMR or other non-app WebSocket — silently reject.
+                // HMR isn't needed through the tunnel (mobile users don't need it).
+                logger.info('Tunnel WebSocket: rejecting non-app upgrade (likely Vite HMR)', { path: req.url });
+                socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+                socket.destroy();
+                return;
+            }
+
+            logger.info('Tunnel WebSocket: routing to app WSS');
+        }
+
+        wss.handleUpgrade(req, socket, head, (ws) => {
+            wss.emit('connection', ws, req);
+        });
+    });
+
     // WebSocket connection handling
-    wss.on('connection', async (ws: WebSocket) => {
-        console.log('[Server] Client connected');
+    wss.on('connection', async (ws: WebSocket, req) => {
+        // Check for mobile token auth on query string
+        const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+        const mobileToken = url.searchParams.get('token');
+        const isMobile = url.searchParams.get('mobile') === '1';
+
+        if (isMobile) {
+            if (!mobileToken || !tunnelManager.validateToken(mobileToken)) {
+                logger.error('Mobile WebSocket rejected: invalid token');
+                ws.close(4001, 'Invalid token');
+                return;
+            }
+            logger.info('Mobile client connected via tunnel');
+        }
+
+        console.log('[Server] Client connected' + (isMobile ? ' (mobile)' : ''));
         clients.add(ws);
         clientAliveMap.set(ws, true); // Mark as alive on connection
 
@@ -833,21 +962,26 @@ export async function createApp(basePath?: string) {
 
                     case 'supervisor:chat:message': {
                         // User sends a chat message to the supervisor
-                        const { content, taskId } = payload as { content?: string; taskId?: string };
+                        const { content, taskId, workspaceId } = payload as { content?: string; taskId?: string; workspaceId?: string };
                         if (!content) {
                             console.error('[Server] supervisor:chat:message requires content');
                             return;
                         }
-                        await supervisorChat.sendMessage(content, taskId);
+                        console.log(`[Server] supervisor:chat:message workspaceId=${workspaceId || 'none'}`);
+                        await supervisorChat.sendMessage(content, taskId, workspaceId);
                         break;
                     }
 
                     case 'supervisor:chat:history': {
-                        // Request chat history
-                        const history = supervisorChat.getHistory();
+                        // Request chat history (optionally scoped to a workspace)
+                        const { workspaceId: histWorkspaceId } = (payload || {}) as { workspaceId?: string };
+                        const history = histWorkspaceId
+                            ? supervisorChat.getWorkspaceHistory(histWorkspaceId)
+                            : supervisorChat.getHistory();
+                        console.log(`[Server] supervisor:chat:history workspaceId=${histWorkspaceId || 'all'} messages=${history.length}`);
                         ws.send(JSON.stringify({
                             type: 'supervisor:chat:history',
-                            payload: { messages: history }
+                            payload: { messages: history, workspaceId: histWorkspaceId }
                         }));
                         break;
                     }
@@ -856,6 +990,15 @@ export async function createApp(basePath?: string) {
                         // Clear chat history
                         supervisorChat.clearHistory();
                         broadcast({ type: 'supervisor:chat:history' as WSMessageType, payload: { messages: [] } });
+                        break;
+                    }
+
+                    case 'tunnel:status': {
+                        // Request tunnel status
+                        ws.send(JSON.stringify({
+                            type: 'tunnel:status',
+                            payload: tunnelManager.getStatus()
+                        }));
                         break;
                     }
                 }
@@ -883,6 +1026,163 @@ export async function createApp(basePath?: string) {
     // REST API routes
     app.get('/api/health', (_req, res) => {
         res.json({ status: 'ok' });
+    });
+
+    // ===== Tunnel Management Routes =====
+    app.post('/api/tunnel/start', async (_req, res) => {
+        try {
+            logger.info('Starting tunnel via API');
+            const status = await tunnelManager.start();
+            res.json(status);
+        } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            logger.error('Failed to start tunnel', { error: errorMsg });
+            res.status(500).json({ error: errorMsg });
+        }
+    });
+
+    app.post('/api/tunnel/stop', async (_req, res) => {
+        try {
+            logger.info('Stopping tunnel via API');
+            await tunnelManager.stop();
+            res.json({ active: false });
+        } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            logger.error('Failed to stop tunnel', { error: errorMsg });
+            res.status(500).json({ error: errorMsg });
+        }
+    });
+
+    app.get('/api/tunnel/status', (_req, res) => {
+        res.json(tunnelManager.getStatus());
+    });
+
+    // ===== Mobile Route (legacy redirect) =====
+    // Old /mobile route now redirects to the React app root with the token.
+    // The responsive React frontend handles mobile layout automatically.
+    app.get('/mobile', (req, res) => {
+        let token = req.query.token as string;
+
+        if (!token) {
+            const host = req.headers.host || '';
+            const tunnelStatus = tunnelManager.getStatus();
+
+            if (isTunnelHost(host) && tunnelStatus.active && tunnelStatus.token) {
+                token = tunnelStatus.token;
+            } else {
+                res.status(401).send('Access denied: Missing token');
+                return;
+            }
+        }
+
+        if (!tunnelManager.validateToken(token)) {
+            res.status(401).send('Access denied: Invalid or expired token');
+            return;
+        }
+
+        // Redirect to the React app with the auth token
+        logger.info('Redirecting /mobile to React app', { hasToken: !!token });
+        res.redirect(`/?token=${token}`);
+    });
+
+    // ===== ElevenLabs TTS Route =====
+    const ELEVENLABS_VOICES: Record<string, string> = {
+        charlotte: 'XB0fDUnXU5powFXDhCwa',
+        verity: 'oW8bn5YtBB89X2nJ0DT9',
+        george: 'JBFqnCBsd6RMkjVDRZzb',
+        brian: 'nPczCjzI2devNBz1zQrb',
+        jessica: 'cgSgspJ2msm6clMCkdEp',
+        daisy: 'DYAWdnlYLnZyj3yWpS75',
+    };
+
+    function sanitizeTtsText(text: string): string {
+        return text
+            // Remove markdown headings
+            .replace(/#{1,6}\s/g, '')
+            // Remove bold/italic markers
+            .replace(/\*\*(.+?)\*\*/g, '$1')
+            .replace(/\*(.+?)\*/g, '$1')
+            // Remove inline code
+            .replace(/`(.+?)`/g, '$1')
+            // Remove code blocks
+            .replace(/```[\s\S]*?```/g, '')
+            // Remove links, keep text
+            .replace(/\[(.+?)\]\(.+?\)/g, '$1')
+            // Remove common emojis/symbols that sound odd when spoken
+            .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '')
+            // Collapse multiple newlines
+            .replace(/\n{2,}/g, '. ')
+            .replace(/\n/g, ' ')
+            // Collapse whitespace
+            .replace(/\s{2,}/g, ' ')
+            .trim();
+    }
+
+    app.post('/api/tts', async (req, res) => {
+        const apiKey = process.env.ELEVENLABS_API_KEY;
+        if (!apiKey) {
+            logger.error('ElevenLabs API key not configured');
+            res.status(500).json({ error: 'TTS not configured: missing ELEVENLABS_API_KEY' });
+            return;
+        }
+
+        const { text, voice } = req.body as { text?: string; voice?: string };
+        if (!text || typeof text !== 'string') {
+            res.status(400).json({ error: 'Missing or invalid "text" field' });
+            return;
+        }
+
+        const voiceName = (voice || 'charlotte').toLowerCase();
+        const voiceId = ELEVENLABS_VOICES[voiceName];
+        if (!voiceId) {
+            res.status(400).json({ error: `Unknown voice "${voice}". Available: ${Object.keys(ELEVENLABS_VOICES).join(', ')}` });
+            return;
+        }
+
+        const cleanText = sanitizeTtsText(text);
+        if (!cleanText) {
+            res.status(400).json({ error: 'Text is empty after sanitization' });
+            return;
+        }
+
+        logger.info('TTS request', { voice: voiceName, textLength: cleanText.length });
+
+        try {
+            const elevenLabsRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+                method: 'POST',
+                headers: {
+                    'xi-api-key': apiKey,
+                    'Content-Type': 'application/json',
+                    'Accept': 'audio/mpeg',
+                },
+                body: JSON.stringify({
+                    text: cleanText,
+                    model_id: 'eleven_multilingual_v2',
+                    voice_settings: {
+                        stability: 0.5,
+                        similarity_boost: 0.75,
+                    },
+                }),
+            });
+
+            if (!elevenLabsRes.ok) {
+                const errBody = await elevenLabsRes.text();
+                logger.error('ElevenLabs API error', { status: elevenLabsRes.status, body: errBody });
+                res.status(elevenLabsRes.status).json({ error: `ElevenLabs API error: ${elevenLabsRes.status}`, detail: errBody });
+                return;
+            }
+
+            const audioBuffer = Buffer.from(await elevenLabsRes.arrayBuffer());
+            logger.info('TTS response', { audioBytes: audioBuffer.length });
+
+            res.setHeader('Content-Type', 'audio/mpeg');
+            res.setHeader('Content-Length', audioBuffer.length);
+            res.send(audioBuffer);
+        } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            logger.error('TTS fetch failed', { error: errorMsg });
+            res.status(500).json({ error: 'TTS request failed', detail: errorMsg });
+        }
     });
 
     // Usage tracking — receives the unique user ID from the frontend
@@ -1522,6 +1822,218 @@ export async function createApp(basePath?: string) {
         }
     });
 
+    // Test MCP server connection
+    app.post('/api/mcp/test', async (req, res) => {
+        const { server } = req.body;
+
+        if (!server || !server.name) {
+            return res.status(400).json({ success: false, error: 'Server configuration required' });
+        }
+
+        const serverType = server.type || 'stdio';
+        logger.info(`Testing MCP server connection: ${server.name} (${serverType})`);
+
+        try {
+            if (serverType === 'streamableHttp' || serverType === 'http') {
+                // Test HTTP-based MCP server
+                const url = server.url;
+                if (!url) {
+                    return res.json({ success: false, error: 'URL is required for HTTP MCP server' });
+                }
+
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 10000);
+
+                try {
+                    // Send MCP initialize request
+                    const headers: Record<string, string> = {
+                        'Content-Type': 'application/json',
+                        ...(server.headers || {})
+                    };
+
+                    const initRequest = {
+                        jsonrpc: '2.0',
+                        id: 1,
+                        method: 'initialize',
+                        params: {
+                            protocolVersion: '2024-11-05',
+                            capabilities: {},
+                            clientInfo: {
+                                name: 'claudia-test',
+                                version: '1.0.0'
+                            }
+                        }
+                    };
+
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers,
+                        body: JSON.stringify(initRequest),
+                        signal: controller.signal
+                    });
+
+                    clearTimeout(timeout);
+
+                    if (response.ok) {
+                        const data = await response.json() as { result?: { serverInfo?: { name?: string; version?: string }; capabilities?: Record<string, unknown> }; error?: { message?: string } };
+                        if (data.result) {
+                            const serverInfo = data.result.serverInfo;
+                            const capabilities = data.result.capabilities || {};
+                            const toolCount = capabilities.tools ? 'available' : 'not advertised';
+
+                            logger.info(`MCP server ${server.name} connected successfully: ${serverInfo?.name || 'unknown'} v${serverInfo?.version || 'unknown'}`);
+                            return res.json({
+                                success: true,
+                                message: `Connected to ${serverInfo?.name || server.name}${serverInfo?.version ? ` v${serverInfo.version}` : ''}`,
+                                details: {
+                                    serverName: serverInfo?.name,
+                                    serverVersion: serverInfo?.version,
+                                    tools: toolCount
+                                }
+                            });
+                        } else if (data.error) {
+                            return res.json({ success: false, error: data.error.message || 'Server returned error' });
+                        }
+                        return res.json({ success: true, message: 'Server responded' });
+                    } else {
+                        return res.json({ success: false, error: `HTTP ${response.status}: ${response.statusText}` });
+                    }
+                } catch (fetchError: unknown) {
+                    clearTimeout(timeout);
+                    const errorMessage = fetchError instanceof Error && fetchError.name === 'AbortError'
+                        ? 'Connection timed out'
+                        : (fetchError instanceof Error ? fetchError.message : 'Connection failed');
+                    return res.json({ success: false, error: errorMessage });
+                }
+            } else {
+                // Test stdio-based MCP server
+                const command = server.command;
+                const args = server.args || [];
+
+                if (!command) {
+                    return res.json({ success: false, error: 'Command is required for stdio MCP server' });
+                }
+
+                // Spawn the process
+                let mcpProcess: ChildProcess;
+                try {
+                    mcpProcess = spawn(command, args, {
+                        stdio: ['pipe', 'pipe', 'pipe'],
+                        env: { ...process.env, ...(server.env || {}) }
+                    });
+                } catch (spawnError) {
+                    const errorMessage = spawnError instanceof Error ? spawnError.message : 'Failed to spawn process';
+                    return res.json({ success: false, error: `Failed to start: ${errorMessage}` });
+                }
+
+                // Set up timeout
+                const timeoutMs = 10000;
+                let resolved = false;
+                const timeoutId = setTimeout(() => {
+                    if (!resolved) {
+                        resolved = true;
+                        mcpProcess.kill();
+                        return res.json({ success: false, error: 'Connection timed out (no response within 10s)' });
+                    }
+                }, timeoutMs);
+
+                // Collect stderr for error reporting
+                let stderrOutput = '';
+                mcpProcess.stderr?.on('data', (data: Buffer) => {
+                    stderrOutput += data.toString();
+                });
+
+                // Handle process exit
+                mcpProcess.on('error', (error: Error) => {
+                    if (!resolved) {
+                        resolved = true;
+                        clearTimeout(timeoutId);
+                        return res.json({ success: false, error: `Process error: ${error.message}` });
+                    }
+                });
+
+                mcpProcess.on('exit', (code: number | null, signal: string | null) => {
+                    if (!resolved) {
+                        resolved = true;
+                        clearTimeout(timeoutId);
+                        if (code !== null && code !== 0) {
+                            const errorInfo = stderrOutput ? `: ${stderrOutput.trim().slice(0, 200)}` : '';
+                            return res.json({ success: false, error: `Process exited with code ${code}${errorInfo}` });
+                        }
+                        if (signal) {
+                            return res.json({ success: false, error: `Process killed by signal ${signal}` });
+                        }
+                    }
+                });
+
+                // Buffer for incoming data
+                let buffer = '';
+
+                mcpProcess.stdout?.on('data', (data: Buffer) => {
+                    buffer += data.toString();
+
+                    // Try to parse JSON-RPC response
+                    const lines = buffer.split('\n');
+                    for (const line of lines) {
+                        if (line.trim()) {
+                            try {
+                                const response = JSON.parse(line) as { result?: { serverInfo?: { name?: string; version?: string }; capabilities?: Record<string, unknown> }; error?: { message?: string } };
+                                if (response.result && !resolved) {
+                                    resolved = true;
+                                    clearTimeout(timeoutId);
+                                    mcpProcess.kill();
+
+                                    const serverInfo = response.result.serverInfo;
+                                    const capabilities = response.result.capabilities || {};
+                                    const toolCount = capabilities.tools ? 'available' : 'not advertised';
+
+                                    logger.info(`MCP server ${server.name} connected successfully: ${serverInfo?.name || 'unknown'} v${serverInfo?.version || 'unknown'}`);
+                                    return res.json({
+                                        success: true,
+                                        message: `Connected to ${serverInfo?.name || server.name}${serverInfo?.version ? ` v${serverInfo.version}` : ''}`,
+                                        details: {
+                                            serverName: serverInfo?.name,
+                                            serverVersion: serverInfo?.version,
+                                            tools: toolCount
+                                        }
+                                    });
+                                } else if (response.error && !resolved) {
+                                    resolved = true;
+                                    clearTimeout(timeoutId);
+                                    mcpProcess.kill();
+                                    return res.json({ success: false, error: response.error.message || 'Server returned error' });
+                                }
+                            } catch {
+                                // Not valid JSON yet, continue collecting
+                            }
+                        }
+                    }
+                });
+
+                // Send MCP initialize request
+                const initRequest = {
+                    jsonrpc: '2.0',
+                    id: 1,
+                    method: 'initialize',
+                    params: {
+                        protocolVersion: '2024-11-05',
+                        capabilities: {},
+                        clientInfo: {
+                            name: 'claudia-test',
+                            version: '1.0.0'
+                        }
+                    }
+                };
+
+                mcpProcess.stdin?.write(JSON.stringify(initRequest) + '\n');
+            }
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            logger.error(`MCP test failed for ${server.name}:`, error);
+            return res.json({ success: false, error: errorMessage });
+        }
+    });
+
     // Test AI Core credentials endpoint
     app.post('/api/aicore/test', async (req, res) => {
         try {
@@ -1615,6 +2127,161 @@ export async function createApp(basePath?: string) {
                 success: false,
                 error: `Server error: ${message}`
             });
+        }
+    });
+
+    // Fetch live deployments/models from SAP AI Core
+    app.get('/api/aicore/models', async (_req, res) => {
+        try {
+            const config = configStore.getConfig();
+            const creds = config.aiCoreCredentials?.clientId
+                ? config.aiCoreCredentials
+                : (process.env.SAP_AICORE_CLIENT_ID && process.env.SAP_AICORE_CLIENT_SECRET ? {
+                    clientId: process.env.SAP_AICORE_CLIENT_ID,
+                    clientSecret: process.env.SAP_AICORE_CLIENT_SECRET,
+                    authUrl: process.env.SAP_AICORE_AUTH_URL || '',
+                    baseUrl: process.env.SAP_AICORE_BASE_URL || '',
+                    resourceGroup: process.env.SAP_AICORE_RESOURCE_GROUP || 'default',
+                    timeoutMs: parseInt(process.env.SAP_AICORE_TIMEOUT_MS || '120000', 10)
+                } : null);
+
+            if (!creds?.clientId || !creds?.clientSecret || !creds?.authUrl || !creds?.baseUrl) {
+                return res.status(400).json({ success: false, error: 'No AI Core credentials configured' });
+            }
+
+            logger.info('Fetching AI Core models list');
+            const tempProxy = createAnthropicProxy({
+                clientId: creds.clientId,
+                clientSecret: creds.clientSecret,
+                authUrl: creds.authUrl,
+                baseUrl: creds.baseUrl,
+                resourceGroup: creds.resourceGroup || 'default',
+                requestTimeoutMs: creds.timeoutMs || 120000
+            });
+
+            const modelsResponse = await tempProxy.deploymentCatalog.getModels();
+            // Also get raw deployments for more detail
+            const rawDeployments = await tempProxy.deploymentCatalog.getAvailableDeployments();
+
+            // Build a labeled model list from raw deployments (internal names)
+            const seen = new Set<string>();
+            const models: { value: string; label: string }[] = [];
+            for (const d of rawDeployments) {
+                const internalName: string = (d as any).details?.resources?.backendDetails?.model?.name;
+                if (internalName && !seen.has(internalName)) {
+                    seen.add(internalName);
+                    // Create a human-readable label from the internal name
+                    const label = internalName
+                        .replace('anthropic--claude-', 'Claude ')
+                        .replace(/-/g, ' ')
+                        .replace(/\b\w/g, (c: string) => c.toUpperCase())
+                        .replace(/\./g, '.');
+                    models.push({ value: internalName, label });
+                }
+            }
+
+            logger.info(`Returning ${models.length} AI Core models`);
+            res.json({ success: true, models, rawCount: rawDeployments.length });
+        } catch (error: unknown) {
+            logger.error('Failed to fetch AI Core models', { error });
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ success: false, error: `Failed to fetch models: ${message}` });
+        }
+    });
+
+    // Test a specific AI Core model by sending a simple prompt
+    app.post('/api/aicore/test-model', async (req, res) => {
+        try {
+            const { model } = req.body;
+            if (!model) {
+                return res.status(400).json({ success: false, error: 'Model name required' });
+            }
+
+            const config = configStore.getConfig();
+            const creds = config.aiCoreCredentials?.clientId
+                ? config.aiCoreCredentials
+                : (process.env.SAP_AICORE_CLIENT_ID && process.env.SAP_AICORE_CLIENT_SECRET ? {
+                    clientId: process.env.SAP_AICORE_CLIENT_ID,
+                    clientSecret: process.env.SAP_AICORE_CLIENT_SECRET,
+                    authUrl: process.env.SAP_AICORE_AUTH_URL || '',
+                    baseUrl: process.env.SAP_AICORE_BASE_URL || '',
+                    resourceGroup: process.env.SAP_AICORE_RESOURCE_GROUP || 'default',
+                    timeoutMs: parseInt(process.env.SAP_AICORE_TIMEOUT_MS || '120000', 10)
+                } : null);
+
+            if (!creds?.clientId || !creds?.clientSecret || !creds?.authUrl || !creds?.baseUrl) {
+                return res.status(400).json({ success: false, error: 'No AI Core credentials configured' });
+            }
+
+            logger.info('Testing AI Core model', { model });
+            const tempProxy = createAnthropicProxy({
+                clientId: creds.clientId,
+                clientSecret: creds.clientSecret,
+                authUrl: creds.authUrl,
+                baseUrl: creds.baseUrl,
+                resourceGroup: creds.resourceGroup || 'default',
+                requestTimeoutMs: creds.timeoutMs || 30000 // Shorter timeout for test
+            });
+
+            // Find the deployment for this model
+            const deployment = await tempProxy.deploymentCatalog.findDeploymentFor(model);
+            if (!deployment) {
+                return res.status(404).json({ success: false, error: `No deployment found for model: ${model}` });
+            }
+
+            // Get access token
+            const accessToken = await tempProxy.tokenProvider.getValidToken();
+
+            // Send a simple test message
+            const invokeUrl = `${creds.baseUrl}/v2/inference/deployments/${deployment.id}/invoke`;
+            const testPayload = {
+                anthropic_version: 'bedrock-2023-05-31',
+                max_tokens: 150,
+                messages: [
+                    { role: 'user', content: 'What model are you? Please respond briefly with just your model name/version.' }
+                ]
+            };
+
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 30000);
+
+            try {
+                const response = await fetch(invokeUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${accessToken}`,
+                        'Content-Type': 'application/json',
+                        'AI-Resource-Group': creds.resourceGroup || 'default'
+                    },
+                    body: JSON.stringify(testPayload),
+                    signal: controller.signal
+                });
+
+                clearTimeout(timeout);
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    logger.warn('Model test failed', { status: response.status, error: errorText });
+                    return res.json({ success: false, error: `Model returned ${response.status}: ${errorText.slice(0, 200)}` });
+                }
+
+                const result = await response.json() as { content?: Array<{ type: string; text?: string }> };
+                const textContent = result.content?.find((c: { type: string }) => c.type === 'text');
+                const responseText = textContent?.text || JSON.stringify(result);
+
+                logger.info('Model test successful', { model, response: responseText.slice(0, 100) });
+                res.json({ success: true, response: responseText, deploymentId: deployment.id });
+            } catch (fetchError: any) {
+                clearTimeout(timeout);
+                if (fetchError.name === 'AbortError') {
+                    return res.json({ success: false, error: 'Request timed out after 30 seconds' });
+                }
+                throw fetchError;
+            }
+        } catch (error: unknown) {
+            logger.error('Failed to test AI Core model', { error });
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ success: false, error: `Test failed: ${message}` });
         }
     });
 
@@ -2249,6 +2916,9 @@ Guidelines:
         // Give clients enough time to receive the message and for I/O to complete
         // 500ms provides a good balance between responsiveness and reliability
         setTimeout(() => {
+            // Stop tunnel if active
+            tunnelManager.stop().catch(() => {});
+
             // Save all state synchronously before exit
             taskSpawner.saveNow();
             supervisorChat.saveChatHistoryNow();

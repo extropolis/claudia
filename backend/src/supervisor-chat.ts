@@ -289,7 +289,8 @@ export class SupervisorChat extends EventEmitter {
             role: 'assistant',
             content: `**Task started**\n\n${task.prompt}`,
             timestamp: new Date().toISOString(),
-            taskId: task.id
+            taskId: task.id,
+            workspaceId: task.workspaceId
         };
 
         this.addMessage(message);
@@ -381,16 +382,10 @@ export class SupervisorChat extends EventEmitter {
 ${conversationContext || 'No conversation history available.'}
 
 ## Your Task
-Analyze this task and provide:
-1. A brief summary of what happened (2-3 sentences)
-2. Whether any follow-up actions are needed
-3. Suggested next steps (if any)
-
-Respond in a conversational way as if you're updating the user about their task.
-If the task completed successfully with no issues, just confirm it's done.
-If there are errors or the task needs input, explain what's needed.
-
-Keep your response concise and actionable.`;
+Give a brief, spoken-friendly update — 1-2 sentences max. No bullet lists, no markdown headers.
+If it completed fine, just say what was done. If there's an issue, briefly explain.
+Occasionally suggest a logical next step. End by asking what to do next.
+Be witty — dry humor, light sarcasm, maybe a pun. Think "funny coworker" not "trying too hard." Never let jokes get in the way of being useful.`;
 
             // Call Claude Code for analysis
             const analysis = await this.callClaudeSimple(analysisPrompt, task.workspaceId);
@@ -401,7 +396,8 @@ Keep your response concise and actionable.`;
                 role: 'assistant',
                 content: analysis,
                 timestamp: new Date().toISOString(),
-                taskId: task.id
+                taskId: task.id,
+                workspaceId: task.workspaceId
             };
 
             this.addMessage(assistantMessage);
@@ -416,7 +412,8 @@ Keep your response concise and actionable.`;
                 role: 'assistant',
                 content: `Task "${task.prompt.substring(0, 50)}${task.prompt.length > 50 ? '...' : ''}" is now ${task.state}.`,
                 timestamp: new Date().toISOString(),
-                taskId: task.id
+                taskId: task.id,
+                workspaceId: task.workspaceId
             };
             this.addMessage(fallbackMessage);
         } finally {
@@ -513,7 +510,7 @@ Keep your response concise and actionable.`;
     /**
      * Send a message to the supervisor and get a response
      */
-    async sendMessage(content: string, taskId?: string): Promise<ChatMessage | null> {
+    async sendMessage(content: string, taskId?: string, workspaceId?: string): Promise<ChatMessage | null> {
         if (this.isProcessing) {
             console.log('[SupervisorChat] Already processing a message, please wait');
             return null;
@@ -529,15 +526,16 @@ Keep your response concise and actionable.`;
                 role: 'user',
                 content,
                 timestamp: new Date().toISOString(),
-                taskId
+                taskId,
+                workspaceId
             };
             this.addMessage(userMessage);
 
-            // Get context about tasks
-            const context = await this.buildContext(taskId);
+            // Get context about tasks (workspace-scoped if provided)
+            const context = await this.buildContext(taskId, workspaceId);
 
             // Call Claude Code with tool support
-            const result = await this.callClaudeWithTools(content, context);
+            const result = await this.callClaudeWithTools(content, context, workspaceId);
 
             // Process tool calls if any
             let finalResponse = result.response || '';
@@ -560,7 +558,8 @@ Keep your response concise and actionable.`;
                 role: 'assistant',
                 content: finalResponse,
                 timestamp: new Date().toISOString(),
-                taskId
+                taskId,
+                workspaceId
             };
             this.addMessage(assistantMessage);
 
@@ -574,7 +573,8 @@ Keep your response concise and actionable.`;
                 role: 'assistant',
                 content: 'Sorry, I encountered an error processing your message. Please try again.',
                 timestamp: new Date().toISOString(),
-                taskId
+                taskId,
+                workspaceId
             };
             this.addMessage(errorMessage);
 
@@ -783,21 +783,32 @@ Keep your response concise and actionable.`;
     /**
      * Build context about current tasks for the AI
      */
-    private async buildContext(focusTaskId?: string): Promise<string> {
+    private async buildContext(focusTaskId?: string, workspaceId?: string): Promise<string> {
         const parts: string[] = [];
 
-        // Get all tasks
-        const tasks = this.taskSpawner.getAllTasks();
+        // Get all tasks, optionally scoped to workspace
+        const allTasks = this.taskSpawner.getAllTasks();
+        const tasks = workspaceId
+            ? allTasks.filter(t => t.workspaceId === workspaceId)
+            : allTasks;
+
+        // Show which workspace we're scoped to
+        if (workspaceId) {
+            const workspace = this.workspaceStore.getWorkspaces().find(w => w.id === workspaceId);
+            if (workspace) {
+                parts.push(`## Active Workspace: ${workspace.name} (${workspace.id})\n`);
+            }
+        }
 
         if (tasks.length > 0) {
-            parts.push('## Current Tasks\n');
+            parts.push(`## ${workspaceId ? 'Workspace' : 'Current'} Tasks\n`);
             for (const task of tasks) {
                 const marker = task.id === focusTaskId ? ' [FOCUSED]' : '';
                 parts.push(`- Task ${task.id}${marker}: "${task.prompt.substring(0, 100)}" (${task.state})`);
             }
             parts.push('');
         } else {
-            parts.push('## Current Tasks\nNo active tasks.\n');
+            parts.push(`## ${workspaceId ? 'Workspace' : 'Current'} Tasks\nNo active tasks.\n`);
         }
 
         // Get workspaces
@@ -805,7 +816,8 @@ Keep your response concise and actionable.`;
         if (workspaces.length > 0) {
             parts.push('## Available Workspaces\n');
             for (const ws of workspaces) {
-                parts.push(`- ${ws.id} (${ws.name || 'unnamed'})`);
+                const marker = ws.id === workspaceId ? ' [ACTIVE]' : '';
+                parts.push(`- ${ws.id} (${ws.name || 'unnamed'})${marker}`);
             }
             parts.push('');
         }
@@ -838,9 +850,12 @@ Keep your response concise and actionable.`;
     /**
      * Format chat history for the prompt
      */
-    private formatChatHistory(): string {
-        // Include last 10 messages for context
-        const recent = this.chatHistory.slice(-10);
+    private formatChatHistory(workspaceId?: string): string {
+        // Filter by workspace if provided, then take last 10
+        const filtered = workspaceId
+            ? this.chatHistory.filter(msg => msg.workspaceId === workspaceId)
+            : this.chatHistory;
+        const recent = filtered.slice(-10);
         if (recent.length === 0) return '';
 
         const formatted = recent.map(msg => {
@@ -854,36 +869,29 @@ Keep your response concise and actionable.`;
     /**
      * Build the system prompt with tools
      */
-    private buildSystemPrompt(context: string): string {
+    private buildSystemPrompt(context: string, workspaceId?: string): string {
         const toolsJson = JSON.stringify(TOOLS, null, 2);
-        const chatHistorySection = this.formatChatHistory();
+        const chatHistorySection = this.formatChatHistory(workspaceId);
 
-        return `You are a helpful AI supervisor assistant for a code development environment.
-You help users understand and manage their coding tasks, answer questions about what's happening,
-and can take actions using the tools available to you.
+        return `You are a concise, witty AI supervisor for a voice-first coding environment. Keep responses SHORT and conversational — no bullet lists, no markdown headers. Talk like you're speaking to someone.
+
+Give brief answers with a touch of humor — dry wit, light sarcasm, the occasional pun. Think "funniest person on the engineering team" not "open mic night." Never let jokes get in the way of being useful. Suggest next steps occasionally. Always ask what to do next.
 
 ## Available Tools
-You have access to the following tools. To use a tool, respond with JSON in this exact format:
+To use a tool, respond with JSON:
 \`\`\`json
 {
-  "response": "Your message to the user (can be empty if just calling tools)",
-  "tool_calls": [
-    {
-      "tool": "tool_name",
-      "parameters": { "param1": "value1" }
-    }
-  ]
+  "response": "Your short message",
+  "tool_calls": [{"tool": "tool_name", "parameters": {"param1": "value1"}}]
 }
 \`\`\`
 
-If you don't need to use any tools, respond with just:
+No tools needed:
 \`\`\`json
-{
-  "response": "Your message to the user"
-}
+{"response": "Your short message"}
 \`\`\`
 
-Tools available:
+Tools:
 ${toolsJson}
 
 ## Context
@@ -891,20 +899,20 @@ ${context}
 
 ${chatHistorySection}
 
-IMPORTANT: Always respond with valid JSON. Do not include any text outside the JSON block.`;
+IMPORTANT: Always respond with valid JSON. Do not include any text outside the JSON block. Keep responses concise and spoken-friendly.`;
     }
 
     /**
      * Call Claude Code with tool support
      */
-    private async callClaudeWithTools(userMessage: string, context: string): Promise<ClaudeResponse> {
+    private async callClaudeWithTools(userMessage: string, context: string, workspaceId?: string): Promise<ClaudeResponse> {
         // Rate limiting check
         if (!this.canSpawnProcess()) {
             throw new Error('Rate limit exceeded: too many Claude processes spawned recently');
         }
         this.recordSpawn();
 
-        const systemPrompt = this.buildSystemPrompt(context);
+        const systemPrompt = this.buildSystemPrompt(context, workspaceId);
         const fullPrompt = `${systemPrompt}\n\nUser message: "${userMessage}"\n\nRespond with JSON:`;
 
         return new Promise((resolve, reject) => {
@@ -1008,8 +1016,8 @@ IMPORTANT: Always respond with valid JSON. Do not include any text outside the J
 You called tools and got these results:
 ${toolResults}
 
-Based on these results, provide a helpful response to the user. Be concise but informative.
-Do NOT use JSON format for this response - just provide a natural language response.`;
+Give a brief, spoken-friendly response — 1-2 sentences. No bullet lists or markdown. Be witty but useful. Suggest what to do next if it's obvious.
+Do NOT use JSON format — just plain text.`;
 
         return new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
@@ -1068,6 +1076,13 @@ Do NOT use JSON format for this response - just provide a natural language respo
      */
     getHistory(): ChatMessage[] {
         return [...this.chatHistory];
+    }
+
+    /**
+     * Get chat history for a specific workspace
+     */
+    getWorkspaceHistory(workspaceId: string): ChatMessage[] {
+        return this.chatHistory.filter(msg => msg.workspaceId === workspaceId);
     }
 
     /**

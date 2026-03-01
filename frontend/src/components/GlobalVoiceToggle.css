@@ -64,3 +64,19 @@
     background: rgba(248, 81, 73, 0.2);
     color: var(--accent-red);
 }
+
+/* Mobile: icon-only compact button */
+@media (max-width: 768px) {
+    .global-voice-toggle {
+        padding: 6px;
+        gap: 0;
+    }
+
+    .global-voice-toggle > span {
+        display: none;
+    }
+
+    .global-voice-toggle .voice-target-indicator {
+        display: none;
+    }
+}

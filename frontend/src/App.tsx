@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { WorkspacePanel } from './components/WorkspacePanel';
 import { TerminalView } from './components/TerminalView';
 import { SupervisorChat } from './components/SupervisorChat';
@@ -7,10 +7,23 @@ import { SettingsMenu } from './components/SettingsMenu';
 import { GlobalVoiceManager } from './components/GlobalVoiceManager';
 import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
 import { SystemStats } from './components/SystemStats';
+import { MobileAccessModal } from './components/MobileAccessModal';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft } from 'lucide-react';
 import { getApiBaseUrl } from './config/api-config';
+
+// Hook: returns true when viewport is ≤768px wide
+function useIsMobile(breakpoint = 768) {
+    const [isMobile, setIsMobile] = useState(() => window.innerWidth <= breakpoint);
+    useEffect(() => {
+        const mql = window.matchMedia(`(max-width: ${breakpoint}px)`);
+        const onChange = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+        mql.addEventListener('change', onChange);
+        return () => mql.removeEventListener('change', onChange);
+    }, [breakpoint]);
+    return isMobile;
+}
 
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
 const DEFAULT_SIDEBAR_WIDTH = 640;
@@ -18,6 +31,7 @@ const CHAT_PANEL_WIDTH_KEY = 'claudia-chat-panel-width';
 const DEFAULT_CHAT_PANEL_WIDTH = 380;
 
 function App() {
+    const isMobile = useIsMobile();
     const {
         createTask,
         interruptTask,
@@ -36,12 +50,17 @@ function App() {
         deleteArchivedTask,
         continueArchivedTask,
         pushToGithub,
+        requestRecentWorkspaces,
+        clearRecentWorkspace,
         wsRef
     } = useWebSocket();
 
     const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats, errorNotification, clearErrorNotification } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
     const selectedWorkspace = selectedTask ? workspaces.find(w => w.id === selectedTask.workspaceId) : undefined;
+
+    // On mobile, track whether the user is viewing the terminal (screen 2)
+    const [mobileShowTerminal, setMobileShowTerminal] = useState(false);
 
     // Count tasks that have running processes (not disconnected or archived)
     const activeTasks = Array.from(tasks.values()).filter(t =>
@@ -84,6 +103,9 @@ function App() {
     const [showSettings, setShowSettings] = useState(false);
     const [settingsInitialPanel, setSettingsInitialPanel] = useState<string | undefined>(undefined);
     const [showChatPanel, setShowChatPanel] = useState(false);
+    const [showMobileAccess, setShowMobileAccess] = useState(false);
+    const [tunnelActive, setTunnelActive] = useState(false);
+    const [tunnelLoading, setTunnelLoading] = useState(false);
     const sidebarRef = useRef<HTMLElement>(null);
     const aiCoreCheckDoneRef = useRef(false);
 
@@ -161,7 +183,7 @@ function App() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ userId }),
-            }).catch(() => {}); // fire-and-forget
+            }).catch(() => { }); // fire-and-forget
         } catch {
             // Silently fail — tracking is non-critical
         }
@@ -175,6 +197,11 @@ function App() {
     const handleSelectTask = (taskId: string) => {
         // Only update local state - TerminalView will send task:select when it mounts
         useTaskStore.getState().selectTask(taskId);
+
+        // On mobile, switch to terminal screen
+        if (isMobile) {
+            setMobileShowTerminal(true);
+        }
 
         // Dispatch scroll-to-bottom events with increasing delays to catch both
         // fast (cached) and slow (network) history loads
@@ -196,6 +223,11 @@ function App() {
             }));
         }, 150);
     };
+
+    // Mobile back button: return to workspace list
+    const handleMobileBack = useCallback(() => {
+        setMobileShowTerminal(false);
+    }, []);
 
     // Count unread messages indicator
     const hasUnreadMessages = chatMessages.length > 0 && !showChatPanel;
@@ -246,11 +278,64 @@ function App() {
         }
     };
 
+    // Check tunnel status on mount
+    useEffect(() => {
+        (async () => {
+            try {
+                const res = await fetch(`${getApiBaseUrl()}/api/tunnel/status`);
+                const data = await res.json();
+                setTunnelActive(data.active === true);
+            } catch {
+                // ignore
+            }
+        })();
+    }, []);
+
+    // Toggle tunnel: start + show modal, or stop tunnel
+    const handleMobileToggle = useCallback(async () => {
+        if (tunnelActive) {
+            try {
+                await fetch(`${getApiBaseUrl()}/api/tunnel/stop`, { method: 'POST' });
+            } catch {
+                // ignore
+            }
+            setTunnelActive(false);
+            setShowMobileAccess(false);
+        } else {
+            setShowMobileAccess(true);
+            setTunnelLoading(true);
+            try {
+                const res = await fetch(`${getApiBaseUrl()}/api/tunnel/start`, { method: 'POST' });
+                const data = await res.json();
+                if (data.error) {
+                    console.error('[Tunnel] Failed to start:', data.error);
+                    setTunnelActive(false);
+                } else {
+                    setTunnelActive(true);
+                }
+            } catch (err) {
+                console.error('[Tunnel] Failed to start:', err);
+                setTunnelActive(false);
+            } finally {
+                setTunnelLoading(false);
+            }
+        }
+    }, [tunnelActive]);
+
+    // Determine what to show on mobile
+    const mobileShowingTerminal = isMobile && mobileShowTerminal && selectedTask;
+
     return (
-        <div className="app">
+        <div className={`app ${isMobile ? 'is-mobile' : ''}`}>
             <header className="app-header">
+                {/* Mobile back button when viewing terminal */}
+                {mobileShowingTerminal && (
+                    <button className="mobile-back-button" onClick={handleMobileBack} title="Back to tasks">
+                        <ArrowLeft size={20} />
+                    </button>
+                )}
                 <div className="logo">
-                    <Terminal size={24} />
+                    <Terminal size={isMobile ? 20 : 24} />
                     <h1>Claudia</h1>
                 </div>
                 <div className="header-controls">
@@ -263,15 +348,26 @@ function App() {
                     </div>
 
                     {showSystemStats && <SystemStats />}
-                    {supervisorEnabled && (
+                    {!isMobile && supervisorEnabled && (
                         <button
                             className={`chat-toggle-button ${showChatPanel ? 'active' : ''} ${hasUnreadMessages ? 'has-messages' : ''}`}
                             onClick={() => setShowChatPanel(!showChatPanel)}
                             title={showChatPanel ? 'Close Chat' : 'Open Chat'}
                         >
                             <MessageCircle size={18} />
-                            <span>Chat</span>
+                            <span className="btn-label">Chat</span>
                             {hasUnreadMessages && <span className="message-badge">{chatMessages.length}</span>}
+                        </button>
+                    )}
+                    {!isMobile && (
+                        <button
+                            className={`chat-toggle-button ${tunnelActive ? 'active' : ''} ${tunnelLoading ? 'loading' : ''}`}
+                            onClick={handleMobileToggle}
+                            title={tunnelActive ? 'Stop Tunnel' : 'Start Mobile Tunnel'}
+                            disabled={tunnelLoading}
+                        >
+                            <Smartphone size={18} />
+                            <span className="btn-label">{tunnelLoading ? 'Connecting...' : 'Mobile'}</span>
                         </button>
                     )}
                     <GlobalVoiceToggle />
@@ -280,101 +376,144 @@ function App() {
                         onClick={handleRestartServer}
                         title="Restart Server"
                     >
-                        <RotateCcw size={20} />
+                        <RotateCcw size={isMobile ? 18 : 20} />
                     </button>
                     <button
                         className="settings-button"
                         onClick={handleSettingsOpen}
                         title="Settings"
                     >
-                        <Settings size={20} />
+                        <Settings size={isMobile ? 18 : 20} />
                     </button>
                 </div>
             </header>
 
             <main className="app-main">
-                <aside
-                    className="sidebar"
-                    ref={sidebarRef}
-                    style={{ width: `${sidebarWidth}px`, minWidth: `${sidebarWidth}px` }}
-                >
-                    <WorkspacePanel
-                        onDeleteTask={archiveTask}
-                        onInterruptTask={interruptTask}
-                        onArchiveTask={archiveTask}
-                        onRevertTask={revertTask}
-                        onCreateWorkspace={createWorkspace}
-                        onDeleteWorkspace={deleteWorkspace}
-                        onReorderWorkspaces={reorderWorkspaces}
-                        onOpenFolder={openFolder}
-                        onOpenTerminal={openTerminal}
-                        onPushToGithub={pushToGithub}
-                        onSetSystemPrompt={setSystemPrompt}
-                        onCreateTask={createTask}
-                        onSelectTask={handleSelectTask}
-                        onRequestArchivedTasks={requestArchivedTasks}
-                        onRestoreArchivedTask={restoreArchivedTask}
-                        onDeleteArchivedTask={deleteArchivedTask}
-                        onContinueArchivedTask={continueArchivedTask}
-                    />
-                </aside>
-
-                <div
-                    className={`resize-handle ${isResizing ? 'resizing' : ''}`}
-                    onMouseDown={handleMouseDown}
-                />
-
-                <section className="main-panel">
-                    {selectedTask ? (
-                        <TerminalView
-                            key={selectedTask.id}
-                            task={selectedTask}
-                            wsRef={wsRef}
-                            workspace={selectedWorkspace}
-                        />
+                {/* ===== MOBILE LAYOUT ===== */}
+                {isMobile ? (
+                    mobileShowingTerminal ? (
+                        // Screen 2: Full-screen terminal
+                        <section className="main-panel mobile-full">
+                            <TerminalView
+                                key={selectedTask!.id}
+                                task={selectedTask!}
+                                wsRef={wsRef}
+                                workspace={selectedWorkspace}
+                                isMobile={true}
+                            />
+                        </section>
                     ) : (
-                        <div className="empty-state-main">
-                            <Terminal size={48} strokeWidth={1} />
-                            <h2>Select a task to view its terminal</h2>
-                            <p>Add a workspace and create a task to get started</p>
-                        </div>
-                    )}
-                </section>
-
-                {showChatPanel && (
-                    <>
-                        <div
-                            className={`resize-handle chat-resize ${isResizingChat ? 'resizing' : ''}`}
-                            onMouseDown={handleChatResizeMouseDown}
-                        />
-                        <aside
-                            className="chat-panel-sidebar"
-                            style={{ width: `${chatPanelWidth}px`, minWidth: `${chatPanelWidth}px` }}
-                        >
-                            <div className="chat-panel-header">
-                                <span>AI Supervisor</span>
-                                <button
-                                    className="chat-close-button"
-                                    onClick={() => setShowChatPanel(false)}
-                                    title="Close chat"
-                                >
-                                    <X size={18} />
-                                </button>
-                            </div>
-                            <SupervisorChat
-                                messages={chatMessages}
-                                isTyping={chatTyping}
-                                selectedTaskId={selectedTaskId}
-                                onSendMessage={sendChatMessage}
-                                onClearHistory={clearChatHistory}
+                        // Screen 1: Full-screen workspace list
+                        <aside className="sidebar mobile-full">
+                            <WorkspacePanel
+                                onDeleteTask={archiveTask}
+                                onInterruptTask={interruptTask}
+                                onArchiveTask={archiveTask}
+                                onRevertTask={revertTask}
+                                onCreateWorkspace={createWorkspace}
+                                onDeleteWorkspace={deleteWorkspace}
+                                onReorderWorkspaces={reorderWorkspaces}
+                                onOpenFolder={openFolder}
+                                onOpenTerminal={openTerminal}
+                                onPushToGithub={pushToGithub}
+                                onSetSystemPrompt={setSystemPrompt}
+                                onCreateTask={createTask}
+                                onSelectTask={handleSelectTask}
+                                onRequestArchivedTasks={requestArchivedTasks}
+                                onRestoreArchivedTask={restoreArchivedTask}
+                                onDeleteArchivedTask={deleteArchivedTask}
+                                onContinueArchivedTask={continueArchivedTask}
                             />
                         </aside>
+                    )
+                ) : (
+                    /* ===== DESKTOP LAYOUT (unchanged) ===== */
+                    <>
+                        <aside
+                            className="sidebar"
+                            ref={sidebarRef}
+                            style={{ width: `${sidebarWidth}px`, minWidth: `${sidebarWidth}px` }}
+                        >
+                            <WorkspacePanel
+                                onDeleteTask={archiveTask}
+                                onInterruptTask={interruptTask}
+                                onArchiveTask={archiveTask}
+                                onRevertTask={revertTask}
+                                onCreateWorkspace={createWorkspace}
+                                onDeleteWorkspace={deleteWorkspace}
+                                onReorderWorkspaces={reorderWorkspaces}
+                                onOpenFolder={openFolder}
+                                onOpenTerminal={openTerminal}
+                                onPushToGithub={pushToGithub}
+                                onSetSystemPrompt={setSystemPrompt}
+                                onCreateTask={createTask}
+                                onSelectTask={handleSelectTask}
+                                onRequestArchivedTasks={requestArchivedTasks}
+                                onRestoreArchivedTask={restoreArchivedTask}
+                                onDeleteArchivedTask={deleteArchivedTask}
+                                onContinueArchivedTask={continueArchivedTask}
+                            />
+                        </aside>
+
+                        <div
+                            className={`resize-handle ${isResizing ? 'resizing' : ''}`}
+                            onMouseDown={handleMouseDown}
+                        />
+
+                        <section className="main-panel">
+                            {selectedTask ? (
+                                <TerminalView
+                                    key={selectedTask.id}
+                                    task={selectedTask}
+                                    wsRef={wsRef}
+                                    workspace={selectedWorkspace}
+                                />
+                            ) : (
+                                <div className="empty-state-main">
+                                    <Terminal size={48} strokeWidth={1} />
+                                    <h2>Select a task to view its terminal</h2>
+                                    <p>Add a workspace and create a task to get started</p>
+                                </div>
+                            )}
+                        </section>
+
+                        {showChatPanel && (
+                            <>
+                                <div
+                                    className={`resize-handle chat-resize ${isResizingChat ? 'resizing' : ''}`}
+                                    onMouseDown={handleChatResizeMouseDown}
+                                />
+                                <aside
+                                    className="chat-panel-sidebar"
+                                    style={{ width: `${chatPanelWidth}px`, minWidth: `${chatPanelWidth}px` }}
+                                >
+                                    <div className="chat-panel-header">
+                                        <span>AI Supervisor</span>
+                                        <button
+                                            className="chat-close-button"
+                                            onClick={() => setShowChatPanel(false)}
+                                            title="Close chat"
+                                        >
+                                            <X size={18} />
+                                        </button>
+                                    </div>
+                                    <SupervisorChat
+                                        messages={chatMessages}
+                                        isTyping={chatTyping}
+                                        selectedTaskId={selectedTaskId}
+                                        onSendMessage={sendChatMessage}
+                                        onClearHistory={clearChatHistory}
+                                    />
+                                </aside>
+                            </>
+                        )}
                     </>
                 )}
             </main>
 
-            <ProjectPicker onSelect={handleProjectSelect} />
+            <ProjectPicker onSelect={handleProjectSelect} wsRef={wsRef} requestRecentWorkspaces={requestRecentWorkspaces} clearRecentWorkspace={clearRecentWorkspace} />
             <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
+            {!isMobile && <MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} />}
             <GlobalVoiceManager />
 
             {/* Offline warning overlay */}

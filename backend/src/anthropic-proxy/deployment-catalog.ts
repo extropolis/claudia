@@ -38,6 +38,8 @@ const MODEL_MAPPINGS: Record<string, string> = {
     'claude-3-opus-20240229': 'anthropic--claude-3-opus',
     'claude-opus-4-20250514': 'anthropic--claude-opus-4',
     'claude-4-5-opus': 'anthropic--claude-4.5-opus',
+    'claude-4-6-opus': 'anthropic--claude-4.6-opus',
+    'claude-4-6-sonnet': 'anthropic--claude-4.6-sonnet',
 };
 
 // Build reverse mapping
