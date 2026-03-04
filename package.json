@@ -44,7 +44,7 @@
     "package:win": "npm run build && electron-builder --win",
     "package:linux": "npm run build && electron-builder --linux",
     "postinstall": "npm run build -w shared && npm run build:backend",
-    "start": "./start.sh",
+    "start": "./start-electron.sh",
     "test": "npm run test:backend && npm run test:frontend",
     "test:backend": "npm test -w backend",
     "test:frontend": "npm test -w frontend",

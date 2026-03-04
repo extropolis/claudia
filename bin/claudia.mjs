@@ -2,8 +2,8 @@
 
 // Claudia CLI
 // Usage:
-//   claudia                Start the web app (backend + frontend)
-//   claudia electron       Start the Electron desktop app
+//   claudia                Start the Electron desktop app (default)
+//   claudia web            Start the web app (backend + frontend)
 //   claudia --help         Show help
 
 import { spawn } from 'child_process';
@@ -25,8 +25,8 @@ Claudia - Multi-instance Claude Code orchestrator
 Usage: claudia [command]
 
 Commands:
-  start         Start the web app (default)
-  electron      Start the Electron desktop app
+  start         Start the Electron desktop app (default)
+  web           Start the web app (backend + frontend)
   build         Build all packages
   help          Show this help
 
@@ -111,11 +111,11 @@ function runNpm(script) {
 
 switch (command) {
     case 'start':
-        runScript('start');
+        runScript('start-electron');
         break;
 
-    case 'electron':
-        runScript('start-electron');
+    case 'web':
+        runScript('start');
         break;
 
     case 'build':
