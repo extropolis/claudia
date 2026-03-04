@@ -191,9 +191,9 @@ describe('taskStore', () => {
             expect(useTaskStore.getState().workspaces).toHaveLength(1);
         });
 
-        it('should expand all workspaces on first load', () => {
+        it('should start workspaces collapsed on first load', () => {
             useTaskStore.getState().setWorkspaces([mockWorkspace]);
-            expect(useTaskStore.getState().expandedWorkspaces.has('/test/workspace')).toBe(true);
+            expect(useTaskStore.getState().expandedWorkspaces.has('/test/workspace')).toBe(false);
         });
 
         it('should add workspace', () => {

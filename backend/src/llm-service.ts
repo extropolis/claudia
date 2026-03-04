@@ -6,8 +6,20 @@
 // The local server's Anthropic proxy endpoint (same server, no port needed)
 import { PORTS } from '@claudia/shared';
 
+import type { ConfigStore } from './config-store.js';
+
 const LLM_API_URL = `http://localhost:${PORTS.BACKEND}/v1/messages`;
 const DEFAULT_LLM_MODEL = 'claude-sonnet-4-5-20250929';
+
+let configStoreRef: ConfigStore | null = null;
+
+/**
+ * Initialize the LLM service with a config store so it can read the configured model
+ */
+export function initializeLLMService(configStore: ConfigStore): void {
+    configStoreRef = configStore;
+    console.log('[LLM] Service initialized with config store');
+}
 
 /**
  * Get the appropriate model to use based on configuration
