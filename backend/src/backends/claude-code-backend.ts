@@ -27,6 +27,22 @@ const claudeExe = process.platform === 'win32' ? 'claude.exe' : 'claude';
 const logger = createLogger('[ClaudeCodeBackend]');
 
 /**
+ * Map legacy permission mode values to actual Claude Code CLI values.
+ * Claude CLI --permission-mode accepts: acceptEdits, bypassPermissions, default, dontAsk, plan
+ * Old Claudia UI used: plan, safe, dangerous, auto
+ */
+const PERMISSION_MODE_MAP: Record<string, string> = {
+    'safe': 'acceptEdits',
+    'dangerous': 'bypassPermissions',
+    'auto': 'dontAsk',
+    'plan': 'plan',
+    'default': 'default',
+    'acceptEdits': 'acceptEdits',
+    'bypassPermissions': 'bypassPermissions',
+    'dontAsk': 'dontAsk',
+};
+
+/**
  * Build CLI args from ClaudeCodeSwitches config.
  */
 function buildClaudeCodeSwitchArgs(switches: ClaudeCodeSwitches): string[] {
@@ -42,7 +58,9 @@ function buildClaudeCodeSwitchArgs(switches: ClaudeCodeSwitches): string[] {
         args.push('--max-budget-usd', String(switches.maxBudgetUsd));
     }
     if (switches.permissionMode) {
-        args.push('--permission-mode', switches.permissionMode);
+        const cliMode = PERMISSION_MODE_MAP[switches.permissionMode] || switches.permissionMode;
+        args.push('--permission-mode', cliMode);
+        logger.info(`Permission mode: "${switches.permissionMode}" → CLI: "${cliMode}"`);
     }
     if (switches.allowedTools && switches.allowedTools.trim()) {
         args.push('--allowedTools', switches.allowedTools.trim());

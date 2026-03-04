@@ -242,7 +242,10 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
 
         if (switches.permissionMode !== undefined) {
             if (switches.permissionMode !== null) {
-                const validModes = ['plan', 'safe', 'dangerous', 'auto'];
+                // Accept both actual Claude CLI values and legacy Claudia values
+                // Claude CLI accepts: acceptEdits, bypassPermissions, default, dontAsk, plan
+                // Legacy Claudia values: plan, safe, dangerous, auto (mapped at build time)
+                const validModes = ['plan', 'safe', 'dangerous', 'auto', 'acceptEdits', 'bypassPermissions', 'default', 'dontAsk'];
                 if (typeof switches.permissionMode !== 'string' || !validModes.includes(switches.permissionMode)) {
                     return { valid: false, error: `claudeCodeSwitches.permissionMode must be one of: ${validModes.join(', ')} or null` };
                 }

@@ -17,6 +17,24 @@ import { getConversationHistory } from './conversation-parser.js';
 const logger = createLogger('[TaskSpawner]');
 
 /**
+ * Map legacy permission mode values to actual Claude Code CLI values.
+ * Claude CLI --permission-mode accepts: acceptEdits, bypassPermissions, default, dontAsk, plan
+ * Old Claudia UI used: plan, safe, dangerous, auto
+ */
+const PERMISSION_MODE_MAP: Record<string, string> = {
+    // Legacy values → actual CLI values
+    'safe': 'acceptEdits',
+    'dangerous': 'bypassPermissions',
+    'auto': 'dontAsk',
+    // These are already valid CLI values (pass through)
+    'plan': 'plan',
+    'default': 'default',
+    'acceptEdits': 'acceptEdits',
+    'bypassPermissions': 'bypassPermissions',
+    'dontAsk': 'dontAsk',
+};
+
+/**
  * Build CLI args from ClaudeCodeSwitches config.
  * Returns args to push into the claudeArgs array.
  */
@@ -36,7 +54,9 @@ function buildClaudeCodeSwitchArgs(switches: ClaudeCodeSwitches): string[] {
     }
 
     if (switches.permissionMode) {
-        args.push('--permission-mode', switches.permissionMode);
+        const cliMode = PERMISSION_MODE_MAP[switches.permissionMode] || switches.permissionMode;
+        args.push('--permission-mode', cliMode);
+        logger.info(`Permission mode: "${switches.permissionMode}" → CLI: "${cliMode}"`);
     }
 
     if (switches.allowedTools && switches.allowedTools.trim()) {

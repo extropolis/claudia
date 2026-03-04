@@ -1196,7 +1196,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                     </CollapsiblePanel>
 
                     <CollapsiblePanel
-                        title="CLI Switches"
+                        title="Claude Code CLI Switches"
                         icon={<Code size={18} />}
                         isExpanded={expandedPanels.cliSwitches}
                         onToggle={() => togglePanel('cliSwitches')}
@@ -1285,7 +1285,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 <div className="permission-info">
                                     <span className="permission-label">Permission Mode</span>
                                     <span className="permission-description">
-                                        Set default permission mode: plan (read-only), safe (no destructive ops), dangerous (all allowed), auto.
+                                        Set permission mode: plan (read-only), acceptEdits (auto-approve edits), dontAsk (auto-approve all).
                                     </span>
                                 </div>
                                 <div className="cli-switch-input-group">
@@ -1293,7 +1293,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                         <input
                                             type="checkbox"
                                             checked={cliSwitches.permissionMode !== null}
-                                            onChange={(e) => handleCliSwitchToggle({ permissionMode: e.target.checked ? 'auto' : null })}
+                                            onChange={(e) => handleCliSwitchToggle({ permissionMode: e.target.checked ? 'dontAsk' : null })}
                                         />
                                         <span className="toggle-slider"></span>
                                     </label>
@@ -1303,10 +1303,10 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                             value={cliSwitches.permissionMode}
                                             onChange={(e) => handleCliSwitchToggle({ permissionMode: e.target.value })}
                                         >
-                                            <option value="plan">plan</option>
-                                            <option value="safe">safe</option>
-                                            <option value="dangerous">dangerous</option>
-                                            <option value="auto">auto</option>
+                                            <option value="default">default</option>
+                                            <option value="plan">plan (read-only)</option>
+                                            <option value="acceptEdits">acceptEdits (auto-approve edits)</option>
+                                            <option value="dontAsk">dontAsk (auto-approve all)</option>
                                         </select>
                                     )}
                                 </div>
