@@ -82,6 +82,200 @@ describe('validateConfigUpdate', () => {
         expect(validateConfigUpdate({ customAnthropicApiKey: 123 }).valid).toBe(false);
     });
 
+    it('should validate apiMode includes hyperspace-proxy', () => {
+        expect(validateConfigUpdate({ apiMode: 'hyperspace-proxy' }).valid).toBe(true);
+    });
+
+    it('should validate backend enum', () => {
+        expect(validateConfigUpdate({ backend: 'claude-code' }).valid).toBe(true);
+        expect(validateConfigUpdate({ backend: 'opencode' }).valid).toBe(true);
+        expect(validateConfigUpdate({ backend: 'invalid-backend' }).valid).toBe(false);
+        expect(validateConfigUpdate({ backend: 'invalid-backend' }).error).toContain('backend must be one of');
+        expect(validateConfigUpdate({ backend: 123 }).valid).toBe(false);
+    });
+
+    it('should validate opencodePort range', () => {
+        expect(validateConfigUpdate({ opencodePort: 4096 }).valid).toBe(true);
+        expect(validateConfigUpdate({ opencodePort: 1 }).valid).toBe(true);
+        expect(validateConfigUpdate({ opencodePort: 65535 }).valid).toBe(true);
+        expect(validateConfigUpdate({ opencodePort: 0 }).valid).toBe(false);
+        expect(validateConfigUpdate({ opencodePort: -1 }).valid).toBe(false);
+        expect(validateConfigUpdate({ opencodePort: 65536 }).valid).toBe(false);
+        expect(validateConfigUpdate({ opencodePort: 'not-a-number' }).valid).toBe(false);
+        expect(validateConfigUpdate({ opencodePort: 'not-a-number' }).error).toContain('opencodePort must be a number');
+    });
+
+    it('should validate sapAiCoreModel enum', () => {
+        expect(validateConfigUpdate({ sapAiCoreModel: 'anthropic--claude-4.6-opus' }).valid).toBe(true);
+        expect(validateConfigUpdate({ sapAiCoreModel: 'anthropic--claude-3.5-sonnet' }).valid).toBe(true);
+        expect(validateConfigUpdate({ sapAiCoreModel: 'anthropic--claude-3.5-haiku' }).valid).toBe(true);
+        expect(validateConfigUpdate({ sapAiCoreModel: 'invalid-model' }).valid).toBe(false);
+        expect(validateConfigUpdate({ sapAiCoreModel: 'invalid-model' }).error).toContain('sapAiCoreModel must be one of');
+        expect(validateConfigUpdate({ sapAiCoreModel: 123 }).valid).toBe(false);
+        expect(validateConfigUpdate({ sapAiCoreModel: 123 }).error).toBe('sapAiCoreModel must be a string');
+    });
+
+    it('should validate hyperspaceProxy object', () => {
+        // Valid proxy config
+        expect(validateConfigUpdate({
+            hyperspaceProxy: {
+                proxyUrl: 'http://localhost:6655',
+                apiKey: 'test-key',
+                model: 'anthropic--claude-4.5-sonnet',
+                alwaysThinkingEnabled: true
+            }
+        }).valid).toBe(true);
+
+        // Invalid - not an object
+        expect(validateConfigUpdate({ hyperspaceProxy: 'invalid' }).valid).toBe(false);
+        expect(validateConfigUpdate({ hyperspaceProxy: 'invalid' }).error).toBe('hyperspaceProxy must be an object');
+
+        // Invalid - null
+        expect(validateConfigUpdate({ hyperspaceProxy: null }).valid).toBe(false);
+
+        // Invalid field types
+        expect(validateConfigUpdate({ hyperspaceProxy: { proxyUrl: 123 } }).valid).toBe(false);
+        expect(validateConfigUpdate({ hyperspaceProxy: { proxyUrl: 123 } }).error).toBe('hyperspaceProxy.proxyUrl must be a string');
+
+        expect(validateConfigUpdate({ hyperspaceProxy: { apiKey: 123 } }).valid).toBe(false);
+        expect(validateConfigUpdate({ hyperspaceProxy: { apiKey: 123 } }).error).toBe('hyperspaceProxy.apiKey must be a string');
+
+        expect(validateConfigUpdate({ hyperspaceProxy: { model: 123 } }).valid).toBe(false);
+        expect(validateConfigUpdate({ hyperspaceProxy: { model: 123 } }).error).toBe('hyperspaceProxy.model must be a string');
+
+        expect(validateConfigUpdate({ hyperspaceProxy: { alwaysThinkingEnabled: 'yes' } }).valid).toBe(false);
+        expect(validateConfigUpdate({ hyperspaceProxy: { alwaysThinkingEnabled: 'yes' } }).error).toBe('hyperspaceProxy.alwaysThinkingEnabled must be a boolean');
+
+        // Empty object is valid (all fields optional)
+        expect(validateConfigUpdate({ hyperspaceProxy: {} }).valid).toBe(true);
+    });
+
+    it('should validate supervisorSystemPrompt', () => {
+        expect(validateConfigUpdate({ supervisorSystemPrompt: 'Custom prompt' }).valid).toBe(true);
+        expect(validateConfigUpdate({ supervisorSystemPrompt: '' }).valid).toBe(true);
+        expect(validateConfigUpdate({ supervisorSystemPrompt: 123 }).valid).toBe(false);
+        expect(validateConfigUpdate({ supervisorSystemPrompt: 123 }).error).toBe('supervisorSystemPrompt must be a string');
+    });
+
+    it('should validate MCP server type enum', () => {
+        // stdio server (default)
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', command: 'cmd', enabled: true }]
+        }).valid).toBe(true);
+
+        // Explicit stdio type
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', type: 'stdio', command: 'cmd', enabled: true }]
+        }).valid).toBe(true);
+
+        // streamableHttp server
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', type: 'streamableHttp', url: 'http://localhost:3000', enabled: true }]
+        }).valid).toBe(true);
+
+        // http server
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', type: 'http', url: 'http://localhost:3000', enabled: true }]
+        }).valid).toBe(true);
+
+        // Invalid type
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', type: 'invalid', command: 'cmd', enabled: true }]
+        }).valid).toBe(false);
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', type: 'invalid', command: 'cmd', enabled: true }]
+        }).error).toContain("type must be");
+
+        // streamableHttp requires url
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', type: 'streamableHttp', enabled: true }]
+        }).valid).toBe(false);
+
+        // streamableHttp requires valid url
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', type: 'streamableHttp', url: 'not-a-url', enabled: true }]
+        }).valid).toBe(false);
+    });
+
+    it('should validate MCP server optional fields', () => {
+        // Valid timeout
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', command: 'cmd', enabled: true, timeout: 5000 }]
+        }).valid).toBe(true);
+
+        // Invalid timeout - negative
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', command: 'cmd', enabled: true, timeout: -1 }]
+        }).valid).toBe(false);
+
+        // Invalid timeout - zero
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', command: 'cmd', enabled: true, timeout: 0 }]
+        }).valid).toBe(false);
+
+        // Valid description
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', command: 'cmd', enabled: true, description: 'A test server' }]
+        }).valid).toBe(true);
+
+        // Invalid description
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', command: 'cmd', enabled: true, description: 123 }]
+        }).valid).toBe(false);
+
+        // Valid headers
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', type: 'http', url: 'http://localhost:3000', enabled: true, headers: { 'Authorization': 'Bearer token' } }]
+        }).valid).toBe(true);
+
+        // Invalid headers - not an object
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', command: 'cmd', enabled: true, headers: 'invalid' }]
+        }).valid).toBe(false);
+
+        // Invalid headers - array
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', command: 'cmd', enabled: true, headers: ['invalid'] }]
+        }).valid).toBe(false);
+
+        // Invalid headers - non-string value
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', command: 'cmd', enabled: true, headers: { key: 123 } }]
+        }).valid).toBe(false);
+
+        // Valid autoApprove
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', command: 'cmd', enabled: true, autoApprove: ['tool1', 'tool2'] }]
+        }).valid).toBe(true);
+
+        // Invalid autoApprove - not an array
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', command: 'cmd', enabled: true, autoApprove: 'tool1' }]
+        }).valid).toBe(false);
+
+        // Invalid autoApprove - non-string items
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', command: 'cmd', enabled: true, autoApprove: [123] }]
+        }).valid).toBe(false);
+    });
+
+    it('should validate multiple config fields at once', () => {
+        const result = validateConfigUpdate({
+            rules: 'test rules',
+            skipPermissions: true,
+            apiMode: 'default',
+            backend: 'claude-code',
+            opencodePort: 4096,
+            supervisorEnabled: false,
+        });
+        expect(result.valid).toBe(true);
+        expect(result.data?.rules).toBe('test rules');
+        expect(result.data?.skipPermissions).toBe(true);
+        expect(result.data?.apiMode).toBe('default');
+        expect(result.data?.backend).toBe('claude-code');
+        expect(result.data?.opencodePort).toBe(4096);
+    });
+
     it('should validate aiCoreCredentials', () => {
         // Valid credentials
         const validCreds = {

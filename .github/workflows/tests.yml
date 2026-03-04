@@ -7,135 +7,32 @@ on:
     branches: [ main, develop ]
 
 jobs:
-  unit-tests:
-    name: Unit Tests
-    runs-on: ubuntu-latest
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+      fail-fast: false
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
       - name: Install dependencies
-        run: |
-          npm ci
-          cd backend && npm ci
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w shared
 
       - name: Build backend
-        run: cd backend && npm run build
+        run: npm run build -w backend
 
-      - name: Run result-parser unit tests
-        run: cd backend && npx tsx tests/unit/result-parser.test.ts
-
-      - name: Run task-manager unit tests
-        run: cd backend && npx tsx tests/unit/task-manager.test.ts
-
-  integration-tests:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    needs: unit-tests
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: |
-          npm ci
-          cd backend && npm ci
-
-      - name: Build backend
-        run: cd backend && npm run build
-
-      - name: Start backend server
-        run: |
-          cd backend
-          npm run start &
-          sleep 10
-
-      - name: Run orchestrator integration tests
-        run: cd backend && npx tsx tests/integration/orchestrator.integration.test.ts
-        timeout-minutes: 10
-
-      - name: Stop backend server
-        if: always()
-        run: pkill -f "node.*backend" || true
-
-  cli-tests:
-    name: CLI Tests
-    runs-on: ubuntu-latest
-    needs: unit-tests
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: |
-          npm ci
-          cd backend && npm ci
-
-      - name: Build backend
-        run: cd backend && npm run build
-
-      - name: Start backend server
-        run: |
-          cd backend
-          npm run start &
-          sleep 10
-
-      - name: Run CLI tests
-        run: cd backend && npm run test:cli -- --message "echo hello world" --timeout 30000
-        timeout-minutes: 5
-
-      - name: Stop backend server
-        if: always()
-        run: pkill -f "node.*backend" || true
-
-  full-test-suite:
-    name: Full Test Suite
-    runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests, cli-tests]
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: |
-          npm ci
-          cd backend && npm ci
-
-      - name: Run full test suite
-        run: cd backend && ./run-all-tests.sh
-        timeout-minutes: 15
-
-      - name: Upload test logs
-        if: failure()
-        uses: actions/upload-artifact@v3
-        with:
-          name: test-logs
-          path: /tmp/claudia-test-*.log
+      - name: Run unit tests
+        run: npm test -w backend

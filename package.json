@@ -31,12 +31,14 @@
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
+    "cross-env": "^10.1.0",
     "electron": "^39.2.7",
     "electron-builder": "^26.4.0",
     "playwright": "^1.57.0"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
     "@llamaindex/anthropic": "^0.3.26",
     "@modelcontextprotocol/sdk": "^1.25.2",
     "@opencode-ai/sdk": "^1.1.14",
@@ -47,7 +49,6 @@
     "get-port": "^7.1.0",
     "jsonwebtoken": "^9.0.3",
     "llamaindex": "^0.12.1",
-    "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
     "opencode-studio-server": "^1.2.1",
     "uuid": "^9.0.1",
     "ws": "^8.16.0"

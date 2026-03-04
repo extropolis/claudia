@@ -47,6 +47,7 @@ script.js
 # Local config
 .env
 .env.local
+start.ps1
 
 # Runtime data (persisted state)
 backend/tasks.json

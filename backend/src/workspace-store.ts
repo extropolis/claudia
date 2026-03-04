@@ -3,7 +3,7 @@
  * Workspaces are simply folder paths - the name comes from the folder name
  */
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from 'fs';
-import { join, dirname, resolve } from 'path';
+import { join, dirname, resolve, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { Workspace, RecentWorkspace } from '@claudia/shared';
 
@@ -115,7 +115,7 @@ export class WorkspaceStore {
 
         const workspace: Workspace = {
             id: resolvedPath, // id IS the path
-            name: resolvedPath.split('/').pop() || resolvedPath,
+            name: basename(resolvedPath) || resolvedPath,
             createdAt: new Date().toISOString()
         };
 

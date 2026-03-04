@@ -18,6 +18,9 @@ import { getConversationHistory, ConversationMessage } from './conversation-pars
 import { ChatMessage, Task, SuggestedAction } from '@claudia/shared';
 import { randomUUID } from 'crypto';
 
+/** On Windows, spawn requires .exe extension to find executables */
+const claudeExe = process.platform === 'win32' ? 'claude.exe' : 'claude';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -451,7 +454,7 @@ Be witty — dry humor, light sarcasm, maybe a pun. Think "funny coworker" not "
                 reject(new Error('Claude Code timeout'));
             }, 30000);
 
-            const claudeProcess = spawn('claude', [
+            const claudeProcess = spawn(claudeExe, [
                 '--print',
                 '--output-format', 'text',
                 '-p', prompt
@@ -925,7 +928,7 @@ IMPORTANT: Always respond with valid JSON. Do not include any text outside the J
             const workspaces = this.workspaceStore.getWorkspaces();
             const cwd = workspaces.length > 0 ? workspaces[0].id : process.cwd();
 
-            const claudeProcess = spawn('claude', [
+            const claudeProcess = spawn(claudeExe, [
                 '--print',
                 '--output-format', 'text',
                 '-p', fullPrompt
@@ -1028,7 +1031,7 @@ Do NOT use JSON format — just plain text.`;
             const workspaces = this.workspaceStore.getWorkspaces();
             const cwd = workspaces.length > 0 ? workspaces[0].id : process.cwd();
 
-            const claudeProcess = spawn('claude', [
+            const claudeProcess = spawn(claudeExe, [
                 '--print',
                 '--output-format', 'text',
                 '-p', prompt

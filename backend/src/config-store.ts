@@ -141,7 +141,7 @@ const DEFAULT_CONFIG: AppConfig = {
     supervisorEnabled: false,
     supervisorSystemPrompt: DEFAULT_SUPERVISOR_PROMPT,
     autoFocusOnInput: false,
-    apiMode: 'sap-ai-core',
+    apiMode: 'default',
     sapAiCoreModel: DEFAULT_SAP_AI_CORE_MODEL,
     backend: 'claude-code',
     opencodePort: 4096,

@@ -22,6 +22,8 @@ import {
 import { ConfigStore } from '../config-store.js';
 import { createLogger } from '../logger.js';
 
+/** On Windows, node-pty requires the .exe extension to find executables */
+const opencodeExe = process.platform === 'win32' ? 'opencode.exe' : 'opencode';
 const logger = createLogger('[OpenCodeBackend]');
 
 const __filename = fileURLToPath(import.meta.url);
@@ -146,7 +148,7 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
         logger.info('Creating OpenCode task (interactive)', { taskId: id, workspaceId: config.workspaceId, prompt: config.prompt });
         logger.debug('Command args', { args: opencodeArgs });
 
-        const ptyProcess = spawn('opencode', opencodeArgs, {
+        const ptyProcess = spawn(opencodeExe, opencodeArgs, {
             name: 'xterm-256color',
             cols: 120,
             rows: 40,
@@ -190,7 +192,7 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
             logger.info('Reconnecting task (fresh start)', { taskId: config.taskId });
         }
 
-        const ptyProcess = spawn('opencode', opencodeArgs, {
+        const ptyProcess = spawn(opencodeExe, opencodeArgs, {
             name: 'xterm-256color',
             cols: 120,
             rows: 40,
