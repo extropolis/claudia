@@ -69,7 +69,7 @@ if (dirtyFiles.length > 0) {
 
 // --- Check tag doesn't already exist ---
 try {
-  runCapture(`git rev-parse ${tag}`);
+  runCapture(`git rev-parse refs/tags/${tag}`);
   console.error(`❌ Tag ${tag} already exists. Bump version.txt to a new version.`);
   process.exit(1);
 } catch {
@@ -90,7 +90,14 @@ for (const rel of PACKAGE_PATHS) {
 // --- Git: stage, commit, tag, push ---
 console.log('\n📝 Committing...\n');
 run('git add version.txt package.json shared/package.json backend/package.json frontend/package.json');
-run(`git commit -m "chore: release ${tag}"`);
+
+// Check if there are staged changes to commit
+const staged = runCapture('git diff --cached --name-only');
+if (staged) {
+  run(`git commit -m "chore: release ${tag}"`);
+} else {
+  console.log('  (no version changes to commit — versions already match)');
+}
 
 console.log('\n🏷️  Tagging...\n');
 run(`git tag ${tag}`);
