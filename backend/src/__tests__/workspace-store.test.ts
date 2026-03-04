@@ -204,6 +204,167 @@ describe('WorkspaceStore', () => {
         });
     });
 
+    describe('system prompts', () => {
+        it('should get and set system prompt', () => {
+            store.addWorkspace(testWorkspace1);
+
+            const result = store.setSystemPrompt(testWorkspace1, 'You are a helpful assistant');
+            expect(result).toBe(true);
+            expect(store.getSystemPrompt(testWorkspace1)).toBe('You are a helpful assistant');
+        });
+
+        it('should return undefined for workspace without system prompt', () => {
+            store.addWorkspace(testWorkspace1);
+            expect(store.getSystemPrompt(testWorkspace1)).toBeUndefined();
+        });
+
+        it('should return undefined for non-existent workspace', () => {
+            expect(store.getSystemPrompt('/non/existent')).toBeUndefined();
+        });
+
+        it('should return false when setting prompt on non-existent workspace', () => {
+            const result = store.setSystemPrompt('/non/existent', 'test');
+            expect(result).toBe(false);
+        });
+
+        it('should allow clearing system prompt', () => {
+            store.addWorkspace(testWorkspace1);
+            store.setSystemPrompt(testWorkspace1, 'Some prompt');
+            store.setSystemPrompt(testWorkspace1, undefined);
+            expect(store.getSystemPrompt(testWorkspace1)).toBeUndefined();
+        });
+
+        it('should persist system prompt to file', () => {
+            store.addWorkspace(testWorkspace1);
+            store.setSystemPrompt(testWorkspace1, 'Persisted prompt');
+
+            const newStore = new WorkspaceStore(testBaseDir);
+            expect(newStore.getSystemPrompt(testWorkspace1)).toBe('Persisted prompt');
+        });
+    });
+
+    describe('recent workspaces', () => {
+        it('should add workspace to recent when deleted', () => {
+            store.addWorkspace(testWorkspace1);
+            store.deleteWorkspace(testWorkspace1);
+
+            const recent = store.getRecentWorkspaces();
+            expect(recent.some(w => w.id === testWorkspace1)).toBe(true);
+        });
+
+        it('should include removedAt timestamp in recent workspace', () => {
+            store.addWorkspace(testWorkspace1);
+            store.deleteWorkspace(testWorkspace1);
+
+            const recent = store.getRecentWorkspaces();
+            const recentWorkspace = recent.find(w => w.id === testWorkspace1);
+            expect(recentWorkspace?.removedAt).toBeDefined();
+        });
+
+        it('should not include active workspaces in recent list', () => {
+            store.addWorkspace(testWorkspace1);
+            store.deleteWorkspace(testWorkspace1);
+            // Re-add the workspace
+            store.addWorkspace(testWorkspace1);
+
+            const recent = store.getRecentWorkspaces();
+            expect(recent.some(w => w.id === testWorkspace1)).toBe(false);
+        });
+
+        it('should clear a specific recent workspace', () => {
+            store.addWorkspace(testWorkspace1);
+            store.addWorkspace(testWorkspace2);
+            store.deleteWorkspace(testWorkspace1);
+            store.deleteWorkspace(testWorkspace2);
+
+            const result = store.clearRecentWorkspace(testWorkspace1);
+            expect(result).toBe(true);
+
+            const recent = store.getRecentWorkspaces();
+            expect(recent.some(w => w.id === testWorkspace1)).toBe(false);
+            expect(recent.some(w => w.id === testWorkspace2)).toBe(true);
+        });
+
+        it('should return false when clearing non-existent recent workspace', () => {
+            const result = store.clearRecentWorkspace('/non/existent');
+            expect(result).toBe(false);
+        });
+
+        it('should clear all recent workspaces', () => {
+            store.addWorkspace(testWorkspace1);
+            store.addWorkspace(testWorkspace2);
+            store.deleteWorkspace(testWorkspace1);
+            store.deleteWorkspace(testWorkspace2);
+
+            store.clearAllRecentWorkspaces();
+
+            const recent = store.getRecentWorkspaces();
+            expect(recent.length).toBe(0);
+        });
+
+        it('should filter out recent workspaces where directory no longer exists', () => {
+            const tempDir = join(testBaseDir, 'temp-workspace');
+            mkdirSync(tempDir, { recursive: true });
+
+            store.addWorkspace(tempDir);
+            store.deleteWorkspace(tempDir);
+
+            // Remove the directory
+            rmSync(tempDir, { recursive: true, force: true });
+
+            const recent = store.getRecentWorkspaces();
+            expect(recent.some(w => w.id === tempDir)).toBe(false);
+        });
+
+        it('should persist recent workspaces to file', () => {
+            store.addWorkspace(testWorkspace1);
+            store.deleteWorkspace(testWorkspace1);
+
+            const newStore = new WorkspaceStore(testBaseDir);
+            const recent = newStore.getRecentWorkspaces();
+            expect(recent.some(w => w.id === testWorkspace1)).toBe(true);
+        });
+
+        it('should limit recent workspaces to MAX_RECENT_WORKSPACES', () => {
+            // Create and delete more than 10 workspaces
+            const dirs: string[] = [];
+            for (let i = 0; i < 12; i++) {
+                const dir = join(testBaseDir, `ws-${i}`);
+                mkdirSync(dir, { recursive: true });
+                dirs.push(dir);
+            }
+
+            for (const dir of dirs) {
+                store.addWorkspace(dir);
+            }
+
+            for (const dir of dirs) {
+                store.deleteWorkspace(dir);
+            }
+
+            // Read the raw config to check the internal limit
+            const configPath = join(testBaseDir, 'workspace-config.json');
+            const configData = JSON.parse(readFileSync(configPath, 'utf-8'));
+            expect(configData.recentWorkspaces.length).toBeLessThanOrEqual(10);
+        });
+    });
+
+    describe('workspace name generation', () => {
+        it('should use folder name as workspace name', () => {
+            const workspace = store.addWorkspace(testWorkspace1);
+            expect(workspace.name).toBe('workspace1');
+        });
+
+        it('should include createdAt timestamp', () => {
+            const before = new Date().toISOString();
+            const workspace = store.addWorkspace(testWorkspace1);
+            const after = new Date().toISOString();
+
+            expect(workspace.createdAt >= before).toBe(true);
+            expect(workspace.createdAt <= after).toBe(true);
+        });
+    });
+
     describe('loadConfig filtering', () => {
         it('should filter out non-existent workspaces on load', () => {
             // Add workspace

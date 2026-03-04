@@ -241,6 +241,165 @@ describe('ConfigStore', () => {
         });
     });
 
+    describe('backend methods', () => {
+        it('should get and set backend', () => {
+            store.setBackend('opencode');
+            expect(store.getBackend()).toBe('opencode');
+
+            store.setBackend('claude-code');
+            expect(store.getBackend()).toBe('claude-code');
+        });
+
+        it('should update backend via updateConfig', () => {
+            store.updateConfig({ backend: 'opencode' });
+            expect(store.getConfig().backend).toBe('opencode');
+        });
+
+        it('should persist backend changes', () => {
+            store.setBackend('opencode');
+            const newStore = new ConfigStore(testBaseDir);
+            expect(newStore.getBackend()).toBe('opencode');
+        });
+
+        it('should default to claude-code', () => {
+            expect(store.getBackend()).toBe('claude-code');
+        });
+    });
+
+    describe('opencodePort methods', () => {
+        it('should get and set opencodePort', () => {
+            store.setOpencodePort(5000);
+            expect(store.getOpencodePort()).toBe(5000);
+        });
+
+        it('should update opencodePort via updateConfig', () => {
+            store.updateConfig({ opencodePort: 8080 });
+            expect(store.getConfig().opencodePort).toBe(8080);
+        });
+
+        it('should default to 4096', () => {
+            expect(store.getOpencodePort()).toBe(4096);
+        });
+
+        it('should persist opencodePort changes', () => {
+            store.setOpencodePort(9999);
+            const newStore = new ConfigStore(testBaseDir);
+            expect(newStore.getOpencodePort()).toBe(9999);
+        });
+    });
+
+    describe('useLearnings methods', () => {
+        it('should get and set useLearnings', () => {
+            store.setUseLearnings(true);
+            expect(store.getUseLearnings()).toBe(true);
+
+            store.setUseLearnings(false);
+            expect(store.getUseLearnings()).toBe(false);
+        });
+
+        it('should update useLearnings via updateConfig', () => {
+            store.updateConfig({ useLearnings: true });
+            expect(store.getConfig().useLearnings).toBe(true);
+        });
+
+        it('should default to false', () => {
+            expect(store.getUseLearnings()).toBe(false);
+        });
+
+        it('should persist useLearnings changes', () => {
+            store.setUseLearnings(true);
+            const newStore = new ConfigStore(testBaseDir);
+            expect(newStore.getUseLearnings()).toBe(true);
+        });
+    });
+
+    describe('hyperspaceProxy methods', () => {
+        it('should get and set hyperspaceProxy', () => {
+            const proxyConfig = {
+                proxyUrl: 'http://localhost:7777',
+                apiKey: 'test-key-123',
+                model: 'anthropic--claude-4.5-sonnet',
+                alwaysThinkingEnabled: true
+            };
+
+            store.setHyperspaceProxy(proxyConfig);
+            expect(store.getHyperspaceProxy()).toEqual(proxyConfig);
+        });
+
+        it('should update hyperspaceProxy via updateConfig', () => {
+            const proxyConfig = {
+                proxyUrl: 'http://localhost:8888',
+                apiKey: 'key-456',
+                model: 'anthropic--claude-3.5-sonnet',
+                alwaysThinkingEnabled: false
+            };
+
+            store.updateConfig({ hyperspaceProxy: proxyConfig });
+            expect(store.getConfig().hyperspaceProxy).toEqual(proxyConfig);
+        });
+
+        it('should have default hyperspaceProxy values', () => {
+            const proxy = store.getHyperspaceProxy();
+            expect(proxy.proxyUrl).toBe('http://localhost:6655');
+            expect(proxy.apiKey).toBe('');
+            expect(proxy.model).toBe('anthropic--claude-4.5-sonnet');
+            expect(proxy.alwaysThinkingEnabled).toBe(false);
+        });
+
+        it('should persist hyperspaceProxy changes', () => {
+            const proxyConfig = {
+                proxyUrl: 'http://custom:1234',
+                apiKey: 'persist-key',
+                model: 'anthropic--claude-opus-4',
+                alwaysThinkingEnabled: true
+            };
+
+            store.setHyperspaceProxy(proxyConfig);
+            const newStore = new ConfigStore(testBaseDir);
+            expect(newStore.getHyperspaceProxy()).toEqual(proxyConfig);
+        });
+    });
+
+    describe('sapAiCoreModel methods', () => {
+        it('should get and set sapAiCoreModel', () => {
+            store.setSapAiCoreModel('anthropic--claude-3.5-sonnet');
+            expect(store.getSapAiCoreModel()).toBe('anthropic--claude-3.5-sonnet');
+        });
+
+        it('should update sapAiCoreModel via updateConfig', () => {
+            store.updateConfig({ sapAiCoreModel: 'anthropic--claude-3.5-haiku' });
+            expect(store.getConfig().sapAiCoreModel).toBe('anthropic--claude-3.5-haiku');
+        });
+
+        it('should default to anthropic--claude-4.6-opus', () => {
+            expect(store.getSapAiCoreModel()).toBe('anthropic--claude-4.6-opus');
+        });
+
+        it('should persist sapAiCoreModel changes', () => {
+            store.setSapAiCoreModel('anthropic--claude-opus-4');
+            const newStore = new ConfigStore(testBaseDir);
+            expect(newStore.getSapAiCoreModel()).toBe('anthropic--claude-opus-4');
+        });
+    });
+
+    describe('setAICoreCredentials URL sanitization', () => {
+        it('should strip leading = from authUrl and baseUrl', () => {
+            const creds = {
+                clientId: 'client-123',
+                clientSecret: 'secret-456',
+                authUrl: '=https://auth.test.com',
+                baseUrl: '==https://api.test.com',
+                resourceGroup: 'group-1',
+                timeoutMs: 60000,
+            };
+
+            store.setAICoreCredentials(creds);
+            const stored = store.getAICoreCredentials();
+            expect(stored?.authUrl).toBe('https://auth.test.com');
+            expect(stored?.baseUrl).toBe('https://api.test.com');
+        });
+    });
+
     describe('config file handling', () => {
         it('should handle corrupted config file gracefully', () => {
             // Create corrupted config
