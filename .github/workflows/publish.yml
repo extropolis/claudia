@@ -87,12 +87,7 @@ jobs:
       - name: Build frontend
         run: npm run build -w frontend
 
-      - name: Publish @claudia/shared
-        run: npm publish -w shared --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish claudia
+      - name: Publish @extropolis/claudia
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -100,6 +95,4 @@ jobs:
       - name: Published successfully
         run: |
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
-          echo "🎉 Successfully published v$TAG_VERSION to npm"
-          echo "📦 claudia@$TAG_VERSION"
-          echo "📦 @claudia/shared@$TAG_VERSION"
+          echo "🎉 Successfully published @extropolis/claudia@$TAG_VERSION to npm"

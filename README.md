@@ -226,7 +226,7 @@ That's it. The script will:
 The CI/CD pipeline then:
 1. Builds and runs all tests automatically
 2. Pauses for **your approval** in GitHub Actions
-3. Publishes `@claudia/shared` and `claudia` to npm
+3. Publishes `@extropolis/claudia` to npm
 
 **Other version commands:**
 ```bash
