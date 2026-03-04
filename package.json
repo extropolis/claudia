@@ -25,6 +25,29 @@
   "bin": {
     "claudia": "bin/claudia.mjs"
   },
+  "files": [
+    "bin/",
+    "backend/dist/",
+    "backend/hooks/",
+    "backend/package.json",
+    "frontend/dist/",
+    "frontend/package.json",
+    "shared/dist/",
+    "shared/package.json",
+    "dist-electron/",
+    "electron/",
+    "start.sh",
+    "start.ps1",
+    "start-electron.sh",
+    "start-electron.ps1",
+    "install.sh",
+    "install.ps1",
+    "index.html",
+    "styles.css",
+    "version.txt",
+    "README.md",
+    "LICENSE"
+  ],
   "workspaces": [
     "backend",
     "frontend",
@@ -43,7 +66,7 @@
     "package:mac": "npm run build && electron-builder --mac",
     "package:win": "npm run build && electron-builder --win",
     "package:linux": "npm run build && electron-builder --linux",
-    "postinstall": "npm run build -w shared && npm run build:backend",
+    "prepare": "npm run build -w shared && npm run build:backend",
     "start": "./start-electron.sh",
     "test": "npm run test:backend && npm run test:frontend",
     "test:backend": "npm test -w backend",
