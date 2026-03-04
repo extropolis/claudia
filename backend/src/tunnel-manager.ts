@@ -107,7 +107,8 @@ export class TunnelManager extends EventEmitter {
         const ngrokArgs = ['http', '--domain', this.domain, String(this.port)];
         logger.info('Spawning ngrok', { args: ngrokArgs });
 
-        const ngrok = spawn('ngrok', ngrokArgs, {
+        const ngrokExe = process.platform === 'win32' ? 'ngrok.exe' : 'ngrok';
+        const ngrok = spawn(ngrokExe, ngrokArgs, {
             stdio: ['pipe', 'pipe', 'pipe'],
         });
 

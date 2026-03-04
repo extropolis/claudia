@@ -4,6 +4,7 @@ import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS } f
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
+import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { ConfigStore } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
@@ -14,6 +15,12 @@ import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 
 const logger = createLogger('[TaskSpawner]');
+
+/** On Windows, node-pty requires the .exe extension to find executables */
+const isWindows = process.platform === 'win32';
+function exe(name: string): string {
+    return isWindows ? `${name}.exe` : name;
+}
 
 /**
  * Check if Claude Code CLI is installed and available
@@ -1633,7 +1640,7 @@ export class TaskSpawner extends EventEmitter {
             const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
 
             // Write to temp file for --mcp-config
-            const mcpConfigFile = `/tmp/claudia-mcp-${id}.json`;
+            const mcpConfigFile = join(tmpdir(), `claudia-mcp-${id}.json`);
             writeFileSync(mcpConfigFile, mcpConfigJson);
             logger.info(`MCP config written to: ${mcpConfigFile}`);
             logger.debug(`MCP config contents: ${mcpConfigJson}`);
@@ -1668,7 +1675,7 @@ export class TaskSpawner extends EventEmitter {
             apiMode: this.configStore?.getApiMode()
         });
 
-        const ptyProcess = spawn('claude', claudeArgs, {
+        const ptyProcess = spawn(exe('claude'), claudeArgs, {
             name: 'xterm-256color',
             cols: initialCols || 120, // Use provided cols or default 120 (increased from 80)
             rows: initialRows || 40,  // Use provided rows or default 40 (increased from 24)
@@ -2710,7 +2717,7 @@ export class TaskSpawner extends EventEmitter {
                 console.log(`[TaskSpawner] Reconnecting OpenCode task ${taskId} (fresh start)`);
             }
 
-            ptyProcess = spawn('opencode', opencodeArgs, {
+            ptyProcess = spawn(exe('opencode'), opencodeArgs, {
                 name: 'xterm-256color',
                 cols: 120,
                 rows: 40,
@@ -2761,7 +2768,7 @@ export class TaskSpawner extends EventEmitter {
             const mcpResult = this.buildMcpConfig();
             if (mcpResult) {
                 const mcpConfigJson = JSON.stringify({ mcpServers: mcpResult.mcpConfig }, null, 2);
-                const mcpConfigFile = `/tmp/claudia-mcp-${taskId}-reconnect.json`;
+                const mcpConfigFile = join(tmpdir(), `claudia-mcp-${taskId}-reconnect.json`);
                 writeFileSync(mcpConfigFile, mcpConfigJson);
                 claudeArgs.push('--mcp-config', mcpConfigFile);
                 console.log(`[TaskSpawner] Added ${mcpResult.enabledMcpServers.length} MCP server(s) for reconnection via ${mcpConfigFile}`);
@@ -2774,7 +2781,7 @@ export class TaskSpawner extends EventEmitter {
                 console.log(`[TaskSpawner] Reconnecting Claude Code task ${taskId} (fresh start)`);
             }
 
-            ptyProcess = spawn('claude', claudeArgs, {
+            ptyProcess = spawn(exe('claude'), claudeArgs, {
                 name: 'xterm-256color',
                 cols: 120,
                 rows: 40,

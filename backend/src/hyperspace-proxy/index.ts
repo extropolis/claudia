@@ -1,9 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { ConfigStore } from '../config-store.js';
 import { appendFileSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { reportUsage } from '../usage-reporter.js';
 
-const LOG_FILE = '/tmp/hyperspace-requests.log';
+const LOG_FILE = join(tmpdir(), 'hyperspace-requests.log');
 
 function logToFile(message: string): void {
     const timestamp = new Date().toISOString();

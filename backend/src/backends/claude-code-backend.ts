@@ -10,6 +10,9 @@ import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, statSy
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { TaskState, WaitingInputType, TaskGitState } from '@claudia/shared';
+
+/** On Windows, node-pty requires the .exe extension to find executables */
+const claudeExe = process.platform === 'win32' ? 'claude.exe' : 'claude';
 import {
     CodeBackend,
     BackendType,
@@ -153,7 +156,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
         logger.info('Creating task', { taskId: id, workspaceId: config.workspaceId });
         logger.debug('Command args', { args: claudeArgs });
 
-        const ptyProcess = spawn('claude', claudeArgs, {
+        const ptyProcess = spawn(claudeExe, claudeArgs, {
             name: 'xterm-256color',
             cols: 120,
             rows: 40,
@@ -221,7 +224,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
             logger.info('Reconnecting task (fresh start)', { taskId: config.taskId });
         }
 
-        const ptyProcess = spawn('claude', claudeArgs, {
+        const ptyProcess = spawn(claudeExe, claudeArgs, {
             name: 'xterm-256color',
             cols: 120,
             rows: 40,
