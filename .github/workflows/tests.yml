@@ -22,12 +22,13 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: |
-          npm ci
-          cd backend && npm ci
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w shared
 
       - name: Build backend
-        run: cd backend && npm run build
+        run: npm run build -w backend
 
       - name: Run result-parser unit tests
         run: cd backend && npx tsx tests/unit/result-parser.test.ts
@@ -51,12 +52,13 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: |
-          npm ci
-          cd backend && npm ci
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w shared
 
       - name: Build backend
-        run: cd backend && npm run build
+        run: npm run build -w backend
 
       - name: Start backend server
         run: |
@@ -88,12 +90,13 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: |
-          npm ci
-          cd backend && npm ci
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w shared
 
       - name: Build backend
-        run: cd backend && npm run build
+        run: npm run build -w backend
 
       - name: Start backend server
         run: |
@@ -125,9 +128,10 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: |
-          npm ci
-          cd backend && npm ci
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w shared
 
       - name: Run full test suite
         run: cd backend && ./run-all-tests.sh
