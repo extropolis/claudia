@@ -200,6 +200,35 @@ npx tsx test-cli.ts --help
 
 Automated tests run on push to `main` and `develop` branches across Ubuntu and Windows environments. The pipeline builds the shared package, backend, and runs unit tests.
 
+### Releasing
+
+Versioning is controlled by a single file: **`version.txt`** in the project root. All package versions are synced from it.
+
+**To release a new version:**
+
+1. Edit `version.txt` with the new version (e.g., `0.2.0`)
+2. Run the release command:
+   ```bash
+   npm run release
+   ```
+
+That's it. The script will:
+- Sync the version into all `package.json` files
+- Commit the changes
+- Create a git tag (`v0.2.0`)
+- Push to `main` with the tag
+
+The CI/CD pipeline then:
+1. Builds and runs all tests automatically
+2. Pauses for **your approval** in GitHub Actions
+3. Publishes `@extropolis/claudia` to npm
+
+**Other version commands:**
+```bash
+npm run version:sync    # Sync package.json files to version.txt (no git)
+npm run version:check   # Verify all packages match version.txt
+```
+
 ### Project Structure
 
 ```

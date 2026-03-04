@@ -49,9 +49,9 @@
     "test:backend": "npm test -w backend",
     "test:frontend": "npm test -w frontend",
     "test:watch": "concurrently \"npm run test:watch -w backend\" \"npm run test:watch -w frontend\"",
-    "version:patch": "node scripts/bump-version.mjs patch",
-    "version:minor": "node scripts/bump-version.mjs minor",
-    "version:major": "node scripts/bump-version.mjs major"
+    "version:sync": "node scripts/bump-version.mjs",
+    "version:check": "node scripts/bump-version.mjs --check",
+    "release": "node scripts/release.mjs"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

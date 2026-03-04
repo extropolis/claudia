@@ -55,3 +55,7 @@ backend/config.json
 backend/workspace-config.json
 backend/chat-history.json
 backend/archived-histories/
+backend/task-histories/
+
+# Vite cache
+vite

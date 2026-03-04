@@ -1,14 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "mcp__*"
+      "mcp__*",
+      "Bash(gh run:*)"
     ],
     "deny": []
   },
   "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
-    "playwright",
-    "duckduckgo",
-    "jira_mcp"
+    "playwright"
   ]
 }
