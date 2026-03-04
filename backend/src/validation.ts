@@ -326,6 +326,11 @@ export function validateWorkspacePath(path: unknown): ValidationResult<string> {
         return { valid: false, error: 'Path cannot be empty' };
     }
 
+    // Check for parent directory traversal in the raw input (before normalize resolves it away)
+    if (/\.\./.test(path)) {
+        return { valid: false, error: 'Invalid path: access to this location is not allowed' };
+    }
+
     // Normalize and resolve the path
     const normalizedPath = normalize(path);
     const resolvedPath = isAbsolute(normalizedPath) ? normalizedPath : resolve(normalizedPath);
@@ -339,15 +344,15 @@ export function validateWorkspacePath(path: unknown): ValidationResult<string> {
     // Disallow paths containing suspicious patterns
     const suspiciousPatterns = [
         /\.\./, // Parent directory traversal
-        /^\/etc\//, // System config
-        /^\/var\//, // System var
-        /^\/usr\//, // System usr (except /usr/local)
-        /^\/bin\//, // System binaries
-        /^\/sbin\//, // System binaries
-        /^\/root\//, // Root home
-        /^\/proc\//, // Proc filesystem
-        /^\/sys\//, // Sys filesystem
-        /^\/dev\//, // Device files
+        /^\/etc(\/|$)/, // System config
+        /^\/var(\/|$)/, // System var
+        /^\/usr(\/|$)/, // System usr (except /usr/local)
+        /^\/bin(\/|$)/, // System binaries
+        /^\/sbin(\/|$)/, // System binaries
+        /^\/root(\/|$)/, // Root home
+        /^\/proc(\/|$)/, // Proc filesystem
+        /^\/sys(\/|$)/, // Sys filesystem
+        /^\/dev(\/|$)/, // Device files
     ];
 
     for (const pattern of suspiciousPatterns) {

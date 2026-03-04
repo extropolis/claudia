@@ -30,11 +30,8 @@ jobs:
       - name: Build backend
         run: npm run build -w backend
 
-      - name: Run result-parser unit tests
-        run: cd backend && npx tsx tests/unit/result-parser.test.ts
-
-      - name: Run task-manager unit tests
-        run: cd backend && npx tsx tests/unit/task-manager.test.ts
+      - name: Run unit tests
+        run: npm test -w backend
 
   integration-tests:
     name: Integration Tests
