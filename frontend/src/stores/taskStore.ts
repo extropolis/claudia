@@ -367,9 +367,9 @@ export const useTaskStore = create<TaskStore>()(
                         }
                     });
                 } else {
-                    // First load or page refresh - respect persisted state (already in newExpanded from currentExpanded)
-                    // If no persisted state exists (first time ever), newExpanded stays empty = all closed
-                    console.log('[TaskStore] Initial load - using persisted expansion state (default: all closed)');
+                    // First load or page refresh - expand all workspaces by default
+                    console.log('[TaskStore] Initial load - expanding all workspaces');
+                    uniqueWorkspaces.forEach(w => newExpanded.add(w.id));
                 }
                 // Remove any workspaces that no longer exist
                 const workspaceIds = new Set(uniqueWorkspaces.map(w => w.id));
