@@ -200,7 +200,7 @@ export const useTaskStore = create<TaskStore>()(
             voiceInterimTranscript: '',
             autoSendEnabled: false,
             autoSendDelayMs: 3000,
-            deepgramApiKey: '64070750f98b25b595b1a900ed263e3a11f11690',
+            deepgramApiKey: '',
 
             // Supervisor initial state
             taskSummaries: new Map(),
