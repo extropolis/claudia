@@ -3,7 +3,7 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
     Loader2, Square, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
@@ -92,6 +92,7 @@ interface TaskItemProps {
     onArchiveTask: (taskId: string) => void;
     onRevertTask: (taskId: string) => void;
     onSelectTask: (taskId: string) => void;
+    onRenameTask?: (taskId: string, displayName: string) => void;
     isSelected: boolean;
     hasActiveQuestion: boolean;
     // Drag and drop
@@ -103,8 +104,11 @@ interface TaskItemProps {
     onDragEnd: () => void;
 }
 
-function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, isSelected, hasActiveQuestion, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
+function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, isSelected, hasActiveQuestion, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
     const [stopClicked, setStopClicked] = useState(false);
+    const [isEditing, setIsEditing] = useState(false);
+    const [editValue, setEditValue] = useState('');
+    const editInputRef = useRef<HTMLInputElement>(null);
 
     // Reset stopClicked when task state changes from busy
     useEffect(() => {
@@ -117,8 +121,8 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
     const segments = task.prompt.split('⏺').map(s => s.trim()).filter(Boolean);
     const lastSegment = segments.length > 0 ? segments[segments.length - 1] : task.prompt;
 
-    // CSS handles visual truncation with line-clamp
-    const displayPrompt = lastSegment;
+    // Use displayName if set, otherwise fall back to last segment of prompt
+    const displayPrompt = task.displayName || lastSegment;
 
     const canInterrupt = task.state === 'busy' && !stopClicked;
     const isBeingDragged = dragIndex === index;
@@ -126,14 +130,54 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
 
     const taskItemRef = useRef<HTMLDivElement>(null);
 
+    // Focus input when editing starts
+    useEffect(() => {
+        if (isEditing && editInputRef.current) {
+            editInputRef.current.focus();
+            editInputRef.current.select();
+        }
+    }, [isEditing]);
+
+    const handleStartEdit = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        setEditValue(task.displayName || lastSegment);
+        setIsEditing(true);
+    };
+
+    const handleSaveEdit = () => {
+        const trimmed = editValue.trim();
+        if (onRenameTask && trimmed !== (task.displayName || lastSegment)) {
+            if (trimmed === '' || trimmed === lastSegment) {
+                onRenameTask(task.id, '');
+            } else {
+                onRenameTask(task.id, trimmed);
+            }
+        }
+        setIsEditing(false);
+    };
+
+    const handleCancelEdit = () => {
+        setIsEditing(false);
+    };
+
+    const handleEditKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            handleSaveEdit();
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            handleCancelEdit();
+        }
+    };
+
     return (
         <div
             ref={taskItemRef}
             className={`task-item ${isSelected ? 'selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
-            draggable
-            onClick={() => onSelectTask(task.id)}
+            draggable={!isEditing}
+            onClick={() => !isEditing && onSelectTask(task.id)}
             onDragStart={(e) => {
-                // Set the drag image to be the entire task item
+                if (isEditing) { e.preventDefault(); return; }
                 if (taskItemRef.current) {
                     e.dataTransfer.setDragImage(taskItemRef.current, 10, 10);
                 }
@@ -148,7 +192,24 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                 <GripVertical size={12} />
             </div>
             <StateIcon task={task} hasActiveQuestion={hasActiveQuestion} onArchive={() => onArchiveTask(task.id)} />
-            <span className="task-prompt" title={task.prompt}>{displayPrompt}</span>
+            {isEditing ? (
+                <input
+                    ref={editInputRef}
+                    className="task-name-input"
+                    value={editValue}
+                    onChange={(e) => setEditValue(e.target.value)}
+                    onBlur={handleSaveEdit}
+                    onKeyDown={handleEditKeyDown}
+                    onClick={(e) => e.stopPropagation()}
+                />
+            ) : (
+                <span
+                    className="task-prompt"
+                    title={task.prompt}
+                >
+                    {displayPrompt}
+                </span>
+            )}
             <div className="task-actions">
                 {canInterrupt && (
                     <button
@@ -176,6 +237,15 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                         title={`Revert changes (${task.gitState.filesModified.length} files)`}
                     >
                         <Undo2 size={12} />
+                    </button>
+                )}
+                {onRenameTask && !isEditing && (
+                    <button
+                        className="task-action-button rename"
+                        onClick={handleStartEdit}
+                        title="Rename task"
+                    >
+                        <Pencil size={12} />
                     </button>
                 )}
                 <button
@@ -227,6 +297,9 @@ interface WorkspaceSectionProps {
     onDragEnd: () => void;
     // Task reordering
     onReorderTasks: (fromIndex: number, toIndex: number) => void;
+    // Rename handlers
+    onRenameTask?: (taskId: string, displayName: string) => void;
+    onRenameWorkspace?: (workspaceId: string, displayName: string) => void;
 }
 
 function WorkspaceSection({
@@ -255,9 +328,15 @@ function WorkspaceSection({
     onDragStart,
     onDragEnter,
     onDragEnd,
-    onReorderTasks
+    onReorderTasks,
+    onRenameTask,
+    onRenameWorkspace
 }: WorkspaceSectionProps) {
     const [inputValue, setInputValue] = useState('');
+    const [isEditingWorkspaceName, setIsEditingWorkspaceName] = useState(false);
+    const [workspaceEditValue, setWorkspaceEditValue] = useState('');
+    const workspaceEditRef = useRef<HTMLInputElement>(null);
+
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
@@ -503,6 +582,49 @@ function WorkspaceSection({
 
     const isDropTarget = dragOverIndex === index && isDragging;
 
+    // Workspace name display
+    const workspaceDisplayName = workspace.displayName || workspace.name;
+
+    // Focus workspace name input when editing starts
+    useEffect(() => {
+        if (isEditingWorkspaceName && workspaceEditRef.current) {
+            workspaceEditRef.current.focus();
+            workspaceEditRef.current.select();
+        }
+    }, [isEditingWorkspaceName]);
+
+    const handleStartWorkspaceEdit = (e?: React.MouseEvent) => {
+        if (e) e.stopPropagation();
+        setWorkspaceEditValue(workspace.displayName || workspace.name);
+        setIsEditingWorkspaceName(true);
+    };
+
+    const handleSaveWorkspaceEdit = () => {
+        const trimmed = workspaceEditValue.trim();
+        if (onRenameWorkspace && trimmed !== workspaceDisplayName) {
+            if (trimmed === '' || trimmed === workspace.name) {
+                onRenameWorkspace(workspace.id, '');
+            } else {
+                onRenameWorkspace(workspace.id, trimmed);
+            }
+        }
+        setIsEditingWorkspaceName(false);
+    };
+
+    const handleCancelWorkspaceEdit = () => {
+        setIsEditingWorkspaceName(false);
+    };
+
+    const handleWorkspaceEditKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            handleSaveWorkspaceEdit();
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            handleCancelWorkspaceEdit();
+        }
+    };
+
     return (
         <div
             className={`workspace-section ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
@@ -521,10 +643,38 @@ function WorkspaceSection({
                 >
                     <GripVertical size={14} />
                 </div>
-                <div className="workspace-header-left" onClick={onToggleExpand}>
+                <div className="workspace-header-left" onClick={() => !isEditingWorkspaceName && onToggleExpand()}>
                     {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                     <Briefcase size={16} className="workspace-icon" />
-                    <span className="workspace-name" title={workspace.id}>{workspace.name}</span>
+                    {isEditingWorkspaceName ? (
+                        <input
+                            ref={workspaceEditRef}
+                            className="workspace-name-input"
+                            value={workspaceEditValue}
+                            onChange={(e) => setWorkspaceEditValue(e.target.value)}
+                            onBlur={handleSaveWorkspaceEdit}
+                            onKeyDown={handleWorkspaceEditKeyDown}
+                            onClick={(e) => e.stopPropagation()}
+                        />
+                    ) : (
+                        <>
+                            <span
+                                className="workspace-name"
+                                title={workspace.id}
+                            >
+                                {workspaceDisplayName}
+                            </span>
+                            {onRenameWorkspace && (
+                                <button
+                                    className="workspace-rename-button"
+                                    onClick={handleStartWorkspaceEdit}
+                                    title="Rename workspace"
+                                >
+                                    <Pencil size={12} />
+                                </button>
+                            )}
+                        </>
+                    )}
                     {tasks.length > 0 && (
                         <span className="workspace-task-count">{tasks.length}</span>
                     )}
@@ -574,6 +724,17 @@ function WorkspaceSection({
                             >
                                 <Copy size={14} />
                                 <span>Copy Path</span>
+                            </button>
+                            <button
+                                className="workspace-dropdown-item"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    onToggleMenu();
+                                    handleStartWorkspaceEdit();
+                                }}
+                            >
+                                <Pencil size={14} />
+                                <span>Rename</span>
                             </button>
                             <button
                                 className="workspace-dropdown-item"
@@ -650,6 +811,7 @@ function WorkspaceSection({
                                         onArchiveTask={onArchiveTask}
                                         onRevertTask={onRevertTask}
                                         onSelectTask={onSelectTask}
+                                        onRenameTask={onRenameTask}
                                         isDragging={taskDragIndex !== null}
                                         dragIndex={taskDragIndex}
                                         dragOverIndex={taskDragOverIndex}
@@ -827,6 +989,8 @@ interface WorkspacePanelProps {
     onRestoreArchivedTask?: (taskId: string) => void;
     onDeleteArchivedTask?: (taskId: string) => void;
     onContinueArchivedTask?: (taskId: string) => void;
+    onRenameTask?: (taskId: string, displayName: string) => void;
+    onRenameWorkspace?: (workspaceId: string, displayName: string) => void;
 }
 
 export function WorkspacePanel({
@@ -845,7 +1009,9 @@ export function WorkspacePanel({
     onRequestArchivedTasks,
     onRestoreArchivedTask,
     onDeleteArchivedTask,
-    onContinueArchivedTask
+    onContinueArchivedTask,
+    onRenameTask,
+    onRenameWorkspace
 }: WorkspacePanelProps) {
     const {
         tasks,
@@ -1045,6 +1211,8 @@ export function WorkspacePanel({
                             onDragEnter={handleDragEnter}
                             onDragEnd={handleDragEnd}
                             onReorderTasks={(fromIndex, toIndex) => reorderTasks(workspace.id, fromIndex, toIndex)}
+                            onRenameTask={onRenameTask}
+                            onRenameWorkspace={onRenameWorkspace}
                         />
                     ))
                 )}

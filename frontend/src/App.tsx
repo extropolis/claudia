@@ -50,6 +50,8 @@ function App() {
         deleteArchivedTask,
         continueArchivedTask,
         pushToGithub,
+        renameTask,
+        renameWorkspace,
         requestRecentWorkspaces,
         clearRecentWorkspace,
         wsRef
@@ -423,6 +425,8 @@ function App() {
                                 onRestoreArchivedTask={restoreArchivedTask}
                                 onDeleteArchivedTask={deleteArchivedTask}
                                 onContinueArchivedTask={continueArchivedTask}
+                                onRenameTask={renameTask}
+                                onRenameWorkspace={renameWorkspace}
                             />
                         </aside>
                     )
@@ -452,6 +456,8 @@ function App() {
                                 onRestoreArchivedTask={restoreArchivedTask}
                                 onDeleteArchivedTask={deleteArchivedTask}
                                 onContinueArchivedTask={continueArchivedTask}
+                                onRenameTask={renameTask}
+                                onRenameWorkspace={renameWorkspace}
                             />
                         </aside>
 

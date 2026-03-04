@@ -193,6 +193,17 @@ export class WorkspaceStore {
         return true;
     }
 
+    // Rename a workspace (set displayName)
+    renameWorkspace(id: string, displayName: string): boolean {
+        const workspace = this.config.workspaces.find(w => w.id === id);
+        if (!workspace) return false;
+
+        workspace.displayName = displayName.trim() || undefined; // Clear if empty
+        this.saveConfig();
+        console.log(`[WorkspaceStore] Renamed workspace ${id} to "${displayName}"`);
+        return true;
+    }
+
     // Get workspace system prompt
     getSystemPrompt(workspaceId: string): string | undefined {
         const workspace = this.config.workspaces.find(w => w.id === workspaceId);

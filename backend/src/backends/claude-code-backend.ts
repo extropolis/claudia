@@ -19,12 +19,43 @@ import {
     ReconnectConfig,
     TaskEnvironment
 } from './types.js';
-import { ConfigStore } from '../config-store.js';
+import { ConfigStore, ClaudeCodeSwitches } from '../config-store.js';
 import { createLogger } from '../logger.js';
 
 /** On Windows, node-pty requires the .exe extension to find executables */
 const claudeExe = process.platform === 'win32' ? 'claude.exe' : 'claude';
 const logger = createLogger('[ClaudeCodeBackend]');
+
+/**
+ * Build CLI args from ClaudeCodeSwitches config.
+ */
+function buildClaudeCodeSwitchArgs(switches: ClaudeCodeSwitches): string[] {
+    const args: string[] = [];
+
+    if (switches.verbose) {
+        args.push('--verbose');
+    }
+    if (switches.maxTurns != null && switches.maxTurns > 0) {
+        args.push('--max-turns', String(switches.maxTurns));
+    }
+    if (switches.maxBudgetUsd != null && switches.maxBudgetUsd > 0) {
+        args.push('--max-budget-usd', String(switches.maxBudgetUsd));
+    }
+    if (switches.permissionMode) {
+        args.push('--permission-mode', switches.permissionMode);
+    }
+    if (switches.allowedTools && switches.allowedTools.trim()) {
+        args.push('--allowedTools', switches.allowedTools.trim());
+    }
+    if (switches.disallowedTools && switches.disallowedTools.trim()) {
+        args.push('--disallowedTools', switches.disallowedTools.trim());
+    }
+    if (switches.appendSystemPrompt && switches.appendSystemPrompt.trim()) {
+        args.push('--append-system-prompt', switches.appendSystemPrompt.trim());
+    }
+
+    return args;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -152,6 +183,16 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
             logger.info('Using model', { model: config.model });
         }
 
+        // Add Claude Code CLI switches from settings
+        if (this.configStore) {
+            const switches = this.configStore.getClaudeCodeSwitches();
+            const switchArgs = buildClaudeCodeSwitchArgs(switches);
+            if (switchArgs.length > 0) {
+                claudeArgs.push(...switchArgs);
+                logger.info('Applied CLI switches', { switchArgs });
+            }
+        }
+
         logger.info('Creating task', { taskId: id, workspaceId: config.workspaceId });
         logger.debug('Command args', { args: claudeArgs });
 
@@ -199,6 +240,16 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
 
         if (this.configStore?.getSkipPermissions()) {
             claudeArgs.push('--dangerously-skip-permissions');
+        }
+
+        // Add Claude Code CLI switches from settings
+        if (this.configStore) {
+            const switches = this.configStore.getClaudeCodeSwitches();
+            const switchArgs = buildClaudeCodeSwitchArgs(switches);
+            if (switchArgs.length > 0) {
+                claudeArgs.push(...switchArgs);
+                logger.info('Applied CLI switches for reconnect', { switchArgs });
+            }
         }
 
         // Check if session file exists before trying to resume
@@ -569,7 +620,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
 
     private setupProcessHandlers(task: InternalTask): void {
         task.process.onData((rawData: string) => {
-            // Filter out auth conflict warning in SAP AI Core proxy mode
+            // Filter out auth conflict warning that appears when multiple auth methods are set
             const data = this.filterAuthConflictWarning(rawData);
             if (!data) return; // Entire chunk was warning content
 
@@ -759,8 +810,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
 
     /**
      * Filter out the Claude Code auth conflict warning from PTY output.
-     * This warning appears when ANTHROPIC_API_KEY is set alongside a claude.ai login token,
-     * which is expected in SAP AI Core proxy mode (we set a dummy API key).
+     * This warning appears when ANTHROPIC_API_KEY is set alongside a claude.ai login token.
      */
     private filterAuthConflictWarning(data: string): string {
         const cleanData = this.stripAnsi(data);

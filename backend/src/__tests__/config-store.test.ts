@@ -85,9 +85,6 @@ describe('ConfigStore', () => {
         });
 
         it('should update apiMode', () => {
-            store.updateConfig({ apiMode: 'sap-ai-core' });
-            expect(store.getConfig().apiMode).toBe('sap-ai-core');
-
             store.updateConfig({ apiMode: 'custom-anthropic' });
             expect(store.getConfig().apiMode).toBe('custom-anthropic');
         });
@@ -106,20 +103,6 @@ describe('ConfigStore', () => {
             const config = store.getConfig();
             expect(config.mcpServers.length).toBe(1);
             expect(config.mcpServers[0].name).toBe('test-server');
-        });
-
-        it('should update aiCoreCredentials', () => {
-            const creds = {
-                clientId: 'test-client',
-                clientSecret: 'test-secret',
-                authUrl: 'https://auth.example.com',
-                baseUrl: 'https://api.example.com',
-                resourceGroup: 'test-group',
-                timeoutMs: 30000,
-            };
-            store.updateConfig({ aiCoreCredentials: creds });
-
-            expect(store.getConfig().aiCoreCredentials).toEqual(creds);
         });
 
         it('should update supervisorSystemPrompt', () => {
@@ -141,42 +124,10 @@ describe('ConfigStore', () => {
         });
     });
 
-    describe('getAICoreCredentials / setAICoreCredentials', () => {
-        it('should get and set AI Core credentials', () => {
-            const creds = {
-                clientId: 'client-123',
-                clientSecret: 'secret-456',
-                authUrl: 'https://auth.test.com',
-                baseUrl: 'https://api.test.com',
-                resourceGroup: 'group-1',
-                timeoutMs: 60000,
-            };
-
-            store.setAICoreCredentials(creds);
-            expect(store.getAICoreCredentials()).toEqual(creds);
-        });
-
-        it('should allow clearing credentials', () => {
-            const creds = {
-                clientId: 'client-123',
-                clientSecret: 'secret-456',
-                authUrl: 'https://auth.test.com',
-                baseUrl: 'https://api.test.com',
-                resourceGroup: 'group-1',
-                timeoutMs: 60000,
-            };
-
-            store.setAICoreCredentials(creds);
-            store.setAICoreCredentials(undefined);
-
-            expect(store.getAICoreCredentials()).toBeUndefined();
-        });
-    });
-
     describe('helper methods', () => {
         it('should get apiMode', () => {
-            store.updateConfig({ apiMode: 'sap-ai-core' });
-            expect(store.getApiMode()).toBe('sap-ai-core');
+            store.updateConfig({ apiMode: 'custom-anthropic' });
+            expect(store.getApiMode()).toBe('custom-anthropic');
         });
 
         it('should get customAnthropicApiKey', () => {
@@ -220,7 +171,7 @@ describe('ConfigStore', () => {
                 rules: 'Custom rules',
                 skipPermissions: true,
                 supervisorEnabled: true,
-                apiMode: 'sap-ai-core',
+                apiMode: 'custom-anthropic',
             });
 
             // Reset
@@ -310,93 +261,6 @@ describe('ConfigStore', () => {
             store.setUseLearnings(true);
             const newStore = new ConfigStore(testBaseDir);
             expect(newStore.getUseLearnings()).toBe(true);
-        });
-    });
-
-    describe('hyperspaceProxy methods', () => {
-        it('should get and set hyperspaceProxy', () => {
-            const proxyConfig = {
-                proxyUrl: 'http://localhost:7777',
-                apiKey: 'test-key-123',
-                model: 'anthropic--claude-4.5-sonnet',
-                alwaysThinkingEnabled: true
-            };
-
-            store.setHyperspaceProxy(proxyConfig);
-            expect(store.getHyperspaceProxy()).toEqual(proxyConfig);
-        });
-
-        it('should update hyperspaceProxy via updateConfig', () => {
-            const proxyConfig = {
-                proxyUrl: 'http://localhost:8888',
-                apiKey: 'key-456',
-                model: 'anthropic--claude-3.5-sonnet',
-                alwaysThinkingEnabled: false
-            };
-
-            store.updateConfig({ hyperspaceProxy: proxyConfig });
-            expect(store.getConfig().hyperspaceProxy).toEqual(proxyConfig);
-        });
-
-        it('should have default hyperspaceProxy values', () => {
-            const proxy = store.getHyperspaceProxy();
-            expect(proxy.proxyUrl).toBe('http://localhost:6655');
-            expect(proxy.apiKey).toBe('');
-            expect(proxy.model).toBe('anthropic--claude-4.5-sonnet');
-            expect(proxy.alwaysThinkingEnabled).toBe(false);
-        });
-
-        it('should persist hyperspaceProxy changes', () => {
-            const proxyConfig = {
-                proxyUrl: 'http://custom:1234',
-                apiKey: 'persist-key',
-                model: 'anthropic--claude-opus-4',
-                alwaysThinkingEnabled: true
-            };
-
-            store.setHyperspaceProxy(proxyConfig);
-            const newStore = new ConfigStore(testBaseDir);
-            expect(newStore.getHyperspaceProxy()).toEqual(proxyConfig);
-        });
-    });
-
-    describe('sapAiCoreModel methods', () => {
-        it('should get and set sapAiCoreModel', () => {
-            store.setSapAiCoreModel('anthropic--claude-3.5-sonnet');
-            expect(store.getSapAiCoreModel()).toBe('anthropic--claude-3.5-sonnet');
-        });
-
-        it('should update sapAiCoreModel via updateConfig', () => {
-            store.updateConfig({ sapAiCoreModel: 'anthropic--claude-3.5-haiku' });
-            expect(store.getConfig().sapAiCoreModel).toBe('anthropic--claude-3.5-haiku');
-        });
-
-        it('should default to anthropic--claude-4.6-opus', () => {
-            expect(store.getSapAiCoreModel()).toBe('anthropic--claude-4.6-opus');
-        });
-
-        it('should persist sapAiCoreModel changes', () => {
-            store.setSapAiCoreModel('anthropic--claude-opus-4');
-            const newStore = new ConfigStore(testBaseDir);
-            expect(newStore.getSapAiCoreModel()).toBe('anthropic--claude-opus-4');
-        });
-    });
-
-    describe('setAICoreCredentials URL sanitization', () => {
-        it('should strip leading = from authUrl and baseUrl', () => {
-            const creds = {
-                clientId: 'client-123',
-                clientSecret: 'secret-456',
-                authUrl: '=https://auth.test.com',
-                baseUrl: '==https://api.test.com',
-                resourceGroup: 'group-1',
-                timeoutMs: 60000,
-            };
-
-            store.setAICoreCredentials(creds);
-            const stored = store.getAICoreCredentials();
-            expect(stored?.authUrl).toBe('https://auth.test.com');
-            expect(stored?.baseUrl).toBe('https://api.test.com');
         });
     });
 

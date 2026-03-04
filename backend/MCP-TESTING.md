@@ -85,7 +85,7 @@ MCP servers are configured in `backend/orchestrator-config.json`:
 
 ### No AI responses
 If you get no responses from AI:
-- Check SAP AI Core credentials in environment
+- Check API credentials in environment
 - Or use the main backend CLI: `npx tsx test-cli.ts`
 
 ### MCP server won't connect

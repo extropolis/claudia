@@ -25,6 +25,7 @@ export interface PersistedTask {
     wasInterrupted?: boolean;
     systemPrompt?: string;
     shouldContinue?: boolean;
+    displayName?: string;
 }
 
 /**
@@ -40,6 +41,7 @@ export interface ArchivedTaskMetadata {
     gitState?: TaskGitState;
     systemPrompt?: string;
     historySize?: number;
+    displayName?: string;
 }
 
 /**

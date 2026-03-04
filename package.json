@@ -1,7 +1,7 @@
 {
   "name": "@extropolis/claudia",
   "productName": "Claudia",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Multi-instance Claude Code orchestrator web UI",
   "license": "MIT",
   "repository": {
@@ -48,7 +48,10 @@
     "test": "npm run test:backend && npm run test:frontend",
     "test:backend": "npm test -w backend",
     "test:frontend": "npm test -w frontend",
-    "test:watch": "concurrently \"npm run test:watch -w backend\" \"npm run test:watch -w frontend\""
+    "test:watch": "concurrently \"npm run test:watch -w backend\" \"npm run test:watch -w frontend\"",
+    "version:patch": "node scripts/bump-version.mjs patch",
+    "version:minor": "node scripts/bump-version.mjs minor",
+    "version:major": "node scripts/bump-version.mjs major"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

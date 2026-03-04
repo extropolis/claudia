@@ -15,7 +15,6 @@ cd "$(dirname "$0")"
 if [ -f .env ]; then
     set -a; source .env; set +a
 fi
-export AICORE_RESOURCE_GROUP="${AICORE_RESOURCE_GROUP:-default}"
 
 # Increase Node.js memory limit
 export NODE_OPTIONS="--max-old-space-size=8192"

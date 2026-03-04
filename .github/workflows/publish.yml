@@ -1,0 +1,98 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Prevent concurrent publishes
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  # Job 1: Build and test (runs automatically)
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w shared
+
+      - name: Build backend
+        run: npm run build -w backend
+
+      - name: Run tests
+        run: npm test -w backend
+
+      - name: Verify tag matches package version
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
+            echo "❌ Tag version (v$TAG_VERSION) does not match package.json version ($PACKAGE_VERSION)"
+            exit 1
+          fi
+          echo "✅ Tag v$TAG_VERSION matches package.json version $PACKAGE_VERSION"
+
+  # Job 2: Publish (requires manual approval via GitHub Environment)
+  publish:
+    name: Publish to npm
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w shared
+
+      - name: Build backend
+        run: npm run build -w backend
+
+      - name: Build frontend
+        run: npm run build -w frontend
+
+      - name: Publish @claudia/shared
+        run: npm publish -w shared --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @extropolis/claudia
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Published successfully
+        run: |
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          echo "🎉 Successfully published v$TAG_VERSION to npm"
+          echo "📦 @extropolis/claudia@$TAG_VERSION"
+          echo "📦 @claudia/shared@$TAG_VERSION"

@@ -1,35 +1,13 @@
 /**
- * LLM Service - Uses the built-in Anthropic proxy (via SAP AI Core) for generating dynamic responses
- * This service calls the local /v1/messages endpoint which proxies to SAP AI Core
+ * LLM Service - Uses the built-in Anthropic proxy for generating dynamic responses
+ * This service calls the local /v1/messages endpoint which proxies to the configured API
  */
 
 // The local server's Anthropic proxy endpoint (same server, no port needed)
 import { PORTS } from '@claudia/shared';
-import type { ConfigStore } from './config-store.js';
 
 const LLM_API_URL = `http://localhost:${PORTS.BACKEND}/v1/messages`;
 const DEFAULT_LLM_MODEL = 'claude-sonnet-4-5-20250929';
-
-// Model mapping from SAP AI Core internal names to Anthropic API names
-const SAP_TO_ANTHROPIC_MODEL_MAP: Record<string, string> = {
-    'anthropic--claude-4.5-opus': 'claude-4-5-opus',
-    'anthropic--claude-opus-4': 'claude-opus-4-20250514',
-    'anthropic--claude-sonnet-4': 'claude-sonnet-4-20250514',
-    'anthropic--claude-4.5-sonnet': 'claude-sonnet-4-5-20250929',
-    'anthropic--claude-3.7-sonnet': 'claude-3-7-sonnet-20250219',
-    'anthropic--claude-3.5-sonnet': 'claude-3-5-sonnet-latest',
-    'anthropic--claude-3.5-haiku': 'claude-3-5-haiku-20241022',
-    'anthropic--claude-3-opus': 'claude-3-opus-20240229',
-};
-
-let configStore: ConfigStore | null = null;
-
-/**
- * Initialize the LLM service with a config store
- */
-export function initializeLLMService(store: ConfigStore): void {
-    configStore = store;
-}
 
 /**
  * Get the appropriate model to use based on configuration
@@ -38,19 +16,6 @@ function getLLMModel(): string {
     // Check environment variable first
     if (process.env.LLM_MODEL) {
         return process.env.LLM_MODEL;
-    }
-
-    // If config store is available and using SAP AI Core, use configured model
-    if (configStore) {
-        const apiMode = configStore.getApiMode();
-        if (apiMode === 'sap-ai-core') {
-            const sapModel = configStore.getSapAiCoreModel();
-            const anthropicModel = SAP_TO_ANTHROPIC_MODEL_MAP[sapModel];
-            if (anthropicModel) {
-                return anthropicModel;
-            }
-            console.warn(`[LLM] No Anthropic model mapping found for SAP AI Core model: ${sapModel}, using default`);
-        }
     }
 
     return DEFAULT_LLM_MODEL;

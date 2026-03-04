@@ -1,9 +1,12 @@
 /**
- * Reports usage metrics to the Claudia usage dashboard.
+ * Reports usage metrics.
  * Fire-and-forget — never blocks or throws to callers.
+ *
+ * Usage reporting is currently disabled (no dashboard URL configured).
+ * To enable, set the USAGE_DASHBOARD_URL environment variable.
  */
 
-const USAGE_DASHBOARD_URL = 'https://claudia-usage-dashboard.cfapps.eu12.hana.ondemand.com/api/usage';
+const USAGE_DASHBOARD_URL = process.env.USAGE_DASHBOARD_URL || '';
 const CLAUDIA_VERSION = '1.0.0';
 
 let currentUserId: string | null = null;
@@ -26,10 +29,11 @@ export interface UsageParams {
 /**
  * Reports a single API call's token usage to the dashboard.
  * Safe to call without await — errors are logged and swallowed.
+ * No-op if USAGE_DASHBOARD_URL is not configured.
  */
 export async function reportUsage(params: UsageParams): Promise<void> {
-    if (!currentUserId) {
-        // Silently skip — user ID not set yet (SAP AI Core not configured or frontend not connected)
+    if (!currentUserId || !USAGE_DASHBOARD_URL) {
+        // Silently skip — user ID not set or no dashboard URL configured
         return;
     }
 
@@ -53,10 +57,10 @@ export async function reportUsage(params: UsageParams): Promise<void> {
 
         if (response.ok) {
             const result = await response.json() as { ok: boolean; event_id: number };
-            console.log(`[UsageReporter] ✅ Usage reported — event_id=${result.event_id}`);
+            console.log(`[UsageReporter] Usage reported — event_id=${result.event_id}`);
         } else {
             const text = await response.text();
-            console.warn(`[UsageReporter] ⚠️ Report failed: ${response.status} — ${text}`);
+            console.warn(`[UsageReporter] Report failed: ${response.status} — ${text}`);
         }
     } catch (error) {
         console.warn('[UsageReporter] Network error, skipping usage report:', error);

@@ -9,8 +9,8 @@ claudia/
 ├── backend/              # Node.js backend server
 │   ├── src/
 │   │   ├── backends/             # Pluggable backend implementations
-│   │   ├── anthropic-proxy/      # SAP AI Core proxy (Bedrock)
-│   │   ├── hyperspace-proxy/     # Hyperspace AI Proxy integration
+│   │   ├── anthropic-proxy/      # Anthropic API proxy
+
 │   │   ├── commands/             # Auto-installed Claude Code commands
 │   │   └── __tests__/            # Unit tests (Vitest)
 │   └── hooks/                    # Claude Code lifecycle hooks
@@ -65,7 +65,7 @@ claudia/
 | `task-spawner.ts` | Spawns and manages CLI processes. Tracks task state lifecycle, handles hooks, manages output buffering, coordinates with backends |
 | `supervisor-chat.ts` | Conversational AI interface with tool-calling (create_task, delete_task, send_task_input, list_tasks, etc.) and context awareness from running tasks |
 | `workspace-store.ts` | Manages workspace directories (project folders). Persists to `workspace-config.json` |
-| `config-store.ts` | Manages application configuration (API mode, MCP servers, permissions, rules). Supports SAP AI Core, Hyperspace, and direct API modes. Persists to `config.json` |
+| `config-store.ts` | Manages application configuration (API mode, MCP servers, permissions, rules). Supports direct API mode. Persists to `config.json` |
 | `learnings-store.ts` | Vector-based learning storage with semantic search (cosine similarity). Implements MemRL (Memory Reinforcement Learning) for utility scoring. Methods: addLearning, searchLearnings, updateUtility |
 | `llm-service.ts` | Dynamic LLM response generation via local `/v1/messages` endpoint. Functions: generateLLMResponse, generatePlanResponse, generateConversationalResponse |
 | `task-persistence.ts` | Handles task metadata and output history persistence. Supports archived tasks with lazy-loaded history, debounced saves for performance |
@@ -84,29 +84,6 @@ Claudia supports pluggable backend implementations through the `CodeBackend` int
 | `types.ts` | Backend abstraction types - `CodeBackend` interface, `TaskConfig`, `BackendTask`, `BACKEND_INFO` registry |
 | `claude-code-backend.ts` | Claude Code CLI backend - spawns `claude` processes via PTY, full terminal lifecycle management |
 | `opencode-backend.ts` | OpenCode backend - communicates via HTTP API with `opencode serve`, alternative to Claude Code |
-
-### Proxy Systems
-
-#### Anthropic Proxy (`backend/src/anthropic-proxy/`)
-
-Translates Anthropic Messages API requests to SAP AI Core (AWS Bedrock Claude):
-
-| File | Purpose |
-|------|---------|
-| `index.ts` | Express router with `/v1/models` and `/v1/messages` endpoints |
-| `access-token-provider.ts` | OAuth2 token acquisition and caching (60-second buffer) |
-| `deployment-catalog.ts` | Discovers and caches running Claude deployments from SAP AI Core |
-| `request-transformer.ts` | Transforms Anthropic API requests to Bedrock format |
-| `stream-transformer.ts` | Transforms Bedrock SSE to Anthropic SSE format (adds event types) |
-
-#### Hyperspace Proxy (`backend/src/hyperspace-proxy/`)
-
-Proxies requests to Hyperspace AI Proxy (production-approved external service):
-
-| File | Purpose |
-|------|---------|
-| `index.ts` | Express router for Hyperspace proxy integration |
-| Features | Sanitizes tools/system blocks, strips unsupported content types, intercepts warmup requests, tracks token usage from SSE events |
 
 ### Hooks (`backend/hooks/`)
 
@@ -308,10 +285,10 @@ WSMessageType: 40+ types for task lifecycle, workspaces, chat, supervisor,
 │  │ └ OpenCode      │  │ GitUtils     │  │ TaskStateDetection         │  │
 │  └─────────────────┘  └──────────────┘  └────────────────────────────┘  │
 │                                                                           │
-│  ┌─────────────────┐  ┌──────────────┐  ┌────────────────────────────┐  │
-│  │ Anthropic Proxy │  │  Hyperspace  │  │  TunnelManager (ngrok)     │  │
-│  │ (SAP AI Core)   │  │    Proxy     │  │  UsageReporter             │  │
-│  └─────────────────┘  └──────────────┘  └────────────────────────────┘  │
+│  ┌─────────────────┐  ┌────────────────────────────────────────────┐  │
+│  │ Anthropic Proxy │  │  TunnelManager (ngrok)                     │  │
+│  │                 │  │  UsageReporter                             │  │
+│  └─────────────────┘  └────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────────────┘
                             │
                             │ Spawns processes (PTY or HTTP)
@@ -422,10 +399,6 @@ User enables tunnel → POST /api/tunnel/start → TunnelManager → ngrok
 |--------|----------|---------|
 | GET | `/api/config` | Get current configuration |
 | PUT | `/api/config` | Update configuration |
-| POST | `/api/config/validate-aicore` | Validate SAP AI Core settings |
-| GET | `/api/aicore/models` | List SAP AI Core models |
-| POST | `/api/aicore/test` | Test SAP AI Core connection |
-| POST | `/api/hyperspace/models` | List Hyperspace models |
 | GET | `/api/claude-mcp-servers` | List Claude MCP servers |
 | GET | `/api/claude-config/mcp-servers` | Get MCP configuration |
 | PUT | `/api/claude-config/mcp-servers` | Update MCP servers |
@@ -473,7 +446,7 @@ User enables tunnel → POST /api/tunnel/start → TunnelManager → ngrok
 | System monitoring | Real-time CPU/memory stats polling |
 | Conversation history | Claude Code JSONL + OpenCode message parsing |
 | Hook system | Shell scripts → HTTP callbacks for lifecycle events |
-| Embedded proxies | Anthropic (SAP AI Core/Bedrock) + Hyperspace AI Proxy |
+| Embedded proxies | Anthropic API proxy |
 | Usage analytics | Token tracking via fire-and-forget reporter |
 | Cross-platform | Windows (PowerShell), macOS, Linux support |
 | Desktop app | Electron wrapper with embedded backend |
@@ -523,104 +496,3 @@ Multiple Claude Code instances can work on this project simultaneously without c
 
 ---
 
-## Embedded Anthropic Proxy
-
-The backend includes an optional embedded proxy that translates Anthropic Messages API requests to SAP AI Core (AWS Bedrock Claude). This eliminates the need for a separate `sap-ai-proxy` instance.
-
-### Architecture
-
-```
-Claude Code CLI
-    │
-    │ ANTHROPIC_BASE_URL=http://localhost:4001
-    ▼
-┌───────────────────────────────────────────────────────────────────┐
-│                    Backend (Express) :4001                         │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │              Anthropic Proxy (embedded)                     │  │
-│  │   GET  /v1/models    - List available Claude models         │  │
-│  │   POST /v1/messages  - Anthropic Messages API               │  │
-│  │   GET  /health       - Proxy health check                   │  │
-│  └─────────────────────────┬──────────────────────────────────┘  │
-│                            │                                      │
-│  ┌─────────────────────────┼──────────────────────────────────┐  │
-│  │  AccessTokenProvider    │  DeploymentCatalog               │  │
-│  │  (OAuth2 caching)       │  (model discovery)               │  │
-│  └─────────────────────────┼──────────────────────────────────┘  │
-│                            │                                      │
-│  ┌─────────────────────────┼──────────────────────────────────┐  │
-│  │  RequestTransformer     │  StreamTransformer               │  │
-│  │  (Bedrock format)       │  (SSE event types)               │  │
-│  └─────────────────────────┴──────────────────────────────────┘  │
-└───────────────────────────────────────────────────────────────────┘
-                            │
-                            │ OAuth2 + Bearer Token
-                            ▼
-┌───────────────────────────────────────────────────────────────────┐
-│                      SAP AI Core                                  │
-│   /v2/lm/deployments          - Model discovery                  │
-│   /v2/inference/deployments/  - Claude inference (Bedrock)       │
-└───────────────────────────────────────────────────────────────────┘
-```
-
-### Configuration
-
-Set these environment variables in `backend/.env`:
-
-```bash
-SAP_AICORE_AUTH_URL=https://xxx.authentication.xxx.hana.ondemand.com
-SAP_AICORE_CLIENT_ID=your-client-id
-SAP_AICORE_CLIENT_SECRET=your-client-secret
-SAP_AICORE_BASE_URL=https://api.ai.xxx.aws.ml.hana.ondemand.com
-SAP_AICORE_RESOURCE_GROUP=default
-SAP_AICORE_TIMEOUT_MS=120000
-```
-
-### Claude Code Configuration
-
-To use the embedded proxy, update your Claude Code settings (`~/.claude/settings.json`):
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:4001",
-    "ANTHROPIC_MODEL": "claude-sonnet-4-5-20250929"
-  }
-}
-```
-
-### Supported Models
-
-The proxy maps external model names to internal SAP AI Core deployments:
-
-| External (Anthropic API) | Internal (SAP AI Core) |
-|--------------------------|------------------------|
-| `claude-sonnet-4-5-20250929` | `anthropic--claude-4.5-sonnet` |
-| `claude-sonnet-4-20250514` | `anthropic--claude-sonnet-4` |
-| `claude-3-7-sonnet-20250219` | `anthropic--claude-3.7-sonnet` |
-| `claude-3-5-sonnet-20241022` | `anthropic--claude-3.5-sonnet` |
-| `claude-opus-4-20250514` | `anthropic--claude-opus-4` |
-| `claude-4-5-opus` | `anthropic--claude-4.5-opus` |
-
-### Proxy Features
-
-- **OAuth2 Token Caching:** Tokens cached with 60-second expiry buffer
-- **Model Discovery:** Automatically discovers running deployments
-- **Streaming Support:** Full SSE streaming with proper event types
-- **Reasoning Support:** Converts `reasoning_effort` to `thinking` budget
-- **Error Handling:** Proper HTTP status codes and error responses
-
----
-
-## Hyperspace AI Proxy
-
-The backend also includes a proxy for Hyperspace AI Proxy, which is the production-approved method for Claude API access at SAP.
-
-### Features
-
-- Proxies Anthropic API requests to external Hyperspace service
-- Sanitizes tools and system blocks for compatibility
-- Strips unsupported content types from messages
-- Intercepts warmup requests to avoid quota waste
-- Tracks token usage from SSE events
-- Supports both streaming and non-streaming responses

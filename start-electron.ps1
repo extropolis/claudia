@@ -9,9 +9,6 @@ Write-Host ""
 # Start from project root
 Set-Location $PSScriptRoot
 
-# Load environment variables
-$env:AICORE_RESOURCE_GROUP = if ($env:AICORE_RESOURCE_GROUP) { $env:AICORE_RESOURCE_GROUP } else { "default" }
-
 # Increase Node.js memory limit
 $env:NODE_OPTIONS = "--max-old-space-size=8192"
 

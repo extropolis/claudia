@@ -1,40 +1,12 @@
 {
   "workspaces": [
     {
-      "id": "/Users/I850333/projects/experiments/Minecraft",
-      "name": "Minecraft",
-      "createdAt": "2026-01-23T16:12:25.478Z",
-      "systemPrompt": " Port 2567 is the main server                                                     \n Port 3000 is the frontend (vite)   \n\n./start.sh restarts the app    \n\nNEVER touch port 4001"
-    },
-    {
-      "id": "/Users/I850333/projects/experiments/claudia",
-      "name": "claudia",
-      "createdAt": "2026-02-10T21:56:27.323Z"
-    },
-    {
-      "id": "/Users/I850333/projects/experiments/skynative",
-      "name": "skynative",
-      "createdAt": "2026-02-24T01:38:47.542Z",
-      "systemPrompt": "you can login to the app with username: Lance password: Butch988"
-    },
-    {
-      "id": "/Users/I850333/projects/experiments/joule_expense",
-      "name": "joule_expense",
-      "createdAt": "2026-02-24T19:00:42.686Z",
-      "systemPrompt": "here are the joule login creds: username: lance.hughes@sap.com\npassword: ILikeFish_988\n\nalways use playwright mcp to test the joule agent"
-    },
-    {
-      "id": "/Users/I850333/projects/experiments/joule-concur-expense-develop",
-      "name": "joule-concur-expense-develop",
-      "createdAt": "2026-02-24T22:26:50.506Z"
-    },
-    {
-      "id": "/Users/I850333/projects/experiments/noa-examples-master",
-      "name": "noa-examples-master",
-      "createdAt": "2026-03-01T01:22:40.148Z"
+      "id": "C:\\Users\\14255\\Work\\claudia",
+      "name": "C:\\Users\\14255\\Work\\claudia",
+      "createdAt": "2026-03-04T18:57:22.692Z"
     }
   ],
-  "activeWorkspaceId": "/Users/I850333/projects/experiments/Minecraft",
+  "activeWorkspaceId": "C:\\Users\\14255\\Work\\claudia",
   "recentWorkspaces": [
     {
       "id": "/Users/I850333/projects/experiments/openclaw",
