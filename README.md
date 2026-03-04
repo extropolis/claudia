@@ -2,17 +2,25 @@
 
 # Claudia
 
-
-A web-based UI for managing multiple Claude Code CLI instances simultaneously. Claudia provides a visual interface for spawning, monitoring, and interacting with Claude Code tasks across different workspaces.
+A web-based UI for managing multiple Claude Code CLI instances simultaneously. Claudia provides a visual interface for spawning, monitoring, and interacting with Claude Code tasks across different workspaces. Available as a web app or Electron desktop application.
 
 ## Features
 
 - **Multi-Task Management** - Spawn and manage multiple Claude Code CLI instances at once
 - **Real-Time Terminal** - Full terminal emulation with xterm.js and WebSocket streaming
-- **Workspace Organization** - Group tasks by project directories
-- **Voice Input** - Web Speech API integration for hands-free interaction
-- **Git Integration** - Track changes and revert task modifications
+- **Multi-Backend Support** - Works with Claude Code CLI and OpenCode backends
+- **AI Supervisor Chat** - Conversational AI interface with tool-calling for task management
+- **Workspace Organization** - Group tasks by project directories with custom system prompts
+- **Voice Input** - Deepgram-powered speech-to-text with auto-send on silence
+- **Git Integration** - Track changes, view diffs, and revert task modifications
 - **Task Persistence** - Tasks survive server restarts with automatic reconnection
+- **Task Archival** - Archive completed tasks with lazy-loaded history
+- **Learning System** - Extract and store learnings from completed tasks using semantic search
+- **Mobile Access** - Remote access via ngrok tunnel with QR code for mobile devices
+- **System Monitoring** - Real-time CPU and memory usage stats
+- **Conversation History** - View parsed conversation history from Claude Code sessions
+- **Cross-Platform** - Runs on Windows, macOS, and Linux
+- **Electron Desktop App** - Standalone desktop application wrapper
 
 ## Prerequisites
 
@@ -81,8 +89,14 @@ npm run build -w shared
 
 ### Quick Start
 
+**macOS / Linux:**
 ```bash
 ./start.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+.\start.ps1
 ```
 
 This will:
@@ -91,6 +105,23 @@ This will:
 3. Start the frontend dev server (port 5173)
 
 Access the UI at **http://localhost:5173**
+
+### Electron Desktop App
+
+To run as a standalone desktop application:
+
+```bash
+npm run dev:electron
+```
+
+To build distributable packages:
+
+```bash
+npm run package          # Current platform
+npm run package:mac      # macOS
+npm run package:win      # Windows
+npm run package:linux    # Linux
+```
 
 ### Configure Claudia Settings
 
@@ -120,6 +151,9 @@ Claudia runs an embedded proxy that translates Anthropic API calls into SAP AI C
 2. **Create a Task** - Use the text box at the bottom of the workspace panel to enter your prompt and start a new task
 3. **Monitor Progress** - Watch the real-time terminal output as Claude works
 4. **Interact** - Send follow-up messages or interrupt tasks as needed
+5. **Use Supervisor Chat** - Switch to Chat view for AI-assisted task management with tool-calling
+6. **Review Learnings** - After tasks complete, extract and save learnings from conversations
+7. **Mobile Access** - Open Settings to enable mobile tunnel and scan the QR code on your phone
 
 ## Ports
 
@@ -136,22 +170,95 @@ The project uses auto-reload for rapid development:
 - **Backend**: `tsx watch` reloads on file changes (1-2 seconds)
 - **Frontend**: Vite HMR provides instant updates
 
+### Available Scripts
+
+```bash
+# Development
+npm run dev                # Start backend + frontend concurrently
+npm run dev:backend        # Backend only (tsx watch)
+npm run dev:frontend       # Frontend only (Vite HMR)
+npm run dev:electron       # Electron development mode
+
+# Building
+npm run build              # Build all workspaces
+npm run package            # Build Electron distributable
+
+# Testing
+npm run test               # Run all tests
+npm run test:backend       # Backend tests only
+npm run test:frontend      # Frontend tests only
+npm run test:watch         # Watch mode tests
+```
+
+### Test CLI
+
+Test backend changes without the UI:
+
+```bash
+cd backend
+npx tsx test-cli.ts --list-tasks
+npx tsx test-cli.ts -m "your prompt" -w /path/to/workspace
+npx tsx test-cli.ts --help
+```
+
+### CI/CD
+
+Automated tests run on push to `main` and `develop` branches across Ubuntu and Windows environments. The pipeline builds the shared package, backend, and runs unit tests.
+
 ### Project Structure
 
 ```
 claudia/
-├── backend/           # Express + WebSocket server
+├── backend/               # Express + WebSocket server
 │   ├── src/
-│   │   ├── server.ts         # Main server
-│   │   ├── task-spawner.ts   # Process management
-│   │   └── config-store.ts   # Settings storage
-├── frontend/          # React + Vite SPA
+│   │   ├── server.ts              # Main server with routes and WebSocket
+│   │   ├── task-spawner.ts        # Process management and task lifecycle
+│   │   ├── config-store.ts        # Settings and configuration storage
+│   │   ├── supervisor-chat.ts     # AI supervisor with tool-calling
+│   │   ├── learnings-store.ts     # Semantic learning storage (MemRL)
+│   │   ├── llm-service.ts         # LLM response generation
+│   │   ├── task-persistence.ts    # Task data persistence and archival
+│   │   ├── task-state-detection.ts # Terminal output state analysis
+│   │   ├── conversation-parser.ts # Claude conversation history parser
+│   │   ├── git-utils.ts           # Git state tracking and revert
+│   │   ├── tunnel-manager.ts      # ngrok tunnel for mobile access
+│   │   ├── usage-reporter.ts      # Token usage analytics
+│   │   ├── backends/              # Pluggable backend implementations
+│   │   │   ├── claude-code-backend.ts  # Claude Code CLI (PTY)
+│   │   │   └── opencode-backend.ts     # OpenCode HTTP API
+│   │   ├── anthropic-proxy/       # SAP AI Core proxy (Bedrock)
+│   │   └── hyperspace-proxy/      # Hyperspace AI Proxy integration
+│   ├── hooks/                     # Claude Code lifecycle hooks
+│   └── __tests__/                 # Unit tests (Vitest)
+├── frontend/              # React + Vite SPA
 │   └── src/
-│       ├── App.tsx
+│       ├── App.tsx                # Main layout with resizable panels
 │       ├── components/
+│       │   ├── WorkspacePanel.tsx          # Sidebar with workspaces and tasks
+│       │   ├── TerminalView.tsx            # xterm.js terminal emulator
+│       │   ├── SupervisorChat.tsx          # AI chat interface
+│       │   ├── SettingsMenu.tsx            # Full settings panel
+│       │   ├── ConversationHistory.tsx     # Session conversation viewer
+│       │   ├── TaskSummaryPanel.tsx        # Task results and actions
+│       │   ├── LearnFromConversationModal.tsx # Learning extraction UI
+│       │   ├── MobileAccessModal.tsx       # QR code mobile access
+│       │   ├── GlobalVoiceManager.tsx      # Deepgram voice manager
+│       │   ├── SystemStats.tsx             # CPU/memory monitoring
+│       │   └── NotificationContainer.tsx   # Toast notifications
+│       ├── hooks/
+│       │   ├── useWebSocket.ts            # WebSocket with auto-reconnect
+│       │   └── useVoiceRecognition.ts     # Deepgram speech-to-text
 │       └── stores/
-├── shared/            # Shared TypeScript types
-└── start.sh           # Startup script
+│           └── taskStore.ts               # Zustand global state
+├── shared/                # Shared TypeScript types
+│   └── src/index.ts       # Task, Workspace, ChatMessage types
+├── electron/              # Electron desktop wrapper
+│   ├── main.ts            # Main process and window management
+│   ├── server-manager.ts  # Backend server lifecycle
+│   └── preload.ts         # IPC bridge
+├── start.sh               # Startup script (macOS/Linux)
+├── start.ps1              # Startup script (Windows)
+└── package.json           # Monorepo root config
 ```
 
 ## Support

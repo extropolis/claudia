@@ -2,7 +2,7 @@
 
 ## ⚠️ CRITICAL: DO NOT RESTART THE SERVER
 
-**NEVER run `./start.sh`, `npm run dev`, or kill/restart the server during development.**
+**NEVER run `./start.sh`, `.\start.ps1`, `npm run dev`, or kill/restart the server during development.**
 
 The backend uses `tsx watch` which **automatically reloads** when you change `.ts` files:
 - Write code → Wait 1-2 seconds → Changes are live
@@ -37,11 +37,24 @@ Add CLI functionality if needed for testing. Ensure adequate logging to debug is
 
 **Only use this when the server is NOT running (e.g., after system reboot):**
 
+**macOS / Linux:**
 ```bash
 ./start.sh
 ```
 
+**Windows (PowerShell):**
+```powershell
+.\start.ps1
+```
+
 The lock file will prevent accidental duplicate starts.
+
+## Cross-Platform Notes
+
+- **Windows**: Use `.\start.ps1` for startup. Use forward slashes `/` for paths in code, backslashes `\` in shell commands.
+- **macOS/Linux**: Use `./start.sh` for startup.
+- The codebase uses `@homebridge/node-pty-prebuilt-multiarch` for cross-platform PTY support.
+- CI runs on both Ubuntu and Windows to ensure compatibility.
 <!-- CODEUI-RULES -->
 ## Custom Rules
 
