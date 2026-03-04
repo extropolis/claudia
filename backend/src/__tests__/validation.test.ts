@@ -80,8 +80,8 @@ describe('validateConfigUpdate', () => {
         expect(validateConfigUpdate({ customAnthropicApiKey: 123 }).valid).toBe(false);
     });
 
-    it('should validate apiMode includes hyperspace-proxy', () => {
-        expect(validateConfigUpdate({ apiMode: 'hyperspace-proxy' }).valid).toBe(true);
+    it('should reject invalid apiMode', () => {
+        expect(validateConfigUpdate({ apiMode: 'hyperspace-proxy' }).valid).toBe(false);
     });
 
     it('should validate backend enum', () => {

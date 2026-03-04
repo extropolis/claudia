@@ -3,20 +3,8 @@
     "playwright": {
       "command": "npx",
       "args": [
-        "@playwright/mcp@latest"
+        "@playwright/mcp"
       ]
-    },
-    "duckduckgo": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "ddg-mcp-search"
-      ]
-    },
-    "jira_mcp": {
-      "type": "http",
-      "url": "https://litellm.concur.click/mcp/jira_mcp",
-      "timeout": 30
     }
   }
 }

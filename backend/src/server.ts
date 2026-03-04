@@ -159,10 +159,6 @@ export async function createApp(basePath?: string) {
     // Initialize configStore first to determine API mode
     const configStore = new ConfigStore(basePath);
 
-    // Initialize LLM service with config store so it can use the correct model
-    const { initializeLLMService } = await import('./llm-service.js');
-    initializeLLMService(configStore);
-
     // Initialize remaining services
     const taskSpawner = new TaskSpawner(undefined, true, configStore);
     const workspaceStore = new WorkspaceStore(basePath);

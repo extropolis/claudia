@@ -37,15 +37,22 @@ jobs:
       - name: Run tests
         run: npm test -w backend
 
-      - name: Verify tag matches package version
+      - name: Verify tag matches version.txt
         run: |
-          PACKAGE_VERSION=$(node -p "require('./package.json').version")
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
-          if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
-            echo "❌ Tag version (v$TAG_VERSION) does not match package.json version ($PACKAGE_VERSION)"
+          FILE_VERSION=$(cat version.txt | tr -d '[:space:]')
+          echo "🏷️  Git tag:     v$TAG_VERSION"
+          echo "📄 version.txt: $FILE_VERSION"
+          if [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
+            echo ""
+            echo "❌ version.txt ($FILE_VERSION) does not match tag (v$TAG_VERSION)"
+            echo "Update version.txt to $TAG_VERSION and run: node scripts/bump-version.mjs"
             exit 1
           fi
-          echo "✅ Tag v$TAG_VERSION matches package.json version $PACKAGE_VERSION"
+          echo "✅ version.txt matches tag"
+
+      - name: Verify all package.json versions match version.txt
+        run: node scripts/bump-version.mjs --check
 
   # Job 2: Publish (requires manual approval via GitHub Environment)
   publish:
