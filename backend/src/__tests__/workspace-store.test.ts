@@ -381,4 +381,55 @@ describe('WorkspaceStore', () => {
             expect(found).toBeUndefined();
         });
     });
+
+    describe('renameWorkspace', () => {
+        it('should rename an existing workspace', () => {
+            store.addWorkspace(testWorkspace1);
+            const result = store.renameWorkspace(testWorkspace1, 'My Custom Name');
+
+            expect(result).toBe(true);
+            const workspace = store.getWorkspace(testWorkspace1);
+            expect(workspace?.displayName).toBe('My Custom Name');
+        });
+
+        it('should return false for non-existent workspace', () => {
+            const result = store.renameWorkspace('/non/existent', 'New Name');
+            expect(result).toBe(false);
+        });
+
+        it('should clear displayName when given empty string', () => {
+            store.addWorkspace(testWorkspace1);
+            store.renameWorkspace(testWorkspace1, 'Custom Name');
+            store.renameWorkspace(testWorkspace1, '');
+
+            const workspace = store.getWorkspace(testWorkspace1);
+            expect(workspace?.displayName).toBeUndefined();
+        });
+
+        it('should trim whitespace from displayName', () => {
+            store.addWorkspace(testWorkspace1);
+            store.renameWorkspace(testWorkspace1, '  Trimmed Name  ');
+
+            const workspace = store.getWorkspace(testWorkspace1);
+            expect(workspace?.displayName).toBe('Trimmed Name');
+        });
+
+        it('should persist displayName to file', () => {
+            store.addWorkspace(testWorkspace1);
+            store.renameWorkspace(testWorkspace1, 'Persisted Name');
+
+            const newStore = new WorkspaceStore(testBaseDir);
+            const workspace = newStore.getWorkspace(testWorkspace1);
+            expect(workspace?.displayName).toBe('Persisted Name');
+        });
+
+        it('should include displayName in getWorkspaces result', () => {
+            store.addWorkspace(testWorkspace1);
+            store.renameWorkspace(testWorkspace1, 'Listed Name');
+
+            const workspaces = store.getWorkspaces();
+            const found = workspaces.find(w => w.id === testWorkspace1);
+            expect(found?.displayName).toBe('Listed Name');
+        });
+    });
 });

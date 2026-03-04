@@ -6,7 +6,7 @@ import { dirname, join } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
-import { ConfigStore } from './config-store.js';
+import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
 import { sanitizePrompt } from './validation.js';
 import { createLogger } from './logger.js';
@@ -15,6 +15,64 @@ import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 
 const logger = createLogger('[TaskSpawner]');
+
+/**
+ * Map legacy permission mode values to actual Claude Code CLI values.
+ * Claude CLI --permission-mode accepts: acceptEdits, bypassPermissions, default, dontAsk, plan
+ * Old Claudia UI used: plan, safe, dangerous, auto
+ */
+const PERMISSION_MODE_MAP: Record<string, string> = {
+    // Legacy values → actual CLI values
+    'safe': 'acceptEdits',
+    'dangerous': 'bypassPermissions',
+    'auto': 'dontAsk',
+    // These are already valid CLI values (pass through)
+    'plan': 'plan',
+    'default': 'default',
+    'acceptEdits': 'acceptEdits',
+    'bypassPermissions': 'bypassPermissions',
+    'dontAsk': 'dontAsk',
+};
+
+/**
+ * Build CLI args from ClaudeCodeSwitches config.
+ * Returns args to push into the claudeArgs array.
+ */
+function buildClaudeCodeSwitchArgs(switches: ClaudeCodeSwitches): string[] {
+    const args: string[] = [];
+
+    if (switches.verbose) {
+        args.push('--verbose');
+    }
+
+    if (switches.maxTurns != null && switches.maxTurns > 0) {
+        args.push('--max-turns', String(switches.maxTurns));
+    }
+
+    if (switches.maxBudgetUsd != null && switches.maxBudgetUsd > 0) {
+        args.push('--max-budget-usd', String(switches.maxBudgetUsd));
+    }
+
+    if (switches.permissionMode) {
+        const cliMode = PERMISSION_MODE_MAP[switches.permissionMode] || switches.permissionMode;
+        args.push('--permission-mode', cliMode);
+        logger.info(`Permission mode: "${switches.permissionMode}" → CLI: "${cliMode}"`);
+    }
+
+    if (switches.allowedTools && switches.allowedTools.trim()) {
+        args.push('--allowedTools', switches.allowedTools.trim());
+    }
+
+    if (switches.disallowedTools && switches.disallowedTools.trim()) {
+        args.push('--disallowedTools', switches.disallowedTools.trim());
+    }
+
+    if (switches.appendSystemPrompt && switches.appendSystemPrompt.trim()) {
+        args.push('--append-system-prompt', switches.appendSystemPrompt.trim());
+    }
+
+    return args;
+}
 
 /** On Windows, node-pty requires the .exe extension to find executables */
 const isWindows = process.platform === 'win32';
@@ -58,6 +116,7 @@ interface PersistedTask {
     systemPrompt?: string;     // Custom system prompt for this task
     shouldContinue?: boolean;  // True if task should auto-continue on reconnect
     backendType?: BackendType; // Which backend created this task (for reconnection)
+    displayName?: string;      // User-editable display name
 }
 
 // Lightweight metadata for archived tasks (no outputHistory - loaded lazily from disk)
@@ -72,6 +131,7 @@ interface ArchivedTaskMetadata {
     systemPrompt?: string;
     // Size of output history in bytes (for display purposes)
     historySize?: number;
+    displayName?: string;      // User-editable display name
 }
 
 interface TaskPersistence {
@@ -837,6 +897,7 @@ export class TaskSpawner extends EventEmitter {
                     shouldContinue,
                     systemPrompt: task.systemPrompt,
                     backendType: taskBackendType,
+                    displayName: task.displayName,
                 });
             }
 
@@ -967,7 +1028,7 @@ export class TaskSpawner extends EventEmitter {
     /**
      * Filter out the Claude Code auth conflict warning from PTY output.
      * This warning appears when ANTHROPIC_API_KEY is set alongside a claude.ai login token,
-     * which is expected in SAP AI Core proxy mode (we set a dummy API key).
+     * which is expected in custom API key modes (we set the API key explicitly).
      */
     private filterAuthConflictWarning(data: string): string {
         const cleanData = this.stripAnsi(data);
@@ -1021,7 +1082,6 @@ export class TaskSpawner extends EventEmitter {
      * Get environment variables for spawning tasks based on API mode
      * - default: Use Claude's default settings from ~/.claude.json
      * - custom-anthropic: Use custom API key with Anthropic's API directly
-     * - sap-ai-core: Use the embedded proxy (Claude) or native AICORE_SERVICE_KEY (OpenCode)
      */
     private getTaskEnvironment(): { [key: string]: string } {
         const taskEnv = { ...process.env } as { [key: string]: string };
@@ -1039,94 +1099,6 @@ export class TaskSpawner extends EventEmitter {
             if (apiKey) {
                 taskEnv['ANTHROPIC_API_KEY'] = apiKey;
                 console.log(`[TaskSpawner] Using custom Anthropic API key`);
-            }
-        } else if (apiMode === 'hyperspace-proxy') {
-            // Hyperspace AI Proxy (HAI) mode
-            // Route through Claudia's backend proxy (like SAP AI Core) so we can
-            // transform responses to inject the correct model information
-            const backendPort = process.env.CLAUDIA_BACKEND_PORT || PORTS.BACKEND;
-            taskEnv['ANTHROPIC_BASE_URL'] = `http://localhost:${backendPort}/hyperspace`;
-            // Set a dummy API key - the proxy will handle the actual authentication
-            taskEnv['ANTHROPIC_API_KEY'] = 'sk-ant-dummy-hyperspace-proxy';
-
-            // Set the configured model for ALL tiers to prevent Claude Code from
-            // sending requests with default Anthropic model names (which the
-            // Hyperspace proxy won't recognize, causing errors/retries/rate limiting)
-            const hyperspaceConfig = this.configStore.getHyperspaceProxy();
-            if (hyperspaceConfig?.model) {
-                taskEnv['ANTHROPIC_MODEL'] = hyperspaceConfig.model;
-                taskEnv['ANTHROPIC_DEFAULT_SONNET_MODEL'] = hyperspaceConfig.model;
-                taskEnv['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = hyperspaceConfig.model;
-                taskEnv['ANTHROPIC_DEFAULT_OPUS_MODEL'] = hyperspaceConfig.model;
-                console.log(`[TaskSpawner] Set Hyperspace model env vars to: ${hyperspaceConfig.model}`);
-                console.log(`[TaskSpawner] ANTHROPIC_MODEL=${taskEnv['ANTHROPIC_MODEL']}`);
-                console.log(`[TaskSpawner] ANTHROPIC_DEFAULT_SONNET_MODEL=${taskEnv['ANTHROPIC_DEFAULT_SONNET_MODEL']}`);
-                console.log(`[TaskSpawner] ANTHROPIC_DEFAULT_HAIKU_MODEL=${taskEnv['ANTHROPIC_DEFAULT_HAIKU_MODEL']}`);
-                console.log(`[TaskSpawner] ANTHROPIC_DEFAULT_OPUS_MODEL=${taskEnv['ANTHROPIC_DEFAULT_OPUS_MODEL']}`);
-            }
-
-            console.log(`[TaskSpawner] Using Hyperspace AI Proxy through backend at localhost:${backendPort}/hyperspace, model: ${hyperspaceConfig?.model || 'default'}`);
-        } else if (apiMode === 'sap-ai-core') {
-            let credentials = this.configStore.getAICoreCredentials();
-
-            // Fallback to environment variables if no credentials in config
-            if (!credentials && process.env.SAP_AICORE_CLIENT_ID) {
-                credentials = {
-                    clientId: process.env.SAP_AICORE_CLIENT_ID || '',
-                    clientSecret: process.env.SAP_AICORE_CLIENT_SECRET || '',
-                    authUrl: process.env.SAP_AICORE_AUTH_URL || '',
-                    baseUrl: process.env.SAP_AICORE_BASE_URL || '',
-                    resourceGroup: process.env.AICORE_RESOURCE_GROUP || 'default',
-                    timeoutMs: parseInt(process.env.SAP_AICORE_TIMEOUT_MS || '120000', 10),
-                };
-                console.log(`[TaskSpawner] Using SAP AI Core credentials from environment variables`);
-            }
-
-            if (this.backendType === 'opencode' && credentials) {
-                // Check if AICORE_SERVICE_KEY is already set in environment
-                if (process.env.AICORE_SERVICE_KEY) {
-                    // Use the pre-configured service key from environment
-                    taskEnv['AICORE_SERVICE_KEY'] = process.env.AICORE_SERVICE_KEY;
-                    console.log(`[TaskSpawner] Using AICORE_SERVICE_KEY from environment`);
-                } else {
-                    // OpenCode has native SAP AI Core support via AICORE_SERVICE_KEY
-                    // Format: {"clientid":"...","clientsecret":"...","url":"...","serviceurls":{"AI_API_URL":"..."}}
-                    const serviceKey = {
-                        clientid: credentials.clientId,
-                        clientsecret: credentials.clientSecret,
-                        url: credentials.authUrl,
-                        serviceurls: {
-                            AI_API_URL: credentials.baseUrl
-                        }
-                    };
-                    taskEnv['AICORE_SERVICE_KEY'] = JSON.stringify(serviceKey);
-                }
-
-                // Optionally set resource group if configured
-                if (credentials.resourceGroup) {
-                    taskEnv['AICORE_RESOURCE_GROUP'] = credentials.resourceGroup;
-                }
-
-                // Clear any inherited API keys and base URLs that might interfere with OpenCode's native AI Core support
-                delete taskEnv['ANTHROPIC_API_KEY'];
-                delete taskEnv['ANTHROPIC_BASE_URL'];
-                delete taskEnv['OPENAI_API_KEY'];
-                delete taskEnv['OPENAI_BASE_URL'];
-
-                console.log(`[TaskSpawner] Using SAP AI Core native support for OpenCode`);
-
-                console.log(`[TaskSpawner] AICORE_SERVICE_KEY authUrl: ${credentials.authUrl}, baseUrl: ${credentials.baseUrl}`);
-            } else if (this.backendType === 'opencode' && !credentials) {
-                console.log(`[TaskSpawner] WARNING: SAP AI Core mode selected but no credentials found for OpenCode`);
-            } else {
-                // Claude Code uses the embedded proxy server
-                // The proxy is mounted at the backend's root, so we use the backend URL
-                const backendPort = process.env.CLAUDIA_BACKEND_PORT || PORTS.BACKEND;
-                taskEnv['ANTHROPIC_BASE_URL'] = `http://localhost:${backendPort}`;
-                // Set a dummy API key so Claude Code skips its login/auth prompt.
-                // The actual key value is irrelevant — the proxy handles auth via SAP AI Core tokens.
-                taskEnv['ANTHROPIC_API_KEY'] = 'sk-ant-dummy-sap-ai-core-proxy';
-                console.log(`[TaskSpawner] Using SAP AI Core proxy at localhost:${backendPort}`);
             }
         }
         // 'default' mode: don't set any env vars, let the backend use its own settings
@@ -1489,30 +1461,11 @@ export class TaskSpawner extends EventEmitter {
 
         const taskEnv = this.getTaskEnvironment();
 
-        // Determine model based on API mode
-        let model: string | undefined;
-        const apiMode = this.configStore?.getApiMode();
-        if (apiMode === 'sap-ai-core') {
-            // Get configured model from settings, default to Claude 4.5 Opus
-            const sapAiCoreModel = this.configStore?.getSapAiCoreModel() ?? 'anthropic--claude-4.5-opus';
-            // OpenCode model format for SAP AI Core: sap-ai-core/<model-name>
-            model = `sap-ai-core/${sapAiCoreModel}`;
-            logger.info('Using SAP AI Core model', { model });
-            // Verify environment is set correctly
-            const hasServiceKey = !!taskEnv['AICORE_SERVICE_KEY'];
-            logger.info('SAP AI Core environment check', {
-                hasServiceKey,
-                hasAnthropicBaseUrl: !!taskEnv['ANTHROPIC_BASE_URL'],
-                model
-            });
-        }
-
         const backendTask = await this.backend.createTask({
             prompt,
             workspaceId,
             systemPrompt,
             skipPermissions: this.configStore?.getSkipPermissions(),
-            model
         }, taskEnv);
 
         // Create a placeholder PTY process (not used for OpenCode, but needed for type compatibility)
@@ -1601,36 +1554,6 @@ export class TaskSpawner extends EventEmitter {
             logger.info(`Using custom system prompt`);
         }
 
-        // Add model selection for SAP AI Core mode
-        const apiMode = this.configStore?.getApiMode();
-        if (apiMode === 'sap-ai-core') {
-            const sapAiCoreModel = this.configStore?.getSapAiCoreModel() ?? 'anthropic--claude-4.5-opus';
-            // Map SAP AI Core internal model name to Anthropic API model name for Claude Code
-            const sapToAnthropicMap: Record<string, string> = {
-                'anthropic--claude-4.5-opus': 'claude-4-5-opus',
-                'anthropic--claude-opus-4': 'claude-opus-4-20250514',
-                'anthropic--claude-sonnet-4': 'claude-sonnet-4-20250514',
-                'anthropic--claude-4.5-sonnet': 'claude-sonnet-4-5-20250929',
-                'anthropic--claude-3.7-sonnet': 'claude-3-7-sonnet-20250219',
-                'anthropic--claude-3.5-sonnet': 'claude-3-5-sonnet-latest',
-                'anthropic--claude-3.5-haiku': 'claude-3-5-haiku-20241022',
-                'anthropic--claude-3-opus': 'claude-3-opus-20240229',
-            };
-            const model = sapToAnthropicMap[sapAiCoreModel] || sapAiCoreModel;
-            claudeArgs.push('--model', model);
-            logger.info(`Using SAP AI Core model`, { sapModel: sapAiCoreModel, anthropicModel: model });
-        } else if (apiMode === 'hyperspace-proxy') {
-            // Get the model from Hyperspace proxy config
-            const hyperspaceConfig = this.configStore?.getHyperspaceProxy();
-            if (hyperspaceConfig?.model) {
-                // Pass the HAI-format model name directly — the Hyperspace proxy
-                // expects HAI format (e.g., 'anthropic--claude-4.5-opus'), not
-                // Anthropic API format (e.g., 'claude-4-5-opus').
-                claudeArgs.push('--model', hyperspaceConfig.model);
-                logger.info(`Using Hyperspace proxy model`, { model: hyperspaceConfig.model });
-            }
-        }
-
         // Add MCP server configurations
         // IMPORTANT: Claude doesn't automatically load MCP servers from ~/.claude.json in non-interactive mode
         // We must explicitly pass --mcp-config to load MCP servers
@@ -1658,6 +1581,16 @@ export class TaskSpawner extends EventEmitter {
 
         // Explicitly allow all MCP tools to avoid deferred loading issues
         claudeArgs.push('--allowedTools', 'mcp__*');
+
+        // Add Claude Code CLI switches from settings
+        if (this.configStore) {
+            const switches = this.configStore.getClaudeCodeSwitches();
+            const switchArgs = buildClaudeCodeSwitchArgs(switches);
+            if (switchArgs.length > 0) {
+                claudeArgs.push(...switchArgs);
+                logger.info('Applied CLI switches', { switchArgs });
+            }
+        }
 
         // Add -- to terminate argument parsing (workaround for Claude CLI bug with --mcp-config)
         // See: https://github.com/anthropics/claude-code/issues/22404
@@ -1813,6 +1746,7 @@ export class TaskSpawner extends EventEmitter {
             systemPrompt: task.systemPrompt,
             sessionId: task.sessionId || undefined,
             backendType,
+            displayName: task.displayName,
         };
     }
 
@@ -1867,6 +1801,45 @@ export class TaskSpawner extends EventEmitter {
 
     getTask(taskId: string): InternalTask | undefined {
         return this.tasks.get(taskId);
+    }
+
+    /**
+     * Rename a task by setting its displayName
+     * Works for both active and disconnected tasks
+     */
+    renameTask(taskId: string, displayName: string): boolean {
+        const trimmed = displayName.trim();
+
+        // Try active tasks first
+        const task = this.tasks.get(taskId);
+        if (task) {
+            task.displayName = trimmed || undefined; // Clear if empty
+            this.scheduleSave();
+            console.log(`[TaskSpawner] Renamed task ${taskId} to "${trimmed}"`);
+            this.emit('taskStateChanged', this.toPublicTask(task));
+            return true;
+        }
+
+        // Try disconnected tasks
+        const persisted = this.disconnectedTasks.get(taskId);
+        if (persisted) {
+            persisted.displayName = trimmed || undefined;
+            this.scheduleSave();
+            console.log(`[TaskSpawner] Renamed disconnected task ${taskId} to "${trimmed}"`);
+            return true;
+        }
+
+        // Try archived tasks
+        const archived = this.archivedTasks.get(taskId);
+        if (archived) {
+            archived.displayName = trimmed || undefined;
+            this.scheduleSave();
+            console.log(`[TaskSpawner] Renamed archived task ${taskId} to "${trimmed}"`);
+            return true;
+        }
+
+        console.log(`[TaskSpawner] Cannot rename: task ${taskId} not found`);
+        return false;
     }
 
     getDisconnectedTask(taskId: string): { id: string; workspaceId: string; sessionId: string | null; prompt: string; backendType?: BackendType } | undefined {
@@ -2665,6 +2638,7 @@ export class TaskSpawner extends EventEmitter {
             workspaceId: persisted.workspaceId,
             createdAt: new Date(persisted.createdAt),
             lastActivity: new Date(persisted.lastActivity),
+            displayName: persisted.displayName,
         }));
 
         return [...liveTasks, ...disconnectedTasks];
@@ -2736,33 +2710,18 @@ export class TaskSpawner extends EventEmitter {
                 claudeArgs.push('--dangerously-skip-permissions');
             }
 
-            // Add model selection based on API mode (same as createTask)
-            const apiMode = this.configStore?.getApiMode();
-            if (apiMode === 'sap-ai-core') {
-                const sapAiCoreModel = this.configStore?.getSapAiCoreModel() ?? 'anthropic--claude-4.5-opus';
-                const sapToAnthropicMap: Record<string, string> = {
-                    'anthropic--claude-4.5-opus': 'claude-4-5-opus',
-                    'anthropic--claude-opus-4': 'claude-opus-4-20250514',
-                    'anthropic--claude-sonnet-4': 'claude-sonnet-4-20250514',
-                    'anthropic--claude-4.5-sonnet': 'claude-sonnet-4-5-20250929',
-                    'anthropic--claude-3.7-sonnet': 'claude-3-7-sonnet-20250219',
-                    'anthropic--claude-3.5-sonnet': 'claude-3-5-sonnet-latest',
-                    'anthropic--claude-3.5-haiku': 'claude-3-5-haiku-20241022',
-                    'anthropic--claude-3-opus': 'claude-3-opus-20240229',
-                };
-                const model = sapToAnthropicMap[sapAiCoreModel] || sapAiCoreModel;
-                claudeArgs.push('--model', model);
-                console.log(`[TaskSpawner] Reconnect using SAP AI Core model`, { sapModel: sapAiCoreModel, anthropicModel: model });
-            } else if (apiMode === 'hyperspace-proxy') {
-                const hyperspaceConfig = this.configStore?.getHyperspaceProxy();
-                if (hyperspaceConfig?.model) {
-                    claudeArgs.push('--model', hyperspaceConfig.model);
-                    console.log(`[TaskSpawner] Reconnect using Hyperspace proxy model: ${hyperspaceConfig.model}`);
-                }
-            }
-
             // Explicitly allow all MCP tools to avoid deferred loading issues
             claudeArgs.push('--allowedTools', 'mcp__*');
+
+            // Add Claude Code CLI switches from settings
+            if (this.configStore) {
+                const switches = this.configStore.getClaudeCodeSwitches();
+                const switchArgs = buildClaudeCodeSwitchArgs(switches);
+                if (switchArgs.length > 0) {
+                    claudeArgs.push(...switchArgs);
+                    console.log(`[TaskSpawner] Applied CLI switches for reconnect`, { switchArgs });
+                }
+            }
 
             // Add MCP server configurations for reconnection
             const mcpResult = this.buildMcpConfig();

@@ -746,6 +746,98 @@
     background-color: white;
 }
 
+/* CLI Switches Panel Styles */
+.cli-switches-content .permission-item {
+    margin-bottom: 8px;
+}
+
+.cli-switches-content .permission-item + .cli-switch-text-row {
+    margin-top: -4px;
+}
+
+.cli-switch-input-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+.cli-switch-number-input {
+    width: 80px;
+    padding: 4px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    text-align: center;
+}
+
+.cli-switch-number-input:focus {
+    outline: none;
+    border-color: var(--accent-secondary);
+}
+
+.cli-switch-select {
+    padding: 4px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.cli-switch-select:focus {
+    outline: none;
+    border-color: var(--accent-secondary);
+}
+
+.cli-switch-text-row {
+    padding: 0 20px 12px 20px;
+}
+
+.cli-switch-text-input {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    box-sizing: border-box;
+}
+
+.cli-switch-text-input:focus {
+    outline: none;
+    border-color: var(--accent-secondary);
+}
+
+.cli-switch-textarea {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-family: inherit;
+    resize: vertical;
+    box-sizing: border-box;
+}
+
+.cli-switch-textarea:focus {
+    outline: none;
+    border-color: var(--accent-secondary);
+}
+
+.cli-switches-note {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin: 8px 0 0 0;
+    font-style: italic;
+}
+
 /* Rules Panel Styles */
 .rules-content {
     padding: 16px 20px;
@@ -939,24 +1031,7 @@
     cursor: not-allowed;
 }
 
-/* AI Core Panel Styles */
-.aicore-content {
-    padding: 16px 20px;
-}
-
-.aicore-description {
-    font-size: 0.8rem;
-    color: var(--text-muted);
-    margin: 0 0 16px 0;
-    line-height: 1.4;
-}
-
-.aicore-form {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
-
+/* API Field Styles (used by custom API key form) */
 .aicore-field {
     display: flex;
     flex-direction: column;
@@ -987,34 +1062,6 @@
 
 .aicore-input::placeholder {
     color: var(--text-muted);
-}
-
-.aicore-select {
-    appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 12px center;
-    padding-right: 36px;
-    cursor: pointer;
-}
-
-.aicore-select:focus {
-    border-color: var(--accent-secondary);
-}
-
-.aicore-select option {
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    padding: 8px;
-}
-
-.aicore-row {
-    display: flex;
-    gap: 12px;
-}
-
-.aicore-field-half {
-    flex: 1;
 }
 
 .aicore-test-result {
@@ -1049,65 +1096,18 @@
     animation: spin 1s linear infinite;
 }
 
-@keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-}
-
-.aicore-actions {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-top: 16px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border-color);
-}
-
-.aicore-status {
-    font-size: 0.75rem;
-    padding: 4px 8px;
-    border-radius: 4px;
-}
-
-.aicore-status.saved {
-    color: var(--accent-green);
-    background: rgba(63, 185, 80, 0.1);
-}
-
-.aicore-status.unsaved {
-    color: var(--accent-yellow);
-    background: rgba(255, 193, 7, 0.1);
-}
-
 .aicore-buttons {
     display: flex;
     gap: 8px;
 }
 
-.aicore-clear-btn,
-.aicore-test-btn,
-.aicore-save-btn {
+.aicore-test-btn {
     padding: 8px 14px;
     border-radius: 6px;
     font-size: 0.8rem;
     font-weight: 500;
     cursor: pointer;
     transition: all 0.2s ease;
-}
-
-.aicore-clear-btn {
-    background: transparent;
-    border: 1px solid var(--border-color);
-    color: var(--text-secondary);
-}
-
-.aicore-clear-btn:hover:not(:disabled) {
-    background: rgba(248, 81, 73, 0.1);
-    border-color: var(--accent-red);
-    color: var(--accent-red);
-}
-
-.aicore-test-btn {
     background: transparent;
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
@@ -1119,28 +1119,9 @@
     color: var(--accent-secondary);
 }
 
-.aicore-save-btn {
-    background: var(--accent-secondary);
-    border: 1px solid var(--accent-secondary);
-    color: var(--bg-primary);
-}
-
-.aicore-save-btn:hover:not(:disabled) {
-    filter: brightness(1.1);
-}
-
-.aicore-clear-btn:disabled,
-.aicore-test-btn:disabled,
-.aicore-save-btn:disabled {
+.aicore-test-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-}
-
-.aicore-note {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    margin: 12px 0 0 0;
-    font-style: italic;
 }
 
 /* API Configuration Panel Styles */
@@ -1441,146 +1422,6 @@
 .mcp-json-save-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-}
-
-/* Hyperspace Model Row */
-.hyperspace-model-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.hyperspace-model-select-wrapper {
-    position: relative;
-    flex: 1;
-    min-width: 0;
-}
-
-.hyperspace-refresh-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 38px;
-    height: 38px;
-    flex-shrink: 0;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    background: var(--bg-secondary);
-    color: var(--text-secondary);
-    cursor: pointer;
-    transition: all 0.2s ease;
-}
-
-.hyperspace-refresh-btn:hover:not(:disabled) {
-    background: var(--bg-tertiary);
-    border-color: var(--accent-secondary);
-    color: var(--accent-secondary);
-}
-
-.hyperspace-refresh-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-    color: var(--text-muted);
-}
-
-.hyperspace-refresh-btn .spinning {
-    animation: spin 1s linear infinite;
-}
-
-.aicore-refresh-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    border-radius: 6px;
-    background: transparent;
-    border: 1px solid var(--border-color);
-    color: var(--text-secondary);
-    cursor: pointer;
-    transition: all 0.2s ease;
-    flex-shrink: 0;
-}
-
-.aicore-refresh-btn:hover:not(:disabled) {
-    background: var(--bg-tertiary);
-    border-color: var(--accent-secondary);
-    color: var(--accent-secondary);
-}
-
-.aicore-refresh-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-}
-
-.aicore-refresh-btn .spinning {
-    animation: spin 1s linear infinite;
-}
-
-.aicore-test-model-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 10px;
-    font-size: 11px;
-    border-radius: 4px;
-    background: transparent;
-    border: 1px solid var(--border-color);
-    color: var(--text-secondary);
-    cursor: pointer;
-    transition: all 0.2s ease;
-}
-
-.aicore-test-model-btn:hover:not(:disabled) {
-    background: var(--bg-tertiary);
-    border-color: var(--accent-secondary);
-    color: var(--accent-secondary);
-}
-
-.aicore-test-model-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-}
-
-.aicore-test-model-btn .spinning {
-    animation: spin 1s linear infinite;
-}
-
-.model-test-response {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    margin-top: 8px;
-    padding: 10px 12px;
-    border-radius: 6px;
-    font-size: 12px;
-    line-height: 1.5;
-    word-break: break-word;
-}
-
-.model-test-response.success {
-    background: rgba(46, 160, 67, 0.1);
-    border: 1px solid rgba(46, 160, 67, 0.3);
-    color: var(--accent-green);
-}
-
-.model-test-response.error {
-    background: rgba(248, 81, 73, 0.1);
-    border: 1px solid rgba(248, 81, 73, 0.3);
-    color: var(--accent-red);
-}
-
-.model-test-response svg {
-    flex-shrink: 0;
-    margin-top: 2px;
-}
-
-/* Disabled/muted select for no API key */
-.aicore-select.disabled-muted {
-    opacity: 0.5;
-    cursor: not-allowed;
-    color: var(--text-muted);
 }
 
 /* Settings Menu Footer */

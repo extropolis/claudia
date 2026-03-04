@@ -34,20 +34,6 @@ interface MCPServerConfig {
 /**
  * Config update payload validation
  */
-// Valid SAP AI Core models
-const VALID_SAP_AI_CORE_MODELS = [
-    'anthropic--claude-4.6-opus',
-    'anthropic--claude-4.6-sonnet',
-    'anthropic--claude-4.5-opus',
-    'anthropic--claude-opus-4',
-    'anthropic--claude-sonnet-4',
-    'anthropic--claude-4.5-sonnet',
-    'anthropic--claude-3.7-sonnet',
-    'anthropic--claude-3.5-sonnet',
-    'anthropic--claude-3.5-haiku',
-    'anthropic--claude-3-opus',
-] as const;
-
 export interface ConfigUpdatePayload {
     rules?: string;
     mcpServers?: MCPServerConfig[];
@@ -55,24 +41,18 @@ export interface ConfigUpdatePayload {
     autoFocusOnInput?: boolean;
     supervisorEnabled?: boolean;
     supervisorSystemPrompt?: string;
-    apiMode?: 'default' | 'custom-anthropic' | 'sap-ai-core' | 'hyperspace-proxy';
+    apiMode?: 'default' | 'custom-anthropic';
     customAnthropicApiKey?: string;
-    aiCoreCredentials?: {
-        clientId?: string;
-        clientSecret?: string;
-        authUrl?: string;
-        baseUrl?: string;
-        resourceGroup?: string;
-        timeoutMs?: number;
-    };
-    sapAiCoreModel?: string;
     backend?: 'claude-code' | 'opencode';
     opencodePort?: number;
-    hyperspaceProxy?: {
-        proxyUrl?: string;
-        apiKey?: string;
-        model?: string;
-        alwaysThinkingEnabled?: boolean;
+    claudeCodeSwitches?: {
+        verbose?: boolean;
+        maxTurns?: number | null;
+        maxBudgetUsd?: number | null;
+        permissionMode?: string | null;
+        allowedTools?: string;
+        disallowedTools?: string;
+        appendSystemPrompt?: string;
     };
 }
 
@@ -199,7 +179,7 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
 
     // Validate apiMode (optional enum)
     if (payload.apiMode !== undefined) {
-        const validModes = ['default', 'custom-anthropic', 'sap-ai-core', 'hyperspace-proxy'];
+        const validModes = ['default', 'custom-anthropic'];
         if (!validModes.includes(payload.apiMode as string)) {
             return { valid: false, error: `apiMode must be one of: ${validModes.join(', ')}` };
         }
@@ -231,77 +211,67 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
         result.opencodePort = payload.opencodePort;
     }
 
-    // Validate aiCoreCredentials (optional object)
-    if (payload.aiCoreCredentials !== undefined) {
-        if (typeof payload.aiCoreCredentials !== 'object' || payload.aiCoreCredentials === null) {
-            return { valid: false, error: 'aiCoreCredentials must be an object' };
+    // Validate claudeCodeSwitches (optional object)
+    if (payload.claudeCodeSwitches !== undefined) {
+        if (typeof payload.claudeCodeSwitches !== 'object' || payload.claudeCodeSwitches === null) {
+            return { valid: false, error: 'claudeCodeSwitches must be an object' };
         }
-        const creds = payload.aiCoreCredentials as Record<string, unknown>;
-        result.aiCoreCredentials = {};
+        const switches = payload.claudeCodeSwitches as Record<string, unknown>;
+        result.claudeCodeSwitches = {};
 
-        const stringFields = ['clientId', 'clientSecret', 'authUrl', 'baseUrl', 'resourceGroup'];
-        for (const field of stringFields) {
-            if (creds[field] !== undefined) {
-                if (typeof creds[field] !== 'string') {
-                    return { valid: false, error: `aiCoreCredentials.${field} must be a string` };
+        if (switches.verbose !== undefined) {
+            if (typeof switches.verbose !== 'boolean') {
+                return { valid: false, error: 'claudeCodeSwitches.verbose must be a boolean' };
+            }
+            result.claudeCodeSwitches.verbose = switches.verbose;
+        }
+
+        if (switches.maxTurns !== undefined) {
+            if (switches.maxTurns !== null && (typeof switches.maxTurns !== 'number' || switches.maxTurns < 1 || !Number.isInteger(switches.maxTurns))) {
+                return { valid: false, error: 'claudeCodeSwitches.maxTurns must be a positive integer or null' };
+            }
+            result.claudeCodeSwitches.maxTurns = switches.maxTurns as number | null;
+        }
+
+        if (switches.maxBudgetUsd !== undefined) {
+            if (switches.maxBudgetUsd !== null && (typeof switches.maxBudgetUsd !== 'number' || switches.maxBudgetUsd < 0)) {
+                return { valid: false, error: 'claudeCodeSwitches.maxBudgetUsd must be a non-negative number or null' };
+            }
+            result.claudeCodeSwitches.maxBudgetUsd = switches.maxBudgetUsd as number | null;
+        }
+
+        if (switches.permissionMode !== undefined) {
+            if (switches.permissionMode !== null) {
+                // Accept both actual Claude CLI values and legacy Claudia values
+                // Claude CLI accepts: acceptEdits, bypassPermissions, default, dontAsk, plan
+                // Legacy Claudia values: plan, safe, dangerous, auto (mapped at build time)
+                const validModes = ['plan', 'safe', 'dangerous', 'auto', 'acceptEdits', 'bypassPermissions', 'default', 'dontAsk'];
+                if (typeof switches.permissionMode !== 'string' || !validModes.includes(switches.permissionMode)) {
+                    return { valid: false, error: `claudeCodeSwitches.permissionMode must be one of: ${validModes.join(', ')} or null` };
                 }
-                (result.aiCoreCredentials as Record<string, unknown>)[field] = creds[field];
             }
+            result.claudeCodeSwitches.permissionMode = switches.permissionMode as string | null;
         }
 
-        if (creds.timeoutMs !== undefined) {
-            if (typeof creds.timeoutMs !== 'number' || creds.timeoutMs < 0) {
-                return { valid: false, error: 'aiCoreCredentials.timeoutMs must be a positive number' };
+        if (switches.allowedTools !== undefined) {
+            if (typeof switches.allowedTools !== 'string') {
+                return { valid: false, error: 'claudeCodeSwitches.allowedTools must be a string' };
             }
-            result.aiCoreCredentials.timeoutMs = creds.timeoutMs;
+            result.claudeCodeSwitches.allowedTools = switches.allowedTools;
         }
-    }
 
-    // Validate sapAiCoreModel (optional string from predefined list)
-    if (payload.sapAiCoreModel !== undefined) {
-        if (typeof payload.sapAiCoreModel !== 'string') {
-            return { valid: false, error: 'sapAiCoreModel must be a string' };
-        }
-        if (!VALID_SAP_AI_CORE_MODELS.includes(payload.sapAiCoreModel as typeof VALID_SAP_AI_CORE_MODELS[number])) {
-            return { valid: false, error: `sapAiCoreModel must be one of: ${VALID_SAP_AI_CORE_MODELS.join(', ')}` };
-        }
-        result.sapAiCoreModel = payload.sapAiCoreModel;
-    }
-
-    // Validate hyperspaceProxy (optional object)
-    if (payload.hyperspaceProxy !== undefined) {
-        if (typeof payload.hyperspaceProxy !== 'object' || payload.hyperspaceProxy === null) {
-            return { valid: false, error: 'hyperspaceProxy must be an object' };
-        }
-        const proxy = payload.hyperspaceProxy as Record<string, unknown>;
-        result.hyperspaceProxy = {};
-
-        if (proxy.proxyUrl !== undefined) {
-            if (typeof proxy.proxyUrl !== 'string') {
-                return { valid: false, error: 'hyperspaceProxy.proxyUrl must be a string' };
+        if (switches.disallowedTools !== undefined) {
+            if (typeof switches.disallowedTools !== 'string') {
+                return { valid: false, error: 'claudeCodeSwitches.disallowedTools must be a string' };
             }
-            result.hyperspaceProxy.proxyUrl = proxy.proxyUrl;
+            result.claudeCodeSwitches.disallowedTools = switches.disallowedTools;
         }
 
-        if (proxy.apiKey !== undefined) {
-            if (typeof proxy.apiKey !== 'string') {
-                return { valid: false, error: 'hyperspaceProxy.apiKey must be a string' };
+        if (switches.appendSystemPrompt !== undefined) {
+            if (typeof switches.appendSystemPrompt !== 'string') {
+                return { valid: false, error: 'claudeCodeSwitches.appendSystemPrompt must be a string' };
             }
-            result.hyperspaceProxy.apiKey = proxy.apiKey;
-        }
-
-        if (proxy.model !== undefined) {
-            if (typeof proxy.model !== 'string') {
-                return { valid: false, error: 'hyperspaceProxy.model must be a string' };
-            }
-            result.hyperspaceProxy.model = proxy.model;
-        }
-
-        if (proxy.alwaysThinkingEnabled !== undefined) {
-            if (typeof proxy.alwaysThinkingEnabled !== 'boolean') {
-                return { valid: false, error: 'hyperspaceProxy.alwaysThinkingEnabled must be a boolean' };
-            }
-            result.hyperspaceProxy.alwaysThinkingEnabled = proxy.alwaysThinkingEnabled;
+            result.claudeCodeSwitches.appendSystemPrompt = switches.appendSystemPrompt;
         }
     }
 
@@ -404,69 +374,4 @@ export function sanitizePrompt(prompt: string): string {
     }
 
     return sanitized;
-}
-
-/**
- * Validates AI Core test credentials
- */
-export interface AICoreTestPayload {
-    clientId: string;
-    clientSecret: string;
-    authUrl: string;
-    baseUrl?: string;
-    resourceGroup?: string;
-    timeoutMs?: number;
-}
-
-/**
- * Validates AI Core credentials for testing
- * @param body - The request body to validate
- * @returns Validation result
- */
-export function validateAICoreCredentials(body: unknown): ValidationResult<AICoreTestPayload> {
-    if (typeof body !== 'object' || body === null) {
-        return { valid: false, error: 'Request body must be an object' };
-    }
-
-    const payload = body as Record<string, unknown>;
-
-    // Required fields
-    if (typeof payload.clientId !== 'string' || !payload.clientId) {
-        return { valid: false, error: 'clientId is required' };
-    }
-    if (typeof payload.clientSecret !== 'string' || !payload.clientSecret) {
-        return { valid: false, error: 'clientSecret is required' };
-    }
-    if (typeof payload.authUrl !== 'string' || !payload.authUrl) {
-        return { valid: false, error: 'authUrl is required' };
-    }
-
-    // Validate URLs
-    try {
-        new URL(payload.authUrl);
-    } catch {
-        return { valid: false, error: 'authUrl must be a valid URL' };
-    }
-
-    if (payload.baseUrl !== undefined) {
-        if (typeof payload.baseUrl !== 'string') {
-            return { valid: false, error: 'baseUrl must be a string' };
-        }
-        try {
-            new URL(payload.baseUrl);
-        } catch {
-            return { valid: false, error: 'baseUrl must be a valid URL' };
-        }
-    }
-
-    const result: AICoreTestPayload = {
-        clientId: payload.clientId,
-        clientSecret: payload.clientSecret,
-        authUrl: payload.authUrl,
-        baseUrl: payload.baseUrl as string | undefined,
-        resourceGroup: typeof payload.resourceGroup === 'string' ? payload.resourceGroup : undefined,
-        timeoutMs: typeof payload.timeoutMs === 'number' ? payload.timeoutMs : undefined
-    };
-
-    return { valid: true, data: result };
 }

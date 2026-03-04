@@ -57,6 +57,9 @@ interface TestConfig {
     testMcpServer: string | null; // Test a specific MCP server by name
     disconnectTask: boolean;      // Disconnect a task
     reconnectTask: boolean;       // Reconnect a task
+    renameTask: boolean;          // Rename a task
+    renameWorkspace: boolean;     // Rename a workspace
+    renameTo: string | null;      // New display name for rename operations
 }
 
 class TestCLI {
@@ -147,6 +150,12 @@ class TestCLI {
                 } else if (this.config.reconnectTask && this.config.taskId) {
                     this.sendReconnectTask(this.config.taskId);
                     setTimeout(() => this.cleanup(), 1000);
+                } else if (this.config.renameTask && this.config.taskId && this.config.renameTo !== null) {
+                    this.sendRenameTask(this.config.taskId, this.config.renameTo);
+                    setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.renameWorkspace && this.config.workspaceId && this.config.renameTo !== null) {
+                    this.sendRenameWorkspace(this.config.workspaceId, this.config.renameTo);
+                    setTimeout(() => this.cleanup(), 2000);
                 } else if (this.config.testClear) {
                     // Test clear functionality
                     console.log('🧪 Testing clear functionality...');
@@ -631,6 +640,36 @@ class TestCLI {
         };
 
         console.log(`Checking if task needs reconnect: setting active ${taskId}...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendRenameTask(taskId: string, displayName: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot rename task: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'task:rename',
+            payload: { taskId, displayName }
+        };
+
+        console.log(`✏️  Renaming task ${taskId} to "${displayName}"...`);
+        this.ws.send(JSON.stringify(message));
+    }
+
+    private sendRenameWorkspace(workspaceId: string, displayName: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot rename workspace: WebSocket not connected');
+            return;
+        }
+
+        const message = {
+            type: 'workspace:rename',
+            payload: { workspaceId, displayName }
+        };
+
+        console.log(`✏️  Renaming workspace ${workspaceId} to "${displayName}"...`);
         this.ws.send(JSON.stringify(message));
     }
 
@@ -1205,6 +1244,9 @@ function parseArgs(): TestConfig {
     let testMcpServer: string | null = null;
     let disconnectTask = false;
     let reconnectTask = false;
+    let renameTask = false;
+    let renameWorkspace = false;
+    let renameTo: string | null = null;
 
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
@@ -1354,6 +1396,15 @@ function parseArgs(): TestConfig {
             case '--reconnect':
                 reconnectTask = true;
                 break;
+            case '--rename-task':
+                renameTask = true;
+                break;
+            case '--rename-workspace':
+                renameWorkspace = true;
+                break;
+            case '--rename-to':
+                renameTo = args[++i];
+                break;
             case '--help':
             case '-h':
                 console.log(`
@@ -1384,6 +1435,11 @@ TASK OPERATIONS:
   --archive-task           Archive a task (requires --task-id)
   --disconnect             Disconnect a task (requires --task-id)
   --reconnect              Reconnect a task (requires --task-id)
+  --rename-task            Rename a task (requires --task-id and --rename-to)
+  --rename-to <name>       New display name for rename operations
+
+WORKSPACE OPERATIONS (rename):
+  --rename-workspace       Rename a workspace (requires --workspace and --rename-to)
 
 ARCHIVED TASK OPERATIONS:
   --list-archived          List all archived tasks
@@ -1489,6 +1545,12 @@ Examples:
 
   # Test Jira MCP server
   npx tsx test-cli.ts --test-mcp-server jira_mcp
+
+  # Rename a task
+  npx tsx test-cli.ts --rename-task --task-id task-123456 --rename-to "My Custom Name"
+
+  # Rename a workspace
+  npx tsx test-cli.ts --rename-workspace -w /path/to/workspace --rename-to "My Project"
                 `);
                 process.exit(0);
         }
@@ -1547,6 +1609,9 @@ Examples:
         testMcpServer,
         disconnectTask,
         reconnectTask,
+        renameTask,
+        renameWorkspace,
+        renameTo,
     };
 }
 

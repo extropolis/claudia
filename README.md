@@ -26,14 +26,7 @@ A web-based UI for managing multiple Claude Code CLI instances simultaneously. C
 
 - **Node.js** 18+
 - **npm** 9+
-- **Claude Code CLI** - See Step 1 below
-- **HAI CLI** - Required for Hyperspace AI Proxy (production-approved)
-
-## Intro Video
-**[Click to view](https://sapnam-my.sharepoint.com/:v:/g/personal/lance_hughes_sap_com/IQBjFLcg7j2SSpd7WekKAY3JAenz99GB5Rha_YVVrnZNH3s?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=C08ugl)**
-
-## Installation View
-**[Click to view](https://sapnam-my.sharepoint.com/:v:/g/personal/lance_hughes_sap_com/IQBtdF4W_RhQRpFhtdsj94sWAUVO7GvONyEgYiDH0vfREEs?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=NBLmS1))**
+- **Claude Code CLI** - Install first (see below)
 
 ## Step 1: Install Claude Code CLI
 
@@ -47,31 +40,29 @@ curl -fsSL https://claude.ai/install.sh | bash
 irm https://claude.ai/install.ps1 | iex
 ```
 
-## Step 2: Install HAI CLI
+## Step 2: Install Claudia
 
-Follow the official installation guide: **[Hyperspace CLI Installation](https://pages.github.tools.sap/hAIperspace/hai-docs/llm-proxy/installation/cli/#__tabbed_1_1)**
+**macOS / Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/extropolis/claudia/main/install.sh | bash
+```
 
-## Step 3: Configure Hyperspace AI Proxy
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/extropolis/claudia/main/install.ps1 | iex
+```
 
-> **Note:** Hyperspace AI Proxy is the only production-approved method for using Claude at SAP.
+**Or install directly via npm:**
+```bash
+npm install -g @extropolis/claudia
+```
 
-1. Configure Claude Code for the HAI proxy:
-   ```bash
-   hai configure claude-code
-   ```
-
-2. Start the proxy:
-   ```bash
-   hai proxy start
-   ```
-
-3. Copy the API key displayed in the proxy window — you'll need it for Claudia settings.
-
-## Step 4: Install Claudia
+<details>
+<summary>Manual installation (from source)</summary>
 
 ```bash
 # Clone the repository
-git clone https://github.concur.com/ai-experiments/claudia.git
+git clone https://github.com/extropolis/claudia.git
 cd claudia
 
 # Install dependencies
@@ -84,10 +75,17 @@ npm install node-pty@1.2.0-beta.11  # only if v25+
 # Build the shared types package (required before first run)
 npm run build -w shared
 ```
+</details>
 
-## Step 5: Running the App
+## Step 3: Running the App
 
 ### Quick Start
+
+```bash
+claudia
+```
+
+Or if running from a cloned repo:
 
 **macOS / Linux:**
 ```bash
@@ -111,7 +109,19 @@ Access the UI at **http://localhost:5173**
 To run as a standalone desktop application:
 
 ```bash
-npm run dev:electron
+claudia electron
+```
+
+Or if running from a cloned repo:
+
+**macOS / Linux:**
+```bash
+./start-electron.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+.\start-electron.ps1
 ```
 
 To build distributable packages:
@@ -127,23 +137,8 @@ npm run package:linux    # Linux
 
 On first launch, the Settings panel will open automatically:
 
-1. Select **Hyperspace AI Proxy** as your provider
-2. Paste the API key from Step 3 into the API Key field
-3. Choose a model (e.g., Claude 4.5 Sonnet)
-
-### SAP AI Core Setup (Alternative - Non-Production)
-
-> **Note:** SAP AI Core is available for development/testing but is **not approved for production use**. Use Hyperspace AI Proxy for production workloads.
-
-If you need to use SAP AI Core instead, enter your credentials (ask in [@ask-ai-blueprint](https://sap.slack.com/channels/ask-ai-blueprint) Slack channel):
-
-1. **Auth URL** — your SAP authentication endpoint
-2. **Client ID** and **Client Secret**
-3. **Base URL** — your AI Core API endpoint
-4. Choose a model (e.g., Claude 4.5 Sonnet)
-
-Claudia runs an embedded proxy that translates Anthropic API calls into SAP AI Core requests.
-
+1. Enter your **Anthropic API Key**
+2. Choose a model (e.g., Claude 4.5 Sonnet)
 
 ## Usage
 
@@ -255,7 +250,7 @@ claudia/
 │   │   ├── backends/              # Pluggable backend implementations
 │   │   │   ├── claude-code-backend.ts  # Claude Code CLI (PTY)
 │   │   │   └── opencode-backend.ts     # OpenCode HTTP API
-│   │   ├── anthropic-proxy/       # SAP AI Core proxy (Bedrock)
+│   │   ├── anthropic-proxy/       # Anthropic API proxy
 │   │   └── hyperspace-proxy/      # Hyperspace AI Proxy integration
 │   ├── hooks/                     # Claude Code lifecycle hooks
 │   └── __tests__/                 # Unit tests (Vitest)
@@ -290,9 +285,14 @@ claudia/
 └── package.json           # Monorepo root config
 ```
 
+## License
+
+MIT - see [LICENSE](LICENSE) for details.
+
+## Contributing
+
+Contributions are welcome! Please open an issue or submit a pull request on [GitHub](https://github.com/extropolis/claudia).
+
 ## Support
 
-If you have any issues or questions:
-
-- **Email**: lance.hughes@sap.com
-- **Slack**: [#claudia-support](https://sap.slack.com/channels/claudia-support)
+If you have any issues or questions, please [open an issue](https://github.com/extropolis/claudia/issues).

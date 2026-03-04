@@ -13,11 +13,9 @@ import { WorkspaceStore } from './workspace-store.js';
 import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
-import { createAnthropicProxy, AnthropicProxyConfig } from './anthropic-proxy/index.js';
-import { createHyperspaceProxy } from './hyperspace-proxy/index.js';
 import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, PORTS } from '@claudia/shared';
-import { validateConfigUpdate, validateWorkspacePath, validateAICoreCredentials } from './validation.js';
+import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
@@ -42,6 +40,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'task:reconnect',
     'task:revert',
     'task:restore',
+    'task:rename',
     'task:archived:list',
     'task:archived:restore',
     'task:archived:continue',
@@ -49,6 +48,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:create',
     'workspace:delete',
     'workspace:reorder',
+    'workspace:rename',
     'workspace:openFolder',
     'workspace:openTerminal',
     'workspace:systemPrompt:get',
@@ -134,7 +134,7 @@ export async function createApp(basePath?: string) {
         }
 
         // Let API routes, WebSocket upgrade, and /mobile (legacy) pass through
-        if (req.path.startsWith('/api/') || req.path.startsWith('/hyperspace')) {
+        if (req.path.startsWith('/api/')) {
             return next();
         }
 
@@ -162,50 +162,6 @@ export async function createApp(basePath?: string) {
     // Initialize LLM service with config store so it can use the correct model
     const { initializeLLMService } = await import('./llm-service.js');
     initializeLLMService(configStore);
-
-    // Mount Anthropic Proxy based on API mode
-    const apiMode = configStore.getApiMode();
-    const aiCoreCredentials = configStore.getAICoreCredentials();
-
-    // Store proxy instance for cache management
-    let currentProxyInstance: ReturnType<typeof createAnthropicProxy> | null = null;
-
-    // Always mount the Hyperspace proxy - it reads config on each request
-    // so it works as soon as the user sets apiMode to hyperspace-proxy
-    console.log('[Server] Mounting Hyperspace proxy at /hyperspace');
-    const hyperspaceProxyInstance = createHyperspaceProxy(configStore);
-    app.use('/hyperspace', hyperspaceProxyInstance.router);
-
-    // Check for env var override (legacy support)
-    const envConfigured = process.env.SAP_AICORE_CLIENT_ID && process.env.SAP_AICORE_CLIENT_SECRET;
-
-    if (apiMode === 'sap-ai-core' && aiCoreCredentials?.clientId) {
-        // Use credentials from config store
-        console.log('[Server] API mode: sap-ai-core (from config), mounting Anthropic proxy');
-        currentProxyInstance = createAnthropicProxy({
-            clientId: aiCoreCredentials.clientId,
-            clientSecret: aiCoreCredentials.clientSecret,
-            authUrl: aiCoreCredentials.authUrl,
-            baseUrl: aiCoreCredentials.baseUrl,
-            resourceGroup: aiCoreCredentials.resourceGroup || 'default',
-            requestTimeoutMs: aiCoreCredentials.timeoutMs || 120000
-        });
-        app.use('/', currentProxyInstance.router);
-    } else if (envConfigured) {
-        // Legacy: env vars override for SAP AI Core
-        console.log('[Server] SAP AI Core configured via env vars, mounting Anthropic proxy');
-        currentProxyInstance = createAnthropicProxy({
-            clientId: process.env.SAP_AICORE_CLIENT_ID!,
-            clientSecret: process.env.SAP_AICORE_CLIENT_SECRET!,
-            authUrl: process.env.SAP_AICORE_AUTH_URL || '',
-            baseUrl: process.env.SAP_AICORE_BASE_URL || '',
-            resourceGroup: process.env.SAP_AICORE_RESOURCE_GROUP || 'default',
-            requestTimeoutMs: parseInt(process.env.SAP_AICORE_TIMEOUT_MS || '120000', 10)
-        });
-        app.use('/', currentProxyInstance.router);
-    } else {
-        console.log(`[Server] API mode: ${apiMode}, Anthropic proxy not mounted`);
-    }
 
     // Initialize remaining services
     const taskSpawner = new TaskSpawner(undefined, true, configStore);
@@ -688,6 +644,17 @@ export async function createApp(basePath?: string) {
                         break;
                     }
 
+                    case 'task:rename': {
+                        // Rename a task (set displayName)
+                        const { taskId, displayName } = payload as { taskId?: string; displayName?: string };
+                        if (!taskId || displayName === undefined) break;
+                        const renamed = taskSpawner.renameTask(taskId, displayName);
+                        if (renamed) {
+                            broadcast({ type: 'task:stateChanged' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
+                        }
+                        break;
+                    }
+
                     case 'task:reconnect': {
                         // Reconnect to a disconnected task
                         const { taskId } = payload as { taskId?: string };
@@ -832,6 +799,17 @@ export async function createApp(basePath?: string) {
                             // Broadcast updated workspace list to all clients
                             const workspaces = workspaceStore.getWorkspaces();
                             broadcast({ type: 'workspace:reordered' as WSMessageType, payload: { workspaces } });
+                        }
+                        break;
+                    }
+
+                    case 'workspace:rename': {
+                        // Rename a workspace (set displayName)
+                        const { workspaceId, displayName } = payload as { workspaceId?: string; displayName?: string };
+                        if (!workspaceId || displayName === undefined) break;
+                        if (workspaceStore.renameWorkspace(workspaceId, displayName)) {
+                            const workspaces = workspaceStore.getWorkspaces();
+                            broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
                         }
                         break;
                     }
@@ -1439,68 +1417,6 @@ export async function createApp(basePath?: string) {
 
     // Config API routes
 
-    // Validate SAP AI Core credentials without saving them
-    app.post('/api/config/validate-aicore', async (req, res) => {
-        try {
-            const { aiCoreCredentials } = req.body;
-
-            if (!aiCoreCredentials) {
-                return res.status(400).json({ error: 'aiCoreCredentials required' });
-            }
-
-            // Validate required fields
-            if (!aiCoreCredentials.clientId || !aiCoreCredentials.clientSecret ||
-                !aiCoreCredentials.authUrl || !aiCoreCredentials.baseUrl) {
-                return res.status(400).json({
-                    error: 'Missing required fields',
-                    details: 'clientId, clientSecret, authUrl, and baseUrl are required'
-                });
-            }
-
-            logger.info('Validating SAP AI Core credentials');
-
-            // Create temporary proxy to test credentials
-            const tempProxy = createAnthropicProxy({
-                clientId: aiCoreCredentials.clientId,
-                clientSecret: aiCoreCredentials.clientSecret,
-                authUrl: aiCoreCredentials.authUrl,
-                baseUrl: aiCoreCredentials.baseUrl,
-                resourceGroup: aiCoreCredentials.resourceGroup || 'default',
-                requestTimeoutMs: aiCoreCredentials.timeoutMs || 120000
-            });
-
-            // Attempt to validate
-            const validationResult = await tempProxy.tokenProvider.validateCredentials();
-
-            if (!validationResult.valid) {
-                logger.warn('SAP AI Core credential validation failed', { error: validationResult.error });
-                return res.status(401).json({
-                    valid: false,
-                    error: validationResult.error
-                });
-            }
-
-            // Also try to list models to ensure full access
-            try {
-                await tempProxy.deploymentCatalog.getModels();
-                logger.info('SAP AI Core credentials validated successfully');
-                res.json({ valid: true, message: 'Credentials are valid and can access deployments' });
-            } catch (error: any) {
-                logger.warn('Credentials valid but cannot list deployments', { error: error.message });
-                res.json({
-                    valid: true,
-                    warning: 'Credentials are valid but could not list deployments. You may need to check permissions or resource group.'
-                });
-            }
-        } catch (error: any) {
-            logger.error('Credential validation error', { error: error.message });
-            res.status(500).json({
-                valid: false,
-                error: 'Validation failed: ' + error.message
-            });
-        }
-    });
-
     app.get('/api/config', async (_req, res) => {
         // If rules are empty, try to sync from CLAUDE.md files
         const config = configStore.getConfig();
@@ -1512,32 +1428,11 @@ export async function createApp(basePath?: string) {
                     console.log(`[Server] Syncing rules from ${workspace.id}/CLAUDE.md to config`);
                     configStore.updateConfig({ rules });
                     const updatedConfig = configStore.getConfig();
-                    // Add aiCoreConfigured flag based on env vars (takes precedence over config file)
-                    const aiCoreConfiguredFromEnv = !!(
-                        process.env.SAP_AICORE_CLIENT_ID &&
-                        process.env.SAP_AICORE_CLIENT_SECRET
-                    );
-                    return res.json({ ...updatedConfig, aiCoreConfiguredFromEnv });
+                    return res.json(updatedConfig);
                 }
             }
         }
-        // Add aiCoreConfigured flag and populate from env vars if not in config
-        const aiCoreConfiguredFromEnv = !!(
-            process.env.SAP_AICORE_CLIENT_ID &&
-            process.env.SAP_AICORE_CLIENT_SECRET
-        );
-        // If no credentials in config but have env vars, populate from env
-        const aiCoreCredentials = config.aiCoreCredentials?.clientId
-            ? config.aiCoreCredentials
-            : (aiCoreConfiguredFromEnv ? {
-                clientId: process.env.SAP_AICORE_CLIENT_ID || '',
-                clientSecret: process.env.SAP_AICORE_CLIENT_SECRET || '',
-                authUrl: process.env.SAP_AICORE_AUTH_URL || '',
-                baseUrl: process.env.SAP_AICORE_BASE_URL || '',
-                resourceGroup: process.env.SAP_AICORE_RESOURCE_GROUP || 'default',
-                timeoutMs: parseInt(process.env.SAP_AICORE_TIMEOUT_MS || '120000', 10)
-            } : undefined);
-        res.json({ ...config, aiCoreCredentials, aiCoreConfiguredFromEnv });
+        res.json(config);
     });
 
     app.put('/api/config', async (req, res) => {
@@ -1560,48 +1455,6 @@ export async function createApp(basePath?: string) {
             if (newBackend && newBackend !== currentBackend) {
                 logger.info('Backend config changed, switching task spawner backend', { from: currentBackend, to: newBackend });
                 await taskSpawner.switchBackend(newBackend);
-            }
-
-            // If SAP AI Core credentials changed, validate and clear cache
-            if (validation.data!.aiCoreCredentials !== undefined) {
-                logger.info('SAP AI Core credentials changed, validating and clearing cache');
-
-                const newCredentials = validation.data!.aiCoreCredentials;
-                if (newCredentials) {
-                    const proxyConfig: AnthropicProxyConfig = {
-                        clientId: newCredentials.clientId || '',
-                        clientSecret: newCredentials.clientSecret || '',
-                        authUrl: newCredentials.authUrl || '',
-                        baseUrl: newCredentials.baseUrl || '',
-                        resourceGroup: newCredentials.resourceGroup || 'default',
-                        requestTimeoutMs: newCredentials.timeoutMs || 120000
-                    };
-
-                    // Create temporary proxy instance to validate credentials
-                    const tempProxy = createAnthropicProxy(proxyConfig);
-
-                    // Validate credentials
-                    const validationResult = await tempProxy.tokenProvider.validateCredentials();
-                    if (!validationResult.valid) {
-                        logger.error('Invalid SAP AI Core credentials', { error: validationResult.error });
-                        return res.status(400).json({
-                            error: 'Invalid SAP AI Core credentials',
-                            details: validationResult.error
-                        });
-                    }
-                    logger.info('SAP AI Core credentials validated successfully');
-
-                    // Update config on existing proxy so it uses the new credentials
-                    if (currentProxyInstance) {
-                        logger.info('Updating proxy config with new credentials');
-                        currentProxyInstance.updateConfig(proxyConfig);
-                    } else {
-                        // No proxy mounted yet — create and mount one
-                        logger.info('No proxy mounted yet, creating new proxy with credentials');
-                        currentProxyInstance = createAnthropicProxy(proxyConfig);
-                        app.use('/', currentProxyInstance.router);
-                    }
-                }
             }
 
             // If rules were updated, sync to all workspace CLAUDE.md files
@@ -2018,384 +1871,6 @@ export async function createApp(basePath?: string) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
             logger.error(`MCP test failed for ${server.name}`, { error: error instanceof Error ? error.message : String(error) });
             return res.json({ success: false, error: errorMessage });
-        }
-    });
-
-    // Test AI Core credentials endpoint
-    app.post('/api/aicore/test', async (req, res) => {
-        try {
-            const { clientId, clientSecret, authUrl, baseUrl, resourceGroup, timeoutMs } = req.body;
-
-            if (!clientId || !clientSecret || !authUrl) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Missing required credentials (clientId, clientSecret, authUrl)'
-                });
-            }
-
-            // Test by obtaining an access token
-            const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-            const tokenUrl = `${authUrl}/oauth/token?grant_type=client_credentials`;
-
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), timeoutMs || 30000);
-
-            try {
-                const tokenResponse = await fetch(tokenUrl, {
-                    method: 'POST',
-                    headers: {
-                        Authorization: `Basic ${credentials}`,
-                        'Content-Type': 'application/x-www-form-urlencoded'
-                    },
-                    signal: controller.signal
-                });
-
-                clearTimeout(timeout);
-
-                if (!tokenResponse.ok) {
-                    const errorText = await tokenResponse.text();
-                    return res.json({
-                        success: false,
-                        error: `Authentication failed: ${tokenResponse.status} - ${errorText}`
-                    });
-                }
-
-                const tokenData = await tokenResponse.json();
-                if (!tokenData.access_token) {
-                    return res.json({
-                        success: false,
-                        error: 'Invalid token response from auth server'
-                    });
-                }
-
-                // If baseUrl is provided, also test the AI Core API endpoint
-                if (baseUrl) {
-                    const apiUrl = `${baseUrl}/v2/lm/deployments?$top=1`;
-                    const apiResponse = await fetch(apiUrl, {
-                        headers: {
-                            Authorization: `Bearer ${tokenData.access_token}`,
-                            'AI-Resource-Group': resourceGroup || 'default'
-                        }
-                    });
-
-                    if (!apiResponse.ok) {
-                        return res.json({
-                            success: false,
-                            error: `API access failed: ${apiResponse.status} - Unable to access AI Core API`
-                        });
-                    }
-                }
-
-                res.json({
-                    success: true,
-                    message: baseUrl
-                        ? 'Successfully authenticated and connected to AI Core API'
-                        : 'Successfully authenticated with SAP AI Core'
-                });
-
-            } catch (fetchError: unknown) {
-                clearTimeout(timeout);
-                if (fetchError instanceof Error && fetchError.name === 'AbortError') {
-                    return res.json({
-                        success: false,
-                        error: 'Connection timeout - unable to reach auth server'
-                    });
-                }
-                const message = fetchError instanceof Error ? fetchError.message : String(fetchError);
-                return res.json({
-                    success: false,
-                    error: `Connection error: ${message}`
-                });
-            }
-        } catch (error: unknown) {
-            console.error('[Server] Error testing AI Core credentials:', error);
-            const message = error instanceof Error ? error.message : String(error);
-            res.status(500).json({
-                success: false,
-                error: `Server error: ${message}`
-            });
-        }
-    });
-
-    // Fetch live deployments/models from SAP AI Core
-    app.get('/api/aicore/models', async (_req, res) => {
-        try {
-            const config = configStore.getConfig();
-            const creds = config.aiCoreCredentials?.clientId
-                ? config.aiCoreCredentials
-                : (process.env.SAP_AICORE_CLIENT_ID && process.env.SAP_AICORE_CLIENT_SECRET ? {
-                    clientId: process.env.SAP_AICORE_CLIENT_ID,
-                    clientSecret: process.env.SAP_AICORE_CLIENT_SECRET,
-                    authUrl: process.env.SAP_AICORE_AUTH_URL || '',
-                    baseUrl: process.env.SAP_AICORE_BASE_URL || '',
-                    resourceGroup: process.env.SAP_AICORE_RESOURCE_GROUP || 'default',
-                    timeoutMs: parseInt(process.env.SAP_AICORE_TIMEOUT_MS || '120000', 10)
-                } : null);
-
-            if (!creds?.clientId || !creds?.clientSecret || !creds?.authUrl || !creds?.baseUrl) {
-                return res.status(400).json({ success: false, error: 'No AI Core credentials configured' });
-            }
-
-            logger.info('Fetching AI Core models list');
-            const tempProxy = createAnthropicProxy({
-                clientId: creds.clientId,
-                clientSecret: creds.clientSecret,
-                authUrl: creds.authUrl,
-                baseUrl: creds.baseUrl,
-                resourceGroup: creds.resourceGroup || 'default',
-                requestTimeoutMs: creds.timeoutMs || 120000
-            });
-
-            const modelsResponse = await tempProxy.deploymentCatalog.getModels();
-            // Also get raw deployments for more detail
-            const rawDeployments = await tempProxy.deploymentCatalog.getAvailableDeployments();
-
-            // Build a labeled model list from raw deployments (internal names)
-            const seen = new Set<string>();
-            const models: { value: string; label: string }[] = [];
-            for (const d of rawDeployments) {
-                const internalName: string = (d as any).details?.resources?.backendDetails?.model?.name;
-                if (internalName && !seen.has(internalName)) {
-                    seen.add(internalName);
-                    // Create a human-readable label from the internal name
-                    const label = internalName
-                        .replace('anthropic--claude-', 'Claude ')
-                        .replace(/-/g, ' ')
-                        .replace(/\b\w/g, (c: string) => c.toUpperCase())
-                        .replace(/\./g, '.');
-                    models.push({ value: internalName, label });
-                }
-            }
-
-            logger.info(`Returning ${models.length} AI Core models`);
-            res.json({ success: true, models, rawCount: rawDeployments.length });
-        } catch (error: unknown) {
-            logger.error('Failed to fetch AI Core models', { error });
-            const message = error instanceof Error ? error.message : String(error);
-            res.status(500).json({ success: false, error: `Failed to fetch models: ${message}` });
-        }
-    });
-
-    // Test a specific AI Core model by sending a simple prompt
-    app.post('/api/aicore/test-model', async (req, res) => {
-        try {
-            const { model } = req.body;
-            if (!model) {
-                return res.status(400).json({ success: false, error: 'Model name required' });
-            }
-
-            const config = configStore.getConfig();
-            const creds = config.aiCoreCredentials?.clientId
-                ? config.aiCoreCredentials
-                : (process.env.SAP_AICORE_CLIENT_ID && process.env.SAP_AICORE_CLIENT_SECRET ? {
-                    clientId: process.env.SAP_AICORE_CLIENT_ID,
-                    clientSecret: process.env.SAP_AICORE_CLIENT_SECRET,
-                    authUrl: process.env.SAP_AICORE_AUTH_URL || '',
-                    baseUrl: process.env.SAP_AICORE_BASE_URL || '',
-                    resourceGroup: process.env.SAP_AICORE_RESOURCE_GROUP || 'default',
-                    timeoutMs: parseInt(process.env.SAP_AICORE_TIMEOUT_MS || '120000', 10)
-                } : null);
-
-            if (!creds?.clientId || !creds?.clientSecret || !creds?.authUrl || !creds?.baseUrl) {
-                return res.status(400).json({ success: false, error: 'No AI Core credentials configured' });
-            }
-
-            logger.info('Testing AI Core model', { model });
-            const tempProxy = createAnthropicProxy({
-                clientId: creds.clientId,
-                clientSecret: creds.clientSecret,
-                authUrl: creds.authUrl,
-                baseUrl: creds.baseUrl,
-                resourceGroup: creds.resourceGroup || 'default',
-                requestTimeoutMs: creds.timeoutMs || 30000 // Shorter timeout for test
-            });
-
-            // Find the deployment for this model
-            const deployment = await tempProxy.deploymentCatalog.findDeploymentFor(model);
-            if (!deployment) {
-                return res.status(404).json({ success: false, error: `No deployment found for model: ${model}` });
-            }
-
-            // Get access token
-            const accessToken = await tempProxy.tokenProvider.getValidToken();
-
-            // Send a simple test message
-            const invokeUrl = `${creds.baseUrl}/v2/inference/deployments/${deployment.id}/invoke`;
-            const testPayload = {
-                anthropic_version: 'bedrock-2023-05-31',
-                max_tokens: 150,
-                messages: [
-                    { role: 'user', content: 'What model are you? Please respond briefly with just your model name/version.' }
-                ]
-            };
-
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 30000);
-
-            try {
-                const response = await fetch(invokeUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${accessToken}`,
-                        'Content-Type': 'application/json',
-                        'AI-Resource-Group': creds.resourceGroup || 'default'
-                    },
-                    body: JSON.stringify(testPayload),
-                    signal: controller.signal
-                });
-
-                clearTimeout(timeout);
-
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    logger.warn('Model test failed', { status: response.status, error: errorText });
-                    return res.json({ success: false, error: `Model returned ${response.status}: ${errorText.slice(0, 200)}` });
-                }
-
-                const result = await response.json() as { content?: Array<{ type: string; text?: string }> };
-                const textContent = result.content?.find((c: { type: string }) => c.type === 'text');
-                const responseText = textContent?.text || JSON.stringify(result);
-
-                logger.info('Model test successful', { model, response: responseText.slice(0, 100) });
-                res.json({ success: true, response: responseText, deploymentId: deployment.id });
-            } catch (fetchError: any) {
-                clearTimeout(timeout);
-                if (fetchError.name === 'AbortError') {
-                    return res.json({ success: false, error: 'Request timed out after 30 seconds' });
-                }
-                throw fetchError;
-            }
-        } catch (error: unknown) {
-            logger.error('Failed to test AI Core model', { error });
-            const message = error instanceof Error ? error.message : String(error);
-            res.status(500).json({ success: false, error: `Test failed: ${message}` });
-        }
-    });
-
-    // Fetch models from Hyperspace AI Proxy (proxied to avoid CORS)
-    app.post('/api/hyperspace/models', async (req, res) => {
-        try {
-            const { proxyUrl, apiKey } = req.body;
-
-            if (!proxyUrl || !apiKey) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Missing proxyUrl or apiKey'
-                });
-            }
-
-            // Build the models endpoint URL
-            let baseUrl = proxyUrl;
-            if (!baseUrl.endsWith('/')) baseUrl += '/';
-            if (!baseUrl.includes('anthropic')) baseUrl += 'anthropic/';
-            const modelsUrl = `${baseUrl}v1/models`;
-
-            const response = await fetch(modelsUrl, {
-                headers: {
-                    'x-api-key': apiKey
-                }
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                res.json({ success: true, data });
-            } else {
-                const errorText = await response.text();
-                res.json({
-                    success: false,
-                    error: `Failed to fetch models: ${response.status} - ${errorText}`
-                });
-            }
-        } catch (error: unknown) {
-            console.error('[Server] Error fetching Hyperspace models:', error);
-            const message = error instanceof Error ? error.message : String(error);
-            res.status(500).json({
-                success: false,
-                error: `Server error: ${message}`
-            });
-        }
-    });
-
-    // ============================================================
-    // Embeddings API - proxies to SAP AI Core for vector embeddings
-    // ============================================================
-    app.post('/v1/embeddings', async (req, res) => {
-        try {
-            const { input, model } = req.body;
-
-            if (!input) {
-                return res.status(400).json({ error: 'Missing input text' });
-            }
-
-            // Get AI Core credentials
-            const credentials = configStore.getAICoreCredentials();
-            if (!credentials?.clientId || !credentials?.clientSecret) {
-                return res.status(400).json({ error: 'SAP AI Core credentials not configured' });
-            }
-
-            // Get access token
-            const tokenUrl = `${credentials.authUrl}/oauth/token?grant_type=client_credentials`;
-            const basicAuth = Buffer.from(`${credentials.clientId}:${credentials.clientSecret}`).toString('base64');
-
-            const tokenResponse = await fetch(tokenUrl, {
-                method: 'POST',
-                headers: {
-                    Authorization: `Basic ${basicAuth}`,
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }
-            });
-
-            if (!tokenResponse.ok) {
-                return res.status(500).json({ error: 'Failed to get AI Core token' });
-            }
-
-            const tokenData = await tokenResponse.json() as { access_token: string };
-
-            // Find the text-embedding-ada-002 deployment
-            const deploymentsUrl = `${credentials.baseUrl}/v2/lm/deployments`;
-            const deploymentsResponse = await fetch(deploymentsUrl, {
-                headers: {
-                    Authorization: `Bearer ${tokenData.access_token}`,
-                    'AI-Resource-Group': credentials.resourceGroup || 'default'
-                }
-            });
-
-            if (!deploymentsResponse.ok) {
-                return res.status(500).json({ error: 'Failed to get deployments' });
-            }
-
-            const deploymentsData = await deploymentsResponse.json() as { resources: any[] };
-            const embeddingDeployment = deploymentsData.resources?.find((d: any) =>
-                d.status === 'RUNNING' &&
-                d.details?.resources?.backendDetails?.model?.name === 'text-embedding-ada-002'
-            );
-
-            if (!embeddingDeployment) {
-                return res.status(400).json({ error: 'No text-embedding-ada-002 deployment found' });
-            }
-
-            // Call the embeddings endpoint
-            const embeddingsUrl = `${credentials.baseUrl}/v2/inference/deployments/${embeddingDeployment.id}/embeddings?api-version=2024-02-01`;
-            const embeddingsResponse = await fetch(embeddingsUrl, {
-                method: 'POST',
-                headers: {
-                    Authorization: `Bearer ${tokenData.access_token}`,
-                    'Content-Type': 'application/json',
-                    'AI-Resource-Group': credentials.resourceGroup || 'default'
-                },
-                body: JSON.stringify({ input })
-            });
-
-            if (!embeddingsResponse.ok) {
-                const errorText = await embeddingsResponse.text();
-                return res.status(500).json({ error: `Embeddings request failed: ${errorText}` });
-            }
-
-            const embeddingsData = await embeddingsResponse.json();
-            res.json(embeddingsData);
-        } catch (error) {
-            logger.error('Embeddings API error', { error: error instanceof Error ? error.message : String(error) });
-            res.status(500).json({ error: 'Failed to generate embeddings' });
         }
     });
 

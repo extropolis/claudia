@@ -2,9 +2,29 @@
   "name": "@extropolis/claudia",
   "productName": "Claudia",
   "version": "0.1.0",
-  "description": "Multi-instance Claudia orchestrator web UI",
+  "description": "Multi-instance Claude Code orchestrator web UI",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/extropolis/claudia.git"
+  },
+  "homepage": "https://github.com/extropolis/claudia",
+  "bugs": {
+    "url": "https://github.com/extropolis/claudia/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "orchestrator",
+    "ai",
+    "terminal",
+    "electron"
+  ],
   "type": "module",
   "main": "dist-electron/main.js",
+  "bin": {
+    "claudia": "bin/claudia.mjs"
+  },
   "workspaces": [
     "backend",
     "frontend",
@@ -23,7 +43,8 @@
     "package:mac": "npm run build && electron-builder --mac",
     "package:win": "npm run build && electron-builder --win",
     "package:linux": "npm run build && electron-builder --linux",
-    "start": "./start.sh",
+    "postinstall": "npm run build -w shared && npm run build:backend",
+    "start": "./start-electron.sh",
     "test": "npm run test:backend && npm run test:frontend",
     "test:backend": "npm test -w backend",
     "test:frontend": "npm test -w frontend",

@@ -537,6 +537,15 @@ export function useWebSocket() {
         sendMessage('git:push', { workspaceId });
     }, [sendMessage]);
 
+    // Rename actions
+    const renameTask = useCallback((taskId: string, displayName: string) => {
+        sendMessage('task:rename', { taskId, displayName });
+    }, [sendMessage]);
+
+    const renameWorkspace = useCallback((workspaceId: string, displayName: string) => {
+        sendMessage('workspace:rename', { workspaceId, displayName });
+    }, [sendMessage]);
+
     return {
         createTask,
         selectTaskOnServer,
@@ -566,6 +575,8 @@ export function useWebSocket() {
         deleteArchivedTask,
         continueArchivedTask,
         pushToGithub,
+        renameTask,
+        renameWorkspace,
         wsRef
     };
 }

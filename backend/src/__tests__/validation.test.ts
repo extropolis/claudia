@@ -6,7 +6,6 @@ import {
     validateConfigUpdate,
     validateWorkspacePath,
     sanitizePrompt,
-    validateAICoreCredentials,
 } from '../validation.js';
 
 describe('validateConfigUpdate', () => {
@@ -72,7 +71,6 @@ describe('validateConfigUpdate', () => {
     it('should validate apiMode enum', () => {
         expect(validateConfigUpdate({ apiMode: 'default' }).valid).toBe(true);
         expect(validateConfigUpdate({ apiMode: 'custom-anthropic' }).valid).toBe(true);
-        expect(validateConfigUpdate({ apiMode: 'sap-ai-core' }).valid).toBe(true);
         expect(validateConfigUpdate({ apiMode: 'invalid' }).valid).toBe(false);
         expect(validateConfigUpdate({ apiMode: 'invalid' }).error).toContain('apiMode must be one of');
     });
@@ -82,8 +80,10 @@ describe('validateConfigUpdate', () => {
         expect(validateConfigUpdate({ customAnthropicApiKey: 123 }).valid).toBe(false);
     });
 
-    it('should validate apiMode includes hyperspace-proxy', () => {
-        expect(validateConfigUpdate({ apiMode: 'hyperspace-proxy' }).valid).toBe(true);
+    it('should validate apiMode values', () => {
+        expect(validateConfigUpdate({ apiMode: 'default' }).valid).toBe(true);
+        expect(validateConfigUpdate({ apiMode: 'custom-anthropic' }).valid).toBe(true);
+        expect(validateConfigUpdate({ apiMode: 'hyperspace-proxy' }).valid).toBe(false);
     });
 
     it('should validate backend enum', () => {
@@ -103,51 +103,6 @@ describe('validateConfigUpdate', () => {
         expect(validateConfigUpdate({ opencodePort: 65536 }).valid).toBe(false);
         expect(validateConfigUpdate({ opencodePort: 'not-a-number' }).valid).toBe(false);
         expect(validateConfigUpdate({ opencodePort: 'not-a-number' }).error).toContain('opencodePort must be a number');
-    });
-
-    it('should validate sapAiCoreModel enum', () => {
-        expect(validateConfigUpdate({ sapAiCoreModel: 'anthropic--claude-4.6-opus' }).valid).toBe(true);
-        expect(validateConfigUpdate({ sapAiCoreModel: 'anthropic--claude-3.5-sonnet' }).valid).toBe(true);
-        expect(validateConfigUpdate({ sapAiCoreModel: 'anthropic--claude-3.5-haiku' }).valid).toBe(true);
-        expect(validateConfigUpdate({ sapAiCoreModel: 'invalid-model' }).valid).toBe(false);
-        expect(validateConfigUpdate({ sapAiCoreModel: 'invalid-model' }).error).toContain('sapAiCoreModel must be one of');
-        expect(validateConfigUpdate({ sapAiCoreModel: 123 }).valid).toBe(false);
-        expect(validateConfigUpdate({ sapAiCoreModel: 123 }).error).toBe('sapAiCoreModel must be a string');
-    });
-
-    it('should validate hyperspaceProxy object', () => {
-        // Valid proxy config
-        expect(validateConfigUpdate({
-            hyperspaceProxy: {
-                proxyUrl: 'http://localhost:6655',
-                apiKey: 'test-key',
-                model: 'anthropic--claude-4.5-sonnet',
-                alwaysThinkingEnabled: true
-            }
-        }).valid).toBe(true);
-
-        // Invalid - not an object
-        expect(validateConfigUpdate({ hyperspaceProxy: 'invalid' }).valid).toBe(false);
-        expect(validateConfigUpdate({ hyperspaceProxy: 'invalid' }).error).toBe('hyperspaceProxy must be an object');
-
-        // Invalid - null
-        expect(validateConfigUpdate({ hyperspaceProxy: null }).valid).toBe(false);
-
-        // Invalid field types
-        expect(validateConfigUpdate({ hyperspaceProxy: { proxyUrl: 123 } }).valid).toBe(false);
-        expect(validateConfigUpdate({ hyperspaceProxy: { proxyUrl: 123 } }).error).toBe('hyperspaceProxy.proxyUrl must be a string');
-
-        expect(validateConfigUpdate({ hyperspaceProxy: { apiKey: 123 } }).valid).toBe(false);
-        expect(validateConfigUpdate({ hyperspaceProxy: { apiKey: 123 } }).error).toBe('hyperspaceProxy.apiKey must be a string');
-
-        expect(validateConfigUpdate({ hyperspaceProxy: { model: 123 } }).valid).toBe(false);
-        expect(validateConfigUpdate({ hyperspaceProxy: { model: 123 } }).error).toBe('hyperspaceProxy.model must be a string');
-
-        expect(validateConfigUpdate({ hyperspaceProxy: { alwaysThinkingEnabled: 'yes' } }).valid).toBe(false);
-        expect(validateConfigUpdate({ hyperspaceProxy: { alwaysThinkingEnabled: 'yes' } }).error).toBe('hyperspaceProxy.alwaysThinkingEnabled must be a boolean');
-
-        // Empty object is valid (all fields optional)
-        expect(validateConfigUpdate({ hyperspaceProxy: {} }).valid).toBe(true);
     });
 
     it('should validate supervisorSystemPrompt', () => {
@@ -276,33 +231,6 @@ describe('validateConfigUpdate', () => {
         expect(result.data?.opencodePort).toBe(4096);
     });
 
-    it('should validate aiCoreCredentials', () => {
-        // Valid credentials
-        const validCreds = {
-            aiCoreCredentials: {
-                clientId: 'test-client',
-                clientSecret: 'test-secret',
-                authUrl: 'https://auth.example.com',
-                baseUrl: 'https://api.example.com',
-                resourceGroup: 'test-group',
-                timeoutMs: 30000,
-            }
-        };
-        expect(validateConfigUpdate(validCreds).valid).toBe(true);
-
-        // Invalid - not an object
-        expect(validateConfigUpdate({ aiCoreCredentials: 'invalid' }).valid).toBe(false);
-
-        // Invalid - timeoutMs must be positive
-        expect(validateConfigUpdate({
-            aiCoreCredentials: { timeoutMs: -100 }
-        }).valid).toBe(false);
-
-        // Invalid - string fields must be strings
-        expect(validateConfigUpdate({
-            aiCoreCredentials: { clientId: 123 }
-        }).valid).toBe(false);
-    });
 });
 
 describe('validateWorkspacePath', () => {
@@ -428,76 +356,3 @@ describe('sanitizePrompt', () => {
     });
 });
 
-describe('validateAICoreCredentials', () => {
-    const validPayload = {
-        clientId: 'test-client',
-        clientSecret: 'test-secret',
-        authUrl: 'https://auth.example.com/oauth/token',
-    };
-
-    it('should reject non-object input', () => {
-        expect(validateAICoreCredentials(null).valid).toBe(false);
-        expect(validateAICoreCredentials('string').valid).toBe(false);
-        expect(validateAICoreCredentials(123).valid).toBe(false);
-    });
-
-    it('should require clientId', () => {
-        const payload = { ...validPayload };
-        delete (payload as Record<string, unknown>).clientId;
-        expect(validateAICoreCredentials(payload).valid).toBe(false);
-        expect(validateAICoreCredentials(payload).error).toBe('clientId is required');
-    });
-
-    it('should require clientSecret', () => {
-        const payload = { ...validPayload };
-        delete (payload as Record<string, unknown>).clientSecret;
-        expect(validateAICoreCredentials(payload).valid).toBe(false);
-        expect(validateAICoreCredentials(payload).error).toBe('clientSecret is required');
-    });
-
-    it('should require authUrl', () => {
-        const payload = { ...validPayload };
-        delete (payload as Record<string, unknown>).authUrl;
-        expect(validateAICoreCredentials(payload).valid).toBe(false);
-        expect(validateAICoreCredentials(payload).error).toBe('authUrl is required');
-    });
-
-    it('should validate authUrl is a valid URL', () => {
-        const payload = { ...validPayload, authUrl: 'not-a-url' };
-        expect(validateAICoreCredentials(payload).valid).toBe(false);
-        expect(validateAICoreCredentials(payload).error).toBe('authUrl must be a valid URL');
-    });
-
-    it('should accept valid payload', () => {
-        const result = validateAICoreCredentials(validPayload);
-        expect(result.valid).toBe(true);
-        expect(result.data?.clientId).toBe('test-client');
-        expect(result.data?.clientSecret).toBe('test-secret');
-        expect(result.data?.authUrl).toBe('https://auth.example.com/oauth/token');
-    });
-
-    it('should accept optional baseUrl if valid', () => {
-        const payload = { ...validPayload, baseUrl: 'https://api.example.com' };
-        const result = validateAICoreCredentials(payload);
-        expect(result.valid).toBe(true);
-        expect(result.data?.baseUrl).toBe('https://api.example.com');
-    });
-
-    it('should reject invalid baseUrl', () => {
-        const payload = { ...validPayload, baseUrl: 'not-a-url' };
-        expect(validateAICoreCredentials(payload).valid).toBe(false);
-        expect(validateAICoreCredentials(payload).error).toBe('baseUrl must be a valid URL');
-    });
-
-    it('should accept optional resourceGroup and timeoutMs', () => {
-        const payload = {
-            ...validPayload,
-            resourceGroup: 'my-group',
-            timeoutMs: 60000,
-        };
-        const result = validateAICoreCredentials(payload);
-        expect(result.valid).toBe(true);
-        expect(result.data?.resourceGroup).toBe('my-group');
-        expect(result.data?.timeoutMs).toBe(60000);
-    });
-});

@@ -41,6 +41,7 @@ export interface Task {
     order?: number;          // Display order within workspace (lower = higher in list)
     sessionId?: string | null;      // Session ID for conversation history (null if not captured yet)
     backendType?: BackendType; // Which backend created this task (for conversation lookup)
+    displayName?: string;    // User-editable display name (shown instead of prompt when set)
 }
 
 export interface Workspace {
@@ -48,6 +49,7 @@ export interface Workspace {
     name: string;            // Folder name
     createdAt: string;
     systemPrompt?: string;   // Custom system prompt for this workspace
+    displayName?: string;    // User-editable display name (shown instead of folder name when set)
 }
 
 export interface RecentWorkspace {
@@ -103,6 +105,7 @@ export type WSMessageType =
     | 'task:waitingInput'
     | 'task:revertResult'
     | 'tasks:updated'
+    | 'task:renamed'
     // Archived tasks
     | 'task:archived'
     | 'task:archived:list'
@@ -117,6 +120,7 @@ export type WSMessageType =
     | 'workspace:deleted'
     | 'workspace:reordered'
     | 'workspace:updated'
+    | 'workspace:renamed'
     | 'workspace:recent:list'
     // Task reordering
     | 'tasks:reordered'

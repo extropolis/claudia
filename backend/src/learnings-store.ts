@@ -1,7 +1,7 @@
 /**
  * Learnings Store - Vector-based storage for learned patterns
  *
- * Uses SAP AI Core for embeddings via the local proxy.
+ * Uses embeddings via the local proxy for semantic search.
  * Stores learnings with title, content, and embeddings for semantic search.
  */
 
@@ -62,7 +62,6 @@ export class LearningsStore {
             : join(__dirname, '..', 'learnings.json');
 
         this.configStore = configStore || new ConfigStore(basePath);
-        // SAP AI Core typically uses text-embedding-ada-002 or similar
         this.embeddingModel = process.env.EMBEDDING_MODEL || 'text-embedding-ada-002';
 
         this.data = this.loadData();
@@ -94,7 +93,7 @@ export class LearningsStore {
     }
 
     /**
-     * Generate embeddings using SAP AI Core
+     * Generate embeddings via the local proxy
      */
     async generateEmbedding(text: string): Promise<number[]> {
         const url = `http://localhost:${PORTS.BACKEND}/v1/embeddings`;

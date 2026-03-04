@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, RefreshCw, Zap } from 'lucide-react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, Zap } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
 import { useTaskStore } from '../stores/taskStore';
@@ -21,39 +21,8 @@ interface MCPServerListItem {
     headers?: Record<string, string>;
 }
 
-interface AICoreCredentials {
-    clientId: string;
-    clientSecret: string;
-    authUrl: string;
-    baseUrl: string;
-    resourceGroup: string;
-    timeoutMs: number;
-}
-
-type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core' | 'hyperspace-proxy';
+type ApiMode = 'default' | 'custom-anthropic';
 type BackendType = 'claude-code' | 'opencode';
-type SapAiCoreModel = string;
-
-const SAP_AI_CORE_MODELS_FALLBACK: { value: string; label: string }[] = [
-    { value: 'anthropic--claude-4.6-opus', label: 'Claude 4.6 Opus' },
-    { value: 'anthropic--claude-4.6-sonnet', label: 'Claude 4.6 Sonnet' },
-    { value: 'anthropic--claude-4.5-opus', label: 'Claude 4.5 Opus' },
-    { value: 'anthropic--claude-opus-4', label: 'Claude Opus 4' },
-    { value: 'anthropic--claude-sonnet-4', label: 'Claude Sonnet 4' },
-    { value: 'anthropic--claude-4.5-sonnet', label: 'Claude 4.5 Sonnet' },
-    { value: 'anthropic--claude-3.7-sonnet', label: 'Claude 3.7 Sonnet' },
-    { value: 'anthropic--claude-3.5-sonnet', label: 'Claude 3.5 Sonnet' },
-    { value: 'anthropic--claude-3.5-haiku', label: 'Claude 3.5 Haiku' },
-    { value: 'anthropic--claude-3-opus', label: 'Claude 3 Opus' },
-];
-
-interface HyperspaceProxyConfig {
-    proxyUrl: string;
-    apiKey: string;
-    model: string;
-    alwaysThinkingEnabled: boolean;
-}
-
 
 interface BackendStatus {
     backend: BackendType;
@@ -101,6 +70,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         api: false,
         mcp: false,
         permissions: false,
+        cliSwitches: false,
         rules: false,
         supervisor: false,
         learnings: false
@@ -132,6 +102,18 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [autoFocusOnInput, setAutoFocusOnInput] = useState(false);
     const [useLearnings, setUseLearnings] = useState(false);
 
+    // CLI Switches state
+    const [cliSwitches, setCliSwitches] = useState({
+        verbose: false,
+        maxTurns: null as number | null,
+        maxBudgetUsd: null as number | null,
+        permissionMode: null as string | null,
+        allowedTools: '',
+        disallowedTools: '',
+        appendSystemPrompt: ''
+    });
+    const cliSwitchesTimerRef = useRef<NodeJS.Timeout | null>(null);
+
     // Debounce timers
     const rulesTimerRef = useRef<NodeJS.Timeout | null>(null);
     const supervisorPromptTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -140,35 +122,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     // API Mode state
     const [apiMode, setApiMode] = useState<ApiMode>('default');
     const [customAnthropicApiKey, setCustomAnthropicApiKey] = useState('');
-
-    // AI Core credentials state
-    const [aiCoreCredentials, setAiCoreCredentials] = useState<AICoreCredentials>({
-        clientId: '',
-        clientSecret: '',
-        authUrl: '',
-        baseUrl: '',
-        resourceGroup: 'default',
-        timeoutMs: 120000
-    });
-    const [sapAiCoreModel, setSapAiCoreModel] = useState<SapAiCoreModel>('anthropic--claude-4.6-opus');
-    const [aiCoreModels, setAiCoreModels] = useState<{ value: string; label: string }[]>([]);
-    const [aiCoreModelsLoading, setAiCoreModelsLoading] = useState(false);
-    const [aiCoreTestStatus, setAiCoreTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
-    const [aiCoreTestMessage, setAiCoreTestMessage] = useState('');
-    const [modelTestStatus, setModelTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
-    const [modelTestResponse, setModelTestResponse] = useState('');
-
-    // Hyperspace AI Proxy state
-    const [hyperspaceProxy, setHyperspaceProxy] = useState<HyperspaceProxyConfig>({
-        proxyUrl: 'http://localhost:6655',
-        apiKey: '',
-        model: '',
-        alwaysThinkingEnabled: false
-    });
-    const [hyperspaceUseCustomModel, setHyperspaceUseCustomModel] = useState(false);
-    const [hyperspaceModels, setHyperspaceModels] = useState<{ value: string; label: string }[]>([]);
-    const [hyperspaceModelsLoading, setHyperspaceModelsLoading] = useState(false);
-    const hyperspaceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
     // Custom API key test state
     const [customApiKeyTestStatus, setCustomApiKeyTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -181,7 +134,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
 
     // Debounce timers for API settings
     const apiModeTimerRef = useRef<NodeJS.Timeout | null>(null);
-    const aiCoreTimerRef = useRef<NodeJS.Timeout | null>(null);
 
     useEffect(() => {
         if (isOpen) {
@@ -204,63 +156,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     }, [expandedPanels.mcp]);
 
-    const fetchHyperspaceModels = useCallback(async (proxyUrl: string, apiKey: string) => {
-        if (!proxyUrl || !apiKey) {
-            setHyperspaceModels([]);
-            return;
-        }
-
-        setHyperspaceModelsLoading(true);
-        try {
-            // Call backend proxy to avoid CORS issues
-            const response = await fetch(`${getApiBaseUrl()}/api/hyperspace/models`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ proxyUrl, apiKey })
-            });
-
-            if (response.ok) {
-                const result = await response.json();
-                if (result.success && result.data?.data) {
-                    const models = result.data.data.map((m: { id: string; display_name: string }) => ({
-                        value: m.id,
-                        label: m.display_name || m.id
-                    }));
-                    setHyperspaceModels(models);
-
-                    // If no model is selected yet and we have models, select the first one
-                    // Also save to backend so the selection persists
-                    if (models.length > 0) {
-                        setHyperspaceProxy(prev => {
-                            if (!prev.model || !models.find((m: { value: string }) => m.value === prev.model)) {
-                                const updated = { ...prev, model: models[0].value };
-                                // Save the auto-selected model to backend
-                                fetch(`${getApiBaseUrl()}/api/config`, {
-                                    method: 'PUT',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ hyperspaceProxy: updated })
-                                }).catch(err => console.error('Failed to save auto-selected model:', err));
-                                return updated;
-                            }
-                            return prev;
-                        });
-                    }
-                } else {
-                    console.error('Failed to fetch Hyperspace models:', result.error);
-                    setHyperspaceModels([]);
-                }
-            } else {
-                console.error('Failed to fetch Hyperspace models:', response.status);
-                setHyperspaceModels([]);
-            }
-        } catch (error) {
-            console.error('Failed to fetch Hyperspace models:', error);
-            setHyperspaceModels([]);
-        } finally {
-            setHyperspaceModelsLoading(false);
-        }
-    }, []);
-
     const fetchConfig = async () => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`);
@@ -273,25 +168,19 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 setAutoFocusOnInput(config.autoFocusOnInput || false);
                 setApiMode(config.apiMode || 'default');
                 setCustomAnthropicApiKey(config.customAnthropicApiKey || '');
-                if (config.aiCoreCredentials) {
-                    setAiCoreCredentials(config.aiCoreCredentials);
-                    // Load live models if credentials are present
-                    if (config.aiCoreCredentials.clientId) {
-                        fetchAiCoreModels();
-                    }
-                }
-                if (config.sapAiCoreModel) {
-                    setSapAiCoreModel(config.sapAiCoreModel);
-                }
-                if (config.hyperspaceProxy) {
-                    setHyperspaceProxy(config.hyperspaceProxy);
-                    // If we have an API key, fetch the available models
-                    if (config.hyperspaceProxy.apiKey && config.hyperspaceProxy.proxyUrl) {
-                        fetchHyperspaceModels(config.hyperspaceProxy.proxyUrl, config.hyperspaceProxy.apiKey);
-                    }
-                }
                 setBackend(config.backend || 'claude-code');
                 setUseLearnings(config.useLearnings || false);
+                if (config.claudeCodeSwitches) {
+                    setCliSwitches({
+                        verbose: config.claudeCodeSwitches.verbose || false,
+                        maxTurns: config.claudeCodeSwitches.maxTurns ?? null,
+                        maxBudgetUsd: config.claudeCodeSwitches.maxBudgetUsd ?? null,
+                        permissionMode: config.claudeCodeSwitches.permissionMode ?? null,
+                        allowedTools: config.claudeCodeSwitches.allowedTools || '',
+                        disallowedTools: config.claudeCodeSwitches.disallowedTools || '',
+                        appendSystemPrompt: config.claudeCodeSwitches.appendSystemPrompt || ''
+                    });
+                }
             }
         } catch (error) {
             console.error('Failed to fetch config:', error);
@@ -580,141 +469,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }, 1000);
     };
 
-    const saveAiCoreCredentials = useCallback(async (credentials: AICoreCredentials, model: string) => {
-        try {
-            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ aiCoreCredentials: credentials, sapAiCoreModel: model })
-            });
-            if (!response.ok) {
-                console.error('Failed to save AI Core credentials');
-            } else {
-                showWarning('API Configuration Changed', 'This change only applies to new tasks. Running tasks will continue using their original configuration.');
-            }
-        } catch (error) {
-            console.error('Failed to save AI Core credentials:', error);
-        }
-    }, [showWarning]);
-
-    const fetchAiCoreModels = useCallback(async () => {
-        setAiCoreModelsLoading(true);
-        try {
-            const response = await fetch(`${getApiBaseUrl()}/api/aicore/models`);
-            const result = await response.json();
-            if (result.success && result.models?.length > 0) {
-                console.log(`[Settings] Loaded ${result.models.length} AI Core models from live deployments`);
-                setAiCoreModels(result.models);
-            } else {
-                console.warn('[Settings] Failed to load AI Core models:', result.error);
-                setAiCoreModels([]);
-            }
-        } catch (error) {
-            console.error('[Settings] Error fetching AI Core models:', error);
-            setAiCoreModels([]);
-        } finally {
-            setAiCoreModelsLoading(false);
-        }
-    }, []);
-
-    // Auto-fetch live AI Core models when API panel is opened
-    useEffect(() => {
-        if (expandedPanels.api && aiCoreCredentials.clientId) {
-            fetchAiCoreModels();
-        }
-    }, [expandedPanels.api, aiCoreCredentials.clientId, fetchAiCoreModels]);
-
-    const testAiCoreModel = useCallback(async () => {
-        if (!sapAiCoreModel) return;
-        setModelTestStatus('testing');
-        setModelTestResponse('');
-        try {
-            const response = await fetch(`${getApiBaseUrl()}/api/aicore/test-model`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: sapAiCoreModel })
-            });
-            const result = await response.json();
-            if (result.success) {
-                setModelTestStatus('success');
-                setModelTestResponse(result.response);
-            } else {
-                setModelTestStatus('error');
-                setModelTestResponse(result.error || 'Test failed');
-            }
-        } catch (error) {
-            setModelTestStatus('error');
-            setModelTestResponse('Failed to test model');
-        }
-    }, [sapAiCoreModel]);
-
-    const handleAiCoreChange = (field: keyof AICoreCredentials, value: string | number) => {
-        const updatedCredentials = { ...aiCoreCredentials, [field]: value };
-        setAiCoreCredentials(updatedCredentials);
-        setAiCoreTestStatus('idle');
-
-        // Auto-save with debounce
-        if (aiCoreTimerRef.current) {
-            clearTimeout(aiCoreTimerRef.current);
-        }
-        aiCoreTimerRef.current = setTimeout(() => {
-            saveAiCoreCredentials(updatedCredentials, sapAiCoreModel);
-        }, 1000);
-    };
-
-    const handleSapAiCoreModelChange = (model: string) => {
-        setSapAiCoreModel(model);
-
-        // Save immediately for dropdowns
-        saveAiCoreCredentials(aiCoreCredentials, model);
-    };
-
-    const testAiCoreCredentials = async () => {
-        setAiCoreTestStatus('testing');
-        setAiCoreTestMessage('Testing credentials...');
-        try {
-            const response = await fetch(`${getApiBaseUrl()}/api/aicore/test`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(aiCoreCredentials)
-            });
-            const result = await response.json();
-            if (response.ok && result.success) {
-                setAiCoreTestStatus('success');
-                setAiCoreTestMessage(result.message || 'Connection successful!');
-            } else {
-                setAiCoreTestStatus('error');
-                setAiCoreTestMessage(result.error || 'Connection failed');
-            }
-        } catch (error) {
-            setAiCoreTestStatus('error');
-            setAiCoreTestMessage('Failed to test credentials');
-        }
-    };
-
-    const clearAiCoreCredentials = async () => {
-        const emptyCredentials: AICoreCredentials = {
-            clientId: '',
-            clientSecret: '',
-            authUrl: '',
-            baseUrl: '',
-            resourceGroup: 'default',
-            timeoutMs: 120000
-        };
-        setAiCoreCredentials(emptyCredentials);
-        try {
-            await fetch(`${getApiBaseUrl()}/api/config`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ aiCoreCredentials: undefined })
-            });
-            setAiCoreTestStatus('idle');
-            setAiCoreTestMessage('');
-        } catch (error) {
-            console.error('Failed to clear AI Core credentials:', error);
-        }
-    };
-
     const saveAutoFocusOnInput = async (value: boolean) => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`, {
@@ -744,6 +498,44 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             console.error('Failed to save use learnings setting:', error);
         }
     };
+
+    const saveCliSwitches = useCallback(async (switches: typeof cliSwitches) => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ claudeCodeSwitches: switches })
+            });
+            if (!response.ok) {
+                console.error('Failed to save CLI switches');
+            }
+        } catch (error) {
+            console.error('Failed to save CLI switches:', error);
+        }
+    }, []);
+
+    const handleCliSwitchChange = useCallback((updates: Partial<typeof cliSwitches>) => {
+        setCliSwitches(prev => {
+            const updated = { ...prev, ...updates };
+            // Debounce the save for text fields
+            if (cliSwitchesTimerRef.current) {
+                clearTimeout(cliSwitchesTimerRef.current);
+            }
+            cliSwitchesTimerRef.current = setTimeout(() => {
+                saveCliSwitches(updated);
+            }, 500);
+            return updated;
+        });
+    }, [saveCliSwitches]);
+
+    const handleCliSwitchToggle = useCallback((updates: Partial<typeof cliSwitches>) => {
+        setCliSwitches(prev => {
+            const updated = { ...prev, ...updates };
+            // Save immediately for toggles
+            saveCliSwitches(updated);
+            return updated;
+        });
+    }, [saveCliSwitches]);
 
     const saveBackend = useCallback(async (backendType: BackendType) => {
         try {
@@ -787,65 +579,14 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     }, [showWarning]);
 
-    const saveHyperspaceProxy = useCallback(async (config: HyperspaceProxyConfig) => {
-        try {
-            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ hyperspaceProxy: config })
-            });
-            if (!response.ok) {
-                console.error('Failed to save Hyperspace proxy config');
-            } else {
-                showWarning('API Configuration Changed', 'This change only applies to new tasks. Running tasks will continue using their original configuration.');
-            }
-        } catch (error) {
-            console.error('Failed to save Hyperspace proxy config:', error);
-        }
-    }, [showWarning]);
-
-    const handleHyperspaceChange = (field: keyof HyperspaceProxyConfig, value: string | boolean) => {
-        const updatedConfig = { ...hyperspaceProxy, [field]: value };
-        setHyperspaceProxy(updatedConfig);
-
-        // Auto-save with debounce
-        if (hyperspaceTimerRef.current) {
-            clearTimeout(hyperspaceTimerRef.current);
-        }
-        hyperspaceTimerRef.current = setTimeout(() => {
-            saveHyperspaceProxy(updatedConfig);
-
-            // Fetch models when API key or proxy URL changes
-            if (field === 'apiKey' || field === 'proxyUrl') {
-                fetchHyperspaceModels(updatedConfig.proxyUrl, updatedConfig.apiKey);
-            }
-        }, 1000);
-    };
-
     const handleApiModeChange = (mode: ApiMode) => {
         setApiMode(mode);
         // Reset test statuses when mode changes
         setCustomApiKeyTestStatus('idle');
         setCustomApiKeyTestMessage('');
-        setAiCoreTestStatus('idle');
-        setAiCoreTestMessage('');
 
         // Save immediately for radio buttons
         saveApiMode(mode, customAnthropicApiKey);
-
-        // Also save hyperspace config immediately if switching to hyperspace mode
-        // to ensure any pending changes are persisted, and fetch models
-        if (mode === 'hyperspace-proxy') {
-            if (hyperspaceTimerRef.current) {
-                clearTimeout(hyperspaceTimerRef.current);
-            }
-            saveHyperspaceProxy(hyperspaceProxy);
-
-            // Auto-fetch models when switching to hyperspace mode
-            if (hyperspaceProxy.apiKey && hyperspaceProxy.proxyUrl) {
-                fetchHyperspaceModels(hyperspaceProxy.proxyUrl, hyperspaceProxy.apiKey);
-            }
-        }
     };
 
     const handleCustomApiKeyChange = (key: string) => {
@@ -1166,38 +907,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                         </span>
                                     </div>
                                 </label>
-
-                                <label className={`api-mode-option ${apiMode === 'sap-ai-core' ? 'selected' : ''}`}>
-                                    <input
-                                        type="radio"
-                                        name="apiMode"
-                                        value="sap-ai-core"
-                                        checked={apiMode === 'sap-ai-core'}
-                                        onChange={() => handleApiModeChange('sap-ai-core')}
-                                    />
-                                    <div className="api-mode-content">
-                                        <span className="api-mode-title">SAP AI Core</span>
-                                        <span className="api-mode-description">
-                                            Use Claude models through your SAP AI Core deployment
-                                        </span>
-                                    </div>
-                                </label>
-
-                                <label className={`api-mode-option ${apiMode === 'hyperspace-proxy' ? 'selected' : ''}`}>
-                                    <input
-                                        type="radio"
-                                        name="apiMode"
-                                        value="hyperspace-proxy"
-                                        checked={apiMode === 'hyperspace-proxy'}
-                                        onChange={() => handleApiModeChange('hyperspace-proxy')}
-                                    />
-                                    <div className="api-mode-content">
-                                        <span className="api-mode-title">Hyperspace AI Proxy</span>
-                                        <span className="api-mode-description">
-                                            Use the HAI proxy (requires hai proxy start running)
-                                        </span>
-                                    </div>
-                                </label>
                             </div>
 
                             {/* Custom Anthropic API Key fields */}
@@ -1232,273 +941,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                             {customApiKeyTestStatus === 'testing' ? 'Testing...' : 'Test API Key'}
                                         </button>
                                     </div>
-                                </div>
-                            )}
-
-                            {/* SAP AI Core fields */}
-                            {apiMode === 'sap-ai-core' && (
-                                <div className="api-mode-fields">
-                                    <div className="aicore-form">
-                                        <div className="aicore-field">
-                                            <label>Client ID</label>
-                                            <input
-                                                type="text"
-                                                value={aiCoreCredentials.clientId}
-                                                onChange={(e) => handleAiCoreChange('clientId', e.target.value)}
-                                                placeholder="sb-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx!..."
-                                                className="aicore-input"
-                                            />
-                                        </div>
-
-                                        <div className="aicore-field">
-                                            <label>Client Secret</label>
-                                            <input
-                                                type="password"
-                                                value={aiCoreCredentials.clientSecret}
-                                                onChange={(e) => handleAiCoreChange('clientSecret', e.target.value)}
-                                                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx$..."
-                                                className="aicore-input"
-                                            />
-                                        </div>
-
-                                        <div className="aicore-field">
-                                            <label>Auth URL</label>
-                                            <input
-                                                type="text"
-                                                value={aiCoreCredentials.authUrl}
-                                                onChange={(e) => handleAiCoreChange('authUrl', e.target.value)}
-                                                placeholder="https://xxx.authentication.sap.hana.ondemand.com"
-                                                className="aicore-input"
-                                            />
-                                        </div>
-
-                                        <div className="aicore-field">
-                                            <label>Base URL</label>
-                                            <input
-                                                type="text"
-                                                value={aiCoreCredentials.baseUrl}
-                                                onChange={(e) => handleAiCoreChange('baseUrl', e.target.value)}
-                                                placeholder="https://api.ai.xxx.aws.ml.hana.ondemand.com"
-                                                className="aicore-input"
-                                            />
-                                        </div>
-
-                                        <div className="aicore-row">
-                                            <div className="aicore-field aicore-field-half">
-                                                <label>Resource Group</label>
-                                                <input
-                                                    type="text"
-                                                    value={aiCoreCredentials.resourceGroup}
-                                                    onChange={(e) => handleAiCoreChange('resourceGroup', e.target.value)}
-                                                    placeholder="default"
-                                                    className="aicore-input"
-                                                />
-                                            </div>
-
-                                            <div className="aicore-field aicore-field-half">
-                                                <label>Timeout (ms)</label>
-                                                <input
-                                                    type="number"
-                                                    value={aiCoreCredentials.timeoutMs}
-                                                    onChange={(e) => handleAiCoreChange('timeoutMs', parseInt(e.target.value) || 120000)}
-                                                    placeholder="120000"
-                                                    className="aicore-input"
-                                                />
-                                            </div>
-                                        </div>
-
-                                        <div className="aicore-field">
-                                            <label>Model</label>
-                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                                                <select
-                                                    value={sapAiCoreModel}
-                                                    onChange={(e) => handleSapAiCoreModelChange(e.target.value)}
-                                                    className="aicore-input aicore-select"
-                                                    style={{ flex: 1 }}
-                                                    disabled={aiCoreModelsLoading}
-                                                >
-                                                    {aiCoreModelsLoading && (
-                                                        <option value="">Loading deployments...</option>
-                                                    )}
-                                                    {(aiCoreModels.length > 0 ? aiCoreModels : SAP_AI_CORE_MODELS_FALLBACK).map((model) => (
-                                                        <option key={model.value} value={model.value}>
-                                                            {model.label}
-                                                        </option>
-                                                    ))}
-                                                </select>
-                                                <button
-                                                    className="aicore-refresh-btn"
-                                                    onClick={fetchAiCoreModels}
-                                                    disabled={aiCoreModelsLoading || !aiCoreCredentials.clientId}
-                                                    title="Refresh deployments from AI Core"
-                                                >
-                                                    <RefreshCw size={14} className={aiCoreModelsLoading ? 'spinning' : ''} />
-                                                </button>
-                                            </div>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
-                                                {aiCoreModels.length > 0 && (
-                                                    <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                                                        {aiCoreModels.length} live deployments
-                                                    </span>
-                                                )}
-                                                <button
-                                                    className="aicore-test-model-btn"
-                                                    onClick={testAiCoreModel}
-                                                    disabled={modelTestStatus === 'testing' || !sapAiCoreModel || !aiCoreCredentials.clientId}
-                                                    title="Send a test prompt to verify the model"
-                                                >
-                                                    {modelTestStatus === 'testing' ? (
-                                                        <><Loader2 size={12} className="spinning" /> Testing...</>
-                                                    ) : (
-                                                        <>Test Model</>
-                                                    )}
-                                                </button>
-                                            </div>
-                                            {modelTestStatus !== 'idle' && modelTestResponse && (
-                                                <div className={`model-test-response ${modelTestStatus}`}>
-                                                    {modelTestStatus === 'success' && <CheckCircle size={14} />}
-                                                    {modelTestStatus === 'error' && <AlertCircle size={14} />}
-                                                    <span>{modelTestResponse}</span>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    {aiCoreTestStatus !== 'idle' && (
-                                        <div className={`aicore-test-result ${aiCoreTestStatus}`}>
-                                            {aiCoreTestStatus === 'testing' && <Loader2 size={16} className="spinning" />}
-                                            {aiCoreTestStatus === 'success' && <CheckCircle size={16} />}
-                                            {aiCoreTestStatus === 'error' && <AlertCircle size={16} />}
-                                            <span>{aiCoreTestMessage}</span>
-                                        </div>
-                                    )}
-
-                                    <div className="aicore-buttons" style={{ marginBottom: '8px' }}>
-                                        <button
-                                            className="aicore-clear-btn"
-                                            onClick={clearAiCoreCredentials}
-                                            disabled={!aiCoreCredentials.clientId && !aiCoreCredentials.clientSecret}
-                                        >
-                                            Clear
-                                        </button>
-                                        <button
-                                            className="aicore-test-btn"
-                                            onClick={testAiCoreCredentials}
-                                            disabled={!aiCoreCredentials.clientId || !aiCoreCredentials.clientSecret || aiCoreTestStatus === 'testing'}
-                                        >
-                                            {aiCoreTestStatus === 'testing' ? 'Testing...' : 'Test Connection'}
-                                        </button>
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Hyperspace AI Proxy fields */}
-                            {apiMode === 'hyperspace-proxy' && (
-                                <div className="api-mode-fields">
-                                    <div className="aicore-form">
-                                        <div className="aicore-field">
-                                            <label>Proxy URL</label>
-                                            <input
-                                                type="text"
-                                                value={hyperspaceProxy.proxyUrl}
-                                                onChange={(e) => handleHyperspaceChange('proxyUrl', e.target.value)}
-                                                placeholder="http://localhost:6655"
-                                                className="aicore-input"
-                                            />
-                                        </div>
-
-                                        <div className="aicore-field">
-                                            <label>API Key</label>
-                                            <input
-                                                type="password"
-                                                value={hyperspaceProxy.apiKey}
-                                                onChange={(e) => handleHyperspaceChange('apiKey', e.target.value)}
-                                                placeholder="Your API key from hai proxy terminal"
-                                                className="aicore-input"
-                                            />
-                                        </div>
-
-                                        <div className="aicore-field">
-                                            <label>Model</label>
-                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                                {!hyperspaceUseCustomModel ? (
-                                                    <div className="hyperspace-model-row">
-                                                        <div className="hyperspace-model-select-wrapper">
-                                                            <select
-                                                                value={hyperspaceProxy.model}
-                                                                onChange={(e) => handleHyperspaceChange('model', e.target.value)}
-                                                                className={`aicore-input aicore-select ${!hyperspaceProxy.apiKey ? 'disabled-muted' : ''}`}
-                                                                disabled={hyperspaceModelsLoading || !hyperspaceProxy.apiKey}
-                                                            >
-                                                                {!hyperspaceProxy.apiKey && (
-                                                                    <option value="">Add API key to load models</option>
-                                                                )}
-                                                                {hyperspaceProxy.apiKey && hyperspaceModels.length === 0 && !hyperspaceModelsLoading && (
-                                                                    <option value="">No models loaded</option>
-                                                                )}
-                                                                {hyperspaceModelsLoading && (
-                                                                    <option value="">Loading models...</option>
-                                                                )}
-                                                                {hyperspaceModels.map((model) => (
-                                                                    <option key={model.value} value={model.value}>
-                                                                        {model.label}
-                                                                    </option>
-                                                                ))}
-                                                            </select>
-                                                            {hyperspaceModelsLoading && (
-                                                                <Loader2 size={14} className="spinning" style={{ position: 'absolute', right: '30px', top: '50%', transform: 'translateY(-50%)' }} />
-                                                            )}
-                                                        </div>
-                                                        <button
-                                                            className="hyperspace-refresh-btn"
-                                                            onClick={() => fetchHyperspaceModels(hyperspaceProxy.proxyUrl, hyperspaceProxy.apiKey)}
-                                                            disabled={!hyperspaceProxy.apiKey || !hyperspaceProxy.proxyUrl || hyperspaceModelsLoading}
-                                                            title="Refresh models"
-                                                        >
-                                                            <RefreshCw size={16} className={hyperspaceModelsLoading ? 'spinning' : ''} />
-                                                        </button>
-                                                    </div>
-                                                ) : (
-                                                    <input
-                                                        type="text"
-                                                        value={hyperspaceProxy.model}
-                                                        onChange={(e) => handleHyperspaceChange('model', e.target.value)}
-                                                        placeholder="e.g., anthropic--claude-4.5-sonnet"
-                                                        className="aicore-input"
-                                                    />
-                                                )}
-                                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={hyperspaceUseCustomModel}
-                                                        onChange={(e) => setHyperspaceUseCustomModel(e.target.checked)}
-                                                    />
-                                                    Enter custom model name
-                                                </label>
-                                            </div>
-                                        </div>
-
-                                        <div className="permission-item" style={{ marginTop: '12px' }}>
-                                            <div className="permission-info">
-                                                <span className="permission-label">Always Thinking Mode</span>
-                                                <span className="permission-description">
-                                                    Enable extended thinking for all prompts
-                                                </span>
-                                            </div>
-                                            <label className="toggle-switch">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={hyperspaceProxy.alwaysThinkingEnabled}
-                                                    onChange={(e) => handleHyperspaceChange('alwaysThinkingEnabled', e.target.checked)}
-                                                />
-                                                <span className="toggle-slider"></span>
-                                            </label>
-                                        </div>
-                                    </div>
-
-                                    <p className="api-config-note" style={{ marginTop: '12px' }}>
-                                        Make sure <code style={{ fontSize: '0.75rem', padding: '2px 4px', background: 'var(--bg-tertiary)', borderRadius: '3px' }}>hai proxy start</code> is running before using this mode.
-                                    </p>
                                 </div>
                             )}
 
@@ -1754,6 +1196,186 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                     </CollapsiblePanel>
 
                     <CollapsiblePanel
+                        title="Claude Code CLI Switches"
+                        icon={<Code size={18} />}
+                        isExpanded={expandedPanels.cliSwitches}
+                        onToggle={() => togglePanel('cliSwitches')}
+                    >
+                        <div className="permissions-content cli-switches-content">
+                            {/* Verbose */}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Verbose</span>
+                                    <span className="permission-description">
+                                        Enable verbose logging with full turn-by-turn output for debugging.
+                                    </span>
+                                </div>
+                                <label className="toggle-switch">
+                                    <input
+                                        type="checkbox"
+                                        checked={cliSwitches.verbose}
+                                        onChange={(e) => handleCliSwitchToggle({ verbose: e.target.checked })}
+                                    />
+                                    <span className="toggle-slider"></span>
+                                </label>
+                            </div>
+
+                            {/* Max Turns */}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Max Turns</span>
+                                    <span className="permission-description">
+                                        Limit the number of agentic turns to prevent runaway loops.
+                                    </span>
+                                </div>
+                                <div className="cli-switch-input-group">
+                                    <label className="toggle-switch">
+                                        <input
+                                            type="checkbox"
+                                            checked={cliSwitches.maxTurns !== null}
+                                            onChange={(e) => handleCliSwitchToggle({ maxTurns: e.target.checked ? 50 : null })}
+                                        />
+                                        <span className="toggle-slider"></span>
+                                    </label>
+                                    {cliSwitches.maxTurns !== null && (
+                                        <input
+                                            type="number"
+                                            className="cli-switch-number-input"
+                                            value={cliSwitches.maxTurns}
+                                            min={1}
+                                            max={1000}
+                                            onChange={(e) => handleCliSwitchChange({ maxTurns: parseInt(e.target.value) || 1 })}
+                                        />
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Max Budget */}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Max Budget (USD)</span>
+                                    <span className="permission-description">
+                                        Set a cost ceiling per task to control API spending.
+                                    </span>
+                                </div>
+                                <div className="cli-switch-input-group">
+                                    <label className="toggle-switch">
+                                        <input
+                                            type="checkbox"
+                                            checked={cliSwitches.maxBudgetUsd !== null}
+                                            onChange={(e) => handleCliSwitchToggle({ maxBudgetUsd: e.target.checked ? 5.0 : null })}
+                                        />
+                                        <span className="toggle-slider"></span>
+                                    </label>
+                                    {cliSwitches.maxBudgetUsd !== null && (
+                                        <input
+                                            type="number"
+                                            className="cli-switch-number-input"
+                                            value={cliSwitches.maxBudgetUsd}
+                                            min={0}
+                                            step={0.5}
+                                            onChange={(e) => handleCliSwitchChange({ maxBudgetUsd: parseFloat(e.target.value) || 0 })}
+                                        />
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Permission Mode */}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Permission Mode</span>
+                                    <span className="permission-description">
+                                        Set permission mode: plan (read-only), acceptEdits (auto-approve edits), dontAsk (auto-approve all).
+                                    </span>
+                                </div>
+                                <div className="cli-switch-input-group">
+                                    <label className="toggle-switch">
+                                        <input
+                                            type="checkbox"
+                                            checked={cliSwitches.permissionMode !== null}
+                                            onChange={(e) => handleCliSwitchToggle({ permissionMode: e.target.checked ? 'dontAsk' : null })}
+                                        />
+                                        <span className="toggle-slider"></span>
+                                    </label>
+                                    {cliSwitches.permissionMode !== null && (
+                                        <select
+                                            className="cli-switch-select"
+                                            value={cliSwitches.permissionMode}
+                                            onChange={(e) => handleCliSwitchToggle({ permissionMode: e.target.value })}
+                                        >
+                                            <option value="default">default</option>
+                                            <option value="plan">plan (read-only)</option>
+                                            <option value="acceptEdits">acceptEdits (auto-approve edits)</option>
+                                            <option value="dontAsk">dontAsk (auto-approve all)</option>
+                                        </select>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Allowed Tools */}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Allowed Tools</span>
+                                    <span className="permission-description">
+                                        Comma-separated list of additional tools that run without permission prompts.
+                                    </span>
+                                </div>
+                            </div>
+                            <div className="cli-switch-text-row">
+                                <input
+                                    type="text"
+                                    className="cli-switch-text-input"
+                                    value={cliSwitches.allowedTools}
+                                    placeholder="e.g. Bash, Read, Write (leave empty to disable)"
+                                    onChange={(e) => handleCliSwitchChange({ allowedTools: e.target.value })}
+                                />
+                            </div>
+
+                            {/* Disallowed Tools */}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Disallowed Tools</span>
+                                    <span className="permission-description">
+                                        Comma-separated list of tools to completely disable.
+                                    </span>
+                                </div>
+                            </div>
+                            <div className="cli-switch-text-row">
+                                <input
+                                    type="text"
+                                    className="cli-switch-text-input"
+                                    value={cliSwitches.disallowedTools}
+                                    placeholder="e.g. Write, Bash (leave empty to disable)"
+                                    onChange={(e) => handleCliSwitchChange({ disallowedTools: e.target.value })}
+                                />
+                            </div>
+
+                            {/* Append System Prompt */}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Append System Prompt</span>
+                                    <span className="permission-description">
+                                        Append custom instructions to Claude's default system prompt.
+                                    </span>
+                                </div>
+                            </div>
+                            <div className="cli-switch-text-row">
+                                <textarea
+                                    className="cli-switch-textarea"
+                                    value={cliSwitches.appendSystemPrompt}
+                                    placeholder="Enter custom system prompt text... (leave empty to disable)"
+                                    rows={3}
+                                    onChange={(e) => handleCliSwitchChange({ appendSystemPrompt: e.target.value })}
+                                />
+                            </div>
+
+                            <p className="cli-switches-note">
+                                Changes apply to new tasks only. Existing tasks keep their original settings.
+                            </p>
+                        </div>
+                    </CollapsiblePanel>
+
+                    <CollapsiblePanel
                         title="Rules"
                         icon={<FileText size={18} />}
                         isExpanded={expandedPanels.rules}
@@ -1856,17 +1478,9 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 <div className="settings-menu-footer">
                     <button className="settings-done-btn" onClick={() => {
                         // Flush any pending debounced saves before closing
-                        if (hyperspaceTimerRef.current) {
-                            clearTimeout(hyperspaceTimerRef.current);
-                            saveHyperspaceProxy(hyperspaceProxy);
-                        }
                         if (apiModeTimerRef.current) {
                             clearTimeout(apiModeTimerRef.current);
                             saveApiMode(apiMode, customAnthropicApiKey);
-                        }
-                        if (aiCoreTimerRef.current) {
-                            clearTimeout(aiCoreTimerRef.current);
-                            saveAiCoreCredentials(aiCoreCredentials, sapAiCoreModel);
                         }
                         if (rulesTimerRef.current) {
                             clearTimeout(rulesTimerRef.current);

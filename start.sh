@@ -44,15 +44,10 @@ trap "rm -f '$LOCK_FILE'" EXIT INT TERM
 # Ensure OpenCode CLI is in PATH
 export PATH=$HOME/.opencode/bin:$PATH
 
-# SAP AI Core Configuration
-# Set AICORE_SERVICE_KEY and AICORE_RESOURCE_GROUP environment variables
-# before running this script, or create a .env file with:
-#   AICORE_SERVICE_KEY='{"clientid":"...","clientsecret":"...","url":"...","serviceurls":{"AI_API_URL":"..."}}'
-#   AICORE_RESOURCE_GROUP='default'
+# Load environment variables if .env exists
 if [ -f .env ]; then
     set -a; source .env; set +a
 fi
-export AICORE_RESOURCE_GROUP="${AICORE_RESOURCE_GROUP:-default}"
 
 echo "🧹 Cleaning up existing processes..."
 
