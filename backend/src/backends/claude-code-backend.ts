@@ -10,9 +10,6 @@ import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, statSy
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { TaskState, WaitingInputType, TaskGitState } from '@claudia/shared';
-
-/** On Windows, node-pty requires the .exe extension to find executables */
-const claudeExe = process.platform === 'win32' ? 'claude.exe' : 'claude';
 import {
     CodeBackend,
     BackendType,
@@ -25,6 +22,8 @@ import {
 import { ConfigStore } from '../config-store.js';
 import { createLogger } from '../logger.js';
 
+/** On Windows, node-pty requires the .exe extension to find executables */
+const claudeExe = process.platform === 'win32' ? 'claude.exe' : 'claude';
 const logger = createLogger('[ClaudeCodeBackend]');
 
 const __filename = fileURLToPath(import.meta.url);
@@ -69,7 +68,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
 
     private tasks: Map<string, InternalTask> = new Map();
     private configStore: ConfigStore | null = null;
-    private pendingSessionCapture: Map<string, { taskId: string; workspaceId: string; startTime: number }> = new Map();
+    private pendingSessionCapture: Map<string, { taskId: string; workspaceId: string; startTime: number; interval?: ReturnType<typeof setInterval> }> = new Map();
     private sessionCaptureIntervals: Map<string, NodeJS.Timeout> = new Map();
     private statePollingInterval: NodeJS.Timeout | null = null;
     private readonly statePollingMs: number;

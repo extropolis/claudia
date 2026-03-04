@@ -98,7 +98,10 @@ export class TunnelManager extends EventEmitter {
     private async startNgrok(): Promise<void> {
         // Kill any stale ngrok processes first (free tier allows only 1 session)
         try {
-            execSync('pkill -f ngrok 2>/dev/null || true', { stdio: 'ignore' });
+            const killCmd = process.platform === 'win32'
+                ? 'taskkill /f /im ngrok.exe 2>nul || exit /b 0'
+                : 'pkill -f ngrok 2>/dev/null || true';
+            execSync(killCmd, { stdio: 'ignore' });
             await new Promise(r => setTimeout(r, 500));
         } catch {
             // ignore

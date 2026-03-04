@@ -13,7 +13,7 @@ import { WorkspaceStore } from './workspace-store.js';
 import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
-import { createAnthropicProxy } from './anthropic-proxy/index.js';
+import { createAnthropicProxy, AnthropicProxyConfig } from './anthropic-proxy/index.js';
 import { createHyperspaceProxy } from './hyperspace-proxy/index.js';
 import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, PORTS } from '@claudia/shared';
@@ -1568,15 +1568,17 @@ export async function createApp(basePath?: string) {
 
                 const newCredentials = validation.data!.aiCoreCredentials;
                 if (newCredentials) {
-                    // Create temporary proxy instance to validate credentials
-                    const tempProxy = createAnthropicProxy({
-                        clientId: newCredentials.clientId,
-                        clientSecret: newCredentials.clientSecret,
-                        authUrl: newCredentials.authUrl,
-                        baseUrl: newCredentials.baseUrl,
+                    const proxyConfig: AnthropicProxyConfig = {
+                        clientId: newCredentials.clientId || '',
+                        clientSecret: newCredentials.clientSecret || '',
+                        authUrl: newCredentials.authUrl || '',
+                        baseUrl: newCredentials.baseUrl || '',
                         resourceGroup: newCredentials.resourceGroup || 'default',
                         requestTimeoutMs: newCredentials.timeoutMs || 120000
-                    });
+                    };
+
+                    // Create temporary proxy instance to validate credentials
+                    const tempProxy = createAnthropicProxy(proxyConfig);
 
                     // Validate credentials
                     const validationResult = await tempProxy.tokenProvider.validateCredentials();
@@ -1588,32 +1590,17 @@ export async function createApp(basePath?: string) {
                         });
                     }
                     logger.info('SAP AI Core credentials validated successfully');
-                }
 
-                // Update config on existing proxy so it uses the new credentials
-                if (currentProxyInstance) {
-                    const newConfig = {
-                        clientId: newCredentials.clientId,
-                        clientSecret: newCredentials.clientSecret,
-                        authUrl: newCredentials.authUrl,
-                        baseUrl: newCredentials.baseUrl,
-                        resourceGroup: newCredentials.resourceGroup || 'default',
-                        requestTimeoutMs: newCredentials.timeoutMs || 120000
-                    };
-                    logger.info('Updating proxy config with new credentials');
-                    currentProxyInstance.updateConfig(newConfig);
-                } else {
-                    // No proxy mounted yet — create and mount one
-                    logger.info('No proxy mounted yet, creating new proxy with credentials');
-                    currentProxyInstance = createAnthropicProxy({
-                        clientId: newCredentials.clientId,
-                        clientSecret: newCredentials.clientSecret,
-                        authUrl: newCredentials.authUrl,
-                        baseUrl: newCredentials.baseUrl,
-                        resourceGroup: newCredentials.resourceGroup || 'default',
-                        requestTimeoutMs: newCredentials.timeoutMs || 120000
-                    });
-                    app.use('/', currentProxyInstance.router);
+                    // Update config on existing proxy so it uses the new credentials
+                    if (currentProxyInstance) {
+                        logger.info('Updating proxy config with new credentials');
+                        currentProxyInstance.updateConfig(proxyConfig);
+                    } else {
+                        // No proxy mounted yet — create and mount one
+                        logger.info('No proxy mounted yet, creating new proxy with credentials');
+                        currentProxyInstance = createAnthropicProxy(proxyConfig);
+                        app.use('/', currentProxyInstance.router);
+                    }
                 }
             }
 
@@ -2029,7 +2016,7 @@ export async function createApp(basePath?: string) {
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            logger.error(`MCP test failed for ${server.name}:`, error);
+            logger.error(`MCP test failed for ${server.name}`, { error: error instanceof Error ? error.message : String(error) });
             return res.json({ success: false, error: errorMessage });
         }
     });
@@ -2407,7 +2394,7 @@ export async function createApp(basePath?: string) {
             const embeddingsData = await embeddingsResponse.json();
             res.json(embeddingsData);
         } catch (error) {
-            logger.error('Embeddings API error:', error);
+            logger.error('Embeddings API error', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to generate embeddings' });
         }
     });
@@ -2429,7 +2416,7 @@ export async function createApp(basePath?: string) {
             }));
             res.json({ learnings: learningsWithoutEmbeddings });
         } catch (error) {
-            logger.error('Failed to get learnings:', error);
+            logger.error('Failed to get learnings', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to get learnings' });
         }
     });
@@ -2447,7 +2434,7 @@ export async function createApp(basePath?: string) {
                 embeddingDimensions: learning.embedding?.length || 0
             });
         } catch (error) {
-            logger.error('Failed to get learning:', error);
+            logger.error('Failed to get learning', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to get learning' });
         }
     });
@@ -2474,7 +2461,7 @@ export async function createApp(basePath?: string) {
                 embeddingDimensions: learning.embedding?.length || 0
             });
         } catch (error) {
-            logger.error('Failed to add learning:', error);
+            logger.error('Failed to add learning', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to add learning' });
         }
     });
@@ -2493,7 +2480,7 @@ export async function createApp(basePath?: string) {
                 embeddingDimensions: learning.embedding?.length || 0
             });
         } catch (error) {
-            logger.error('Failed to update learning:', error);
+            logger.error('Failed to update learning', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to update learning' });
         }
     });
@@ -2507,7 +2494,7 @@ export async function createApp(basePath?: string) {
             }
             res.json({ success: true });
         } catch (error) {
-            logger.error('Failed to delete learning:', error);
+            logger.error('Failed to delete learning', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to delete learning' });
         }
     });
@@ -2540,7 +2527,7 @@ export async function createApp(basePath?: string) {
                 }))
             });
         } catch (error) {
-            logger.error('Failed to search learnings:', error);
+            logger.error('Failed to search learnings', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to search learnings' });
         }
     });
@@ -2589,7 +2576,7 @@ export async function createApp(basePath?: string) {
                 injectedCount: injectedIds.length
             });
         } catch (error) {
-            logger.error('Failed to get task learnings:', error);
+            logger.error('Failed to get task learnings', { error: error instanceof Error ? error.message : String(error) });
             res.status(500).json({ error: 'Failed to get task learnings' });
         }
     });
@@ -2876,7 +2863,7 @@ Guidelines:
                         embeddingDimensions: saved.embedding?.length || 0
                     });
                 } catch (err) {
-                    logger.error('Failed to save learning:', err);
+                    logger.error('Failed to save learning', { error: err instanceof Error ? err.message : String(err) });
                 }
             }
 

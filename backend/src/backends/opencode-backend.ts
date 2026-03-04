@@ -10,9 +10,6 @@ import { existsSync, readdirSync, readFileSync, mkdirSync, statSync, openSync, r
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { TaskState, WaitingInputType, TaskGitState } from '@claudia/shared';
-
-/** On Windows, node-pty requires the .exe extension to find executables */
-const opencodeExe = process.platform === 'win32' ? 'opencode.exe' : 'opencode';
 import {
     CodeBackend,
     BackendType,
@@ -25,6 +22,8 @@ import {
 import { ConfigStore } from '../config-store.js';
 import { createLogger } from '../logger.js';
 
+/** On Windows, node-pty requires the .exe extension to find executables */
+const opencodeExe = process.platform === 'win32' ? 'opencode.exe' : 'opencode';
 const logger = createLogger('[OpenCodeBackend]');
 
 const __filename = fileURLToPath(import.meta.url);
