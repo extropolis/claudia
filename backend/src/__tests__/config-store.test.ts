@@ -18,7 +18,7 @@ describe('ConfigStore', () => {
 
     afterEach(() => {
         try {
-            rmSync(testBaseDir, { recursive: true, force: true });
+            rmSync(testBaseDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
         } catch {
             // Ignore cleanup errors
         }

@@ -29,7 +29,7 @@ describe('WorkspaceStore', () => {
 
     afterEach(() => {
         try {
-            rmSync(testBaseDir, { recursive: true, force: true });
+            rmSync(testBaseDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
         } catch {
             // Ignore cleanup errors
         }
@@ -310,7 +310,7 @@ describe('WorkspaceStore', () => {
             store.deleteWorkspace(tempDir);
 
             // Remove the directory
-            rmSync(tempDir, { recursive: true, force: true });
+            rmSync(tempDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 
             const recent = store.getRecentWorkspaces();
             expect(recent.some(w => w.id === tempDir)).toBe(false);
@@ -371,7 +371,7 @@ describe('WorkspaceStore', () => {
             store.addWorkspace(testWorkspace1);
 
             // Remove the directory
-            rmSync(testWorkspace1, { recursive: true, force: true });
+            rmSync(testWorkspace1, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 
             // Create new store - should filter out missing workspace
             const newStore = new WorkspaceStore(testBaseDir);

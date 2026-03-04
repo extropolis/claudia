@@ -18,7 +18,7 @@ describe('parseConversationFile', () => {
     });
 
     afterEach(() => {
-        rmSync(testDir, { recursive: true, force: true });
+        rmSync(testDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     });
 
     it('should parse user messages', async () => {
@@ -286,7 +286,7 @@ describe('findSessionFile', () => {
 
     afterEach(() => {
         process.env.HOME = originalHome;
-        rmSync(testHome, { recursive: true, force: true });
+        rmSync(testHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     });
 
     it('should find existing session file', async () => {
@@ -316,7 +316,7 @@ describe('findRecentSessionFiles', () => {
 
     afterEach(() => {
         process.env.HOME = originalHome;
-        rmSync(testHome, { recursive: true, force: true });
+        rmSync(testHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     });
 
     it('should return empty array for non-existent projects dir', async () => {
@@ -382,7 +382,7 @@ describe('getWorkspaceSessions', () => {
 
     afterEach(() => {
         process.env.HOME = originalHome;
-        rmSync(testHome, { recursive: true, force: true });
+        rmSync(testHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     });
 
     it('should return empty array for non-existent projects dir', async () => {
