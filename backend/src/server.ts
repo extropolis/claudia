@@ -6,7 +6,8 @@ import os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync } from 'fs';
 import { readFile } from 'fs/promises';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import multer from 'multer';
 import { TaskSpawner } from './task-spawner.js';
 import { WorkspaceStore } from './workspace-store.js';
@@ -2364,6 +2365,20 @@ Guidelines:
             gracefulShutdown('RESTART');
         }, 100);
     });
+
+    // ===== Production Static Frontend Serving =====
+    // When installed via npm (no Vite dev server), serve the pre-built frontend
+    const __server_filename = fileURLToPath(import.meta.url);
+    const __server_dirname = dirname(__server_filename);
+    const frontendDistPath = join(__server_dirname, '..', '..', 'frontend', 'dist');
+    if (existsSync(frontendDistPath)) {
+        logger.info('Serving frontend from static dist', { path: frontendDistPath });
+        app.use(express.static(frontendDistPath));
+        // SPA fallback: serve index.html for any non-API route
+        app.get('*', (_req, res) => {
+            res.sendFile(join(frontendDistPath, 'index.html'));
+        });
+    }
 
     // Graceful shutdown handler
     function gracefulShutdown(signal: string): void {

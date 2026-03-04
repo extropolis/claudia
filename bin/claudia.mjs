@@ -2,7 +2,7 @@
 
 // Claudia CLI
 // Usage:
-//   claudia                Start the Electron desktop app (default)
+//   claudia                Start the app (Electron in dev, web server in production)
 //   claudia web            Start the web app (backend + frontend)
 //   claudia --help         Show help
 
@@ -18,6 +18,9 @@ const ROOT_DIR = join(__dirname, '..');
 const args = process.argv.slice(2);
 const command = args[0] || 'start';
 
+// Detect if running from a dev clone (has source files) vs npm global install (only dist)
+const isDev = existsSync(join(ROOT_DIR, 'shared', 'src', 'index.ts'));
+
 function printHelp() {
     console.log(`
 Claudia - Multi-instance Claude Code orchestrator
@@ -25,9 +28,8 @@ Claudia - Multi-instance Claude Code orchestrator
 Usage: claudia [command]
 
 Commands:
-  start         Start the Electron desktop app (default)
-  web           Start the web app (backend + frontend)
-  build         Build all packages
+  start         Start the app (default)
+  web           Start the web app (backend + frontend)${isDev ? '\n  build         Build all packages' : ''}
   help          Show this help
 
 Options:
@@ -109,17 +111,70 @@ function runNpm(script) {
     });
 }
 
+/**
+ * Production mode: start the backend server directly with Node.
+ * The backend serves the API + pre-built frontend static files.
+ */
+function runProduction() {
+    const backendEntry = join(ROOT_DIR, 'backend', 'dist', 'index.js');
+
+    if (!existsSync(backendEntry)) {
+        console.error('Error: Backend not found. The package may be corrupted.');
+        console.error(`Expected: ${backendEntry}`);
+        process.exit(1);
+    }
+
+    console.log('Starting Claudia...');
+
+    const child = spawn(process.execPath, [backendEntry], {
+        cwd: ROOT_DIR,
+        stdio: 'inherit',
+        env: {
+            ...process.env,
+            NODE_ENV: 'production',
+        }
+    });
+
+    child.on('error', (err) => {
+        console.error(`Failed to start: ${err.message}`);
+        process.exit(1);
+    });
+
+    child.on('exit', (code) => {
+        process.exit(code || 0);
+    });
+
+    ['SIGINT', 'SIGTERM'].forEach((signal) => {
+        process.on(signal, () => {
+            child.kill(signal);
+        });
+    });
+}
+
 switch (command) {
     case 'start':
-        runScript('start-electron');
+        if (isDev) {
+            runScript('start-electron');
+        } else {
+            runProduction();
+        }
         break;
 
     case 'web':
-        runScript('start');
+        if (isDev) {
+            runScript('start');
+        } else {
+            runProduction();
+        }
         break;
 
     case 'build':
-        runNpm('build');
+        if (isDev) {
+            runNpm('build');
+        } else {
+            console.error('Build is only available in development mode.');
+            process.exit(1);
+        }
         break;
 
     case 'help':
