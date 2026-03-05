@@ -153,3 +153,18 @@ jobs:
           files: |
             release/*.AppImage
             release/*.deb
+
+  cleanup-old-releases:
+    name: Cleanup Old Releases
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-macos, build-linux]
+    permissions:
+      contents: write
+    steps:
+      - name: Delete old releases (keep latest 10)
+        uses: dev-drprasad/delete-older-releases@v0.3.4
+        with:
+          keep_latest: 10
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
