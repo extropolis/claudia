@@ -4,9 +4,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import os from 'os';
 import { spawn, ChildProcess } from 'child_process';
-import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync } from 'fs';
-import { readFile } from 'fs/promises';
-import { join, dirname } from 'path';
+import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, statSync } from 'fs';
+import { readFile, readdir } from 'fs/promises';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
 import { TaskSpawner } from './task-spawner.js';
@@ -1421,6 +1421,113 @@ export async function createApp(basePath?: string) {
 
     app.get('/api/workspaces', (_req, res) => {
         res.json(workspaceStore.getWorkspaces());
+    });
+
+    // File explorer endpoint - list files and directories for a workspace
+    app.get('/api/workspaces/files', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        const subPath = (req.query.path as string) || '';
+
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+
+        // Resolve the target directory
+        const targetDir = subPath ? join(workspacePath, subPath) : workspacePath;
+
+        // Security: ensure the resolved path is within the workspace
+        const resolvedTarget = resolve(targetDir);
+        const resolvedWorkspace = resolve(workspacePath);
+        if (!resolvedTarget.startsWith(resolvedWorkspace)) {
+            return res.status(403).json({ error: 'Path traversal not allowed' });
+        }
+
+        if (!existsSync(resolvedTarget)) {
+            return res.status(404).json({ error: 'Directory not found' });
+        }
+
+        // Directories to skip entirely
+        const IGNORED_DIRS = new Set([
+            'node_modules', '.git', '.svn', '.hg', '__pycache__',
+            '.next', '.nuxt', 'dist', 'build', '.cache', '.parcel-cache',
+            'coverage', '.nyc_output', '.tox', '.venv', 'venv',
+            '.idea', '.vscode', '.vs', 'vendor', 'target',
+            '.terraform', '.serverless', '.angular'
+        ]);
+
+        // Files to skip
+        const IGNORED_FILES = new Set([
+            '.DS_Store', 'Thumbs.db', 'desktop.ini'
+        ]);
+
+        try {
+            const entries = await readdir(resolvedTarget, { withFileTypes: true });
+            const items: Array<{
+                name: string;
+                type: 'file' | 'directory';
+                path: string;
+                size?: number;
+                childCount?: number;
+            }> = [];
+
+            for (const entry of entries) {
+                // Skip hidden files/dirs (starting with .) except important config files
+                const isHiddenButImportant = ['.env', '.gitignore', '.npmrc', '.eslintrc', '.prettierrc', '.editorconfig', '.claude'].includes(entry.name);
+                if (entry.name.startsWith('.') && !isHiddenButImportant) {
+                    continue;
+                }
+
+                if (entry.isDirectory()) {
+                    if (IGNORED_DIRS.has(entry.name)) continue;
+                    const dirRelPath = subPath ? `${subPath}/${entry.name}` : entry.name;
+                    // Count children for the directory (shallow)
+                    let childCount = 0;
+                    try {
+                        const children = readdirSync(join(resolvedTarget, entry.name));
+                        childCount = children.filter(c => !IGNORED_FILES.has(c)).length;
+                    } catch {
+                        // Permission denied or other error
+                    }
+                    items.push({
+                        name: entry.name,
+                        type: 'directory',
+                        path: dirRelPath,
+                        childCount
+                    });
+                } else if (entry.isFile()) {
+                    if (IGNORED_FILES.has(entry.name)) continue;
+                    const fileRelPath = subPath ? `${subPath}/${entry.name}` : entry.name;
+                    let size = 0;
+                    try {
+                        const stat = statSync(join(resolvedTarget, entry.name));
+                        size = stat.size;
+                    } catch {
+                        // Permission denied
+                    }
+                    items.push({
+                        name: entry.name,
+                        type: 'file',
+                        path: fileRelPath,
+                        size
+                    });
+                }
+            }
+
+            // Sort: directories first, then files, both alphabetically
+            items.sort((a, b) => {
+                if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+                return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+            });
+
+            res.json({
+                path: subPath || '.',
+                workspace: workspacePath,
+                items
+            });
+        } catch (err) {
+            logger.error('Failed to list files:', err);
+            res.status(500).json({ error: 'Failed to list directory contents' });
+        }
     });
 
     // Config API routes
