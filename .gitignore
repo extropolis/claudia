@@ -25,6 +25,7 @@ server_log_new.txt
 
 # Test artifacts
 *.png
+!assets/icon.png
 test-*.txt
 clean_output.txt
 

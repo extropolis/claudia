@@ -113,6 +113,9 @@
     "directories": {
       "output": "release"
     },
+    "asarUnpack": [
+      "node_modules/@homebridge/node-pty-prebuilt-multiarch/**"
+    ],
     "files": [
       "dist-electron/**/*",
       "frontend/dist/**/*",
@@ -175,7 +178,7 @@
         "deb"
       ],
       "category": "Development",
-      "icon": "assets/icons"
+      "icon": "assets/icon.png"
     }
   }
 }
