@@ -49,6 +49,7 @@ script.js
 .env
 .env.local
 start.ps1
+.claude/settings.local.json
 
 # Runtime data (persisted state)
 backend/tasks.json
