@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { homedir } from 'os';
 import { startServer, stopServer, ServerInfo } from './server-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -10,6 +11,15 @@ let mainWindow: BrowserWindow | null = null;
 let serverInfo: ServerInfo | null = null;
 
 const isDev = process.env.NODE_ENV === 'development';
+
+// GUI apps on Windows/macOS don't inherit shell PATH.
+// Ensure common CLI tool locations are included so claude.exe can be found.
+const home = homedir();
+const extraPaths = process.platform === 'win32'
+    ? [join(home, '.local', 'bin'), join(home, 'AppData', 'Roaming', 'npm')]
+    : [join(home, '.local', 'bin'), join(home, '.npm-global', 'bin'), '/usr/local/bin'];
+const sep = process.platform === 'win32' ? ';' : ':';
+process.env.PATH = [...extraPaths, process.env.PATH || ''].join(sep);
 
 // Set the app name for macOS menu
 app.setName('Claudia');
