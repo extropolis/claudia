@@ -3,6 +3,7 @@
   "productName": "Claudia",
   "version": "0.2.8",
   "description": "Multi-instance Claude Code orchestrator web UI",
+  "author": "Extropolis <contact@extropolis.ai>",
   "license": "MIT",
   "repository": {
     "type": "git",
