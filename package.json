@@ -83,7 +83,11 @@
     "electron-builder": "^26.4.0",
     "playwright": "^1.57.0"
   },
+  "bundleDependencies": [
+    "@claudia/shared"
+  ],
   "dependencies": {
+    "@claudia/shared": "*",
     "@anthropic-ai/sdk": "^0.71.2",
     "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
     "@llamaindex/anthropic": "^0.3.26",
@@ -96,6 +100,9 @@
     "get-port": "^7.1.0",
     "jsonwebtoken": "^9.0.3",
     "llamaindex": "^0.12.1",
+    "marked": "^15.0.12",
+    "marked-terminal": "^7.3.0",
+    "multer": "^2.0.2",
     "opencode-studio-server": "^1.2.1",
     "uuid": "^9.0.1",
     "ws": "^8.16.0"
