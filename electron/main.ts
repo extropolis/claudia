@@ -14,7 +14,7 @@ const isDev = process.env.NODE_ENV === 'development';
 // Set the app name for macOS menu
 app.setName('Claudia');
 
-async function createWindow(): Promise<void> {
+async function createWindow(backendUrl: string): Promise<void> {
     // Create the browser window
     mainWindow = new BrowserWindow({
         width: 1400,
@@ -29,19 +29,20 @@ async function createWindow(): Promise<void> {
         show: false // Don't show until ready
     });
 
+    // Pass backend URL as query parameter so it's available immediately on page load
+    const urlParam = `backendUrl=${encodeURIComponent(backendUrl)}`;
+
     // Load the app
     if (isDev) {
         // In development, load from Vite dev server
-        await mainWindow.loadURL('http://localhost:5173');
+        await mainWindow.loadURL(`http://localhost:5173?${urlParam}`);
         mainWindow.webContents.openDevTools();
     } else {
         // In production, load from built files
         // When packaged, __dirname is /dist-electron, so we go up one level
         const indexPath = join(__dirname, '..', 'frontend', 'dist', 'index.html');
         console.log(`[Main] Loading index from: ${indexPath}`);
-        await mainWindow.loadFile(indexPath);
-        // Open DevTools to debug
-        mainWindow.webContents.openDevTools();
+        await mainWindow.loadURL(`file://${indexPath}?${urlParam}`);
     }
 
     // Show window when ready
@@ -66,15 +67,8 @@ async function startApp(): Promise<void> {
         serverInfo = await startServer(basePath);
         console.log(`   Backend URL: ${serverInfo.url}`);
 
-        // Create the Electron window
-        await createWindow();
-
-        // Send backend URL to renderer process
-        if (mainWindow) {
-            mainWindow.webContents.once('dom-ready', () => {
-                mainWindow?.webContents.send('backend-url', serverInfo!.url);
-            });
-        }
+        // Create the Electron window with backend URL
+        await createWindow(serverInfo.url);
 
         console.log('✅ Claudia is ready!');
     } catch (error) {
@@ -95,8 +89,8 @@ app.on('window-all-closed', () => {
 
 app.on('activate', () => {
     // On macOS, re-create window when dock icon is clicked
-    if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
+    if (BrowserWindow.getAllWindows().length === 0 && serverInfo) {
+        createWindow(serverInfo.url);
     }
 });
 

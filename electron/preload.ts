@@ -1,18 +1,16 @@
-import { contextBridge, ipcRenderer, dialog } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
 
 /**
  * Preload script - Security bridge between main and renderer processes
  * Exposes safe APIs to the renderer via contextBridge
  */
 
-// The backend URL will be sent from main process after server starts
-let backendUrl: string = 'http://localhost:3001'; // Default fallback
-
-// Listen for backend URL from main process
-ipcRenderer.on('backend-url', (_event, url: string) => {
-    backendUrl = url;
-    console.log('[Preload] Backend URL received:', url);
-});
+// Read backend URL from query parameter (passed by main process at load time)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const pageUrl: string = (globalThis as any).location?.search || '';
+const urlParams = new URLSearchParams(pageUrl);
+const backendUrl: string = urlParams.get('backendUrl') || 'http://localhost:3001';
+console.log('[Preload] Backend URL:', backendUrl);
 
 // Expose safe APIs to renderer process
 contextBridge.exposeInMainWorld('electronAPI', {
