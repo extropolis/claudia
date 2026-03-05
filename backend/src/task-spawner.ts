@@ -1085,6 +1085,7 @@ export class TaskSpawner extends EventEmitter {
      */
     private getTaskEnvironment(): { [key: string]: string } {
         const taskEnv = { ...process.env } as { [key: string]: string };
+        console.log(`[TaskSpawner] Task environment PATH: ${taskEnv['PATH']?.substring(0, 200)}`);
 
         // Remove CLAUDECODE env var to prevent "nested session" detection in Claude Code CLI
         delete taskEnv['CLAUDECODE'];

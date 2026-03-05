@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, Menu, clipboard } from 'electron';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
+import { appendFileSync, mkdirSync } from 'fs';
 import { startServer, stopServer, ServerInfo } from './server-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,6 +13,24 @@ let serverInfo: ServerInfo | null = null;
 
 const isDev = process.env.NODE_ENV === 'development';
 
+// Redirect console output to a log file in production so we can debug Start Menu launches
+if (!isDev) {
+    const logDir = join(app.getPath('userData'), 'logs');
+    mkdirSync(logDir, { recursive: true });
+    const logFile = join(logDir, 'main.log');
+    const origLog = console.log;
+    const origError = console.error;
+    const origWarn = console.warn;
+    const writeLog = (level: string, args: unknown[]) => {
+        const msg = `[${new Date().toISOString()}] [${level}] ${args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')}\n`;
+        try { appendFileSync(logFile, msg); } catch {}
+    };
+    console.log = (...args: unknown[]) => { origLog(...args); writeLog('INFO', args); };
+    console.error = (...args: unknown[]) => { origError(...args); writeLog('ERROR', args); };
+    console.warn = (...args: unknown[]) => { origWarn(...args); writeLog('WARN', args); };
+    console.log(`Log file: ${logFile}`);
+}
+
 // GUI apps on Windows/macOS don't inherit shell PATH.
 // Ensure common CLI tool locations are included so claude.exe can be found.
 const home = homedir();
@@ -19,7 +38,9 @@ const extraPaths = process.platform === 'win32'
     ? [join(home, '.local', 'bin'), join(home, 'AppData', 'Roaming', 'npm')]
     : [join(home, '.local', 'bin'), join(home, '.npm-global', 'bin'), '/usr/local/bin'];
 const sep = process.platform === 'win32' ? ';' : ':';
-process.env.PATH = [...extraPaths, process.env.PATH || ''].join(sep);
+const originalPath = process.env.PATH || '';
+process.env.PATH = [...extraPaths, originalPath].join(sep);
+console.log(`[Main] Original PATH length: ${originalPath.length}, extra paths: ${extraPaths.join(', ')}`);
 
 // Set the app name for macOS menu
 app.setName('Claudia');
