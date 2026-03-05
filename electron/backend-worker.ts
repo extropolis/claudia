@@ -44,7 +44,10 @@ parentPort?.on('message', async (e: any) => {
             const { port, basePath } = msg;
             console.log(`Starting backend on port ${port}...`);
 
-            const { server } = await createApp(basePath || undefined);
+            const { server, tunnelManager } = await createApp(basePath || undefined);
+
+            // Update tunnel manager with the actual dynamic port
+            tunnelManager.setPort(port);
 
             await new Promise<void>((resolve, reject) => {
                 server.listen(port, () => {

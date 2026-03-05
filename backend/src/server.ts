@@ -108,11 +108,9 @@ export async function createApp(basePath?: string) {
     logger.info('TunnelManager created (ngrok)');
 
     // ===== Tunnel → React Frontend Proxy =====
-    // When accessed through the localtunnel, proxy non-API requests to the Vite
-    // dev server so the React app is served through the same origin as the backend.
-    // This lets mobile devices use the responsive React UI instead of the old
-    // standalone mobile page.
-    const VITE_ORIGIN = `http://localhost:${PORTS.FRONTEND}`;
+    // When accessed through the tunnel, proxy non-API requests to the Vite
+    // dev server (development) or let them fall through to the static server (production).
+    const isDev = process.env.NODE_ENV === 'development' || process.env.CLAUDIA_DEV === '1';
 
     function isTunnelHost(host: string): boolean {
         return host.includes('.loca.lt') || host.includes('localtunnel') ||
@@ -134,12 +132,17 @@ export async function createApp(basePath?: string) {
             }
         }
 
-        // Let API routes, WebSocket upgrade, and /mobile (legacy) pass through
+        // Let API routes pass through
         if (req.path.startsWith('/api/')) {
             return next();
         }
 
-        // Proxy everything else to the Vite dev server (React frontend)
+        // In production, let requests fall through to the static file server
+        if (!isDev) {
+            return next();
+        }
+
+        // In development, proxy to the Vite dev server
         const proxyReq = httpRequest({
             hostname: 'localhost',
             port: PORTS.FRONTEND,
@@ -2418,5 +2421,5 @@ Guidelines:
     // Note: SIGINT/SIGTERM handlers are set up in index.ts to avoid duplicate handlers
     // The gracefulShutdown function is exported for use by the restart endpoint
 
-    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown };
+    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, tunnelManager };
 }

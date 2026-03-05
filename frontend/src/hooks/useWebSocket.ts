@@ -156,6 +156,11 @@ export function useWebSocket() {
                                     config.aiCoreCredentials?.baseUrl
                                 );
                                 useTaskStore.getState().setAiCoreConfigured(aiCoreConfigured);
+
+                                // Sync Deepgram API key from backend (for mobile/tunnel clients)
+                                if (config.deepgramApiKey && !useTaskStore.getState().deepgramApiKey) {
+                                    useTaskStore.setState({ deepgramApiKey: config.deepgramApiKey });
+                                }
                             })
                             .catch(err => console.error('Failed to fetch config:', err));
                         break;

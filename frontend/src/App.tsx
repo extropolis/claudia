@@ -251,13 +251,14 @@ function App() {
     }, [supervisorEnabled, showChatPanel]);
 
     // Open settings to AI Core panel if credentials are not configured (only once on startup)
+    // Skip if tasks already exist (workspace was reloaded, so API key is already set)
     useEffect(() => {
-        if (aiCoreConfigured === false && !aiCoreCheckDoneRef.current) {
+        if (aiCoreConfigured === false && !aiCoreCheckDoneRef.current && tasks.size === 0) {
             aiCoreCheckDoneRef.current = true;
             setSettingsInitialPanel('aicore');
             setShowSettings(true);
         }
-    }, [aiCoreConfigured]);
+    }, [aiCoreConfigured, tasks.size]);
 
     // Auto-dismiss error notification after 15 seconds
     useEffect(() => {

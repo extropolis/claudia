@@ -46,6 +46,13 @@ export class TunnelManager extends EventEmitter {
     }
 
     /**
+     * Update the port (needed when the server uses a dynamic port)
+     */
+    setPort(port: number): void {
+        this.port = port;
+    }
+
+    /**
      * Start a new ngrok tunnel
      */
     async start(): Promise<TunnelStatus> {

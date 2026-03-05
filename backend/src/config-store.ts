@@ -60,6 +60,7 @@ export interface AppConfig {
     opencodePort?: number;  // Port for OpenCode server (default: 4096)
     useLearnings: boolean;  // Use RAG-based learnings injection for tasks
     claudeCodeSwitches: ClaudeCodeSwitches;  // Claude Code CLI switches
+    deepgramApiKey?: string;  // Deepgram API key for voice recognition (synced from frontend)
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
@@ -133,6 +134,7 @@ export class ConfigStore {
                     autoFocusOnInput: loaded.autoFocusOnInput ?? false,
                     apiMode: loaded.apiMode ?? 'default',
                     customAnthropicApiKey: loaded.customAnthropicApiKey,
+                    deepgramApiKey: loaded.deepgramApiKey,
                     backend: loaded.backend ?? 'claude-code',
                     opencodePort: loaded.opencodePort ?? 4096,
                     useLearnings: loaded.useLearnings ?? false,
@@ -186,6 +188,9 @@ export class ConfigStore {
         }
         if (updates.customAnthropicApiKey !== undefined) {
             this.config.customAnthropicApiKey = updates.customAnthropicApiKey;
+        }
+        if (updates.deepgramApiKey !== undefined) {
+            this.config.deepgramApiKey = updates.deepgramApiKey;
         }
         if (updates.backend !== undefined) {
             this.config.backend = updates.backend;

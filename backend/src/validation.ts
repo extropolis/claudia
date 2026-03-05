@@ -54,6 +54,7 @@ export interface ConfigUpdatePayload {
         disallowedTools?: string;
         appendSystemPrompt?: string;
     };
+    deepgramApiKey?: string;
 }
 
 /**
@@ -192,6 +193,14 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
             return { valid: false, error: 'customAnthropicApiKey must be a string' };
         }
         result.customAnthropicApiKey = payload.customAnthropicApiKey;
+    }
+
+    // Validate deepgramApiKey (optional string)
+    if (payload.deepgramApiKey !== undefined) {
+        if (typeof payload.deepgramApiKey !== 'string') {
+            return { valid: false, error: 'deepgramApiKey must be a string' };
+        }
+        result.deepgramApiKey = payload.deepgramApiKey;
     }
 
     // Validate backend (optional enum)

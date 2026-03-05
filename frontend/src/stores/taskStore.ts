@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType } from '@claudia/shared';
+import { getApiBaseUrl } from '../config/api-config';
 
 // Info about a task that is waiting for user input
 export interface WaitingInputInfo {
@@ -502,7 +503,15 @@ export const useTaskStore = create<TaskStore>()(
                 autoSendEnabled: enabled,
                 autoSendDelayMs: delayMs
             }),
-            setDeepgramApiKey: (key) => set({ deepgramApiKey: key }),
+            setDeepgramApiKey: (key) => {
+                set({ deepgramApiKey: key });
+                // Sync to backend so mobile clients can access it
+                fetch(`${getApiBaseUrl()}/api/config`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ deepgramApiKey: key })
+                }).catch(err => console.error('[TaskStore] Failed to sync Deepgram key to backend:', err));
+            },
 
             // Supervisor actions
             setTaskSummary: (summary) => {
