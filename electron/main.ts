@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, Menu } from 'electron';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
@@ -23,6 +23,45 @@ process.env.PATH = [...extraPaths, process.env.PATH || ''].join(sep);
 
 // Set the app name for macOS menu
 app.setName('Claudia');
+
+// Build application menu with standard Edit shortcuts (Cut/Copy/Paste/SelectAll).
+// Without this, Ctrl+V and other edit shortcuts don't reach the renderer in Electron.
+const menuTemplate: Electron.MenuItemConstructorOptions[] = [
+    ...(process.platform === 'darwin' ? [{
+        label: app.name,
+        submenu: [
+            { role: 'about' as const },
+            { type: 'separator' as const },
+            { role: 'quit' as const }
+        ]
+    }] : []),
+    {
+        label: 'Edit',
+        submenu: [
+            { role: 'undo' as const },
+            { role: 'redo' as const },
+            { type: 'separator' as const },
+            { role: 'cut' as const },
+            { role: 'copy' as const },
+            { role: 'paste' as const },
+            { role: 'selectAll' as const }
+        ]
+    },
+    {
+        label: 'View',
+        submenu: [
+            { role: 'reload' as const },
+            { role: 'toggleDevTools' as const },
+            { type: 'separator' as const },
+            { role: 'zoomIn' as const },
+            { role: 'zoomOut' as const },
+            { role: 'resetZoom' as const },
+            { type: 'separator' as const },
+            { role: 'togglefullscreen' as const }
+        ]
+    }
+];
+Menu.setApplicationMenu(Menu.buildFromTemplate(menuTemplate));
 
 async function createWindow(backendUrl: string): Promise<void> {
     // Create the browser window

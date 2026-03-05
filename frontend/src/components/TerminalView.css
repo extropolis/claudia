@@ -246,6 +246,7 @@
 
 .terminal-container .xterm {
     height: 100%;
+    padding-right: 14px; /* Space so scrollbar doesn't overlap CLI text */
 }
 
 .terminal-container .xterm-viewport {

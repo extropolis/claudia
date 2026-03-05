@@ -267,7 +267,10 @@ export async function createApp(basePath?: string) {
     const clientMissedPongs = new WeakMap<WebSocket, number>();
 
     const heartbeatInterval = setInterval(() => {
-        console.log(`[Server] Heartbeat check - ${clients.size} client(s) connected`);
+        // Only log heartbeat when clients are connected
+        if (clients.size > 0) {
+            console.log(`[Server] Heartbeat check - ${clients.size} client(s) connected`);
+        }
         for (const client of clients) {
             if (clientAliveMap.get(client) === false) {
                 // Client didn't respond to last ping
