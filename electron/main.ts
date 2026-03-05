@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, Menu, clipboard } from 'electron';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
@@ -99,6 +99,14 @@ async function createWindow(backendUrl: string): Promise<void> {
         mainWindow?.show();
     });
 
+    // Notify renderer of fullscreen state changes
+    mainWindow.on('enter-full-screen', () => {
+        mainWindow?.webContents.send('fullscreen-changed', true);
+    });
+    mainWindow.on('leave-full-screen', () => {
+        mainWindow?.webContents.send('fullscreen-changed', false);
+    });
+
     // Handle window closed
     mainWindow.on('closed', () => {
         mainWindow = null;
@@ -151,6 +159,19 @@ app.on('before-quit', async () => {
 });
 
 // IPC Handlers
+ipcMain.handle('exit-fullscreen', () => {
+    mainWindow?.setFullScreen(false);
+});
+
+// Clipboard IPC (preload can't access clipboard directly)
+ipcMain.on('clipboard-read', (event) => {
+    event.returnValue = clipboard.readText();
+});
+
+ipcMain.on('clipboard-write', (_event, text: string) => {
+    clipboard.writeText(text);
+});
+
 ipcMain.handle('select-directory', async () => {
     if (!mainWindow) return null;
 

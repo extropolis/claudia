@@ -20,6 +20,27 @@ interface ElectronAPI {
      * @returns true
      */
     isElectron: () => boolean;
+
+    /**
+     * Read text from clipboard
+     */
+    readClipboard: () => string;
+
+    /**
+     * Write text to clipboard
+     */
+    writeClipboard: (text: string) => void;
+
+    /**
+     * Exit fullscreen mode
+     */
+    exitFullscreen: () => Promise<void>;
+
+    /**
+     * Listen for fullscreen state changes
+     * @returns Cleanup function to remove listener
+     */
+    onFullscreenChanged: (callback: (isFullscreen: boolean) => void) => () => void;
 }
 
 interface Window {

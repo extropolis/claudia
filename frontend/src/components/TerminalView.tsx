@@ -192,6 +192,29 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         term.loadAddon(fitAddon);
         term.loadAddon(webLinksAddon);
 
+        // Electron clipboard integration: Ctrl+V paste and right-click copy
+        if (window.electronAPI?.readClipboard) {
+            term.attachCustomKeyEventHandler((event) => {
+                // Ctrl+V: paste from clipboard
+                if (event.type === 'keydown' && event.ctrlKey && event.key === 'v') {
+                    const text = window.electronAPI!.readClipboard();
+                    if (text) {
+                        term.paste(text);
+                    }
+                    return false; // Prevent default handling
+                }
+                // Ctrl+C: copy selection to clipboard (if text is selected)
+                if (event.type === 'keydown' && event.ctrlKey && event.key === 'c') {
+                    const selection = term.getSelection();
+                    if (selection) {
+                        window.electronAPI!.writeClipboard(selection);
+                        return false;
+                    }
+                }
+                return true;
+            });
+        }
+
         // Handle input BEFORE open
         term.onData((data) => {
             if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -217,6 +240,25 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         term.open(terminalRef.current);
         xtermRef.current = term;
         fitAddonRef.current = fitAddon;
+
+        // Windows Terminal behavior: right-click copies selection or pastes
+        if (window.electronAPI?.writeClipboard) {
+            term.element?.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                const selection = term.getSelection();
+                if (selection) {
+                    // Text selected: copy to clipboard
+                    window.electronAPI!.writeClipboard(selection);
+                    term.clearSelection();
+                } else {
+                    // No selection: paste from clipboard
+                    const text = window.electronAPI!.readClipboard();
+                    if (text) {
+                        term.paste(text);
+                    }
+                }
+            });
+        }
 
         // Initial fit - Delayed to ensure DOM is ready
         requestAnimationFrame(() => {

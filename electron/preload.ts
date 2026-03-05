@@ -36,6 +36,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
      */
     isElectron: (): boolean => {
         return true;
+    },
+
+    /**
+     * Read text from clipboard
+     */
+    readClipboard: (): string => {
+        return ipcRenderer.sendSync('clipboard-read');
+    },
+
+    /**
+     * Write text to clipboard
+     */
+    writeClipboard: (text: string): void => {
+        ipcRenderer.send('clipboard-write', text);
+    },
+
+    /**
+     * Exit fullscreen mode
+     */
+    exitFullscreen: (): Promise<void> => {
+        return ipcRenderer.invoke('exit-fullscreen');
+    },
+
+    /**
+     * Listen for fullscreen state changes
+     */
+    onFullscreenChanged: (callback: (isFullscreen: boolean) => void): (() => void) => {
+        const handler = (_event: Electron.IpcRendererEvent, isFullscreen: boolean) => callback(isFullscreen);
+        ipcRenderer.on('fullscreen-changed', handler);
+        return () => ipcRenderer.removeListener('fullscreen-changed', handler);
     }
 });
 
