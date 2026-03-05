@@ -165,7 +165,8 @@ export async function createApp(basePath?: string) {
     initializeLLMService(configStore);
 
     // Initialize remaining services
-    const taskSpawner = new TaskSpawner(undefined, true, configStore);
+    const persistencePath = basePath ? join(basePath, 'tasks.json') : undefined;
+    const taskSpawner = new TaskSpawner(persistencePath, true, configStore);
     const workspaceStore = new WorkspaceStore(basePath);
     // SupervisorChat now handles both auto-analysis (formerly TaskSupervisor) and chat
     const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore);

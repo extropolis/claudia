@@ -267,7 +267,7 @@ export class TaskSpawner extends EventEmitter {
 
         // Create new backend based on config
         this.backendType = this.configStore?.getBackend() || 'claude-code';
-        this.backend = createBackend(this.backendType, this.configStore || undefined);
+        this.backend = createBackend(this.backendType, this.configStore || undefined, this.getHistoryDir());
 
         // Wire up backend events
         this.backend.on('task:output', (taskId: string, data: string) => {

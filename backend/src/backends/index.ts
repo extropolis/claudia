@@ -14,12 +14,12 @@ import { ConfigStore } from '../config-store.js';
 /**
  * Create a backend instance based on the configured type
  */
-export function createBackend(backendType: BackendType, configStore?: ConfigStore): CodeBackend {
+export function createBackend(backendType: BackendType, configStore?: ConfigStore, historyDir?: string): CodeBackend {
     switch (backendType) {
         case 'opencode':
-            return new OpenCodeBackend(configStore);
+            return new OpenCodeBackend(configStore, historyDir);
         case 'claude-code':
         default:
-            return new ClaudeCodeBackend(configStore);
+            return new ClaudeCodeBackend(configStore, historyDir);
     }
 }
