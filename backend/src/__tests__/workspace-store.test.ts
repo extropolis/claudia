@@ -36,16 +36,10 @@ describe('WorkspaceStore', () => {
     });
 
     describe('initialization', () => {
-        it('should create config file on initialization', () => {
-            const configPath = join(testBaseDir, 'workspace-config.json');
-            expect(existsSync(configPath)).toBe(true);
-        });
-
-        it('should add default workspace if none exist', () => {
+        it('should start with empty workspaces on fresh init', () => {
             const workspaces = store.getWorkspaces();
-            // Default adds project root, which may or may not be added
-            // Just verify it returns an array
             expect(Array.isArray(workspaces)).toBe(true);
+            expect(workspaces.length).toBe(0);
         });
     });
 
