@@ -1,7 +1,7 @@
 {
   "name": "@extropolis/claudia",
   "productName": "Claudia",
-  "version": "0.2.20",
+  "version": "0.2.21",
   "description": "Multi-instance Claude Code orchestrator web UI",
   "author": "Extropolis <contact@extropolis.ai>",
   "license": "MIT",
