@@ -168,6 +168,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [hyperspaceUseCustomModel, setHyperspaceUseCustomModel] = useState(false);
     const [hyperspaceModels, setHyperspaceModels] = useState<{ value: string; label: string }[]>([]);
     const [hyperspaceModelsLoading, setHyperspaceModelsLoading] = useState(false);
+    const [haiProxyStatus, setHaiProxyStatus] = useState<'unknown' | 'starting' | 'running' | 'stopped' | 'not-installed'>('unknown');
     const hyperspaceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
     // Custom API key test state
@@ -203,6 +204,54 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             fetchClaudeConfig();
         }
     }, [expandedPanels.mcp]);
+
+    const startHaiProxy = useCallback(async () => {
+        setHaiProxyStatus('starting');
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/hyperspace/start`, { method: 'POST' });
+            const result = await response.json();
+            if (result.success) {
+                setHaiProxyStatus('running');
+                const updatedConfig = {
+                    proxyUrl: result.proxyUrl || 'http://localhost:6655',
+                    apiKey: result.apiKey,
+                    model: hyperspaceProxy.model,
+                    alwaysThinkingEnabled: hyperspaceProxy.alwaysThinkingEnabled
+                };
+                setHyperspaceProxy(updatedConfig);
+                // Fetch models after proxy is up
+                fetchHyperspaceModels(updatedConfig.proxyUrl, updatedConfig.apiKey);
+            } else {
+                setHaiProxyStatus(result.error?.includes('not found') ? 'not-installed' : 'stopped');
+                console.error('[Settings] Failed to start HAI proxy:', result.error);
+            }
+        } catch (error) {
+            setHaiProxyStatus('stopped');
+            console.error('[Settings] Error starting HAI proxy:', error);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [hyperspaceProxy.model, hyperspaceProxy.alwaysThinkingEnabled]);
+
+    const checkHaiProxyStatus = useCallback(async () => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/hyperspace/status`);
+            const result = await response.json();
+            if (!result.haiInstalled) {
+                setHaiProxyStatus('not-installed');
+            } else if (result.proxyRunning) {
+                setHaiProxyStatus('running');
+                if (result.apiKey) {
+                    setHyperspaceProxy(prev => ({ ...prev, apiKey: result.apiKey, proxyUrl: result.proxyUrl || prev.proxyUrl }));
+                    fetchHyperspaceModels(result.proxyUrl || 'http://localhost:6655', result.apiKey);
+                }
+            } else {
+                setHaiProxyStatus('stopped');
+            }
+        } catch {
+            setHaiProxyStatus('stopped');
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const fetchHyperspaceModels = useCallback(async (proxyUrl: string, apiKey: string) => {
         if (!proxyUrl || !apiKey) {
@@ -285,9 +334,9 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 }
                 if (config.hyperspaceProxy) {
                     setHyperspaceProxy(config.hyperspaceProxy);
-                    // If we have an API key, fetch the available models
+                    // Check proxy status before fetching models \u2014 proxy may be dead after restart
                     if (config.hyperspaceProxy.apiKey && config.hyperspaceProxy.proxyUrl) {
-                        fetchHyperspaceModels(config.hyperspaceProxy.proxyUrl, config.hyperspaceProxy.apiKey);
+                        checkHaiProxyStatus();
                     }
                 }
                 setBackend(config.backend || 'claude-code');
@@ -833,6 +882,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         // Save immediately for radio buttons
         saveApiMode(mode, customAnthropicApiKey);
 
+        // When switching to hyperspace mode, auto-start the proxy
         // Also save hyperspace config immediately if switching to hyperspace mode
         // to ensure any pending changes are persisted, and fetch models
         if (mode === 'hyperspace-proxy') {
@@ -841,10 +891,18 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             }
             saveHyperspaceProxy(hyperspaceProxy);
 
-            // Auto-fetch models when switching to hyperspace mode
-            if (hyperspaceProxy.apiKey && hyperspaceProxy.proxyUrl) {
-                fetchHyperspaceModels(hyperspaceProxy.proxyUrl, hyperspaceProxy.apiKey);
-            }
+            // Auto-start/check the proxy when switching to hyperspace mode
+            checkHaiProxyStatus().then(async () => {
+                // If not running after status check, start it
+                setHaiProxyStatus(prev => {
+                    if (prev === 'stopped') {
+                        startHaiProxy();
+                    } else if (prev === 'running' && hyperspaceProxy.apiKey && hyperspaceProxy.proxyUrl) {
+                        fetchHyperspaceModels(hyperspaceProxy.proxyUrl, hyperspaceProxy.apiKey);
+                    }
+                    return prev;
+                });
+            });
         }
     };
 
@@ -1194,7 +1252,16 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     <div className="api-mode-content">
                                         <span className="api-mode-title">Hyperspace AI Proxy</span>
                                         <span className="api-mode-description">
-                                            Use the HAI proxy (requires hai proxy start running)
+                                            Claudia auto-starts the HAI proxy
+                                            {apiMode === 'hyperspace-proxy' && (
+                                                <span className={`hai-status-badge hai-status-${haiProxyStatus}`}>
+                                                    {haiProxyStatus === 'starting' && ' ◌ Starting...'}
+                                                    {haiProxyStatus === 'running' && ' ● Running'}
+                                                    {haiProxyStatus === 'stopped' && ' ✗ Stopped'}
+                                                    {haiProxyStatus === 'not-installed' && ' ✗ hai not installed'}
+                                                    {haiProxyStatus === 'unknown' && ' ◌ Checking...'}
+                                                </span>
+                                            )}
                                         </span>
                                     </div>
                                 </label>
@@ -1396,26 +1463,25 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                             {apiMode === 'hyperspace-proxy' && (
                                 <div className="api-mode-fields">
                                     <div className="aicore-form">
-                                        <div className="aicore-field">
-                                            <label>Proxy URL</label>
-                                            <input
-                                                type="text"
-                                                value={hyperspaceProxy.proxyUrl}
-                                                onChange={(e) => handleHyperspaceChange('proxyUrl', e.target.value)}
-                                                placeholder="http://localhost:6655"
-                                                className="aicore-input"
-                                            />
-                                        </div>
-
-                                        <div className="aicore-field">
-                                            <label>API Key</label>
-                                            <input
-                                                type="password"
-                                                value={hyperspaceProxy.apiKey}
-                                                onChange={(e) => handleHyperspaceChange('apiKey', e.target.value)}
-                                                placeholder="Your API key from hai proxy terminal"
-                                                className="aicore-input"
-                                            />
+                                        {/* Proxy status + controls */}
+                                        <div className="hai-proxy-status-row">
+                                            <div className={`hai-proxy-status-indicator hai-status-${haiProxyStatus}`}>
+                                                {haiProxyStatus === 'starting' && <><Loader2 size={14} className="spinning" /> Starting HAI proxy...</>}
+                                                {haiProxyStatus === 'running' && <><CheckCircle size={14} /> HAI proxy running on {hyperspaceProxy.proxyUrl}</>}
+                                                {haiProxyStatus === 'stopped' && <><AlertCircle size={14} /> HAI proxy not running</>}
+                                                {haiProxyStatus === 'not-installed' && <><AlertCircle size={14} /> <code>hai</code> CLI not installed</>}
+                                                {haiProxyStatus === 'unknown' && <><Loader2 size={14} className="spinning" /> Checking status...</>}
+                                            </div>
+                                            {(haiProxyStatus === 'stopped' || haiProxyStatus === 'unknown') && (
+                                                <button className="aicore-test-btn" onClick={startHaiProxy}>
+                                                    Start Proxy
+                                                </button>
+                                            )}
+                                            {haiProxyStatus === 'running' && (
+                                                <button className="aicore-refresh-btn" onClick={checkHaiProxyStatus} title="Refresh status">
+                                                    <RefreshCw size={14} />
+                                                </button>
+                                            )}
                                         </div>
 
                                         <div className="aicore-field">
@@ -1774,7 +1840,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                     </CollapsiblePanel>
 
                     <CollapsiblePanel
-                        title="AI Supervisor"
+                        title="Summary Mode"
                         icon={<Bot size={18} />}
                         isExpanded={expandedPanels.supervisor}
                         onToggle={() => togglePanel('supervisor')}
@@ -1782,10 +1848,10 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                         <div className="supervisor-content">
                             <div className="supervisor-toggle-item">
                                 <div className="supervisor-toggle-info">
-                                    <span className="supervisor-toggle-label">Enable AI Supervisor</span>
+                                    <span className="supervisor-toggle-label">Enable Summary Mode</span>
                                     <span className="supervisor-toggle-description">
-                                        When enabled, the AI will automatically analyze tasks when they complete
-                                        and provide feedback in the Chat panel.
+                                        When enabled, the AI will automatically summarize tasks when they complete
+                                        and provide suggested next actions in Summary view.
                                     </span>
                                 </div>
                                 <label className="toggle-switch">
@@ -1802,14 +1868,14 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 <>
                                     <div className="supervisor-prompt-section">
                                         <p className="supervisor-description">
-                                            Configure how the AI supervisor analyzes completed tasks.
-                                            This prompt guides the supervisor when tasks finish.
+                                            Configure the AI personality and behavior for task summaries.
+                                            This prompt guides how the AI summarizes completed tasks and suggests next steps.
                                         </p>
                                         <textarea
                                             className="supervisor-textarea"
                                             value={supervisorSystemPrompt}
                                             onChange={(e) => handleSupervisorPromptChange(e.target.value)}
-                                            placeholder="Enter system prompt for the AI supervisor...&#10;&#10;Example:&#10;Make sure tasks complete without errors and are tested."
+                                            placeholder="Enter system prompt for Summary Mode...&#10;&#10;Example:&#10;Keep summaries brief and action-oriented. Suggest running tests after code changes."
                                             rows={10}
                                         />
                                     </div>

@@ -1,21 +1,14 @@
 {
   "workspaces": [
     {
-      "id": "/Users/I850333/projects/experiments/Minecraft",
-      "name": "Minecraft",
-      "createdAt": "2026-01-23T16:12:25.478Z",
-      "systemPrompt": " Port 2567 is the main server                                                     \n Port 3000 is the frontend (vite)   \n\n./start.sh restarts the app    \n\nNEVER touch port 4001"
+      "id": "/Users/I850333/projects/experiments/noa-examples-master",
+      "name": "noa-examples-master",
+      "createdAt": "2026-03-01T01:22:40.148Z"
     },
     {
       "id": "/Users/I850333/projects/experiments/claudia",
       "name": "claudia",
-      "createdAt": "2026-02-10T21:56:27.323Z"
-    },
-    {
-      "id": "/Users/I850333/projects/experiments/skynative",
-      "name": "skynative",
-      "createdAt": "2026-02-24T01:38:47.542Z",
-      "systemPrompt": "you can login to the app with username: Lance password: Butch988"
+      "createdAt": "2026-03-02T18:09:49.348Z"
     },
     {
       "id": "/Users/I850333/projects/experiments/joule_expense",
@@ -24,18 +17,43 @@
       "systemPrompt": "here are the joule login creds: username: lance.hughes@sap.com\npassword: ILikeFish_988\n\nalways use playwright mcp to test the joule agent"
     },
     {
-      "id": "/Users/I850333/projects/experiments/joule-concur-expense-develop",
-      "name": "joule-concur-expense-develop",
-      "createdAt": "2026-02-24T22:26:50.506Z"
+      "id": "/Users/I850333/projects/experiments/backend-for-joule",
+      "name": "backend-for-joule",
+      "createdAt": "2026-03-04T16:49:22.212Z"
     },
     {
-      "id": "/Users/I850333/projects/experiments/noa-examples-master",
-      "name": "noa-examples-master",
-      "createdAt": "2026-03-01T01:22:40.148Z"
+      "id": "/Users/I850333/projects/experiments/agent-runtime",
+      "name": "agent-runtime",
+      "createdAt": "2026-03-04T16:50:50.653Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/joule-profile-assistant",
+      "name": "joule-profile-assistant",
+      "createdAt": "2026-03-04T21:45:12.378Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments",
+      "name": "experiments",
+      "createdAt": "2026-03-05T19:10:59.958Z"
     }
   ],
-  "activeWorkspaceId": "/Users/I850333/projects/experiments/Minecraft",
+  "activeWorkspaceId": "/Users/I850333/projects/experiments/joule_expense",
   "recentWorkspaces": [
+    {
+      "id": "/Users/I850333/projects/experiments/Minecraft",
+      "name": "Minecraft",
+      "removedAt": "2026-03-04T16:48:05.110Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/skynative",
+      "name": "skynative",
+      "removedAt": "2026-03-02T16:39:37.673Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/joule-concur-expense-develop",
+      "name": "joule-concur-expense-develop",
+      "removedAt": "2026-03-01T19:33:44.782Z"
+    },
     {
       "id": "/Users/I850333/projects/experiments/openclaw",
       "name": "openclaw",

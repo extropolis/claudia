@@ -58,6 +58,10 @@ interface TaskStore {
     chatMessages: ChatMessage[];
     chatTyping: boolean;
 
+    // Summary mode state (per-task)
+    summaryMessages: Map<string, ChatMessage[]>;
+    summaryTyping: Map<string, boolean>;
+
     // Waiting input notifications
     waitingInputNotifications: Map<string, WaitingInputInfo>;
 
@@ -123,6 +127,11 @@ interface TaskStore {
     setChatMessages: (messages: ChatMessage[]) => void;
     setChatTyping: (isTyping: boolean) => void;
     clearChatMessages: () => void;
+
+    // Summary mode actions
+    addSummaryMessage: (taskId: string, message: ChatMessage) => void;
+    setSummaryMessages: (taskId: string, messages: ChatMessage[]) => void;
+    setSummaryTyping: (taskId: string, isTyping: boolean) => void;
 
     // Waiting input actions
     setWaitingInput: (info: WaitingInputInfo) => void;
@@ -208,6 +217,10 @@ export const useTaskStore = create<TaskStore>()(
             // Chat initial state
             chatMessages: [],
             chatTyping: false,
+
+            // Summary mode initial state
+            summaryMessages: new Map(),
+            summaryTyping: new Map(),
 
             // Waiting input initial state
             waitingInputNotifications: new Map(),
@@ -529,6 +542,30 @@ export const useTaskStore = create<TaskStore>()(
             setChatMessages: (messages) => set({ chatMessages: messages }),
             setChatTyping: (isTyping) => set({ chatTyping: isTyping }),
             clearChatMessages: () => set({ chatMessages: [] }),
+
+            // Summary mode actions
+            addSummaryMessage: (taskId, message) => {
+                const { summaryMessages } = get();
+                const newMap = new Map(summaryMessages);
+                const existing = newMap.get(taskId) || [];
+                // Avoid duplicates
+                if (!existing.some(m => m.id === message.id)) {
+                    newMap.set(taskId, [...existing, message]);
+                    set({ summaryMessages: newMap });
+                }
+            },
+            setSummaryMessages: (taskId, messages) => {
+                const { summaryMessages } = get();
+                const newMap = new Map(summaryMessages);
+                newMap.set(taskId, messages);
+                set({ summaryMessages: newMap });
+            },
+            setSummaryTyping: (taskId, isTyping) => {
+                const { summaryTyping } = get();
+                const newMap = new Map(summaryTyping);
+                newMap.set(taskId, isTyping);
+                set({ summaryTyping: newMap });
+            },
 
             // Waiting input actions
             setWaitingInput: (info) => {

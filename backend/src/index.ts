@@ -66,7 +66,7 @@ setInterval(() => {
 }, 2000);
 
 
-const { server, taskSpawner, gracefulShutdown } = await createApp();
+const { server, taskSpawner, gracefulShutdown, tunnelManager, configStore } = await createApp();
 
 console.log(`[Index] Starting server on port ${PORT}...`);
 let httpServer: ReturnType<typeof server.listen> | undefined;
@@ -75,6 +75,21 @@ try {
         console.log(`Claude Code UI running on http://localhost:${PORT}`);
         console.log(`WebSocket available at ws://localhost:${PORT}`);
         console.log(`[Index] Server successfully listening`);
+
+        // Auto-restart tunnel if it was previously active (after tsx watch reload)
+        const shouldAutoRestart = configStore.getTunnelAutoRestart();
+        if (shouldAutoRestart) {
+            console.log('[Index] Tunnel was previously active, auto-restarting...');
+            tunnelManager.start().then((status) => {
+                if (status.active) {
+                    console.log('[Index] ✓ Tunnel auto-restarted successfully', { url: status.url });
+                } else {
+                    console.error('[Index] Failed to auto-restart tunnel', { error: status.error });
+                }
+            }).catch((err) => {
+                console.error('[Index] Exception during tunnel auto-restart:', err);
+            });
+        }
     });
 
     httpServer.on('error', (err: any) => {

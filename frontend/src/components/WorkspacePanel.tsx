@@ -217,6 +217,7 @@ interface WorkspaceSectionProps {
     onDeleteWorkspace: () => void;
     onOpenFolder: () => void;
     onOpenTerminal: () => void;
+    onOpenClaudeMd: () => void;
     onPushToGithub: () => void;
     onSystemPrompt: () => void;
     onToggleMenu: () => void;
@@ -248,6 +249,7 @@ function WorkspaceSection({
     onDeleteWorkspace,
     onOpenFolder,
     onOpenTerminal,
+    onOpenClaudeMd,
     onPushToGithub,
     onSystemPrompt,
     onToggleMenu,
@@ -568,6 +570,17 @@ function WorkspaceSection({
                                 className="workspace-dropdown-item"
                                 onClick={(e) => {
                                     e.stopPropagation();
+                                    onOpenClaudeMd();
+                                    onToggleMenu();
+                                }}
+                            >
+                                <FileText size={14} />
+                                <span>Open CLAUDE.md</span>
+                            </button>
+                            <button
+                                className="workspace-dropdown-item"
+                                onClick={(e) => {
+                                    e.stopPropagation();
                                     navigator.clipboard.writeText(workspace.id).catch(err => console.error('Failed to copy path:', err));
                                     onToggleMenu();
                                 }}
@@ -819,6 +832,7 @@ interface WorkspacePanelProps {
     onReorderWorkspaces: (fromIndex: number, toIndex: number) => void;
     onOpenFolder: (workspaceId: string) => void;
     onOpenTerminal: (workspaceId: string) => void;
+    onOpenClaudeMd: (workspaceId: string) => void;
     onPushToGithub: (workspaceId: string) => void;
     onSetSystemPrompt: (workspaceId: string, systemPrompt: string) => void;
     onCreateTask: (prompt: string, workspaceId: string, initialCols?: number, initialRows?: number) => void;
@@ -838,6 +852,7 @@ export function WorkspacePanel({
     onReorderWorkspaces,
     onOpenFolder,
     onOpenTerminal,
+    onOpenClaudeMd,
     onPushToGithub,
     onSetSystemPrompt,
     onCreateTask,
@@ -1037,6 +1052,7 @@ export function WorkspacePanel({
                             onDeleteWorkspace={() => onDeleteWorkspace(workspace.id)}
                             onOpenFolder={() => onOpenFolder(workspace.id)}
                             onOpenTerminal={() => onOpenTerminal(workspace.id)}
+                            onOpenClaudeMd={() => onOpenClaudeMd(workspace.id)}
                             onPushToGithub={() => onPushToGithub(workspace.id)}
                             onSystemPrompt={() => setSystemPromptWorkspace(workspace)}
                             onToggleMenu={() => setOpenMenuId(openMenuId === workspace.id ? null : workspace.id)}

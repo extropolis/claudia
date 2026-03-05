@@ -18,6 +18,7 @@
     from {
         opacity: 0;
     }
+
     to {
         opacity: 1;
     }
@@ -41,6 +42,7 @@
         opacity: 0;
         transform: translateY(20px);
     }
+
     to {
         opacity: 1;
         transform: translateY(0);
@@ -148,6 +150,7 @@
         opacity: 0;
         transform: translateY(-10px);
     }
+
     to {
         opacity: 1;
         transform: translateY(0);
@@ -736,12 +739,12 @@
     border-radius: 50%;
 }
 
-.toggle-switch input:checked + .toggle-slider {
+.toggle-switch input:checked+.toggle-slider {
     background-color: var(--accent-secondary);
     border-color: var(--accent-secondary);
 }
 
-.toggle-switch input:checked + .toggle-slider:before {
+.toggle-switch input:checked+.toggle-slider:before {
     transform: translateX(20px);
     background-color: white;
 }
@@ -1050,8 +1053,13 @@
 }
 
 @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 .aicore-actions {
@@ -1279,8 +1287,13 @@
 }
 
 @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 /* MCP View Toggle Styles */
@@ -1443,11 +1456,77 @@
     cursor: not-allowed;
 }
 
+/* HAI Proxy Status Styles */
+.hai-proxy-status-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    margin-bottom: 12px;
+}
+
+.hai-proxy-status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    font-size: 0.82rem;
+    font-weight: 500;
+}
+
+.hai-proxy-status-indicator.hai-status-running {
+    color: var(--accent-green);
+}
+
+.hai-proxy-status-indicator.hai-status-starting {
+    color: var(--text-muted);
+}
+
+.hai-proxy-status-indicator.hai-status-stopped,
+.hai-proxy-status-indicator.hai-status-unknown {
+    color: var(--text-muted);
+}
+
+.hai-proxy-status-indicator.hai-status-not-installed {
+    color: var(--accent-red, #ef4444);
+}
+
+.hai-proxy-status-indicator code {
+    font-size: 0.78rem;
+    padding: 1px 5px;
+    background: var(--bg-tertiary);
+    border-radius: 3px;
+}
+
+.hai-status-badge {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+
+.hai-status-badge.hai-status-running {
+    color: var(--accent-green);
+}
+
+.hai-status-badge.hai-status-starting,
+.hai-status-badge.hai-status-unknown {
+    color: var(--text-muted);
+}
+
+.hai-status-badge.hai-status-stopped,
+.hai-status-badge.hai-status-not-installed {
+    color: var(--accent-red, #ef4444);
+}
+
 /* Hyperspace Model Row */
 .hyperspace-model-row {
     display: flex;
     align-items: center;
     gap: 8px;
+
 }
 
 .hyperspace-model-select-wrapper {

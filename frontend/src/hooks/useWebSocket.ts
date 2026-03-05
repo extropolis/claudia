@@ -66,6 +66,9 @@ export function useWebSocket() {
         addChatMessage,
         setChatMessages,
         setChatTyping,
+        addSummaryMessage,
+        setSummaryMessages,
+        setSummaryTyping,
         setWaitingInput,
         clearWaitingInput,
         setArchivedTasks,
@@ -231,6 +234,34 @@ export function useWebSocket() {
                         setChatTyping(payload.isTyping);
                         break;
                     }
+                    // Summary Mode messages
+                    case 'summary:message': {
+                        const payload = message.payload as { taskId: string; message: ChatMessage };
+                        console.log('[WebSocket] Summary message received for task:', payload.taskId);
+                        addSummaryMessage(payload.taskId, payload.message);
+
+                        // Auto-speak if enabled and this is an alert (proactive AI summary)
+                        if (payload.message.isAlert && payload.message.role === 'assistant') {
+                            const { autoSpeakResponses } = useTaskStore.getState();
+                            if (autoSpeakResponses) {
+                                window.dispatchEvent(new CustomEvent('summary:speak', {
+                                    detail: { text: payload.message.content, taskId: payload.taskId }
+                                }));
+                            }
+                        }
+                        break;
+                    }
+                    case 'summary:history': {
+                        const payload = message.payload as { taskId: string; messages: ChatMessage[] };
+                        console.log('[WebSocket] Summary history received for task:', payload.taskId, payload.messages.length, 'messages');
+                        setSummaryMessages(payload.taskId, payload.messages);
+                        break;
+                    }
+                    case 'summary:typing': {
+                        const payload = message.payload as { taskId: string; isTyping: boolean };
+                        setSummaryTyping(payload.taskId, payload.isTyping);
+                        break;
+                    }
                     case 'task:waitingInput': {
                         const payload = message.payload as {
                             taskId: string;
@@ -379,7 +410,7 @@ export function useWebSocket() {
         };
 
         wsRef.current = ws;
-    }, [setConnected, setTasks, addTask, updateTask, deleteTask, selectTask, setWorkspaces, addWorkspace, removeWorkspace, setTaskSummary, addChatMessage, setChatMessages, setChatTyping, setWaitingInput, clearWaitingInput, setArchivedTasks, removeArchivedTask]);
+    }, [setConnected, setTasks, addTask, updateTask, deleteTask, selectTask, setWorkspaces, addWorkspace, removeWorkspace, setTaskSummary, addChatMessage, setChatMessages, setChatTyping, addSummaryMessage, setSummaryMessages, setSummaryTyping, setWaitingInput, clearWaitingInput, setArchivedTasks, removeArchivedTask]);
 
     const sendMessage = useCallback((type: string, payload: unknown) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -481,6 +512,10 @@ export function useWebSocket() {
         sendMessage('workspace:openTerminal', { workspaceId });
     }, [sendMessage]);
 
+    const openClaudeMd = useCallback((workspaceId: string) => {
+        sendMessage('workspace:openClaudeMd', { workspaceId });
+    }, [sendMessage]);
+
     const setSystemPrompt = useCallback((workspaceId: string, systemPrompt: string) => {
         sendMessage('workspace:systemPrompt:set', { workspaceId, systemPrompt });
     }, [sendMessage]);
@@ -537,6 +572,19 @@ export function useWebSocket() {
         sendMessage('git:push', { workspaceId });
     }, [sendMessage]);
 
+    // Summary mode actions
+    const sendSummaryChat = useCallback((content: string, taskId: string) => {
+        sendMessage('summary:chat', { content, taskId });
+    }, [sendMessage]);
+
+    const requestSummaryHistory = useCallback((taskId: string) => {
+        sendMessage('summary:history', { taskId });
+    }, [sendMessage]);
+
+    const executeSummaryAction = useCallback((taskId: string, action: { id: string; label: string; action: string; type: string }) => {
+        sendMessage('summary:action', { taskId, action });
+    }, [sendMessage]);
+
     return {
         createTask,
         selectTaskOnServer,
@@ -553,6 +601,7 @@ export function useWebSocket() {
         reorderWorkspaces,
         openFolder,
         openTerminal,
+        openClaudeMd,
         setSystemPrompt,
         requestRecentWorkspaces,
         clearRecentWorkspace,
@@ -566,6 +615,9 @@ export function useWebSocket() {
         deleteArchivedTask,
         continueArchivedTask,
         pushToGithub,
+        sendSummaryChat,
+        requestSummaryHistory,
+        executeSummaryAction,
         wsRef
     };
 }

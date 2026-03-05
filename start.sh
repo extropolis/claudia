@@ -109,8 +109,52 @@ export CLAUDIA_BACKEND_PORT=$BACKEND_PORT
 # Increase Node.js memory limit for backend (handles many persisted tasks + archived tasks)
 export NODE_OPTIONS="--max-old-space-size=8192"
 
-# Start backend and frontend
-# Backend: tsx without watch - use restart button in UI to reload
-# Frontend: Vite HMR auto-reloads on file changes
-npm run dev:no-watch -w backend & npm run dev -w frontend
+# Start frontend in background (Vite HMR auto-reloads on file changes)
+npm run dev -w frontend &
+FRONTEND_PID=$!
+
+# Backend restart loop:
+# - tsx watch handles automatic restarts on file changes
+# - Exit code 75 = explicit restart requested (via API)
+# - Exit code 0 = normal shutdown (stop everything)
+# - Other codes = crash, attempt restart
+echo "🔄 Starting backend with tsx watch (auto-reload on file changes)..."
+while true; do
+    # Temporarily disable set -e so non-zero exit codes don't kill the script
+    set +e
+    npm run dev -w backend
+    EXIT_CODE=$?
+    set -e
+
+    # tsx watch exited — this means either:
+    # 1. The process was killed/crashed (tsx watch normally never exits on its own for file changes)
+    # 2. Explicit restart via API (exit code 75)
+    # 3. Normal shutdown (exit code 0 from SIGINT/SIGTERM)
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo "🛑 [start.sh] Backend exited cleanly (code 0), stopping."
+        kill $FRONTEND_PID 2>/dev/null || true
+        break
+    fi
+
+    echo ""
+    echo "🔄 [start.sh] Backend exited with code $EXIT_CODE, restarting in 2 seconds..."
+    # Brief pause to let port free up and avoid rapid restart loops
+    sleep 2
+    # Verify backend port is free before restarting
+    if lsof -ti:$BACKEND_PORT >/dev/null 2>&1; then
+        echo "   ⏳ Waiting for port $BACKEND_PORT to free up..."
+        for i in $(seq 1 10); do
+            sleep 1
+            if ! lsof -ti:$BACKEND_PORT >/dev/null 2>&1; then
+                break
+            fi
+            if [ $i -eq 10 ]; then
+                echo "   ⚠️  Port $BACKEND_PORT still in use, force-killing..."
+                lsof -ti:$BACKEND_PORT | xargs kill -9 2>/dev/null || true
+                sleep 1
+            fi
+        done
+    fi
+    echo "🚀 [start.sh] Restarting backend..."
+done
 

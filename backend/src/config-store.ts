@@ -67,6 +67,7 @@ export interface HyperspaceProxyConfig {
     apiKey: string;    // ANTHROPIC_AUTH_TOKEN
     model: string;     // Custom model name (e.g., anthropic--claude-4.5-sonnet)
     alwaysThinkingEnabled: boolean;
+    autoStart: boolean;  // Auto-start proxy on server restart if it was previously started
 }
 
 // Default Hyperspace proxy models
@@ -97,6 +98,7 @@ export interface AppConfig {
     opencodePort?: number;  // Port for OpenCode server (default: 4096)
     useLearnings: boolean;  // Use RAG-based learnings injection for tasks
     hyperspaceProxy?: HyperspaceProxyConfig;  // Hyperspace AI Proxy configuration
+    tunnelAutoRestart?: boolean;  // Auto-restart tunnel on server restart if it was previously active
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
@@ -131,7 +133,8 @@ const DEFAULT_HYPERSPACE_PROXY: HyperspaceProxyConfig = {
     proxyUrl: 'http://localhost:6655',
     apiKey: '',
     model: 'anthropic--claude-4.5-sonnet',
-    alwaysThinkingEnabled: false
+    alwaysThinkingEnabled: false,
+    autoStart: false
 };
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -146,7 +149,8 @@ const DEFAULT_CONFIG: AppConfig = {
     backend: 'claude-code',
     opencodePort: 4096,
     useLearnings: false,
-    hyperspaceProxy: DEFAULT_HYPERSPACE_PROXY
+    hyperspaceProxy: DEFAULT_HYPERSPACE_PROXY,
+    tunnelAutoRestart: false
 };
 
 export class ConfigStore {
@@ -185,7 +189,8 @@ export class ConfigStore {
                     backend: loaded.backend ?? 'claude-code',
                     opencodePort: loaded.opencodePort ?? 4096,
                     useLearnings: loaded.useLearnings ?? false,
-                    hyperspaceProxy: loaded.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY
+                    hyperspaceProxy: loaded.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY,
+                    tunnelAutoRestart: loaded.tunnelAutoRestart ?? false
                 };
             }
         } catch (error) {
@@ -250,6 +255,9 @@ export class ConfigStore {
         }
         if (updates.hyperspaceProxy !== undefined) {
             this.config.hyperspaceProxy = updates.hyperspaceProxy;
+        }
+        if (updates.tunnelAutoRestart !== undefined) {
+            this.config.tunnelAutoRestart = updates.tunnelAutoRestart;
         }
         this.saveConfig();
         return this.getConfig();
@@ -355,6 +363,15 @@ export class ConfigStore {
 
     setHyperspaceProxy(config: HyperspaceProxyConfig): void {
         this.config.hyperspaceProxy = config;
+        this.saveConfig();
+    }
+
+    getTunnelAutoRestart(): boolean {
+        return this.config.tunnelAutoRestart ?? false;
+    }
+
+    setTunnelAutoRestart(autoRestart: boolean): void {
+        this.config.tunnelAutoRestart = autoRestart;
         this.saveConfig();
     }
 }

@@ -64,6 +64,14 @@ export interface FileNode {
     children?: FileNode[];   // For directories (loaded lazily)
 }
 
+// Summary Mode action types
+export interface SummaryAction {
+    id: string;
+    label: string;
+    action: string;       // The value to send (e.g., text input, command)
+    type: 'task_input' | 'new_task' | 'chat';  // What kind of action this is
+}
+
 // Supervisor Chat types
 export interface ChatMessage {
     id: string;
@@ -72,6 +80,8 @@ export interface ChatMessage {
     timestamp: string;
     taskId?: string;  // Optional: associated task for context
     workspaceId?: string;  // Optional: workspace this message belongs to
+    actions?: SummaryAction[];  // Optional: clickable action buttons
+    isAlert?: boolean;  // Optional: whether this is a proactive alert (task completed)
 }
 
 // Task Supervisor types
@@ -125,6 +135,12 @@ export type WSMessageType =
     | 'supervisor:chat:response'
     | 'supervisor:chat:history'
     | 'supervisor:chat:typing'
+    // Summary Mode
+    | 'summary:message'
+    | 'summary:history'
+    | 'summary:typing'
+    | 'summary:chat'
+    | 'summary:action'
     // Server status
     | 'server:reloading'
     | 'server:reconnecting'

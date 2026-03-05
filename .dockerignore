@@ -1,0 +1,16 @@
+node_modules
+.git
+release/
+dist-electron/
+electron/
+assets/
+*.png
+*.icns
+*.ico
+.claude/
+backend/task-histories/
+backend/workspace-config.json
+coder/
+ai-test-cli/
+ARCHITECTURE.md
+README.md

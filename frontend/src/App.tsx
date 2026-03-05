@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { WorkspacePanel } from './components/WorkspacePanel';
 import { TerminalView } from './components/TerminalView';
-import { SupervisorChat } from './components/SupervisorChat';
+import { TaskSummaryView } from './components/TaskSummaryView';
+import { PreviewTab } from './components/PreviewTab';
 import { ProjectPicker } from './components/ProjectPicker';
 import { SettingsMenu } from './components/SettingsMenu';
 import { GlobalVoiceManager } from './components/GlobalVoiceManager';
@@ -10,7 +11,8 @@ import { SystemStats } from './components/SystemStats';
 import { MobileAccessModal } from './components/MobileAccessModal';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft } from 'lucide-react';
+import { ChatMessage } from '@claudia/shared';
+import { Terminal, Settings, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, FileText, Globe } from 'lucide-react';
 import { getApiBaseUrl } from './config/api-config';
 
 // Hook: returns true when viewport is ≤768px wide
@@ -27,8 +29,14 @@ function useIsMobile(breakpoint = 768) {
 
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
 const DEFAULT_SIDEBAR_WIDTH = 640;
-const CHAT_PANEL_WIDTH_KEY = 'claudia-chat-panel-width';
-const DEFAULT_CHAT_PANEL_WIDTH = 380;
+const PREVIEW_URLS_KEY = 'claudia-preview-urls'; // JSON map: workspacePath -> url
+
+interface AlertToast {
+    taskId: string;
+    message: string;
+    prompt: string;
+    timestamp: number;
+}
 
 function App() {
     const isMobile = useIsMobile();
@@ -42,9 +50,8 @@ function App() {
         reorderWorkspaces,
         openFolder,
         openTerminal,
+        openClaudeMd,
         setSystemPrompt,
-        sendChatMessage,
-        clearChatHistory,
         requestArchivedTasks,
         restoreArchivedTask,
         deleteArchivedTask,
@@ -55,12 +62,33 @@ function App() {
         wsRef
     } = useWebSocket();
 
-    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats, errorNotification, clearErrorNotification } = useTaskStore();
+    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, isConnected, isServerReloading, isOffline, aiCoreConfigured, showSystemStats, errorNotification, clearErrorNotification, summaryMessages } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
     const selectedWorkspace = selectedTask ? workspaces.find(w => w.id === selectedTask.workspaceId) : undefined;
 
     // On mobile, track whether the user is viewing the terminal (screen 2)
     const [mobileShowTerminal, setMobileShowTerminal] = useState(false);
+
+    // View mode toggle: 'terminal' (xterm.js), 'summary' (conversation view), or 'preview' (iframe browser)
+    type ViewMode = 'terminal' | 'summary' | 'preview';
+    const [viewMode, setViewMode] = useState<ViewMode>('terminal');
+
+    // Browser preview URLs — per-workspace, persisted to localStorage
+    const [previewUrls, setPreviewUrls] = useState<Record<string, string>>(() => {
+        try {
+            const saved = localStorage.getItem(PREVIEW_URLS_KEY);
+            return saved ? JSON.parse(saved) : {};
+        } catch {
+            return {};
+        }
+    });
+
+    // Derive current preview URL from selected workspace
+    const workspaceKey = selectedWorkspace?.id || '_global';
+    const previewUrl = previewUrls[workspaceKey] || '';
+    const setPreviewUrl = useCallback((url: string) => {
+        setPreviewUrls(prev => ({ ...prev, [workspaceKey]: url }));
+    }, [workspaceKey]);
 
     // Count tasks that have running processes (not disconnected or archived)
     const activeTasks = Array.from(tasks.values()).filter(t =>
@@ -90,31 +118,21 @@ function App() {
             return DEFAULT_SIDEBAR_WIDTH;
         }
     });
-    const [chatPanelWidth, setChatPanelWidth] = useState(() => {
-        try {
-            const savedWidth = localStorage.getItem(CHAT_PANEL_WIDTH_KEY);
-            return savedWidth ? parseInt(savedWidth, 10) : DEFAULT_CHAT_PANEL_WIDTH;
-        } catch {
-            return DEFAULT_CHAT_PANEL_WIDTH;
-        }
-    });
     const [isResizing, setIsResizing] = useState(false);
-    const [isResizingChat, setIsResizingChat] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [settingsInitialPanel, setSettingsInitialPanel] = useState<string | undefined>(undefined);
-    const [showChatPanel, setShowChatPanel] = useState(false);
     const [showMobileAccess, setShowMobileAccess] = useState(false);
     const [tunnelActive, setTunnelActive] = useState(false);
     const [tunnelLoading, setTunnelLoading] = useState(false);
     const sidebarRef = useRef<HTMLElement>(null);
     const aiCoreCheckDoneRef = useRef(false);
 
+    // Alert toasts for cross-task summary notifications
+    const [alertToasts, setAlertToasts] = useState<AlertToast[]>([]);
+    const seenAlertIdsRef = useRef<Set<string>>(new Set());
+
     const handleMouseDown = () => {
         setIsResizing(true);
-    };
-
-    const handleChatResizeMouseDown = () => {
-        setIsResizingChat(true);
     };
 
     useEffect(() => {
@@ -127,22 +145,13 @@ function App() {
                     setSidebarWidth(newWidth);
                 }
             }
-            if (isResizingChat) {
-                const newWidth = window.innerWidth - e.clientX;
-                const minWidth = 300;
-                const maxWidth = 600;
-                if (newWidth >= minWidth && newWidth <= maxWidth) {
-                    setChatPanelWidth(newWidth);
-                }
-            }
         };
 
         const handleMouseUp = () => {
             setIsResizing(false);
-            setIsResizingChat(false);
         };
 
-        if (isResizing || isResizingChat) {
+        if (isResizing) {
             document.addEventListener('mousemove', handleMouseMove);
             document.addEventListener('mouseup', handleMouseUp);
         }
@@ -151,7 +160,7 @@ function App() {
             document.removeEventListener('mousemove', handleMouseMove);
             document.removeEventListener('mouseup', handleMouseUp);
         };
-    }, [isResizing, isResizingChat]);
+    }, [isResizing]);
 
     useEffect(() => {
         try {
@@ -163,11 +172,11 @@ function App() {
 
     useEffect(() => {
         try {
-            localStorage.setItem(CHAT_PANEL_WIDTH_KEY, chatPanelWidth.toString());
+            localStorage.setItem(PREVIEW_URLS_KEY, JSON.stringify(previewUrls));
         } catch {
             // Silently fail
         }
-    }, [chatPanelWidth]);
+    }, [previewUrls]);
 
     // Generate or retrieve a unique user ID for usage tracking and send to backend
     useEffect(() => {
@@ -229,16 +238,6 @@ function App() {
         setMobileShowTerminal(false);
     }, []);
 
-    // Count unread messages indicator
-    const hasUnreadMessages = chatMessages.length > 0 && !showChatPanel;
-
-    // Close chat panel if supervisor is disabled
-    useEffect(() => {
-        if (!supervisorEnabled && showChatPanel) {
-            setShowChatPanel(false);
-        }
-    }, [supervisorEnabled, showChatPanel]);
-
     // Open settings to AI Core panel if credentials are not configured (only once on startup)
     useEffect(() => {
         if (aiCoreConfigured === false && !aiCoreCheckDoneRef.current) {
@@ -255,6 +254,33 @@ function App() {
             return () => clearTimeout(timer);
         }
     }, [errorNotification, clearErrorNotification]);
+
+    // Watch for summary alert messages on non-selected tasks to show toasts
+    useEffect(() => {
+        for (const [taskId, messages] of summaryMessages) {
+            if (taskId === selectedTaskId) continue; // Don't toast for the active task
+            const lastMsg = messages[messages.length - 1] as ChatMessage | undefined;
+            if (lastMsg && lastMsg.isAlert && lastMsg.role === 'assistant' && !seenAlertIdsRef.current.has(lastMsg.id)) {
+                seenAlertIdsRef.current.add(lastMsg.id);
+                const task = tasks.get(taskId);
+                setAlertToasts(prev => [...prev, {
+                    taskId,
+                    message: lastMsg.content.substring(0, 120),
+                    prompt: task?.prompt?.substring(0, 50) || 'Task',
+                    timestamp: Date.now()
+                }]);
+                // Auto-dismiss after 8 seconds
+                setTimeout(() => {
+                    setAlertToasts(prev => prev.filter(t => t.taskId !== taskId || t.timestamp !== Date.now()));
+                    // Simpler: just remove by taskId since we'll get a new one if needed
+                    setAlertToasts(prev => prev.filter(t => {
+                        const age = Date.now() - t.timestamp;
+                        return age < 8000;
+                    }));
+                }, 8000);
+            }
+        }
+    }, [summaryMessages, selectedTaskId, tasks]);
 
     // Clear initial panel when settings is closed
     const handleSettingsClose = () => {
@@ -322,15 +348,22 @@ function App() {
         }
     }, [tunnelActive]);
 
+    // Handle clicking an alert toast - switch to that task in summary mode
+    const handleAlertToastClick = (taskId: string) => {
+        handleSelectTask(taskId);
+        setViewMode('summary');
+        setAlertToasts(prev => prev.filter(t => t.taskId !== taskId));
+    };
+
     // Determine what to show on mobile
     const mobileShowingTerminal = isMobile && mobileShowTerminal && selectedTask;
 
     return (
         <div className={`app ${isMobile ? 'is-mobile' : ''}`}>
             <header className="app-header">
-                {/* Mobile back button when viewing terminal */}
-                {mobileShowingTerminal && (
-                    <button className="mobile-back-button" onClick={handleMobileBack} title="Back to tasks">
+                {/* Mobile back button when viewing terminal or preview */}
+                {(mobileShowingTerminal || (isMobile && viewMode === 'preview')) && (
+                    <button className="mobile-back-button" onClick={() => { handleMobileBack(); if (viewMode === 'preview') setViewMode('terminal'); }} title="Back to tasks">
                         <ArrowLeft size={20} />
                     </button>
                 )}
@@ -339,6 +372,32 @@ function App() {
                     <h1>Claudia</h1>
                 </div>
                 <div className="header-controls">
+                    {/* View Mode Toggle */}
+                    {(isMobile ? (mobileShowingTerminal || viewMode === 'preview') : true) && (
+                        <div className="view-mode-toggle">
+                            <button
+                                className={`view-mode-btn ${viewMode === 'terminal' ? 'active' : ''}`}
+                                onClick={() => setViewMode('terminal')}
+                                title="Terminal view"
+                            >
+                                <Terminal size={16} />
+                            </button>
+                            <button
+                                className={`view-mode-btn ${viewMode === 'summary' ? 'active' : ''}`}
+                                onClick={() => setViewMode('summary')}
+                                title="Summary view"
+                            >
+                                <FileText size={16} />
+                            </button>
+                            <button
+                                className={`view-mode-btn ${viewMode === 'preview' ? 'active' : ''}`}
+                                onClick={() => setViewMode('preview')}
+                                title="Browser preview"
+                            >
+                                <Globe size={16} />
+                            </button>
+                        </div>
+                    )}
                     {/* Running Process Counter */}
                     <div className="running-tasks-indicator" title={taskTooltip}>
                         <Activity size={18} className={busyCount > 0 ? 'active-pulse' : ''} />
@@ -348,17 +407,6 @@ function App() {
                     </div>
 
                     {showSystemStats && <SystemStats />}
-                    {!isMobile && supervisorEnabled && (
-                        <button
-                            className={`chat-toggle-button ${showChatPanel ? 'active' : ''} ${hasUnreadMessages ? 'has-messages' : ''}`}
-                            onClick={() => setShowChatPanel(!showChatPanel)}
-                            title={showChatPanel ? 'Close Chat' : 'Open Chat'}
-                        >
-                            <MessageCircle size={18} />
-                            <span className="btn-label">Chat</span>
-                            {hasUnreadMessages && <span className="message-badge">{chatMessages.length}</span>}
-                        </button>
-                    )}
                     {!isMobile && (
                         <button
                             className={`chat-toggle-button ${tunnelActive ? 'active' : ''} ${tunnelLoading ? 'loading' : ''}`}
@@ -391,16 +439,31 @@ function App() {
             <main className="app-main">
                 {/* ===== MOBILE LAYOUT ===== */}
                 {isMobile ? (
-                    mobileShowingTerminal ? (
-                        // Screen 2: Full-screen terminal
+                    viewMode === 'preview' ? (
+                        // Preview mode: full-screen iframe browser
                         <section className="main-panel mobile-full">
-                            <TerminalView
-                                key={selectedTask!.id}
-                                task={selectedTask!}
-                                wsRef={wsRef}
-                                workspace={selectedWorkspace}
-                                isMobile={true}
-                            />
+                            <PreviewTab url={previewUrl} onUrlChange={setPreviewUrl} />
+                        </section>
+                    ) : mobileShowingTerminal ? (
+                        // Screen 2: Full-screen terminal or summary
+                        <section className="main-panel mobile-full">
+                            {viewMode === 'summary' ? (
+                                <TaskSummaryView
+                                    key={`summary-${selectedTask!.id}`}
+                                    task={selectedTask!}
+                                    wsRef={wsRef}
+                                    workspace={selectedWorkspace}
+                                    isMobile={true}
+                                />
+                            ) : (
+                                <TerminalView
+                                    key={selectedTask!.id}
+                                    task={selectedTask!}
+                                    wsRef={wsRef}
+                                    workspace={selectedWorkspace}
+                                    isMobile={true}
+                                />
+                            )}
                         </section>
                     ) : (
                         // Screen 1: Full-screen workspace list
@@ -415,6 +478,7 @@ function App() {
                                 onReorderWorkspaces={reorderWorkspaces}
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
+                                onOpenClaudeMd={openClaudeMd}
                                 onPushToGithub={pushToGithub}
                                 onSetSystemPrompt={setSystemPrompt}
                                 onCreateTask={createTask}
@@ -427,7 +491,7 @@ function App() {
                         </aside>
                     )
                 ) : (
-                    /* ===== DESKTOP LAYOUT (unchanged) ===== */
+                    /* ===== DESKTOP LAYOUT ===== */
                     <>
                         <aside
                             className="sidebar"
@@ -444,6 +508,7 @@ function App() {
                                 onReorderWorkspaces={reorderWorkspaces}
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
+                                onOpenClaudeMd={openClaudeMd}
                                 onPushToGithub={pushToGithub}
                                 onSetSystemPrompt={setSystemPrompt}
                                 onCreateTask={createTask}
@@ -461,13 +526,24 @@ function App() {
                         />
 
                         <section className="main-panel">
-                            {selectedTask ? (
-                                <TerminalView
-                                    key={selectedTask.id}
-                                    task={selectedTask}
-                                    wsRef={wsRef}
-                                    workspace={selectedWorkspace}
-                                />
+                            {viewMode === 'preview' ? (
+                                <PreviewTab url={previewUrl} onUrlChange={setPreviewUrl} />
+                            ) : selectedTask ? (
+                                viewMode === 'summary' ? (
+                                    <TaskSummaryView
+                                        key={`summary-${selectedTask.id}`}
+                                        task={selectedTask}
+                                        wsRef={wsRef}
+                                        workspace={selectedWorkspace}
+                                    />
+                                ) : (
+                                    <TerminalView
+                                        key={selectedTask.id}
+                                        task={selectedTask}
+                                        wsRef={wsRef}
+                                        workspace={selectedWorkspace}
+                                    />
+                                )
                             ) : (
                                 <div className="empty-state-main">
                                     <Terminal size={48} strokeWidth={1} />
@@ -476,37 +552,6 @@ function App() {
                                 </div>
                             )}
                         </section>
-
-                        {showChatPanel && (
-                            <>
-                                <div
-                                    className={`resize-handle chat-resize ${isResizingChat ? 'resizing' : ''}`}
-                                    onMouseDown={handleChatResizeMouseDown}
-                                />
-                                <aside
-                                    className="chat-panel-sidebar"
-                                    style={{ width: `${chatPanelWidth}px`, minWidth: `${chatPanelWidth}px` }}
-                                >
-                                    <div className="chat-panel-header">
-                                        <span>AI Supervisor</span>
-                                        <button
-                                            className="chat-close-button"
-                                            onClick={() => setShowChatPanel(false)}
-                                            title="Close chat"
-                                        >
-                                            <X size={18} />
-                                        </button>
-                                    </div>
-                                    <SupervisorChat
-                                        messages={chatMessages}
-                                        isTyping={chatTyping}
-                                        selectedTaskId={selectedTaskId}
-                                        onSendMessage={sendChatMessage}
-                                        onClearHistory={clearChatHistory}
-                                    />
-                                </aside>
-                            </>
-                        )}
                     </>
                 )}
             </main>
@@ -515,6 +560,23 @@ function App() {
             <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
             {!isMobile && <MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} />}
             <GlobalVoiceManager />
+
+            {/* Summary alert toasts for non-selected tasks */}
+            {alertToasts.length > 0 && (
+                <div className="summary-alert-toasts">
+                    {alertToasts.map((toast) => (
+                        <div
+                            key={`${toast.taskId}-${toast.timestamp}`}
+                            className="summary-alert-toast"
+                            onClick={() => handleAlertToastClick(toast.taskId)}
+                        >
+                            <div className="toast-task">{toast.prompt}</div>
+                            <div className="toast-message">{toast.message}</div>
+                            <div className="toast-cta">Click to view summary</div>
+                        </div>
+                    ))}
+                </div>
+            )}
 
             {/* Offline warning overlay */}
             {isOffline && (

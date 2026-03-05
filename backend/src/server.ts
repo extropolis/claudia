@@ -6,7 +6,8 @@ import os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync } from 'fs';
 import { readFile } from 'fs/promises';
-import { join } from 'path';
+import { join, resolve } from 'path';
+import { fileURLToPath } from 'url';
 import multer from 'multer';
 import { TaskSpawner } from './task-spawner.js';
 import { WorkspaceStore } from './workspace-store.js';
@@ -16,7 +17,7 @@ import { getConversationHistory, getWorkspaceSessions } from './conversation-par
 import { createAnthropicProxy } from './anthropic-proxy/index.js';
 import { createHyperspaceProxy } from './hyperspace-proxy/index.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, PORTS } from '@claudia/shared';
+import { Task, Workspace, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, SummaryAction, WaitingInputType, PORTS } from '@claudia/shared';
 import { validateConfigUpdate, validateWorkspacePath, validateAICoreCredentials } from './validation.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
@@ -51,6 +52,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:reorder',
     'workspace:openFolder',
     'workspace:openTerminal',
+    'workspace:openClaudeMd',
     'workspace:systemPrompt:get',
     'workspace:systemPrompt:set',
     'git:push',
@@ -59,6 +61,9 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'supervisor:chat:message',
     'supervisor:chat:history',
     'supervisor:chat:clear',
+    'summary:chat',
+    'summary:history',
+    'summary:action',
     'task:disconnect',
     'task:clear',
     'tunnel:status'
@@ -115,7 +120,7 @@ export async function createApp(basePath?: string) {
 
     function isTunnelHost(host: string): boolean {
         return host.includes('.loca.lt') || host.includes('localtunnel') ||
-               host.includes('.ngrok-free.app') || host.includes('.ngrok.io') || host.includes('ngrok');
+            host.includes('.ngrok-free.app') || host.includes('.ngrok.io') || host.includes('ngrok');
     }
 
     app.use((req, res, next) => {
@@ -448,10 +453,18 @@ export async function createApp(basePath?: string) {
     // Wire up SupervisorChat events (handles both auto-analysis and user chat)
     supervisorChat.on('message', (message: ChatMessage) => {
         broadcast({ type: 'supervisor:chat:response' as WSMessageType, payload: { message } });
+        // Also broadcast as summary:message for the new Summary Mode UI
+        if (message.taskId) {
+            broadcast({ type: 'summary:message' as WSMessageType, payload: { taskId: message.taskId, message } });
+        }
     });
 
     supervisorChat.on('typing', (isTyping: boolean) => {
         broadcast({ type: 'supervisor:chat:typing' as WSMessageType, payload: { isTyping } });
+    });
+
+    supervisorChat.on('summaryTyping', ({ taskId, isTyping }: { taskId: string; isTyping: boolean }) => {
+        broadcast({ type: 'summary:typing' as WSMessageType, payload: { taskId, isTyping } });
     });
 
     // ===== WebSocket Upgrade Routing =====
@@ -462,7 +475,7 @@ export async function createApp(basePath?: string) {
     server.on('upgrade', (req, socket, head) => {
         const host = req.headers.host || '';
         const isTunnel = host.includes('.loca.lt') || host.includes('localtunnel') ||
-                         host.includes('.ngrok-free.app') || host.includes('.ngrok.io') || host.includes('ngrok');
+            host.includes('.ngrok-free.app') || host.includes('.ngrok.io') || host.includes('ngrok');
         const url = new URL(req.url || '/', `http://${host || 'localhost'}`);
 
         logger.info('WebSocket upgrade request', {
@@ -882,6 +895,42 @@ export async function createApp(basePath?: string) {
                         break;
                     }
 
+                    case 'workspace:openClaudeMd': {
+                        // Open CLAUDE.md file in default editor
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) break;
+                        const { exec } = await import('child_process');
+                        const { existsSync } = await import('fs');
+                        const { join } = await import('path');
+
+                        const claudeMdPath = join(workspaceId, 'CLAUDE.md');
+
+                        // Check if CLAUDE.md exists
+                        if (!existsSync(claudeMdPath)) {
+                            logger.warn('CLAUDE.md does not exist in workspace', { workspaceId, claudeMdPath });
+                            sendWSError(ws, 'CLAUDE.md not found in workspace', message.type, 'FILE_NOT_FOUND');
+                            break;
+                        }
+
+                        const platform = process.platform;
+                        let command: string;
+                        if (platform === 'darwin') {
+                            // Use 'open' command to open with default editor
+                            command = `open "${claudeMdPath}"`;
+                        } else if (platform === 'win32') {
+                            command = `start "" "${claudeMdPath}"`;
+                        } else {
+                            // Linux - use xdg-open
+                            command = `xdg-open "${claudeMdPath}"`;
+                        }
+                        exec(command, (error) => {
+                            if (error) {
+                                logger.error('Failed to open CLAUDE.md', { workspaceId, claudeMdPath, error: error.message });
+                            }
+                        });
+                        break;
+                    }
+
                     case 'workspace:systemPrompt:get': {
                         // Get system prompt for a workspace
                         const { workspaceId } = payload as { workspaceId?: string };
@@ -993,6 +1042,60 @@ export async function createApp(basePath?: string) {
                         break;
                     }
 
+                    // ===== Summary Mode handlers =====
+                    case 'summary:chat': {
+                        // User sends a chat message in summary mode (scoped to a task)
+                        const { content, taskId } = payload as { content?: string; taskId?: string };
+                        if (!content || !taskId) {
+                            console.error('[Server] summary:chat requires content and taskId');
+                            break;
+                        }
+                        const task = taskSpawner.getTask(taskId);
+                        const wsId = task?.workspaceId;
+                        console.log(`[Server] summary:chat taskId=${taskId}`);
+                        await supervisorChat.sendMessage(content, taskId, wsId);
+                        break;
+                    }
+
+                    case 'summary:history': {
+                        // Request summary mode chat history for a specific task
+                        const { taskId } = payload as { taskId?: string };
+                        if (!taskId) break;
+                        const history = supervisorChat.getTaskHistory(taskId);
+                        console.log(`[Server] summary:history taskId=${taskId} messages=${history.length}`);
+                        ws.send(JSON.stringify({
+                            type: 'summary:history',
+                            payload: { taskId, messages: history }
+                        }));
+                        break;
+                    }
+
+                    case 'summary:action': {
+                        // User clicked an action button in summary mode
+                        const { taskId, action } = payload as { taskId?: string; action?: SummaryAction };
+                        if (!taskId || !action) break;
+                        console.log(`[Server] summary:action taskId=${taskId} type=${action.type} label="${action.label}"`);
+
+                        switch (action.type) {
+                            case 'task_input':
+                                if (action.action) {
+                                    taskSpawner.writeToTask(taskId, action.action + '\n');
+                                }
+                                break;
+                            case 'new_task':
+                                // Frontend handles opening the create task dialog
+                                break;
+                            case 'chat':
+                                // Send as a chat message to summary mode
+                                if (action.action) {
+                                    const chatTask = taskSpawner.getTask(taskId);
+                                    await supervisorChat.sendMessage(action.action, taskId, chatTask?.workspaceId);
+                                }
+                                break;
+                        }
+                        break;
+                    }
+
                     case 'tunnel:status': {
                         // Request tunnel status
                         ws.send(JSON.stringify({
@@ -1028,11 +1131,141 @@ export async function createApp(basePath?: string) {
         res.json({ status: 'ok' });
     });
 
+    // ===== Preview Proxy =====
+    // Allows remote clients (mobile via tunnel) to view local dev servers
+    // through the backend. Route: /api/preview-proxy/:port/<path>
+    // Example: /api/preview-proxy/3000/index.html → http://localhost:3000/index.html
+    app.all('/api/preview-proxy/:port', handlePreviewProxy);
+    app.all('/api/preview-proxy/:port/*', handlePreviewProxy);
+
+    function handlePreviewProxy(req: express.Request, res: express.Response) {
+        const port = parseInt(req.params.port, 10);
+        if (isNaN(port) || port < 1 || port > 65535) {
+            logger.warn('Preview proxy: invalid port requested', { port: req.params.port });
+            res.status(400).json({ error: 'Invalid port' });
+            return;
+        }
+        // Don't allow proxying to our own ports to prevent loops
+        if (port === PORTS.BACKEND || port === PORTS.FRONTEND) {
+            logger.warn('Preview proxy: blocked attempt to proxy to Claudia port', { port });
+            res.status(403).json({ error: 'Cannot proxy to Claudia ports' });
+            return;
+        }
+
+        // Extract the path after /api/preview-proxy/:port
+        const proxyPrefix = `/api/preview-proxy/${port}`;
+        const rawPath = req.originalUrl.split('?')[0];
+        const targetPath = rawPath.startsWith(proxyPrefix) ? rawPath.slice(proxyPrefix.length) || '/' : '/';
+        const queryString = req.originalUrl.includes('?') ? '?' + req.originalUrl.split('?')[1] : '';
+
+        logger.info('Preview proxy request', { port, targetPath, method: req.method });
+
+        // Request uncompressed so we can rewrite text content
+        const fwdHeaders = { ...req.headers, host: `localhost:${port}`, 'accept-encoding': 'identity' };
+
+        const proxyReq = httpRequest({
+            hostname: 'localhost',
+            port,
+            path: targetPath + queryString,
+            method: req.method,
+            headers: fwdHeaders,
+        }, (proxyRes) => {
+            // Rewrite Location headers for redirects so they stay within the proxy
+            const locationHeader = proxyRes.headers['location'];
+            if (locationHeader && (proxyRes.statusCode === 301 || proxyRes.statusCode === 302 || proxyRes.statusCode === 307 || proxyRes.statusCode === 308)) {
+                try {
+                    const locUrl = new URL(locationHeader, `http://localhost:${port}`);
+                    if (locUrl.hostname === 'localhost' && parseInt(locUrl.port || '80', 10) === port) {
+                        proxyRes.headers['location'] = `${proxyPrefix}${locUrl.pathname}${locUrl.search}`;
+                    }
+                } catch { /* leave header as-is */ }
+            }
+
+            // For text responses (HTML, JS, CSS), rewrite absolute paths so they
+            // route back through the proxy instead of hitting the Claudia frontend.
+            const contentType = proxyRes.headers['content-type'] || '';
+            const isText = contentType.includes('text/') ||
+                contentType.includes('javascript') ||
+                contentType.includes('json') ||
+                contentType.includes('css');
+
+            if (isText) {
+                const chunks: Buffer[] = [];
+                proxyRes.on('data', (chunk: Buffer) => chunks.push(chunk));
+                proxyRes.on('end', () => {
+                    let body = Buffer.concat(chunks).toString('utf-8');
+
+                    // Rewrite absolute paths in HTML attributes: src="/...", href="/..."
+                    body = body.replace(
+                        /((?:src|href|action|poster)\s*=\s*["'])(\/(?!\/)[^"']*)/gi,
+                        `$1${proxyPrefix}$2`
+                    );
+                    // JS/TS module imports: from "/...", import("/..."), import '/...'
+                    body = body.replace(
+                        /((?:from|import\s*\()\s*["'])(\/(?!\/)[^"']*)/g,
+                        `$1${proxyPrefix}$2`
+                    );
+                    // Bare side-effect imports: import '/path' or import "/path"
+                    body = body.replace(
+                        /(import\s+["'])(\/(?!\/)[^"']*)/g,
+                        `$1${proxyPrefix}$2`
+                    );
+                    // CSS url(/...) references
+                    body = body.replace(
+                        /(url\s*\(\s*["']?)(\/(?!\/)[^"')]*)/gi,
+                        `$1${proxyPrefix}$2`
+                    );
+                    // new URL("/...", import.meta.url) patterns
+                    body = body.replace(
+                        /(new\s+URL\s*\(\s*["'])(\/(?!\/)[^"']*)/g,
+                        `$1${proxyPrefix}$2`
+                    );
+                    // Vite asset modules: export default "/path/to/asset.png"
+                    body = body.replace(
+                        /(export\s+default\s+["'])(\/(?!\/)[^"']*)/g,
+                        `$1${proxyPrefix}$2`
+                    );
+                    // fetch("/...") calls
+                    body = body.replace(
+                        /(fetch\s*\(\s*["'])(\/(?!\/)[^"']*)/g,
+                        `$1${proxyPrefix}$2`
+                    );
+
+                    // Fix headers after rewriting
+                    const outHeaders = { ...proxyRes.headers };
+                    delete outHeaders['content-length'];
+                    delete outHeaders['transfer-encoding'];
+                    delete outHeaders['content-encoding'];
+                    outHeaders['content-length'] = Buffer.byteLength(body).toString();
+
+                    res.writeHead(proxyRes.statusCode || 200, outHeaders);
+                    res.end(body);
+                });
+            } else {
+                // Binary content (images, fonts, wasm, etc.) — pipe through directly
+                res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+                proxyRes.pipe(res);
+            }
+        });
+
+        proxyReq.on('error', (err) => {
+            logger.error('Preview proxy error', { error: err.message, port, path: targetPath });
+            if (!res.headersSent) {
+                res.status(502).json({ error: `Cannot reach localhost:${port}` });
+            }
+        });
+
+        req.pipe(proxyReq);
+    }
+
     // ===== Tunnel Management Routes =====
     app.post('/api/tunnel/start', async (_req, res) => {
         try {
             logger.info('Starting tunnel via API');
             const status = await tunnelManager.start();
+            // Save that tunnel should auto-restart on server reload
+            configStore.setTunnelAutoRestart(true);
+            logger.info('Tunnel auto-restart enabled');
             res.json(status);
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : String(err);
@@ -1045,6 +1278,9 @@ export async function createApp(basePath?: string) {
         try {
             logger.info('Stopping tunnel via API');
             await tunnelManager.stop();
+            // Disable auto-restart when user manually stops the tunnel
+            configStore.setTunnelAutoRestart(false);
+            logger.info('Tunnel auto-restart disabled');
             res.json({ active: false });
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : String(err);
@@ -1055,6 +1291,108 @@ export async function createApp(basePath?: string) {
 
     app.get('/api/tunnel/status', (_req, res) => {
         res.json(tunnelManager.getStatus());
+    });
+
+    // ===== Preview Tunnel Routes =====
+    // Uses the running ngrok agent's local API (localhost:4040) to add tunnels
+    // for app preview ports. Free ngrok allows up to 3 tunnels per agent session,
+    // so with the main Claudia tunnel we can add 2 preview tunnels.
+    const NGROK_API = 'http://127.0.0.1:4040/api';
+    const previewTunnels = new Map<number, string>(); // port -> public_url
+
+    app.post('/api/preview-tunnel/:port', async (req, res) => {
+        const port = parseInt(req.params.port, 10);
+        if (isNaN(port) || port < 1 || port > 65535) {
+            return res.status(400).json({ error: 'Invalid port' });
+        }
+        if (port === PORTS.BACKEND || port === PORTS.FRONTEND) {
+            return res.status(403).json({ error: 'Cannot tunnel to Claudia ports' });
+        }
+
+        // Return existing tunnel if already open for this port
+        const existing = previewTunnels.get(port);
+        if (existing) {
+            logger.info('Preview tunnel already active', { port, url: existing });
+            return res.json({ url: existing, port });
+        }
+
+        try {
+            logger.info('Starting preview tunnel via ngrok API', { port });
+
+            // Check if ngrok agent is running
+            const checkRes = await fetch(`${NGROK_API}/tunnels`).catch(() => null);
+            if (!checkRes || !checkRes.ok) {
+                return res.status(503).json({
+                    error: 'ngrok agent not running. Start the main tunnel first.'
+                });
+            }
+
+            // Check if a tunnel for this port already exists in ngrok
+            const tunnelsData = await checkRes.json() as {
+                tunnels: Array<{ name: string; public_url: string; config: { addr: string } }>
+            };
+            const existingNgrok = tunnelsData.tunnels.find(
+                t => t.config.addr === `http://localhost:${port}` || t.config.addr === String(port)
+            );
+            if (existingNgrok) {
+                const url = existingNgrok.public_url;
+                previewTunnels.set(port, url);
+                logger.info('Found existing ngrok tunnel for port', { port, url });
+                return res.json({ url, port });
+            }
+
+            // Create a new tunnel via ngrok's local API
+            const createRes = await fetch(`${NGROK_API}/tunnels`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: `preview-${port}`,
+                    addr: String(port),
+                    proto: 'http',
+                })
+            });
+
+            if (!createRes.ok) {
+                const errBody = await createRes.text();
+                logger.error('ngrok API error creating tunnel', { port, status: createRes.status, body: errBody });
+                return res.status(502).json({ error: `ngrok API error: ${errBody}` });
+            }
+
+            const created = await createRes.json() as { public_url: string; name: string };
+            const url = created.public_url;
+
+            previewTunnels.set(port, url);
+            logger.info('Preview tunnel started via ngrok', { port, url, name: created.name });
+            res.json({ url, port });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error('Failed to start preview tunnel', { port, error: msg });
+            res.status(500).json({ error: msg });
+        }
+    });
+
+    app.delete('/api/preview-tunnel/:port', async (req, res) => {
+        const port = parseInt(req.params.port, 10);
+        previewTunnels.delete(port);
+
+        try {
+            // Delete the tunnel via ngrok's local API
+            const delRes = await fetch(`${NGROK_API}/tunnels/preview-${port}`, {
+                method: 'DELETE'
+            });
+            logger.info('Preview tunnel stopped', { port, status: delRes.status });
+        } catch (err) {
+            logger.warn('Failed to delete tunnel from ngrok API', { port, error: String(err) });
+        }
+        res.json({ stopped: true, port });
+    });
+
+    app.get('/api/preview-tunnel/status', async (_req, res) => {
+        const tunnels: Record<number, string> = {};
+        for (const [port, url] of previewTunnels) {
+            tunnels[port] = url;
+        }
+        res.json({ tunnels });
     });
 
     // ===== Mobile Route (legacy redirect) =====
@@ -1614,6 +1952,26 @@ export async function createApp(basePath?: string) {
                         requestTimeoutMs: newCredentials.timeoutMs || 120000
                     });
                     app.use('/', currentProxyInstance.router);
+                }
+            }
+
+            // If apiMode changed to sap-ai-core and proxy isn't mounted yet, mount it
+            // This handles the case where credentials were saved earlier but apiMode was different
+            if (validation.data!.apiMode === 'sap-ai-core' && !currentProxyInstance) {
+                const creds = configStore.getAICoreCredentials();
+                if (creds?.clientId) {
+                    logger.info('API mode switched to sap-ai-core, mounting proxy with existing credentials');
+                    currentProxyInstance = createAnthropicProxy({
+                        clientId: creds.clientId,
+                        clientSecret: creds.clientSecret,
+                        authUrl: creds.authUrl,
+                        baseUrl: creds.baseUrl,
+                        resourceGroup: creds.resourceGroup || 'default',
+                        requestTimeoutMs: creds.timeoutMs || 120000
+                    });
+                    app.use('/', currentProxyInstance.router);
+                } else {
+                    logger.warn('API mode switched to sap-ai-core but no credentials found in config');
                 }
             }
 
@@ -2320,14 +2678,225 @@ export async function createApp(basePath?: string) {
                 });
             }
         } catch (error: unknown) {
-            console.error('[Server] Error fetching Hyperspace models:', error);
+            // Only log full error for unexpected failures, not connection refused (proxy not running)
+            const isConnRefused = error instanceof Error && error.cause && (error.cause as any).code === 'ECONNREFUSED';
+            if (isConnRefused) {
+                console.log('[Server] Hyperspace proxy not reachable (ECONNREFUSED) — proxy may not be running');
+            } else {
+                console.error('[Server] Error fetching Hyperspace models:', error);
+            }
             const message = error instanceof Error ? error.message : String(error);
             res.status(500).json({
                 success: false,
-                error: `Server error: ${message}`
+                error: isConnRefused ? 'Proxy not reachable — it may not be running' : `Server error: ${message}`
             });
         }
     });
+
+    // ============================================================
+    // HAI Proxy Lifecycle Management
+    // ============================================================
+
+    // Module-level state for the managed HAI proxy process
+    let haiProxyProcess: ChildProcess | null = null;
+    let haiProxyApiKey: string | null = null;
+    const HAI_PROXY_PORT = 6655;
+    const HAI_PROXY_URL = `http://localhost:${HAI_PROXY_PORT}`;
+
+
+    async function checkHaiInstalled(): Promise<boolean> {
+        return new Promise(resolve => {
+            const proc = spawn('which', ['hai']);
+            proc.on('close', code => resolve(code === 0));
+            proc.on('error', () => resolve(false));
+        });
+    }
+
+    async function isHaiProxyRunning(apiKey: string): Promise<boolean> {
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 3000);
+            const resp = await fetch(`${HAI_PROXY_URL}/anthropic/v1/models`, {
+                headers: { 'x-api-key': apiKey },
+                signal: controller.signal
+            });
+            clearTimeout(timeout);
+            // 401 means proxy is running but wrong key, still "running"
+            return resp.status !== 404 && resp.status !== 0;
+        } catch {
+            return false;
+        }
+    }
+
+    // GET /api/hyperspace/status - check if hai is installed and proxy is running
+    app.get('/api/hyperspace/status', async (_req, res) => {
+        try {
+            const haiInstalled = await checkHaiInstalled();
+            const storedConfig = configStore.getHyperspaceProxy();
+            const currentApiKey = haiProxyApiKey || storedConfig?.apiKey || '';
+            const proxyRunning = currentApiKey ? await isHaiProxyRunning(currentApiKey) : false;
+
+            console.log(`[Server] HAI proxy status: installed=${haiInstalled}, running=${proxyRunning}`);
+            res.json({
+                haiInstalled,
+                proxyRunning,
+                apiKey: currentApiKey,
+                proxyUrl: HAI_PROXY_URL,
+                pid: haiProxyProcess?.pid || null
+            });
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ success: false, error: message });
+        }
+    });
+
+    // POST /api/hyperspace/start - start the HAI proxy with a generated API key
+    app.post('/api/hyperspace/start', async (_req, res) => {
+        try {
+            const haiInstalled = await checkHaiInstalled();
+            if (!haiInstalled) {
+                return res.status(400).json({ success: false, error: 'hai CLI not found. Please install it first.' });
+            }
+
+            // Reuse existing key if proxy is already running (in-memory or from stored config)
+            // This handles the server-restart case where haiProxyProcess is null but proxy still runs
+            const candidateKey = haiProxyApiKey || configStore.getHyperspaceProxy()?.apiKey || null;
+            if (candidateKey) {
+                const running = await isHaiProxyRunning(candidateKey);
+                if (running) {
+                    console.log('[Server] HAI proxy already running (restored from config), reusing key');
+                    haiProxyApiKey = candidateKey; // restore in-memory key
+                    return res.json({ success: true, apiKey: candidateKey, proxyUrl: HAI_PROXY_URL, alreadyRunning: true });
+                }
+            }
+
+            // Kill any stale process
+            if (haiProxyProcess) {
+                try { haiProxyProcess.kill(); } catch { }
+                haiProxyProcess = null;
+            }
+
+            // Generate a new API key
+            const { randomUUID } = await import('node:crypto');
+            const apiKey = randomUUID();
+            haiProxyApiKey = apiKey;
+
+            console.log(`[Server] Starting HAI proxy on port ${HAI_PROXY_PORT} with generated API key`);
+
+            // Start the proxy in headless mode
+            // detached: true + stdio: 'ignore' so it fully survives tsx watch restarts.
+            // Using pipes would tie the child to the parent and tsx watch would kill it.
+            const proc = spawn('hai', [
+                'proxy', 'start',
+                `--dangerous-api-key=${apiKey}`,
+                `--port=${HAI_PROXY_PORT}`,
+                '--headless'
+            ], {
+                detached: true,
+                stdio: 'ignore'
+            });
+
+            haiProxyProcess = proc;
+
+            // Fully detach — server can exit/restart without affecting this child
+            proc.unref();
+
+            proc.on('exit', (code) => {
+                console.log(`[Server] HAI proxy process exited with code ${code}`);
+                if (haiProxyProcess === proc) {
+                    haiProxyProcess = null;
+                }
+            });
+
+            // Wait up to 8 seconds for the proxy to be ready
+            let ready = false;
+            for (let i = 0; i < 16; i++) {
+                await new Promise(r => setTimeout(r, 500));
+                ready = await isHaiProxyRunning(apiKey);
+                if (ready) break;
+            }
+
+            if (!ready) {
+                try { proc.kill(); } catch { }
+                haiProxyProcess = null;
+                haiProxyApiKey = null;
+                return res.status(500).json({ success: false, error: 'HAI proxy did not start in time. Check that port 6655 is available.' });
+            }
+
+            // Configure Claude Code CLI to use this proxy
+            try {
+                await new Promise<void>((resolve, reject) => {
+                    const configProc = spawn('hai', [
+                        'configure', 'claude-code',
+                        `--api-key=${apiKey}`,
+                        `--port=${HAI_PROXY_PORT}`
+                    ], { stdio: 'ignore' });
+                    configProc.on('close', code => code === 0 ? resolve() : reject(new Error(`configure exited ${code}`)));
+                    configProc.on('error', reject);
+                });
+                console.log('[Server] hai configure claude-code completed');
+            } catch (configErr) {
+                console.warn('[Server] hai configure claude-code failed (non-fatal):', configErr);
+            }
+
+            // Persist to config store so the hyperspace proxy router picks it up
+            const hyperspaceConfig = {
+                proxyUrl: HAI_PROXY_URL,
+                apiKey,
+                model: configStore.getHyperspaceProxy()?.model || '',
+                alwaysThinkingEnabled: configStore.getHyperspaceProxy()?.alwaysThinkingEnabled || false
+            };
+            configStore.updateConfig({ hyperspaceProxy: hyperspaceConfig });
+            console.log('[Server] HAI proxy started and config saved');
+
+            res.json({ success: true, apiKey, proxyUrl: HAI_PROXY_URL, pid: proc.pid });
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error('[Server] Failed to start HAI proxy:', error);
+            res.status(500).json({ success: false, error: message });
+        }
+    });
+
+    // POST /api/hyperspace/stop - stop the managed HAI proxy process
+    app.post('/api/hyperspace/stop', async (_req, res) => {
+        try {
+            if (haiProxyProcess) {
+                haiProxyProcess.kill();
+                haiProxyProcess = null;
+                haiProxyApiKey = null;
+                console.log('[Server] HAI proxy stopped');
+                res.json({ success: true });
+            } else {
+                res.json({ success: true, message: 'No managed proxy process was running' });
+            }
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ success: false, error: message });
+        }
+    });
+
+    // ============================================================
+    // HAI Proxy Startup Recovery
+    // On server restart, check if the proxy is still running with the stored key
+    // and restore haiProxyApiKey so status/start calls work immediately.
+    // ============================================================
+    (async () => {
+        try {
+            const storedConfig = configStore.getHyperspaceProxy();
+            const storedKey = storedConfig?.apiKey;
+            if (storedKey) {
+                const running = await isHaiProxyRunning(storedKey);
+                if (running) {
+                    haiProxyApiKey = storedKey;
+                    console.log('[Server] HAI proxy already running after restart — restored API key from config store');
+                } else {
+                    console.log('[Server] HAI proxy not running after restart (stored key found but proxy unreachable)');
+                }
+            }
+        } catch (err) {
+            console.warn('[Server] HAI proxy startup recovery check failed:', err);
+        }
+    })();
 
     // ============================================================
     // Embeddings API - proxies to SAP AI Core for vector embeddings
@@ -2892,20 +3461,40 @@ Guidelines:
         }
     });
 
-    // Restart server endpoint - triggers graceful shutdown, tsx watch will restart
+    // Restart server endpoint - triggers graceful shutdown with restart exit code
+    // Exit code 75 signals the wrapper script (start.sh) to restart the backend
     app.post('/api/server/restart', (_req, res) => {
         console.log('[Server] Restart requested via API');
         res.json({ status: 'restarting' });
 
-        // Give time for response to be sent, then trigger graceful shutdown
+        // Give time for response to be sent, then trigger graceful shutdown with restart
         setTimeout(() => {
             gracefulShutdown('RESTART');
         }, 100);
     });
 
+    // ===== Static Frontend Serving (Docker / Production) =====
+    // When CLAUDIA_FRONTEND_DIR is set, serve the pre-built frontend as static files.
+    // This allows a single port (4001) to serve both API and UI in containerized deployments.
+    const frontendDir = process.env.CLAUDIA_FRONTEND_DIR;
+    if (frontendDir && existsSync(frontendDir)) {
+        logger.info('Serving static frontend from ' + frontendDir);
+        app.use(express.static(frontendDir));
+        // SPA fallback: any non-API route gets index.html
+        app.get('*', (req, res) => {
+            if (!req.path.startsWith('/api/') && !req.path.startsWith('/hyperspace')) {
+                res.sendFile(join(frontendDir, 'index.html'));
+            }
+        });
+    }
+
     // Graceful shutdown handler
+    // SIGTERM = tsx watch file-change restart (fast path, skip tunnel teardown)
+    // SIGINT = user Ctrl+C (full cleanup)
+    // RESTART = API-triggered restart (exit code 75 for wrapper script)
     function gracefulShutdown(signal: string): void {
-        console.log(`[Server] Shutting down (${signal}), notifying clients and saving state...`);
+        const isFileChangeRestart = signal === 'SIGTERM';
+        console.log(`[Server] Shutting down (${signal})${isFileChangeRestart ? ' [tsx watch reload]' : ''}, saving state...`);
 
         // Clear heartbeat interval
         clearInterval(heartbeatInterval);
@@ -2913,11 +3502,14 @@ Guidelines:
         // Notify all connected clients that the server is reloading
         broadcast({ type: 'server:reloading' as WSMessageType, payload: {} });
 
-        // Give clients enough time to receive the message and for I/O to complete
-        // 500ms provides a good balance between responsiveness and reliability
+        // For tsx watch restarts, minimize delay — just save state and exit quickly
+        const shutdownDelay = isFileChangeRestart ? 100 : 500;
+
         setTimeout(() => {
-            // Stop tunnel if active
-            tunnelManager.stop().catch(() => {});
+            // Only stop tunnel on full shutdown (SIGINT), not on file-change restarts
+            if (!isFileChangeRestart) {
+                tunnelManager.stop().catch(() => { });
+            }
 
             // Save all state synchronously before exit
             taskSpawner.saveNow();
@@ -2929,13 +3521,15 @@ Guidelines:
                 client.close(1001, 'Server reloading');
             }
 
-            console.log('[Server] Shutdown complete');
-            process.exit(0);
-        }, 500);
+            // Exit code 75 = restart requested, 0 = normal shutdown
+            const exitCode = signal === 'RESTART' ? 75 : 0;
+            console.log(`[Server] Shutdown complete (exit code ${exitCode})`);
+            process.exit(exitCode);
+        }, shutdownDelay);
     }
 
     // Note: SIGINT/SIGTERM handlers are set up in index.ts to avoid duplicate handlers
     // The gracefulShutdown function is exported for use by the restart endpoint
 
-    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown };
+    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, tunnelManager, configStore };
 }

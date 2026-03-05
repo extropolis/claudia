@@ -37,6 +37,9 @@ export class TunnelManager extends EventEmitter {
     private stopping = false;
     private port: number;
     private domain: string;
+    private healthCheckInterval: NodeJS.Timeout | null = null;
+    private lastHealthCheck: Date | null = null;
+    private consecutiveFailures = 0;
 
     constructor(port: number, domain?: string) {
         super();
@@ -113,6 +116,11 @@ export class TunnelManager extends EventEmitter {
 
         this.ngrokProcess = ngrok;
 
+        ngrok.stdout?.on('data', (data: Buffer) => {
+            const msg = data.toString().trim();
+            if (msg) logger.debug('Ngrok stdout', { output: msg });
+        });
+
         ngrok.stderr?.on('data', (data: Buffer) => {
             const msg = data.toString().trim();
             if (msg) logger.warn('Ngrok stderr', { output: msg });
@@ -123,19 +131,33 @@ export class TunnelManager extends EventEmitter {
             this.emit('tunnel:error', err.message);
         });
 
-        ngrok.on('close', (code) => {
-            logger.info('Ngrok process exited', { code });
+        ngrok.on('close', (code, signal) => {
+            logger.warn('Ngrok process exited', {
+                code,
+                signal,
+                stopping: this.stopping,
+                retryCount: this.retryCount,
+                hadUrl: this.url !== null,
+                uptime: this.startedAt ? `${Math.round((Date.now() - new Date(this.startedAt).getTime()) / 1000)}s` : 'unknown'
+            });
             this.ngrokProcess = null;
             this.url = null;
 
             if (!this.stopping && this.retryCount < this.maxRetries) {
                 this.retryCount++;
-                logger.info(`Ngrok disconnected, retrying... (${this.retryCount}/${this.maxRetries})`);
-                this.retryTimeout = setTimeout(() => this.reconnect(), 2000 * this.retryCount);
+                const backoffDelay = 2000 * this.retryCount;
+                logger.info(`Ngrok disconnected, retrying in ${backoffDelay}ms... (${this.retryCount}/${this.maxRetries})`);
+                this.retryTimeout = setTimeout(() => this.reconnect(), backoffDelay);
                 this.emit('tunnel:closed');
             } else if (!this.stopping) {
+                logger.error('Ngrok closed and not restarting', {
+                    reason: 'max retries reached',
+                    retries: this.retryCount
+                });
                 this.cleanup();
                 this.emit('tunnel:closed');
+            } else {
+                logger.info('Ngrok closed cleanly (intentional stop)');
             }
         });
 
@@ -148,8 +170,18 @@ export class TunnelManager extends EventEmitter {
 
         this.url = url;
         this.startedAt = new Date().toISOString();
-        logger.info('Ngrok tunnel started', { url: this.url, token: this.token });
+        logger.info('✓ Ngrok tunnel started successfully', {
+            url: this.url,
+            token: this.token,
+            domain: this.domain,
+            port: this.port,
+            pid: ngrok.pid
+        });
         this.emit('tunnel:ready', { url: this.url, token: this.token });
+
+        // Start health check monitoring
+        this.startHealthCheck();
+        logger.info('Health check monitoring started (30s interval)');
     }
 
     /**
@@ -252,14 +284,108 @@ export class TunnelManager extends EventEmitter {
     }
 
     /**
+     * Start periodic health check to monitor tunnel status
+     */
+    private startHealthCheck(): void {
+        this.stopHealthCheck();
+        this.consecutiveFailures = 0;
+        this.lastHealthCheck = new Date();
+
+        this.healthCheckInterval = setInterval(async () => {
+            try {
+                const res = await fetch('http://127.0.0.1:4040/api/tunnels', {
+                    signal: AbortSignal.timeout(5000)
+                });
+                if (res.ok) {
+                    const previousFailures = this.consecutiveFailures;
+                    this.lastHealthCheck = new Date();
+                    this.consecutiveFailures = 0;
+
+                    if (previousFailures > 0) {
+                        logger.info('✓ Health check recovered', {
+                            previousFailures,
+                            tunnelUrl: this.url
+                        });
+                    } else {
+                        logger.debug('Health check passed', { tunnelActive: true });
+                    }
+                } else {
+                    this.consecutiveFailures++;
+                    logger.warn('Health check failed - bad response', {
+                        status: res.status,
+                        statusText: res.statusText,
+                        failures: this.consecutiveFailures,
+                        threshold: 3
+                    });
+                }
+            } catch (err) {
+                this.consecutiveFailures++;
+                logger.warn('Health check error', {
+                    error: err instanceof Error ? err.message : String(err),
+                    failures: this.consecutiveFailures,
+                    processAlive: this.ngrokProcess !== null,
+                    hasUrl: this.url !== null
+                });
+
+                // If health check fails multiple times, the tunnel may be dead
+                if (this.consecutiveFailures >= 3) {
+                    logger.error('Multiple health check failures detected, attempting tunnel restart', {
+                        failures: this.consecutiveFailures,
+                        lastHealthCheck: this.lastHealthCheck,
+                        processStillAlive: this.ngrokProcess !== null
+                    });
+                    this.emit('tunnel:error', 'Health check failed - restarting tunnel');
+
+                    // Stop the current tunnel and restart
+                    this.stopHealthCheck();
+                    if (this.ngrokProcess) {
+                        try {
+                            this.ngrokProcess.kill('SIGTERM');
+                        } catch (killErr) {
+                            logger.warn('Error killing ngrok during health check restart', {
+                                error: killErr instanceof Error ? killErr.message : String(killErr)
+                            });
+                        }
+                    }
+
+                    // Reset and reconnect
+                    this.ngrokProcess = null;
+                    this.url = null;
+                    this.consecutiveFailures = 0;
+
+                    // Reconnect with backoff
+                    setTimeout(() => {
+                        if (!this.stopping) {
+                            logger.info('Initiating health-check-triggered reconnection');
+                            this.reconnect();
+                        }
+                    }, 3000);
+                }
+            }
+        }, 30000); // Check every 30 seconds
+    }
+
+    /**
+     * Stop health check monitoring
+     */
+    private stopHealthCheck(): void {
+        if (this.healthCheckInterval) {
+            clearInterval(this.healthCheckInterval);
+            this.healthCheckInterval = null;
+        }
+    }
+
+    /**
      * Cleanup internal state
      */
     private cleanup(): void {
+        this.stopHealthCheck();
         this.ngrokProcess = null;
         this.url = null;
         this.token = null;
         this.startedAt = null;
         this.publicIp = null;
         this.retryCount = 0;
+        this.consecutiveFailures = 0;
     }
 }

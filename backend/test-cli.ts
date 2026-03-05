@@ -57,6 +57,9 @@ interface TestConfig {
     testMcpServer: string | null; // Test a specific MCP server by name
     disconnectTask: boolean;      // Disconnect a task
     reconnectTask: boolean;       // Reconnect a task
+    haiProxyStart: boolean;       // Start HAI proxy (no WebSocket needed)
+    haiProxyStatus: boolean;      // Get HAI proxy status (no WebSocket needed)
+    haiProxyStop: boolean;        // Stop HAI proxy (no WebSocket needed)
 }
 
 class TestCLI {
@@ -1205,6 +1208,9 @@ function parseArgs(): TestConfig {
     let testMcpServer: string | null = null;
     let disconnectTask = false;
     let reconnectTask = false;
+    let haiProxyStart = false;
+    let haiProxyStatus = false;
+    let haiProxyStop = false;
 
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
@@ -1353,6 +1359,15 @@ function parseArgs(): TestConfig {
                 break;
             case '--reconnect':
                 reconnectTask = true;
+                break;
+            case '--hai-proxy-start':
+                haiProxyStart = true;
+                break;
+            case '--hai-proxy-status':
+                haiProxyStatus = true;
+                break;
+            case '--hai-proxy-stop':
+                haiProxyStop = true;
                 break;
             case '--help':
             case '-h':
@@ -1547,6 +1562,9 @@ Examples:
         testMcpServer,
         disconnectTask,
         reconnectTask,
+        haiProxyStart,
+        haiProxyStatus,
+        haiProxyStop,
     };
 }
 
@@ -1750,6 +1768,47 @@ async function main() {
 
     if (config.testMcpServer) {
         await testMcpServer(config.testMcpServer);
+        process.exit(0);
+    }
+
+    if (config.haiProxyStart) {
+        console.log('🚀 Starting HAI proxy...');
+        try {
+            const resp = await fetch(`${baseHttpUrl}/api/hyperspace/start`, { method: 'POST' });
+            const result = await resp.json();
+            console.log('');
+            console.log(result.success ? '✅ HAI proxy started' : '❌ Failed to start HAI proxy');
+            console.log(JSON.stringify(result, null, 2));
+        } catch (err) {
+            console.error('❌ Error:', err);
+        }
+        process.exit(0);
+    }
+
+    if (config.haiProxyStatus) {
+        console.log('🔍 Checking HAI proxy status...');
+        try {
+            const resp = await fetch(`${baseHttpUrl}/api/hyperspace/status`);
+            const result = await resp.json();
+            console.log('');
+            console.log('📡 HAI PROXY STATUS');
+            console.log('='.repeat(40));
+            console.log(JSON.stringify(result, null, 2));
+        } catch (err) {
+            console.error('❌ Error:', err);
+        }
+        process.exit(0);
+    }
+
+    if (config.haiProxyStop) {
+        console.log('🛑 Stopping HAI proxy...');
+        try {
+            const resp = await fetch(`${baseHttpUrl}/api/hyperspace/stop`, { method: 'POST' });
+            const result = await resp.json();
+            console.log(result.success ? '✅ HAI proxy stopped' : '❌ Error stopping proxy');
+        } catch (err) {
+            console.error('❌ Error:', err);
+        }
         process.exit(0);
     }
 

@@ -142,6 +142,42 @@ body {
   gap: 12px;
 }
 
+/* View Mode Toggle (Terminal / Summary) */
+.view-mode-toggle {
+  display: flex;
+  align-items: center;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.view-mode-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.view-mode-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.view-mode-btn.active {
+  color: var(--accent-secondary);
+  background: rgba(0, 212, 255, 0.1);
+}
+
+.view-mode-btn + .view-mode-btn {
+  border-left: 1px solid var(--border-color);
+}
+
 .running-tasks-indicator {
   display: flex;
   align-items: center;
@@ -273,6 +309,8 @@ body {
   border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
+  min-height: 0; /* Allow flex item to shrink below content size so children can scroll */
+  overflow: hidden;
 }
 
 /* Resize Handle */
@@ -2228,6 +2266,77 @@ body {
   color: var(--accent-red);
 }
 
+/* ===== Summary Alert Toasts ===== */
+.summary-alert-toasts {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 380px;
+}
+
+.summary-alert-toast {
+  background: #1a1a2e;
+  border: 1px solid #333;
+  border-left: 3px solid #e6c347;
+  border-radius: 8px;
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  animation: toast-slide-in 0.3s ease;
+}
+
+.summary-alert-toast:hover {
+  background: #222244;
+  border-color: #555;
+  transform: translateY(-2px);
+}
+
+@keyframes toast-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(40px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.toast-task {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e6c347;
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toast-message {
+  font-size: 13px;
+  color: #d4d4d4;
+  line-height: 1.4;
+  margin-bottom: 4px;
+}
+
+.toast-cta {
+  font-size: 11px;
+  color: #5b84f5;
+}
+
+@media (max-width: 768px) {
+  .summary-alert-toasts {
+    left: 16px;
+    right: 16px;
+    bottom: 12px;
+    max-width: none;
+  }
+}
+
 
 /* Voice Active Input Glow */
 .task-input-bar.voice-active .task-input-container,
@@ -2344,6 +2453,10 @@ body {
 
   .header-controls {
     gap: 6px;
+  }
+
+  .view-mode-btn {
+    padding: 5px 8px;
   }
 
   /* Hide text labels on header buttons */

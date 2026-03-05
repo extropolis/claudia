@@ -15,6 +15,17 @@ export function isTunnelAccess(): boolean {
 }
 
 /**
+ * True when the frontend is served by the backend (same origin).
+ * This is the case for Docker, devVM, or any production deployment where
+ * the built frontend is served via CLAUDIA_FRONTEND_DIR.
+ * In dev mode, Vite serves on a separate port (5173).
+ */
+function isSameOriginServing(): boolean {
+    const pagePort = parseInt(window.location.port, 10) || (window.location.protocol === 'https:' ? 443 : 80);
+    return pagePort !== PORTS.FRONTEND;
+}
+
+/**
  * Get the mobile auth token from the URL query string (set by tunnel redirect)
  */
 export function getMobileToken(): string | null {
@@ -32,8 +43,8 @@ export function getApiBaseUrl(): string {
         return window.electronAPI.getBackendUrl();
     }
 
-    // Tunnel access — backend is on the same origin (it proxies the frontend)
-    if (isTunnelAccess()) {
+    // Tunnel access or same-origin serving (Docker, devVM) — backend is on the same origin
+    if (isTunnelAccess() || isSameOriginServing()) {
         return window.location.origin;
     }
 
@@ -52,12 +63,11 @@ export function getWebSocketUrl(): string {
         return httpUrl.replace('http://', 'ws://');
     }
 
-    // Tunnel access — use same host, upgrade protocol
-    if (isTunnelAccess()) {
+    // Tunnel access or same-origin serving (Docker, devVM) — use same host, upgrade protocol
+    if (isTunnelAccess() || isSameOriginServing()) {
         const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const token = getMobileToken();
         const base = `${proto}//${window.location.host}`;
-        // Append mobile token so the backend accepts the WebSocket connection
         return token ? `${base}?token=${token}&mobile=1` : base;
     }
 

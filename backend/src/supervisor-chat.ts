@@ -15,7 +15,7 @@ import { fileURLToPath } from 'url';
 import { TaskSpawner } from './task-spawner.js';
 import { ConfigStore } from './config-store.js';
 import { getConversationHistory, ConversationMessage } from './conversation-parser.js';
-import { ChatMessage, Task, SuggestedAction } from '@claudia/shared';
+import { ChatMessage, Task, SuggestedAction, SummaryAction } from '@claudia/shared';
 import { randomUUID } from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -348,6 +348,27 @@ export class SupervisorChat extends EventEmitter {
     }
 
     /**
+     * Get default action buttons based on task state
+     */
+    private getDefaultActions(task: { id: string; state: string; waitingInputType?: string }): SummaryAction[] {
+        switch (task.state) {
+            case 'idle':
+            case 'exited':
+                return [
+                    { id: randomUUID(), label: 'Continue working', action: 'Continue where you left off', type: 'task_input' },
+                    { id: randomUUID(), label: 'Start new task', action: '', type: 'new_task' },
+                ];
+            case 'waiting_input':
+                return [
+                    { id: randomUUID(), label: 'Yes', action: 'y', type: 'task_input' },
+                    { id: randomUUID(), label: 'No', action: 'n', type: 'task_input' },
+                ];
+            default:
+                return [];
+        }
+    }
+
+    /**
      * Run the actual analysis for a task
      */
     private async runAnalysis(task: { id: string; prompt: string; state: string; workspaceId: string; createdAt: Date; lastActivity: Date }): Promise<void> {
@@ -370,7 +391,7 @@ export class SupervisorChat extends EventEmitter {
             // Get the configurable system prompt
             const systemPrompt = this.configStore.getSupervisorSystemPrompt();
 
-            // Build analysis prompt
+            // Build analysis prompt - request JSON with summary + actions
             const analysisPrompt = `${systemPrompt}
 
 ## Task Information
@@ -382,38 +403,83 @@ export class SupervisorChat extends EventEmitter {
 ${conversationContext || 'No conversation history available.'}
 
 ## Your Task
-Give a brief, spoken-friendly update — 1-2 sentences max. No bullet lists, no markdown headers.
-If it completed fine, just say what was done. If there's an issue, briefly explain.
-Occasionally suggest a logical next step. End by asking what to do next.
-Be witty — dry humor, light sarcasm, maybe a pun. Think "funny coworker" not "trying too hard." Never let jokes get in the way of being useful.`;
+Respond with JSON containing a summary and suggested action buttons:
+{
+  "summary": "1-2 sentence spoken-friendly summary of what happened",
+  "actions": [
+    {"label": "Button text", "action": "text to send to task or empty for new_task", "type": "task_input or new_task or chat"}
+  ]
+}
+
+Rules:
+- The summary should be spoken-friendly. No bullet lists, no markdown headers.
+- If it completed fine, say what was done. If there's an issue, briefly explain.
+- Include 2-4 suggested action buttons the user can click.
+- For completed/idle tasks: suggest things like running tests, making changes, continuing, or starting new tasks.
+- For waiting_input: explain what's being asked and provide the most likely responses as buttons (e.g., "Allow", "Deny", "Yes", "No").
+- For errors/exited: suggest debugging steps or starting fresh.
+- Be witty — dry humor, light sarcasm, maybe a pun. Never let jokes get in the way of being useful.
+- IMPORTANT: Always respond with valid JSON only. No text outside the JSON.`;
 
             // Call Claude Code for analysis
-            const analysis = await this.callClaudeSimple(analysisPrompt, task.workspaceId);
+            const rawAnalysis = await this.callClaudeSimple(analysisPrompt, task.workspaceId);
 
-            // Create assistant message with the analysis
+            // Parse structured response
+            let content: string;
+            let actions: SummaryAction[] = [];
+
+            try {
+                // Try to extract JSON from possible markdown fence
+                let jsonStr = rawAnalysis;
+                const jsonMatch = rawAnalysis.match(/```(?:json)?\s*([\s\S]*?)```/);
+                if (jsonMatch) {
+                    jsonStr = jsonMatch[1].trim();
+                } else if (!jsonStr.trim().startsWith('{')) {
+                    throw new Error('Not JSON');
+                }
+
+                const parsed = JSON.parse(jsonStr.trim());
+                content = parsed.summary || rawAnalysis;
+                actions = (parsed.actions || []).map((a: { label?: string; action?: string; type?: string }) => ({
+                    id: randomUUID(),
+                    label: a.label || 'Continue',
+                    action: a.action || '',
+                    type: a.type || 'chat'
+                }));
+            } catch {
+                // JSON parse failed - use raw response with default actions
+                content = rawAnalysis;
+                actions = this.getDefaultActions(task);
+            }
+
+            // Create assistant message with the analysis and actions
             const assistantMessage: ChatMessage = {
                 id: randomUUID(),
                 role: 'assistant',
-                content: analysis,
+                content,
                 timestamp: new Date().toISOString(),
                 taskId: task.id,
-                workspaceId: task.workspaceId
+                workspaceId: task.workspaceId,
+                actions,
+                isAlert: true
             };
 
             this.addMessage(assistantMessage);
 
-            console.log(`[SupervisorChat] Auto-analysis complete for task ${task.id}`);
+            console.log(`[SupervisorChat] Auto-analysis complete for task ${task.id} with ${actions.length} actions`);
         } catch (error) {
             console.error(`[SupervisorChat] Error auto-analyzing task ${task.id}:`, error);
 
-            // Send fallback message
+            // Send fallback message with default actions
             const fallbackMessage: ChatMessage = {
                 id: randomUUID(),
                 role: 'assistant',
                 content: `Task "${task.prompt.substring(0, 50)}${task.prompt.length > 50 ? '...' : ''}" is now ${task.state}.`,
                 timestamp: new Date().toISOString(),
                 taskId: task.id,
-                workspaceId: task.workspaceId
+                workspaceId: task.workspaceId,
+                actions: this.getDefaultActions(task),
+                isAlert: true
             };
             this.addMessage(fallbackMessage);
         } finally {
@@ -518,6 +584,7 @@ Be witty — dry humor, light sarcasm, maybe a pun. Think "funny coworker" not "
 
         this.isProcessing = true;
         this.emit('typing', true);
+        if (taskId) this.emit('summaryTyping', { taskId, isTyping: true });
 
         try {
             // Create and store user message
@@ -582,6 +649,7 @@ Be witty — dry humor, light sarcasm, maybe a pun. Think "funny coworker" not "
         } finally {
             this.isProcessing = false;
             this.emit('typing', false);
+            if (taskId) this.emit('summaryTyping', { taskId, isTyping: false });
         }
     }
 
