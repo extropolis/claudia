@@ -93,6 +93,18 @@
     50% { opacity: 0.4; }
 }
 
+/* Tunnel Error */
+.tunnel-error {
+    padding: 10px 14px;
+    background: rgba(248, 81, 73, 0.1);
+    border: 1px solid rgba(248, 81, 73, 0.3);
+    border-radius: 8px;
+    color: #f85149;
+    font-size: 13px;
+    margin-bottom: 16px;
+    word-break: break-word;
+}
+
 /* QR Code Area */
 .qr-code-area {
     display: flex;
@@ -118,6 +130,11 @@
     border-radius: 8px;
     color: var(--text-muted, #8b949e);
     font-size: 14px;
+}
+
+.qr-code-area .qr-placeholder.error {
+    border-color: rgba(248, 81, 73, 0.3);
+    color: #f85149;
 }
 
 /* URL Display */

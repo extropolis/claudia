@@ -1,71 +1,83 @@
-import { Server } from 'http';
+import { utilityProcess, UtilityProcess } from 'electron';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import getPort from 'get-port';
-import { createApp } from '../backend/dist/server.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 export interface ServerInfo {
-    server: Server;
+    child: UtilityProcess;
     port: number;
     url: string;
 }
 
 /**
- * Start the Express backend server on an available port
+ * Start the Express backend server in a utility process.
+ *
+ * The backend runs in a separate process because node-pty (native module)
+ * segfaults when loaded in Electron's main process. Electron's utilityProcess
+ * provides a full Node.js environment without Chromium overhead.
+ *
  * @param basePath - Optional base path for configuration files (e.g., app.getPath('userData'))
- * @returns ServerInfo with server instance, port, and URL
+ * @param onLog - Callback for forwarded backend log messages
  */
-export async function startServer(basePath?: string): Promise<ServerInfo> {
-    try {
-        // Find an available port (prefer 3001, but use any available port)
-        const port = await getPort({ port: 3001 });
+export async function startServer(
+    basePath?: string,
+    onLog?: (level: string, message: string) => void
+): Promise<ServerInfo> {
+    const port = await getPort({ port: 3001 });
+    const workerPath = join(__dirname, 'backend-worker.js');
 
-        console.log(`🔮 Starting Claudia backend on port ${port}...`);
+    console.log(`🔮 Starting Claudia backend on port ${port} (utility process)...`);
 
-        // Create the Express app with optional basePath for config files
-        const { server } = await createApp(basePath);
+    const child = utilityProcess.fork(workerPath);
 
-        // Start listening
-        await new Promise<void>((resolve, reject) => {
-            server.listen(port, () => {
-                console.log(`✅ Backend server running on http://localhost:${port}`);
-                resolve();
-            });
+    return new Promise<ServerInfo>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            reject(new Error('Backend startup timeout (30s)'));
+        }, 30000);
 
-            server.on('error', (error) => {
-                console.error('❌ Failed to start backend server:', error);
-                reject(error);
-            });
-        });
-
-        const url = `http://localhost:${port}`;
-
-        return { server, port, url };
-    } catch (error) {
-        console.error('❌ Error starting server:', error);
-        throw error;
-    }
-}
-
-/**
- * Stop the Express backend server gracefully
- * @param server - The HTTP server instance to stop
- */
-export async function stopServer(server: Server): Promise<void> {
-    return new Promise((resolve, reject) => {
-        console.log('🛑 Stopping backend server...');
-
-        server.close((error) => {
-            if (error) {
-                console.error('❌ Error stopping server:', error);
-                reject(error);
-            } else {
-                console.log('✅ Backend server stopped');
-                resolve();
+        child.on('message', (msg: any) => {
+            if (msg.type === 'ready') {
+                clearTimeout(timeout);
+                const url = `http://localhost:${port}`;
+                console.log(`✅ Backend server running on ${url}`);
+                resolve({ child, port, url });
+            } else if (msg.type === 'error') {
+                clearTimeout(timeout);
+                reject(new Error(msg.message));
+            } else if (msg.type === 'log' && onLog) {
+                onLog(msg.level, msg.message);
             }
         });
 
-        // Force close any remaining connections after 5 seconds
+        child.on('exit', (code) => {
+            clearTimeout(timeout);
+            if (code !== 0) {
+                reject(new Error(`Backend process exited with code ${code}`));
+            }
+        });
+
+        // Send start command
+        child.postMessage({ type: 'start', port, basePath: basePath || '' });
+    });
+}
+
+/**
+ * Stop the backend server gracefully
+ */
+export async function stopServer(child: UtilityProcess): Promise<void> {
+    console.log('🛑 Stopping backend server...');
+    child.kill();
+    // Wait for exit with timeout
+    await new Promise<void>((resolve) => {
+        child.on('exit', () => {
+            console.log('✅ Backend server stopped');
+            resolve();
+        });
         setTimeout(() => {
-            console.log('⚠️  Force closing server connections...');
+            console.log('⚠️  Force closing backend...');
             resolve();
         }, 5000);
     });

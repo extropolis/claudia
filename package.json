@@ -88,9 +88,8 @@
     "@claudia/shared"
   ],
   "dependencies": {
-    "@claudia/shared": "*",
     "@anthropic-ai/sdk": "^0.71.2",
-    "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
+    "@claudia/shared": "*",
     "@llamaindex/anthropic": "^0.3.26",
     "@modelcontextprotocol/sdk": "^1.25.2",
     "@opencode-ai/sdk": "^1.1.14",
@@ -104,6 +103,7 @@
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
     "multer": "^2.0.2",
+    "node-pty": "^1.1.0",
     "opencode-studio-server": "^1.2.1",
     "uuid": "^9.0.1",
     "ws": "^8.16.0"
@@ -115,7 +115,7 @@
       "output": "release"
     },
     "asarUnpack": [
-      "node_modules/@homebridge/node-pty-prebuilt-multiarch/**"
+      "node_modules/node-pty/**"
     ],
     "files": [
       "dist-electron/**/*",

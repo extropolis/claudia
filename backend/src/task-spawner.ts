@@ -1,4 +1,4 @@
-import { spawn, IPty } from '@homebridge/node-pty-prebuilt-multiarch';
+import { spawn, IPty } from 'node-pty';
 import { EventEmitter } from 'events';
 import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS } from '@claudia/shared';
 import { fileURLToPath } from 'url';
@@ -846,6 +846,12 @@ export class TaskSpawner extends EventEmitter {
     private saveTasks(): void {
         try {
             const tasksToSave: PersistedTask[] = [];
+
+            // Ensure history directory exists
+            const historyDir = this.getHistoryDir();
+            if (!existsSync(historyDir)) {
+                mkdirSync(historyDir, { recursive: true });
+            }
 
             for (const task of this.tasks.values()) {
                 // Save history to separate file

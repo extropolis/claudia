@@ -116,6 +116,7 @@ function App() {
     const [showMobileAccess, setShowMobileAccess] = useState(false);
     const [tunnelActive, setTunnelActive] = useState(false);
     const [tunnelLoading, setTunnelLoading] = useState(false);
+    const [tunnelError, setTunnelError] = useState<string | null>(null);
     const sidebarRef = useRef<HTMLElement>(null);
     const aiCoreCheckDoneRef = useRef(false);
 
@@ -314,18 +315,21 @@ function App() {
         } else {
             setShowMobileAccess(true);
             setTunnelLoading(true);
+            setTunnelError(null);
             try {
                 const res = await fetch(`${getApiBaseUrl()}/api/tunnel/start`, { method: 'POST' });
                 const data = await res.json();
                 if (data.error) {
                     console.error('[Tunnel] Failed to start:', data.error);
                     setTunnelActive(false);
+                    setTunnelError(data.error);
                 } else {
                     setTunnelActive(true);
                 }
             } catch (err) {
                 console.error('[Tunnel] Failed to start:', err);
                 setTunnelActive(false);
+                setTunnelError(err instanceof Error ? err.message : 'Failed to connect');
             } finally {
                 setTunnelLoading(false);
             }
@@ -538,7 +542,7 @@ function App() {
 
             <ProjectPicker onSelect={handleProjectSelect} wsRef={wsRef} requestRecentWorkspaces={requestRecentWorkspaces} clearRecentWorkspace={clearRecentWorkspace} />
             <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
-            {!isMobile && <MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} />}
+            {!isMobile && <MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} error={tunnelError} />}
             <GlobalVoiceManager />
 
             {/* Offline warning overlay */}

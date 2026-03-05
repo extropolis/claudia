@@ -16,9 +16,10 @@ interface TunnelStatus {
 interface MobileAccessModalProps {
     isOpen: boolean;
     onClose: () => void;
+    error?: string | null;
 }
 
-export function MobileAccessModal({ isOpen, onClose }: MobileAccessModalProps) {
+export function MobileAccessModal({ isOpen, onClose, error }: MobileAccessModalProps) {
     const [status, setStatus] = useState<TunnelStatus | null>(null);
     const [copied, setCopied] = useState(false);
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -40,7 +41,7 @@ export function MobileAccessModal({ isOpen, onClose }: MobileAccessModalProps) {
 
     // Poll for tunnel status when modal is open (tunnel may still be starting)
     useEffect(() => {
-        if (!isOpen) return;
+        if (!isOpen || error) return;
 
         // Fetch immediately
         fetchStatus();
@@ -54,7 +55,7 @@ export function MobileAccessModal({ isOpen, onClose }: MobileAccessModalProps) {
         }, 2000);
 
         return () => clearInterval(interval);
-    }, [isOpen, fetchStatus]);
+    }, [isOpen, error, fetchStatus]);
 
     // Generate QR code when URL changes
     useEffect(() => {
@@ -105,19 +106,32 @@ export function MobileAccessModal({ isOpen, onClose }: MobileAccessModalProps) {
 
                 {/* Status */}
                 <div className="tunnel-status">
-                    <span className={`status-dot ${status?.active ? 'active' : 'starting'}`} />
+                    <span className={`status-dot ${status?.active ? 'active' : error ? 'error' : 'starting'}`} />
                     <span>
                         {status?.active
                             ? 'Tunnel active'
-                            : 'Starting tunnel...'}
+                            : error
+                                ? 'Connection failed'
+                                : 'Starting tunnel...'}
                     </span>
-                    {!status?.active && <span className="loading-spinner" />}
+                    {!status?.active && !error && <span className="loading-spinner" />}
                 </div>
+
+                {/* Error message */}
+                {error && (
+                    <div className="tunnel-error">
+                        {error}
+                    </div>
+                )}
 
                 {/* QR Code */}
                 <div className="qr-code-area">
                     {status?.active ? (
                         <canvas ref={canvasRef} />
+                    ) : error ? (
+                        <div className="qr-placeholder error">
+                            Failed
+                        </div>
                     ) : (
                         <div className="qr-placeholder">
                             Starting...

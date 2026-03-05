@@ -3,7 +3,7 @@
  * Spawns and manages OpenCode CLI processes (mirrors Claude Code approach)
  */
 
-import { spawn, IPty } from '@homebridge/node-pty-prebuilt-multiarch';
+import { spawn, IPty } from 'node-pty';
 import { EventEmitter } from 'events';
 import { execSync } from 'child_process';
 import { existsSync, readdirSync, readFileSync, mkdirSync, statSync, openSync, readSync, closeSync } from 'fs';

@@ -166,7 +166,13 @@ async function startApp(): Promise<void> {
         const basePath = isDev ? undefined : app.getPath('userData');
         console.log(`   Config path: ${basePath || 'backend/ (development)'}`);
 
-        serverInfo = await startServer(basePath);
+        serverInfo = await startServer(basePath, (level, message) => {
+            // Forward backend logs from utility process to main process console
+            // (which then forwards to DevTools via our console interceptor)
+            if (level === 'error') console.error(message);
+            else if (level === 'warn') console.warn(message);
+            else console.log(message);
+        });
         console.log(`   Backend URL: ${serverInfo.url}`);
 
         // Create the Electron window with backend URL
@@ -199,7 +205,7 @@ app.on('activate', () => {
 app.on('before-quit', async () => {
     // Gracefully stop the backend server
     if (serverInfo) {
-        await stopServer(serverInfo.server);
+        await stopServer(serverInfo.child);
     }
 });
 
