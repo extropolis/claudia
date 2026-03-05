@@ -670,7 +670,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
             // Check accumulated history, not just the current chunk, as output might be split
             const recentOutput = this.getRecentOutput(task, 5000);
             if (!task.initialPromptSent && task.pendingPrompt && this.isReadyForInitialInput(recentOutput)) {
-                logger.debug('Claude ready, sending prompt', { taskId: task.id });
+                logger.info('Claude ready, sending prompt', { taskId: task.id, prompt: task.pendingPrompt });
                 task.initialPromptSent = true;
                 const prompt = task.pendingPrompt;
                 task.pendingPrompt = null;
