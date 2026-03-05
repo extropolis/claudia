@@ -97,7 +97,8 @@ export class TunnelManager extends EventEmitter {
      */
     private async startNgrok(): Promise<void> {
         // Check if ngrok is installed before attempting to start
-        const ngrokExe = process.platform === 'win32' ? 'ngrok.exe' : 'ngrok';
+        // Use 'ngrok' (not 'ngrok.exe') because npm installs it as ngrok.cmd on Windows
+        const ngrokExe = 'ngrok';
         try {
             execSync(`${process.platform === 'win32' ? 'where' : 'which'} ${ngrokExe}`, { stdio: 'ignore' });
         } catch {
@@ -120,6 +121,7 @@ export class TunnelManager extends EventEmitter {
 
         const ngrok = spawn(ngrokExe, ngrokArgs, {
             stdio: ['pipe', 'pipe', 'pipe'],
+            shell: process.platform === 'win32', // Required on Windows to find .cmd files
         });
 
         this.ngrokProcess = ngrok;
