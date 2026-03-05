@@ -43,12 +43,6 @@ export class WorkspaceStore {
         }
 
         this.config = this.loadConfig();
-
-        // Add default workspace if none exist (project root - parent of backend/src)
-        if (this.config.workspaces.length === 0) {
-            const projectRoot = resolve(__dirname, '..', '..');
-            this.addWorkspace(projectRoot);
-        }
     }
 
     private loadConfig(): WorkspaceConfig {
