@@ -23,7 +23,7 @@ export interface TunnelStatus {
     publicIp: string | null;
 }
 
-export const DEFAULT_NGROK_DOMAIN = 'winning-walleye-neat.ngrok-free.app';
+// No default domain - use random ngrok URL unless user configures one
 
 export class TunnelManager extends EventEmitter {
     private ngrokProcess: ChildProcess | null = null;
@@ -36,13 +36,13 @@ export class TunnelManager extends EventEmitter {
     private retryTimeout: NodeJS.Timeout | null = null;
     private stopping = false;
     private port: number;
-    private domain: string;
+    private domain: string | null;
 
     constructor(port: number, domain?: string) {
         super();
         this.port = port;
-        this.domain = domain || DEFAULT_NGROK_DOMAIN;
-        logger.info('TunnelManager initialized (ngrok)', { port, domain: this.domain });
+        this.domain = domain || null;
+        logger.info('TunnelManager initialized (ngrok)', { port, domain: this.domain || '(random)' });
     }
 
     /**
@@ -116,7 +116,9 @@ export class TunnelManager extends EventEmitter {
             // ignore
         }
 
-        const ngrokArgs = ['http', '--domain', this.domain, String(this.port)];
+        const ngrokArgs = this.domain
+            ? ['http', '--domain', this.domain, String(this.port)]
+            : ['http', String(this.port)];
         logger.info('Spawning ngrok', { args: ngrokArgs });
 
         const ngrok = spawn(ngrokExe, ngrokArgs, {
