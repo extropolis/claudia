@@ -21,7 +21,7 @@ export async function startServer(basePath?: string): Promise<ServerInfo> {
         console.log(`🔮 Starting Claudia backend on port ${port}...`);
 
         // Create the Express app with optional basePath for config files
-        const { server } = createApp(basePath);
+        const { server } = await createApp(basePath);
 
         // Start listening
         await new Promise<void>((resolve, reject) => {
