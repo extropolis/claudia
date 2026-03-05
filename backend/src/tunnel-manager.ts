@@ -96,6 +96,14 @@ export class TunnelManager extends EventEmitter {
      * tunnel URL regardless of ngrok version or log format changes.
      */
     private async startNgrok(): Promise<void> {
+        // Check if ngrok is installed before attempting to start
+        const ngrokExe = process.platform === 'win32' ? 'ngrok.exe' : 'ngrok';
+        try {
+            execSync(`${process.platform === 'win32' ? 'where' : 'which'} ${ngrokExe}`, { stdio: 'ignore' });
+        } catch {
+            throw new Error(`ngrok is not installed. Install it from https://ngrok.com/download and ensure it's in your PATH.`);
+        }
+
         // Kill any stale ngrok processes first (free tier allows only 1 session)
         try {
             const killCmd = process.platform === 'win32'
@@ -110,7 +118,6 @@ export class TunnelManager extends EventEmitter {
         const ngrokArgs = ['http', '--domain', this.domain, String(this.port)];
         logger.info('Spawning ngrok', { args: ngrokArgs });
 
-        const ngrokExe = process.platform === 'win32' ? 'ngrok.exe' : 'ngrok';
         const ngrok = spawn(ngrokExe, ngrokArgs, {
             stdio: ['pipe', 'pipe', 'pipe'],
         });

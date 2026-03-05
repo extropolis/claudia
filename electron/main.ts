@@ -13,22 +13,44 @@ let serverInfo: ServerInfo | null = null;
 
 const isDev = process.env.NODE_ENV === 'development';
 
-// Redirect console output to a log file in production so we can debug Start Menu launches
-if (!isDev) {
-    const logDir = join(app.getPath('userData'), 'logs');
-    mkdirSync(logDir, { recursive: true });
-    const logFile = join(logDir, 'main.log');
+// Redirect console output to log file + DevTools console
+// Buffer early logs until the window is ready, then flush them
+const logBuffer: Array<{ level: string; msg: string }> = [];
+let windowReady = false;
+{
+    const logDir = !isDev ? join(app.getPath('userData'), 'logs') : null;
+    if (logDir) mkdirSync(logDir, { recursive: true });
+    const logFile = logDir ? join(logDir, 'main.log') : null;
     const origLog = console.log;
     const origError = console.error;
     const origWarn = console.warn;
-    const writeLog = (level: string, args: unknown[]) => {
-        const msg = `[${new Date().toISOString()}] [${level}] ${args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')}\n`;
-        try { appendFileSync(logFile, msg); } catch {}
+    const formatArgs = (args: unknown[]) => args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+    const sendToRenderer = (level: string, msg: string) => {
+        try { mainWindow?.webContents?.executeJavaScript(`console.${level}('[Backend]', ${JSON.stringify(msg)})`); } catch {}
     };
-    console.log = (...args: unknown[]) => { origLog(...args); writeLog('INFO', args); };
-    console.error = (...args: unknown[]) => { origError(...args); writeLog('ERROR', args); };
-    console.warn = (...args: unknown[]) => { origWarn(...args); writeLog('WARN', args); };
-    console.log(`Log file: ${logFile}`);
+    const forwardToRenderer = (level: string, args: unknown[]) => {
+        const msg = formatArgs(args);
+        if (logFile) {
+            try { appendFileSync(logFile, `[${new Date().toISOString()}] [${level.toUpperCase()}] ${msg}\n`); } catch {}
+        }
+        if (windowReady && mainWindow) {
+            sendToRenderer(level, msg);
+        } else {
+            logBuffer.push({ level, msg });
+        }
+    };
+    console.log = (...args: unknown[]) => { origLog(...args); forwardToRenderer('log', args); };
+    console.error = (...args: unknown[]) => { origError(...args); forwardToRenderer('error', args); };
+    console.warn = (...args: unknown[]) => { origWarn(...args); forwardToRenderer('warn', args); };
+    // Export flush function for use after window creation
+    (globalThis as any).__flushLogBuffer = () => {
+        windowReady = true;
+        for (const entry of logBuffer) {
+            sendToRenderer(entry.level, entry.msg);
+        }
+        logBuffer.length = 0;
+    };
+    if (logFile) console.log(`Log file: ${logFile}`);
 }
 
 // GUI apps on Windows/macOS don't inherit shell PATH.
@@ -118,6 +140,8 @@ async function createWindow(backendUrl: string): Promise<void> {
     // Show window when ready
     mainWindow.once('ready-to-show', () => {
         mainWindow?.show();
+        // Flush buffered backend logs to DevTools console
+        setTimeout(() => (globalThis as any).__flushLogBuffer?.(), 500);
     });
 
     // Notify renderer of fullscreen state changes
