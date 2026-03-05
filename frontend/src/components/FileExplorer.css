@@ -8,21 +8,43 @@
     z-index: 5;
 }
 
-/* Collapsed state - just the toggle tab visible */
 .file-explorer.collapsed {
     width: auto;
 }
 
-/* Expanded state */
 .file-explorer.expanded {
-    width: 280px;
-    min-width: 220px;
-    max-width: 400px;
     border-left: 1px solid var(--border-color, #30363d);
     background: var(--bg-secondary, #161b22);
 }
 
-/* Toggle button - vertical tab on the left edge */
+/* ===== RESIZE HANDLE ===== */
+.fe-resize-handle {
+    width: 4px;
+    cursor: col-resize;
+    background: transparent;
+    transition: background 0.15s;
+    flex-shrink: 0;
+    position: relative;
+}
+
+.fe-resize-handle::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -4px;
+    right: -4px;
+}
+
+.fe-resize-handle:hover {
+    background: var(--accent-primary, #1e3a5f);
+}
+
+.fe-resize-handle.resizing {
+    background: var(--accent-secondary, #00d4ff);
+}
+
+/* ===== TOGGLE TAB (collapsed) ===== */
 .file-explorer-toggle {
     display: flex;
     align-items: center;
@@ -49,15 +71,6 @@
     color: var(--text-primary, #e6edf3);
 }
 
-.file-explorer-toggle svg {
-    transform: rotate(0deg);
-}
-
-/* When expanded, the toggle is just part of the panel edge */
-.file-explorer.expanded .file-explorer-toggle {
-    display: none;
-}
-
 .file-explorer-toggle-label {
     margin-top: 4px;
     font-size: 11px;
@@ -65,11 +78,12 @@
     letter-spacing: 1px;
 }
 
-/* Panel content */
+/* ===== PANEL ===== */
 .file-explorer-panel {
     display: flex;
     flex-direction: column;
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     height: 100%;
     overflow: hidden;
 }
@@ -103,14 +117,6 @@
     flex-shrink: 0;
 }
 
-.file-explorer-actions {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    flex-shrink: 0;
-}
-
-.file-explorer-refresh,
 .file-explorer-collapse {
     background: none;
     border: none;
@@ -122,67 +128,139 @@
     align-items: center;
     justify-content: center;
     transition: all 0.15s ease;
+    flex-shrink: 0;
 }
 
-.file-explorer-refresh:hover,
 .file-explorer-collapse:hover {
     background: rgba(255, 255, 255, 0.08);
     color: var(--text-primary, #e6edf3);
 }
 
-.file-explorer-refresh:disabled {
+/* ===== TABS BAR ===== */
+.fe-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border-color, #30363d);
+    flex-shrink: 0;
+    background: var(--bg-secondary, #161b22);
+}
+
+.fe-tab {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 7px 4px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-secondary, #8b949e);
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 500;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.fe-tab:hover {
+    color: var(--text-primary, #e6edf3);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.fe-tab.active {
+    color: var(--accent-secondary, #00d4ff);
+    border-bottom-color: var(--accent-secondary, #00d4ff);
+}
+
+/* ===== TAB CONTENT ===== */
+.fe-tab-content {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.fe-tab-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 10px;
+    border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+    flex-shrink: 0;
+    min-height: 28px;
+}
+
+.fe-tab-stats {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    color: var(--text-muted, #6e7681);
+}
+
+.fe-toolbar-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary, #8b949e);
+    cursor: pointer;
+    padding: 3px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+}
+
+.fe-toolbar-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary, #e6edf3);
+}
+
+.fe-toolbar-btn:disabled {
     opacity: 0.5;
     cursor: default;
 }
 
-/* Stats bar */
-.file-explorer-stats {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    font-size: 10px;
-    color: var(--text-muted, #6e7681);
-    border-bottom: 1px solid rgba(48, 54, 61, 0.5);
-    flex-shrink: 0;
-}
-
-.stats-sep {
-    font-size: 8px;
-}
-
-/* File tree container */
-.file-explorer-tree {
+.fe-tab-scroll {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
     padding: 4px 0;
 }
 
-/* Custom scrollbar */
-.file-explorer-tree::-webkit-scrollbar {
-    width: 6px;
+.fe-tab-scroll::-webkit-scrollbar { width: 6px; }
+.fe-tab-scroll::-webkit-scrollbar-track { background: transparent; }
+.fe-tab-scroll::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+.fe-tab-scroll::-webkit-scrollbar-thumb:hover { background: #555; }
+
+.fe-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 24px 16px;
+    color: var(--text-secondary, #8b949e);
+    font-size: 12px;
 }
 
-.file-explorer-tree::-webkit-scrollbar-track {
-    background: transparent;
+.fe-error {
+    padding: 16px;
+    color: var(--accent-red, #f85149);
+    font-size: 12px;
+    text-align: center;
 }
 
-.file-explorer-tree::-webkit-scrollbar-thumb {
-    background: #333;
-    border-radius: 3px;
+.fe-empty {
+    padding: 24px 16px;
+    color: var(--text-muted, #6e7681);
+    font-size: 12px;
+    text-align: center;
 }
 
-.file-explorer-tree::-webkit-scrollbar-thumb:hover {
-    background: #555;
-}
+/* ===== FILE TREE (shared) ===== */
+.file-tree-node { user-select: none; }
 
-/* Tree node */
-.file-tree-node {
-    user-select: none;
-}
-
-/* Tree item (file or directory row) */
 .file-tree-item {
     display: flex;
     align-items: center;
@@ -196,92 +274,56 @@
     overflow: hidden;
 }
 
-.file-tree-item.directory {
-    cursor: pointer;
-}
+.file-tree-item.directory { cursor: pointer; }
+.file-tree-item:hover { background: rgba(255, 255, 255, 0.04); }
+.file-tree-item.directory:hover { background: rgba(255, 255, 255, 0.06); }
 
-.file-tree-item:hover {
-    background: rgba(255, 255, 255, 0.04);
-}
-
-.file-tree-item.directory:hover {
-    background: rgba(255, 255, 255, 0.06);
-}
-
-/* Chevron for expand/collapse */
 .file-tree-chevron {
-    width: 16px;
-    height: 16px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    width: 16px; height: 16px;
+    display: flex; align-items: center; justify-content: center;
     flex-shrink: 0;
     color: var(--text-muted, #6e7681);
 }
 
-/* Icons */
 .file-tree-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    width: 18px;
-    height: 18px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; width: 18px; height: 18px;
 }
 
-.directory-icon {
-    color: #e8a136;
-}
+.directory-icon { color: #e8a136; }
+.file-icon { color: var(--text-secondary, #8b949e); }
 
-.file-icon {
-    color: var(--text-secondary, #8b949e);
-}
-
-/* File type badge (TS, JS, PY, etc.) */
 .file-type-badge {
-    font-size: 8px;
-    font-weight: 700;
+    font-size: 8px; font-weight: 700;
     font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
-    line-height: 1;
-    letter-spacing: -0.5px;
+    line-height: 1; letter-spacing: -0.5px;
 }
 
-/* Name */
 .file-tree-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    flex: 1;
-    min-width: 0;
+    overflow: hidden; text-overflow: ellipsis;
+    flex: 1; min-width: 0;
     font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
     font-size: 12px;
 }
 
-.file-tree-item.directory .file-tree-name {
-    font-weight: 500;
-}
+.file-tree-item.directory .file-tree-name { font-weight: 500; }
 
-/* File size */
 .file-tree-size {
     font-size: 10px;
     color: var(--text-muted, #6e7681);
-    margin-left: auto;
-    padding-left: 8px;
+    margin-left: auto; padding-left: 8px;
     flex-shrink: 0;
     font-family: 'SF Mono', monospace;
 }
 
-/* Child count badge */
 .file-tree-badge {
     font-size: 9px;
     color: var(--text-muted, #6e7681);
     background: rgba(255, 255, 255, 0.06);
-    padding: 0 5px;
-    border-radius: 8px;
-    margin-left: auto;
-    flex-shrink: 0;
+    padding: 0 5px; border-radius: 8px;
+    margin-left: auto; flex-shrink: 0;
 }
 
-/* Empty directory message */
 .file-tree-empty {
     font-size: 11px;
     color: var(--text-muted, #6e7681);
@@ -289,34 +331,207 @@
     padding: 4px 8px;
 }
 
-/* Loading state */
-.file-explorer-loading {
+.file-tree-children { overflow: hidden; }
+
+/* ===== GIT CHANGES TAB ===== */
+.fe-branch-name {
+    font-family: 'SF Mono', monospace;
+    font-weight: 600;
+    color: var(--text-secondary, #8b949e);
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-ahead, .fe-behind {
+    display: inline-flex;
+    align-items: center;
+    gap: 1px;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 0 3px;
+    border-radius: 4px;
+}
+
+.fe-ahead {
+    color: #3fb950;
+    background: rgba(63, 185, 80, 0.12);
+}
+
+.fe-behind {
+    color: #f85149;
+    background: rgba(248, 81, 73, 0.12);
+}
+
+.git-section { margin-bottom: 4px; }
+
+.git-section-header {
+    padding: 4px 10px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted, #6e7681);
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.git-change-item {
     display: flex;
     align-items: center;
-    justify-content: center;
+    gap: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    transition: background 0.1s;
+}
+
+.git-change-item:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.git-change-path {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: 'SF Mono', monospace;
+    font-size: 11px;
+    color: var(--text-primary, #e6edf3);
+}
+
+.git-change-badge {
+    font-size: 9px;
+    font-weight: 700;
+    padding: 0 4px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+
+.git-change-badge.added { color: #3fb950; background: rgba(63, 185, 80, 0.15); }
+.git-change-badge.modified { color: #d29922; background: rgba(210, 153, 34, 0.15); }
+.git-change-badge.deleted { color: #f85149; background: rgba(248, 81, 73, 0.15); }
+.git-change-badge.untracked { color: #8b949e; background: rgba(139, 148, 158, 0.15); }
+.git-change-badge.renamed { color: #a371f7; background: rgba(163, 113, 247, 0.15); }
+
+.git-status-added { color: #3fb950; }
+.git-status-modified { color: #d29922; }
+.git-status-deleted { color: #f85149; }
+.git-status-untracked { color: #8b949e; }
+.git-status-renamed { color: #a371f7; }
+
+.git-change-item.staged {
+    background: rgba(63, 185, 80, 0.04);
+}
+
+/* ===== CI/CD TAB ===== */
+.ci-pr-info {
+    display: flex;
+    align-items: center;
     gap: 8px;
-    padding: 24px 16px;
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+}
+
+.ci-pr-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 12px;
+    background: rgba(139, 148, 158, 0.15);
+    color: var(--text-primary, #e6edf3);
+}
+
+.ci-pr-badge.open { background: rgba(63, 185, 80, 0.15); color: #3fb950; }
+.ci-pr-badge.closed { background: rgba(248, 81, 73, 0.15); color: #f85149; }
+.ci-pr-badge.merged { background: rgba(163, 113, 247, 0.15); color: #a371f7; }
+
+.ci-pr-link {
     color: var(--text-secondary, #8b949e);
-    font-size: 12px;
+    display: flex;
+    align-items: center;
+    transition: color 0.15s;
 }
 
-/* Error state */
-.file-explorer-error {
-    padding: 16px;
-    color: var(--accent-red, #f85149);
-    font-size: 12px;
-    text-align: center;
+.ci-pr-link:hover { color: var(--accent-secondary, #00d4ff); }
+
+.ci-summary {
+    display: flex;
+    gap: 8px;
+    font-size: 10px;
+    margin-left: auto;
 }
 
-/* Empty state */
-.file-explorer-empty {
-    padding: 24px 16px;
+.ci-no-pr {
+    padding: 8px 10px;
+    font-size: 11px;
     color: var(--text-muted, #6e7681);
-    font-size: 12px;
+    border-bottom: 1px solid rgba(48, 54, 61, 0.5);
     text-align: center;
 }
 
-/* Spinning animation */
+.ci-check-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+    transition: background 0.1s;
+}
+
+.ci-check-item:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.ci-check-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: 'SF Mono', monospace;
+    font-size: 11px;
+    color: var(--text-primary, #e6edf3);
+}
+
+.ci-check-status {
+    font-size: 9px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+}
+
+.ci-check-status.success { color: #3fb950; background: rgba(63, 185, 80, 0.15); }
+.ci-check-status.failure { color: #f85149; background: rgba(248, 81, 73, 0.15); }
+.ci-check-status.in_progress,
+.ci-check-status.running { color: #d29922; background: rgba(210, 153, 34, 0.15); }
+.ci-check-status.pending,
+.ci-check-status.queued,
+.ci-check-status.waiting { color: #8b949e; background: rgba(139, 148, 158, 0.15); }
+.ci-check-status.skipped { color: #6e7681; background: rgba(110, 118, 129, 0.15); }
+.ci-check-status.cancelled { color: #f85149; background: rgba(248, 81, 73, 0.1); }
+
+.ci-check-link {
+    color: var(--text-muted, #6e7681);
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    transition: color 0.15s;
+}
+
+.ci-check-link:hover { color: var(--accent-secondary, #00d4ff); }
+
+.ci-success { color: #3fb950; }
+.ci-failure { color: #f85149; }
+.ci-running { color: #d29922; }
+.ci-queued, .ci-pending { color: #8b949e; }
+.ci-skipped { color: #6e7681; }
+.ci-cancelled { color: #f85149; opacity: 0.7; }
+.ci-neutral { color: #8b949e; }
+
+/* ===== SPINNING ===== */
 .file-explorer .spinning {
     animation: fe-spin 0.8s linear infinite;
 }
@@ -325,12 +540,7 @@
     to { transform: rotate(360deg); }
 }
 
-/* Smooth tree expand/collapse */
-.file-tree-children {
-    overflow: hidden;
-}
-
-/* ===== MOBILE: hide file explorer ===== */
+/* ===== MOBILE ===== */
 @media (max-width: 768px) {
     .file-explorer {
         display: none;
