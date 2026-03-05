@@ -5,10 +5,10 @@ on:
     tags:
       - 'v*'
 
-# One build per release
+# Cancel previous build when a new version is released
 concurrency:
-  group: electron-build-${{ github.ref }}
-  cancel-in-progress: false
+  group: electron-build
+  cancel-in-progress: true
 
 jobs:
   build-windows:

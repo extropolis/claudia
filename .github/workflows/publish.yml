@@ -5,10 +5,10 @@ on:
     tags:
       - 'v*'
 
-# Prevent concurrent publishes
+# Cancel previous publish when a new version is released
 concurrency:
   group: npm-publish
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   # Job 1: Build and test (runs automatically)
