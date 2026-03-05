@@ -179,7 +179,8 @@
         "deb"
       ],
       "category": "Development",
-      "icon": "assets/icon.png"
+      "icon": "assets/icon.png",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     }
   }
 }
