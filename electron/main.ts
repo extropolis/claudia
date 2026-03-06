@@ -118,17 +118,28 @@ async function createWindow(backendUrl: string): Promise<void> {
         },
         title: 'Claudia',
         backgroundColor: '#1a1a1a',
-        show: false // Don't show until ready
+        show: true // Show immediately on macOS to avoid visibility issues
     });
+
+    console.log('[Main] Window created, making it visible');
+
+    // Force window to front on macOS
+    if (process.platform === 'darwin' && app.dock) {
+        app.dock.show();
+    }
+    mainWindow.show();
+    mainWindow.focus();
 
     // Pass backend URL as query parameter so it's available immediately on page load
     const urlParam = `backendUrl=${encodeURIComponent(backendUrl)}`;
 
     // Load the app
+    console.log('[Main] Loading URL...');
     if (isDev) {
         // In development, load from Vite dev server
         await mainWindow.loadURL(`http://localhost:5173?${urlParam}`);
         mainWindow.webContents.openDevTools();
+        console.log('[Main] Dev URL loaded, DevTools opened');
     } else {
         // In production, load from built files
         // When packaged, __dirname is /dist-electron, so we go up one level
@@ -137,12 +148,27 @@ async function createWindow(backendUrl: string): Promise<void> {
         await mainWindow.loadURL(`file://${indexPath}?${urlParam}`);
     }
 
-    // Show window when ready
+    // Window is already shown, but listen for ready-to-show to ensure it's focused
     mainWindow.once('ready-to-show', () => {
-        mainWindow?.show();
+        console.log('[Main] Window ready-to-show event fired');
+        if (mainWindow) {
+            mainWindow.focus();
+            mainWindow.moveTop();
+            console.log('[Main] Window focused and brought to front');
+        }
         // Flush buffered backend logs to DevTools console
         setTimeout(() => (globalThis as any).__flushLogBuffer?.(), 500);
     });
+
+    // Fallback: ensure window is visible after 2 seconds regardless of ready-to-show
+    setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            console.log('[Main] Fallback timer: ensuring window is visible');
+            mainWindow.show();
+            mainWindow.focus();
+            mainWindow.moveTop();
+        }
+    }, 2000);
 
     // Notify renderer of fullscreen state changes
     mainWindow.on('enter-full-screen', () => {
