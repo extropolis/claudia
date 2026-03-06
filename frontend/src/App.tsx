@@ -8,6 +8,7 @@ import { GlobalVoiceManager } from './components/GlobalVoiceManager';
 import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
 import { SystemStats } from './components/SystemStats';
 import { MobileAccessModal } from './components/MobileAccessModal';
+import { FileExplorer } from './components/FileExplorer';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
 import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2 } from 'lucide-react';
@@ -506,6 +507,11 @@ function App() {
                                 </div>
                             )}
                         </section>
+
+                        <FileExplorer
+                            workspacePath={selectedWorkspace?.id}
+                            workspaceName={selectedWorkspace?.displayName || selectedWorkspace?.name}
+                        />
 
                         {showChatPanel && (
                             <>

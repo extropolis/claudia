@@ -4,9 +4,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import os from 'os';
 import { spawn, ChildProcess } from 'child_process';
-import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync } from 'fs';
-import { readFile } from 'fs/promises';
-import { join, dirname } from 'path';
+import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, statSync } from 'fs';
+import { readFile, readdir } from 'fs/promises';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
 import { TaskSpawner } from './task-spawner.js';
@@ -1421,6 +1421,331 @@ export async function createApp(basePath?: string) {
 
     app.get('/api/workspaces', (_req, res) => {
         res.json(workspaceStore.getWorkspaces());
+    });
+
+    // File explorer endpoint - list files and directories for a workspace
+    app.get('/api/workspaces/files', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        const subPath = (req.query.path as string) || '';
+
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+
+        // Resolve the target directory
+        const targetDir = subPath ? join(workspacePath, subPath) : workspacePath;
+
+        // Security: ensure the resolved path is within the workspace
+        const resolvedTarget = resolve(targetDir);
+        const resolvedWorkspace = resolve(workspacePath);
+        if (!resolvedTarget.startsWith(resolvedWorkspace)) {
+            return res.status(403).json({ error: 'Path traversal not allowed' });
+        }
+
+        if (!existsSync(resolvedTarget)) {
+            return res.status(404).json({ error: 'Directory not found' });
+        }
+
+        // Directories to skip entirely
+        const IGNORED_DIRS = new Set([
+            'node_modules', '.git', '.svn', '.hg', '__pycache__',
+            '.next', '.nuxt', 'dist', 'build', '.cache', '.parcel-cache',
+            'coverage', '.nyc_output', '.tox', '.venv', 'venv',
+            '.idea', '.vscode', '.vs', 'vendor', 'target',
+            '.terraform', '.serverless', '.angular'
+        ]);
+
+        // Files to skip
+        const IGNORED_FILES = new Set([
+            '.DS_Store', 'Thumbs.db', 'desktop.ini'
+        ]);
+
+        try {
+            const entries = await readdir(resolvedTarget, { withFileTypes: true });
+            const items: Array<{
+                name: string;
+                type: 'file' | 'directory';
+                path: string;
+                size?: number;
+                childCount?: number;
+            }> = [];
+
+            for (const entry of entries) {
+                // Skip hidden files/dirs (starting with .) except important config files
+                const isHiddenButImportant = ['.env', '.gitignore', '.npmrc', '.eslintrc', '.prettierrc', '.editorconfig', '.claude'].includes(entry.name);
+                if (entry.name.startsWith('.') && !isHiddenButImportant) {
+                    continue;
+                }
+
+                if (entry.isDirectory()) {
+                    if (IGNORED_DIRS.has(entry.name)) continue;
+                    const dirRelPath = subPath ? `${subPath}/${entry.name}` : entry.name;
+                    // Count children for the directory (shallow)
+                    let childCount = 0;
+                    try {
+                        const children = readdirSync(join(resolvedTarget, entry.name));
+                        childCount = children.filter(c => !IGNORED_FILES.has(c)).length;
+                    } catch {
+                        // Permission denied or other error
+                    }
+                    items.push({
+                        name: entry.name,
+                        type: 'directory',
+                        path: dirRelPath,
+                        childCount
+                    });
+                } else if (entry.isFile()) {
+                    if (IGNORED_FILES.has(entry.name)) continue;
+                    const fileRelPath = subPath ? `${subPath}/${entry.name}` : entry.name;
+                    let size = 0;
+                    try {
+                        const stat = statSync(join(resolvedTarget, entry.name));
+                        size = stat.size;
+                    } catch {
+                        // Permission denied
+                    }
+                    items.push({
+                        name: entry.name,
+                        type: 'file',
+                        path: fileRelPath,
+                        size
+                    });
+                }
+            }
+
+            // Sort: directories first, then files, both alphabetically
+            items.sort((a, b) => {
+                if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+                return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+            });
+
+            res.json({
+                path: subPath || '.',
+                workspace: workspacePath,
+                items
+            });
+        } catch (err) {
+            logger.error('Failed to list files', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to list directory contents' });
+        }
+    });
+
+    // Git status endpoint — uncommitted changes for a workspace
+    app.get('/api/workspaces/git-status', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+
+        try {
+            const execAsync = (await import('util')).promisify((await import('child_process')).exec);
+
+            // Check if it's a git repo
+            try {
+                await execAsync('git rev-parse --git-dir', { cwd: workspacePath });
+            } catch {
+                return res.json({ isGitRepo: false, branch: null, changes: [] });
+            }
+
+            // Get current branch
+            let branch = '';
+            try {
+                const { stdout } = await execAsync('git branch --show-current', { cwd: workspacePath });
+                branch = stdout.trim();
+            } catch {
+                branch = 'HEAD';
+            }
+
+            // Get status with porcelain v2 for richer info
+            const { stdout: statusOutput } = await execAsync('git status --porcelain', { cwd: workspacePath });
+            const changes = statusOutput.trim().split('\n')
+                .filter(line => line.length > 0)
+                .map(line => {
+                    const staged = line[0];
+                    const unstaged = line[1];
+                    const filePath = line.substring(3);
+                    // Determine status
+                    let status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked' = 'modified';
+                    let isStaged = false;
+                    if (staged === '?' && unstaged === '?') {
+                        status = 'untracked';
+                    } else if (staged === 'A') {
+                        status = 'added';
+                        isStaged = true;
+                    } else if (staged === 'D' || unstaged === 'D') {
+                        status = 'deleted';
+                        isStaged = staged === 'D';
+                    } else if (staged === 'R') {
+                        status = 'renamed';
+                        isStaged = true;
+                    } else if (staged === 'M') {
+                        status = 'modified';
+                        isStaged = true;
+                    } else if (unstaged === 'M') {
+                        status = 'modified';
+                        isStaged = false;
+                    }
+                    return { path: filePath, status, staged: isStaged };
+                });
+
+            // Get ahead/behind info
+            let ahead = 0;
+            let behind = 0;
+            try {
+                const { stdout: abOutput } = await execAsync('git rev-list --left-right --count HEAD...@{upstream}', { cwd: workspacePath });
+                const parts = abOutput.trim().split(/\s+/);
+                ahead = parseInt(parts[0], 10) || 0;
+                behind = parseInt(parts[1], 10) || 0;
+            } catch {
+                // No upstream configured
+            }
+
+            res.json({ isGitRepo: true, branch, changes, ahead, behind });
+        } catch (err) {
+            logger.error('Failed to get git status', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to get git status' });
+        }
+    });
+
+    // CI/CD checks endpoint - get PR check status from GitHub
+    app.get('/api/workspaces/ci-status', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+
+        try {
+            const execAsync = (await import('util')).promisify((await import('child_process')).exec);
+
+            // Check if it's a git repo
+            try {
+                await execAsync('git rev-parse --git-dir', { cwd: workspacePath });
+            } catch {
+                return res.json({ isGitRepo: false, checks: [], prNumber: null, prUrl: null });
+            }
+
+            // Get current branch
+            let branch = '';
+            try {
+                const { stdout } = await execAsync('git branch --show-current', { cwd: workspacePath });
+                branch = stdout.trim();
+            } catch {
+                return res.json({ isGitRepo: true, checks: [], prNumber: null, prUrl: null, error: 'Cannot determine branch' });
+            }
+
+            // Get remote URL to determine owner/repo
+            let owner = '';
+            let repo = '';
+            try {
+                const { stdout } = await execAsync('git remote get-url origin', { cwd: workspacePath });
+                const url = stdout.trim();
+                // Parse GitHub URL: https://github.com/owner/repo.git or git@github.com:owner/repo.git
+                const httpsMatch = url.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
+                if (httpsMatch) {
+                    owner = httpsMatch[1];
+                    repo = httpsMatch[2];
+                }
+            } catch {
+                return res.json({ isGitRepo: true, checks: [], prNumber: null, prUrl: null, error: 'No remote origin' });
+            }
+
+            if (!owner || !repo) {
+                return res.json({ isGitRepo: true, checks: [], prNumber: null, prUrl: null, error: 'Not a GitHub repository' });
+            }
+
+            // Use gh CLI to get PR info and checks
+            let prNumber: number | null = null;
+            let prUrl: string | null = null;
+            let prState: string | null = null;
+
+            try {
+                const { stdout: prOutput } = await execAsync(
+                    `gh pr view --json number,url,state --jq ".number,.url,.state"`,
+                    { cwd: workspacePath }
+                );
+                const prLines = prOutput.trim().split('\n');
+                if (prLines.length >= 3) {
+                    prNumber = parseInt(prLines[0], 10);
+                    prUrl = prLines[1];
+                    prState = prLines[2];
+                }
+            } catch {
+                // No PR for this branch
+            }
+
+            // Get check runs for current branch
+            interface CICheck {
+                name: string;
+                status: 'queued' | 'in_progress' | 'completed' | 'waiting' | 'pending' | 'neutral';
+                conclusion: string | null;
+                startedAt: string | null;
+                completedAt: string | null;
+                url: string | null;
+            }
+            let checks: CICheck[] = [];
+
+            try {
+                const { stdout: checksOutput } = await execAsync(
+                    `gh pr checks --json name,state,link`,
+                    { cwd: workspacePath }
+                );
+                const checksData = JSON.parse(checksOutput);
+                checks = checksData.map((c: { name: string; state: string; link: string }) => {
+                    let status: CICheck['status'] = 'pending';
+                    let conclusion: string | null = null;
+                    const state = c.state?.toUpperCase();
+
+                    if (state === 'SUCCESS' || state === 'PASS') {
+                        status = 'completed';
+                        conclusion = 'success';
+                    } else if (state === 'FAILURE' || state === 'FAIL' || state === 'ERROR') {
+                        status = 'completed';
+                        conclusion = 'failure';
+                    } else if (state === 'PENDING') {
+                        status = 'pending';
+                    } else if (state === 'SKIPPING' || state === 'SKIPPED') {
+                        status = 'completed';
+                        conclusion = 'skipped';
+                    } else if (state === 'CANCELLED') {
+                        status = 'completed';
+                        conclusion = 'cancelled';
+                    } else {
+                        status = 'in_progress';
+                    }
+
+                    return {
+                        name: c.name,
+                        status,
+                        conclusion,
+                        startedAt: null,
+                        completedAt: null,
+                        url: c.link || null,
+                    };
+                });
+            } catch {
+                // gh pr checks failed — no PR or no checks
+            }
+
+            res.json({
+                isGitRepo: true,
+                branch,
+                owner,
+                repo,
+                prNumber,
+                prUrl,
+                prState,
+                checks,
+            });
+        } catch (err) {
+            logger.error('Failed to get CI status', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to get CI status' });
+        }
     });
 
     // Config API routes
