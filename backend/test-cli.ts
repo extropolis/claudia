@@ -277,8 +277,12 @@ class TestCLI {
         }
 
         const message = {
-            type: 'chat:send',
-            payload
+            type: 'task:create',
+            payload: {
+                prompt: content,
+                workspaceId: this.config.workspaceId || process.cwd(),
+                ...(imagePath && payload.images ? { images: payload.images } : {})
+            }
         };
 
         this.ws.send(JSON.stringify(message));

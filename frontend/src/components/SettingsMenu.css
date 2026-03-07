@@ -1519,3 +1519,122 @@
         padding-top: max(16px, env(safe-area-inset-top, 16px));
     }
 }
+
+/* Plugins Panel Styles */
+.plugins-content {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.plugins-description {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    padding: 12px;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    border-left: 3px solid var(--accent-primary);
+}
+
+.plugins-empty {
+    padding: 24px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    border: 1px dashed var(--border-color);
+}
+
+.plugins-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.plugin-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    transition: all 0.2s ease;
+    gap: 16px;
+}
+
+.plugin-item:hover {
+    background: var(--bg-primary);
+    border-color: var(--accent-secondary);
+}
+
+.plugin-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+}
+
+.plugin-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.plugin-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 0.95rem;
+}
+
+.plugin-version {
+    font-size: 0.8rem;
+    color: var(--text-tertiary);
+    padding: 2px 6px;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+    font-family: 'Monaco', 'Courier New', monospace;
+}
+
+.plugin-type {
+    font-size: 0.75rem;
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.plugin-type-ai-provider {
+    background: rgba(59, 130, 246, 0.15);
+    color: #60a5fa;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.plugin-type-utility {
+    background: rgba(16, 185, 129, 0.15);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.plugin-type-integration {
+    background: rgba(168, 85, 247, 0.15);
+    color: #c084fc;
+    border: 1px solid rgba(168, 85, 247, 0.3);
+}
+
+.plugin-description {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+.plugin-author {
+    font-size: 0.8rem;
+    color: var(--text-tertiary);
+    font-style: italic;
+}

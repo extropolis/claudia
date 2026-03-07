@@ -21,6 +21,7 @@ import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
 import { createLogger } from './logger.js';
+import { PluginManager, PluginContext } from './plugin-system/index.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
 // - config-routes.ts: Config API routes template
@@ -28,6 +29,10 @@ import { createLogger } from './logger.js';
 // - ws-handlers.ts: WebSocket handlers template
 
 const logger = createLogger('[Server]');
+
+// ES module __dirname equivalent
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // Valid WebSocket message types for validation
 const VALID_WS_MESSAGE_TYPES = new Set([
@@ -163,9 +168,27 @@ export async function createApp(basePath?: string) {
     // Initialize configStore first to determine API mode
     const configStore = new ConfigStore(basePath);
 
+    // Initialize Plugin System
+    logger.info('Initializing plugin system...');
+    const pluginContext: PluginContext = {
+        configStore,
+        logger: createLogger('[Plugin]'),
+        express,
+        utils: { spawn, fetch }
+    };
+
+    const pluginManager = new PluginManager(pluginContext);
+
+    // Discover and load plugins from backend/plugins directory
+    const pluginsDir = join(__dirname, '..', 'plugins');
+    await pluginManager.discoverPlugins(pluginsDir);
+
     // Initialize LLM service with config store so it can use the correct model
     const { initializeLLMService } = await import('./llm-service.js');
     initializeLLMService(configStore);
+
+    // Register plugin routes (handles both SAP AI Core and HAI Proxy)
+    pluginManager.registerRoutes(app);
 
     // Initialize remaining services
     const persistencePath = basePath ? join(basePath, 'tasks.json') : undefined;
@@ -175,6 +198,40 @@ export async function createApp(basePath?: string) {
     const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore);
     // LearningsStore for RAG-based learnings
     const learningsStore = new LearningsStore(basePath, configStore);
+
+    // Backfill workspaces from existing tasks
+    // This ensures tasks created before workspace tracking still show up in UI
+    try {
+        const tasks = taskSpawner.getAllTasks();
+        logger.info(`Backfill: Found ${tasks.length} tasks`);
+        const workspacePathsToAdd = new Set<string>();
+
+        for (const task of tasks) {
+            if (task.workspaceId) {
+                const exists = existsSync(task.workspaceId);
+                const alreadyInStore = workspaceStore.getWorkspace(task.workspaceId);
+                logger.info(`Backfill: Task ${task.id} workspace ${task.workspaceId} exists=${exists} inStore=${!!alreadyInStore}`);
+
+                if (!alreadyInStore && exists) {
+                    workspacePathsToAdd.add(task.workspaceId);
+                }
+            }
+        }
+
+        logger.info(`Backfill: Will add ${workspacePathsToAdd.size} unique workspace(s)`);
+        if (workspacePathsToAdd.size > 0) {
+            for (const workspacePath of workspacePathsToAdd) {
+                try {
+                    const workspace = workspaceStore.addWorkspace(workspacePath);
+                    logger.info(`Added workspace: ${workspacePath}`, { workspace });
+                } catch (error) {
+                    logger.error(`Failed to add workspace ${workspacePath}:`, { error });
+                }
+            }
+        }
+    } catch (error) {
+        logger.error('Failed to backfill workspaces from tasks', { error });
+    }
 
     // Wire up tunnel events for broadcasting
     tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
@@ -547,6 +604,20 @@ export async function createApp(basePath?: string) {
                             sendWSError(ws, workspaceValidation.error || 'Invalid workspace path', message.type, 'INVALID_WORKSPACE');
                             return;
                         }
+
+                        // Auto-add workspace if it doesn't exist yet
+                        const validatedPath = workspaceValidation.data!;
+                        if (!workspaceStore.getWorkspace(validatedPath)) {
+                            try {
+                                const workspace = workspaceStore.addWorkspace(validatedPath);
+                                logger.info('Auto-added workspace for new task', { workspaceId: validatedPath });
+                                broadcast({ type: 'workspace:created' as WSMessageType, payload: { workspace } });
+                            } catch (error) {
+                                logger.error('Failed to auto-add workspace', { error });
+                                // Continue anyway - task creation shouldn't fail if workspace can't be added
+                            }
+                        }
+
                         // Use workspace system prompt if set, otherwise fall back to global rules
                         const workspaceSystemPrompt = workspaceStore.getSystemPrompt(workspaceId);
                         const rules = configStore.getRules();
@@ -555,7 +626,7 @@ export async function createApp(basePath?: string) {
 
                         // Pass initial dimensions if provided
                         try {
-                            await taskSpawner.createTask(prompt, workspaceValidation.data!, systemPrompt, initialCols, initialRows);
+                            await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows);
                         } catch (err) {
                             const errorMessage = err instanceof Error ? err.message : String(err);
                             logger.error('Failed to create task', { error: errorMessage });
@@ -912,12 +983,25 @@ export async function createApp(basePath?: string) {
                             sendWSError(ws, workspaceValidation.error || 'Invalid workspace path', message.type, 'INVALID_WORKSPACE');
                             return;
                         }
+
+                        // Auto-add workspace if it doesn't exist yet
+                        const validatedPath = workspaceValidation.data!;
+                        if (!workspaceStore.getWorkspace(validatedPath)) {
+                            try {
+                                const workspace = workspaceStore.addWorkspace(validatedPath);
+                                logger.info('Auto-added workspace for git push task', { workspaceId: validatedPath });
+                                broadcast({ type: 'workspace:created' as WSMessageType, payload: { workspace } });
+                            } catch (error) {
+                                logger.error('Failed to auto-add workspace', { error });
+                            }
+                        }
+
                         // Create a task to push to GitHub
                         const pushPrompt = 'Push the latest changes to GitHub. First check git status to see what needs to be committed. If there are uncommitted changes, create a commit with an appropriate message, then push to the remote repository. If there are no changes, just confirm that everything is already up to date.';
                         const rules = configStore.getRules();
                         const systemPrompt = rules?.trim() || undefined;
                         logger.info('Creating git push task', { workspaceId });
-                        taskSpawner.createTask(pushPrompt, workspaceValidation.data!, systemPrompt);
+                        taskSpawner.createTask(pushPrompt, validatedPath, systemPrompt);
                         break;
                     }
 
@@ -1012,6 +1096,152 @@ export async function createApp(basePath?: string) {
     // REST API routes
     app.get('/api/health', (_req, res) => {
         res.json({ status: 'ok' });
+    });
+
+    // Plugin API routes
+    app.get('/api/plugins', (_req, res) => {
+        try {
+            const plugins = pluginManager.getAllAvailablePlugins(pluginsDir);
+            res.json({ success: true, plugins });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ success: false, error: message });
+        }
+    });
+
+    // Enable a plugin
+    app.post('/api/plugins/:name/enable', async (req, res) => {
+        try {
+            const { name } = req.params;
+            logger.info(`[API] Enabling plugin: ${name}`);
+
+            configStore.setPluginEnabled(name, true);
+
+            // Reload plugins to activate the newly enabled plugin
+            await pluginManager.discoverPlugins(pluginsDir);
+            pluginManager.registerRoutes(app);
+
+            res.json({ success: true, message: `Plugin ${name} enabled successfully` });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error(`[API] Error enabling plugin:`, { error });
+            res.status(500).json({ success: false, error: message });
+        }
+    });
+
+    // Disable a plugin
+    app.post('/api/plugins/:name/disable', async (req, res) => {
+        try {
+            const { name } = req.params;
+            logger.info(`[API] Disabling plugin: ${name}`);
+
+            configStore.setPluginEnabled(name, false);
+
+            // Note: Disabling requires a server restart to fully unload the plugin
+            // For now, we just update the config
+            res.json({
+                success: true,
+                message: `Plugin ${name} disabled. Restart server to fully unload.`,
+                requiresRestart: true
+            });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error(`[API] Error disabling plugin:`, { error });
+            res.status(500).json({ success: false, error: message });
+        }
+    });
+
+    // HAI Proxy Plugin API routes (for frontend Settings)
+    app.post('/api/hyperspace-proxy/test', async (req, res) => {
+        try {
+            const { proxyUrl, apiKey } = req.body;
+            if (!proxyUrl || !apiKey) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'proxyUrl and apiKey are required'
+                });
+            }
+
+            // Test connection by hitting the models endpoint
+            let modelsUrl = proxyUrl;
+            if (!modelsUrl.endsWith('/')) {
+                modelsUrl += '/';
+            }
+            if (!modelsUrl.endsWith('anthropic/')) {
+                modelsUrl += 'anthropic/';
+            }
+            modelsUrl += 'v1/models';
+
+            const response = await fetch(modelsUrl, {
+                method: 'GET',
+                headers: { 'x-api-key': apiKey },
+                signal: AbortSignal.timeout(5000)
+            });
+
+            if (response.ok) {
+                res.json({ success: true });
+            } else {
+                res.status(500).json({
+                    success: false,
+                    error: 'HAI proxy is not responding or credentials are invalid'
+                });
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error('Failed to test HAI proxy connection', { error: message });
+            res.status(500).json({ success: false, error: message });
+        }
+    });
+
+    app.post('/api/hyperspace-proxy/models', async (req, res) => {
+        try {
+            const { proxyUrl, apiKey } = req.body;
+            if (!proxyUrl || !apiKey) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'proxyUrl and apiKey are required'
+                });
+            }
+
+            // Fetch models from the HAI proxy
+            let modelsUrl = proxyUrl;
+            if (!modelsUrl.endsWith('/')) {
+                modelsUrl += '/';
+            }
+            if (!modelsUrl.endsWith('anthropic/')) {
+                modelsUrl += 'anthropic/';
+            }
+            modelsUrl += 'v1/models';
+
+            const response = await fetch(modelsUrl, {
+                method: 'GET',
+                headers: { 'x-api-key': apiKey },
+                signal: AbortSignal.timeout(5000)
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                return res.status(500).json({
+                    success: false,
+                    error: `Failed to fetch models: ${response.status} ${errorText}`
+                });
+            }
+
+            const data = await response.json();
+
+            // Transform the response to match frontend expectations
+            // Anthropic API returns { data: [...models...] }
+            const models = data.data?.map((model: any) => ({
+                id: model.id,
+                name: model.display_name || model.id,
+            })) || [];
+
+            res.json({ success: true, models });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error('Failed to fetch HAI proxy models', { error: message });
+            res.status(500).json({ success: false, error: message });
+        }
     });
 
     // ===== Tunnel Management Routes =====
@@ -1745,6 +1975,499 @@ export async function createApp(basePath?: string) {
         } catch (err) {
             logger.error('Failed to get CI status', { error: err instanceof Error ? err.message : String(err) });
             res.status(500).json({ error: 'Failed to get CI status' });
+        }
+    });
+
+    // GitHub Issues endpoint
+    app.get('/api/workspaces/github-issues', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        const state = req.query.state as string || 'open'; // open, closed, all
+        const limit = parseInt(req.query.limit as string) || 30;
+        const assignee = req.query.assignee as string; // @me for current user, username, or empty
+
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+
+        try {
+            const execAsync = (await import('util')).promisify((await import('child_process')).exec);
+
+            // Check if it's a git repo
+            try {
+                await execAsync('git rev-parse --git-dir', { cwd: workspacePath });
+            } catch {
+                return res.json({ isGitRepo: false, issues: [] });
+            }
+
+            // Get remote URL to determine owner/repo
+            // Prefer public github.com remotes over GitHub Enterprise
+            let owner = '';
+            let repo = '';
+            try {
+                // Get all remotes
+                const { stdout: remotesOutput } = await execAsync('git remote', { cwd: workspacePath });
+                const remotes = remotesOutput.trim().split('\n').filter(r => r.length > 0);
+
+                // Try to find a github.com remote first
+                let foundUrl = '';
+                for (const remote of remotes) {
+                    try {
+                        const { stdout } = await execAsync(`git remote get-url ${remote}`, { cwd: workspacePath });
+                        const url = stdout.trim();
+                        if (url.includes('github.com')) {
+                            foundUrl = url;
+                            break;
+                        }
+                        // Keep first GitHub URL as fallback
+                        if (!foundUrl && url.match(/github[^:/]*[:/]/)) {
+                            foundUrl = url;
+                        }
+                    } catch {
+                        continue;
+                    }
+                }
+
+                if (foundUrl) {
+                    // Parse GitHub URL (supports github.com and GitHub Enterprise)
+                    const match = foundUrl.match(/github[^:/]*[:/]([^/]+)\/([^/.]+)/);
+                    if (match) {
+                        owner = match[1];
+                        repo = match[2];
+                    }
+                }
+            } catch {
+                return res.json({ isGitRepo: true, issues: [], error: 'No remote origin' });
+            }
+
+            if (!owner || !repo) {
+                return res.json({ isGitRepo: true, issues: [], error: 'Not a GitHub repository' });
+            }
+
+            // Check if gh CLI is installed
+            try {
+                await execAsync('gh --version', { cwd: workspacePath });
+            } catch {
+                return res.json({ isGitRepo: true, owner, repo, issues: [], error: 'gh CLI not installed. Install from https://cli.github.com' });
+            }
+
+            // Fetch issues using gh CLI
+            interface GitHubIssue {
+                number: number;
+                title: string;
+                state: string;
+                url: string;
+                createdAt: string;
+                updatedAt: string;
+                closedAt: string | null;
+                author: { login: string };
+                assignees: { login: string }[];
+                labels: { name: string; color: string }[];
+                comments: number;
+                body: string;
+            }
+
+            let issues: GitHubIssue[] = [];
+            try {
+                const assigneeArg = assignee ? `--assignee ${assignee}` : '';
+                const { stdout } = await execAsync(
+                    `gh issue list --repo ${owner}/${repo} --state ${state} ${assigneeArg} --limit ${limit} --json number,title,state,url,createdAt,updatedAt,closedAt,author,assignees,labels,comments,body`,
+                    { cwd: workspacePath }
+                );
+                issues = JSON.parse(stdout);
+            } catch (err) {
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                // Check if it's an auth error
+                if (errorMsg.includes('authentication') || errorMsg.includes('HTTP 401')) {
+                    return res.json({
+                        isGitRepo: true,
+                        owner,
+                        repo,
+                        issues: [],
+                        error: 'GitHub authentication required. Run: gh auth login'
+                    });
+                }
+                return res.json({
+                    isGitRepo: true,
+                    owner,
+                    repo,
+                    issues: [],
+                    error: errorMsg.includes('Could not resolve to a Repository')
+                        ? 'Repository not found or no access'
+                        : 'Failed to fetch issues'
+                });
+            }
+
+            res.json({
+                isGitRepo: true,
+                owner,
+                repo,
+                issues,
+            });
+        } catch (err) {
+            logger.error('Failed to get GitHub issues', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to get GitHub issues' });
+        }
+    });
+
+    // Create GitHub Issue endpoint
+    app.post('/api/workspaces/github-issues', async (req, res) => {
+        const workspacePath = req.body.workspace as string;
+        const title = req.body.title as string;
+        const body = req.body.body as string || '';
+
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace is required' });
+        }
+        if (!title || title.trim().length === 0) {
+            return res.status(400).json({ error: 'title is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+
+        try {
+            const execAsync = (await import('util')).promisify((await import('child_process')).exec);
+
+            // Check if it's a git repo
+            try {
+                await execAsync('git rev-parse --git-dir', { cwd: workspacePath });
+            } catch {
+                return res.status(400).json({ error: 'Not a git repository' });
+            }
+
+            // Get remote URL to determine owner/repo
+            let owner = '';
+            let repo = '';
+            try {
+                // Get all remotes
+                const { stdout: remotesOutput } = await execAsync('git remote', { cwd: workspacePath });
+                const remotes = remotesOutput.trim().split('\n').filter(r => r.length > 0);
+
+                // Try to find a github.com remote first
+                let foundUrl = '';
+                for (const remote of remotes) {
+                    try {
+                        const { stdout } = await execAsync(`git remote get-url ${remote}`, { cwd: workspacePath });
+                        const url = stdout.trim();
+                        if (url.includes('github.com')) {
+                            foundUrl = url;
+                            break;
+                        }
+                        // Keep first GitHub URL as fallback
+                        if (!foundUrl && url.match(/github[^:/]*[:/]/)) {
+                            foundUrl = url;
+                        }
+                    } catch {
+                        continue;
+                    }
+                }
+
+                if (foundUrl) {
+                    // Parse GitHub URL (supports github.com and GitHub Enterprise)
+                    const match = foundUrl.match(/github[^:/]*[:/]([^/]+)\/([^/.]+)/);
+                    if (match) {
+                        owner = match[1];
+                        repo = match[2];
+                    }
+                }
+            } catch {
+                return res.status(400).json({ error: 'No remote origin' });
+            }
+
+            if (!owner || !repo) {
+                return res.status(400).json({ error: 'Not a GitHub repository' });
+            }
+
+            // Check if gh CLI is installed
+            try {
+                await execAsync('gh --version', { cwd: workspacePath });
+            } catch {
+                return res.status(400).json({ error: 'gh CLI not installed. Install from https://cli.github.com' });
+            }
+
+            // Create issue using gh CLI
+            try {
+                // gh CLI requires --body when running non-interactively, so provide empty string if not given
+                const bodyText = body || '';
+                // Auto-assign to current user (@me)
+                const { stdout } = await execAsync(
+                    `gh issue create --repo ${owner}/${repo} --title "${title.replace(/"/g, '\\"')}" --body "${bodyText.replace(/"/g, '\\"')}" --assignee @me`,
+                    { cwd: workspacePath }
+                );
+                // gh issue create returns the URL of the created issue
+                const issueUrl = stdout.trim();
+                // Extract issue number from URL (e.g., https://github.com/owner/repo/issues/123)
+                const match = issueUrl.match(/\/issues\/(\d+)$/);
+                const issueNumber = match ? parseInt(match[1], 10) : null;
+
+                res.json({
+                    success: true,
+                    issue: {
+                        number: issueNumber,
+                        url: issueUrl
+                    }
+                });
+            } catch (err) {
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                // Check if it's an auth error
+                if (errorMsg.includes('authentication') || errorMsg.includes('HTTP 401')) {
+                    return res.status(401).json({
+                        error: 'GitHub authentication required. Run: gh auth login'
+                    });
+                }
+                return res.status(500).json({
+                    error: 'Failed to create issue: ' + errorMsg
+                });
+            }
+        } catch (err) {
+            logger.error('Failed to create GitHub issue', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to create GitHub issue' });
+        }
+    });
+
+    // Close/Reopen GitHub Issue endpoint
+    app.patch('/api/workspaces/github-issues/:issueNumber', async (req, res) => {
+        const workspacePath = req.body.workspace as string;
+        const issueNumber = parseInt(req.params.issueNumber, 10);
+        const state = req.body.state as 'open' | 'closed';
+
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace is required' });
+        }
+        if (!issueNumber || isNaN(issueNumber)) {
+            return res.status(400).json({ error: 'Invalid issue number' });
+        }
+        if (!state || !['open', 'closed'].includes(state)) {
+            return res.status(400).json({ error: 'state must be "open" or "closed"' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+
+        try {
+            const execAsync = (await import('util')).promisify((await import('child_process')).exec);
+
+            // Check if it's a git repo
+            try {
+                await execAsync('git rev-parse --git-dir', { cwd: workspacePath });
+            } catch {
+                return res.status(400).json({ error: 'Not a git repository' });
+            }
+
+            // Get remote URL to determine owner/repo
+            let owner = '';
+            let repo = '';
+            try {
+                const { stdout: remotesOutput } = await execAsync('git remote', { cwd: workspacePath });
+                const remotes = remotesOutput.trim().split('\n').filter(r => r.length > 0);
+
+                let foundUrl = '';
+                for (const remote of remotes) {
+                    try {
+                        const { stdout } = await execAsync(`git remote get-url ${remote}`, { cwd: workspacePath });
+                        const url = stdout.trim();
+                        if (url.includes('github.com')) {
+                            foundUrl = url;
+                            break;
+                        }
+                        if (!foundUrl && url.match(/github[^:/]*[:/]/)) {
+                            foundUrl = url;
+                        }
+                    } catch {
+                        continue;
+                    }
+                }
+
+                if (foundUrl) {
+                    const match = foundUrl.match(/github[^:/]*[:/]([^/]+)\/([^/.]+)/);
+                    if (match) {
+                        owner = match[1];
+                        repo = match[2];
+                    }
+                }
+            } catch {
+                return res.status(400).json({ error: 'No remote origin' });
+            }
+
+            if (!owner || !repo) {
+                return res.status(400).json({ error: 'Not a GitHub repository' });
+            }
+
+            // Check if gh CLI is installed
+            try {
+                await execAsync('gh --version', { cwd: workspacePath });
+            } catch {
+                return res.status(400).json({ error: 'gh CLI not installed' });
+            }
+
+            // Close or reopen the issue using gh CLI
+            try {
+                const stateArg = state === 'closed' ? '--close' : '--reopen';
+                await execAsync(
+                    `gh issue ${state === 'closed' ? 'close' : 'reopen'} ${issueNumber} --repo ${owner}/${repo}`,
+                    { cwd: workspacePath }
+                );
+
+                res.json({
+                    success: true,
+                    issue: {
+                        number: issueNumber,
+                        state: state.toUpperCase()
+                    }
+                });
+            } catch (err) {
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                if (errorMsg.includes('authentication') || errorMsg.includes('HTTP 401')) {
+                    return res.status(401).json({
+                        error: 'GitHub authentication required. Run: gh auth login'
+                    });
+                }
+                return res.status(500).json({
+                    error: 'Failed to update issue: ' + errorMsg
+                });
+            }
+        } catch (err) {
+            logger.error('Failed to update GitHub issue', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to update GitHub issue' });
+        }
+    });
+
+    // Read file contents endpoint
+    app.get('/api/workspaces/read-file', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        const filePath = req.query.file as string;
+
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!filePath) {
+            return res.status(400).json({ error: 'file query parameter is required' });
+        }
+
+        // Resolve the full file path
+        const fullPath = join(workspacePath, filePath);
+
+        // Security: ensure the resolved path is within the workspace
+        const resolvedPath = resolve(fullPath);
+        const resolvedWorkspace = resolve(workspacePath);
+        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+            return res.status(403).json({ error: 'Path traversal not allowed' });
+        }
+
+        if (!existsSync(resolvedPath)) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+
+        try {
+            const stats = statSync(resolvedPath);
+            if (!stats.isFile()) {
+                return res.status(400).json({ error: 'Path is not a file' });
+            }
+
+            // Read file contents
+            const content = await readFile(resolvedPath, 'utf-8');
+            res.json({
+                path: filePath,
+                content,
+                size: stats.size
+            });
+        } catch (err) {
+            logger.error('Failed to read file', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to read file' });
+        }
+    });
+
+    // Save file contents endpoint
+    app.post('/api/workspaces/save-file', async (req, res) => {
+        const workspacePath = req.body.workspace as string;
+        const filePath = req.body.file as string;
+        const content = req.body.content as string;
+
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace parameter is required' });
+        }
+        if (!filePath) {
+            return res.status(400).json({ error: 'file parameter is required' });
+        }
+        if (content === undefined) {
+            return res.status(400).json({ error: 'content parameter is required' });
+        }
+
+        // Resolve the full file path
+        const fullPath = join(workspacePath, filePath);
+
+        // Security: ensure the resolved path is within the workspace
+        const resolvedPath = resolve(fullPath);
+        const resolvedWorkspace = resolve(workspacePath);
+        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+            return res.status(403).json({ error: 'Path traversal not allowed' });
+        }
+
+        try {
+            // Write file contents
+            writeFileSync(resolvedPath, content, 'utf-8');
+            const stats = statSync(resolvedPath);
+            res.json({
+                path: filePath,
+                size: stats.size,
+                success: true
+            });
+        } catch (err) {
+            logger.error('Failed to save file', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to save file' });
+        }
+    });
+
+    // Git diff endpoint
+    app.get('/api/workspaces/git-diff', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        const filePath = req.query.file as string;
+        const staged = req.query.staged === 'true';
+
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!filePath) {
+            return res.status(400).json({ error: 'file query parameter is required' });
+        }
+
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+
+        try {
+            const execAsync = (await import('util')).promisify((await import('child_process')).exec);
+
+            // Check if it's a git repo
+            try {
+                await execAsync('git rev-parse --git-dir', { cwd: workspacePath });
+            } catch {
+                return res.status(400).json({ error: 'Not a git repository' });
+            }
+
+            // Get the diff
+            let diff = '';
+            try {
+                const command = staged
+                    ? `git diff --cached -- "${filePath}"`
+                    : `git diff -- "${filePath}"`;
+                const { stdout } = await execAsync(command, { cwd: workspacePath, maxBuffer: 10 * 1024 * 1024 });
+                diff = stdout;
+            } catch (err) {
+                logger.error('Failed to get git diff', { error: err instanceof Error ? err.message : String(err) });
+            }
+
+            res.json({
+                path: filePath,
+                diff,
+                staged
+            });
+        } catch (err) {
+            logger.error('Failed to get git diff', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to get git diff' });
         }
     });
 

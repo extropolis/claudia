@@ -24,7 +24,7 @@ export interface MCPServerConfig {
 }
 
 // API mode determines how Claude Code connects to Anthropic's API
-export type ApiMode = 'default' | 'custom-anthropic';
+export type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core' | 'hyperspace-proxy';
 
 // Claude Code CLI switches configuration
 export interface ClaudeCodeSwitches {
@@ -37,6 +37,14 @@ export interface ClaudeCodeSwitches {
     appendSystemPrompt: string;    // --append-system-prompt TEXT (empty = not set)
 }
 
+// Hyperspace AI Proxy configuration
+export interface HyperspaceProxyConfig {
+    proxyUrl: string;
+    apiKey: string;
+    model: string;
+    alwaysThinkingEnabled: boolean;
+}
+
 export const DEFAULT_CLAUDE_CODE_SWITCHES: ClaudeCodeSwitches = {
     verbose: false,
     maxTurns: null,
@@ -45,6 +53,13 @@ export const DEFAULT_CLAUDE_CODE_SWITCHES: ClaudeCodeSwitches = {
     allowedTools: '',
     disallowedTools: '',
     appendSystemPrompt: ''
+};
+
+const DEFAULT_HYPERSPACE_PROXY: HyperspaceProxyConfig = {
+    proxyUrl: 'http://localhost:6655',
+    apiKey: '',
+    model: 'anthropic--claude-4.5-sonnet',
+    alwaysThinkingEnabled: false
 };
 
 export interface AppConfig {
@@ -61,6 +76,16 @@ export interface AppConfig {
     useLearnings: boolean;  // Use RAG-based learnings injection for tasks
     claudeCodeSwitches: ClaudeCodeSwitches;  // Claude Code CLI switches
     deepgramApiKey?: string;  // Deepgram API key for voice recognition (synced from frontend)
+    hyperspaceProxy?: HyperspaceProxyConfig;  // Hyperspace AI Proxy configuration
+    aiCoreCredentials?: {  // SAP AI Core credentials
+        clientId: string;
+        clientSecret: string;
+        authUrl: string;
+        baseUrl: string;
+        resourceGroup?: string;
+        timeoutMs?: number;
+    };
+    enabledPlugins?: string[];  // List of enabled plugin names (all disabled by default)
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
@@ -100,7 +125,9 @@ const DEFAULT_CONFIG: AppConfig = {
     backend: 'claude-code',
     opencodePort: 4096,
     useLearnings: false,
-    claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES }
+    claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
+    hyperspaceProxy: DEFAULT_HYPERSPACE_PROXY,
+    enabledPlugins: []  // All plugins disabled by default
 };
 
 export class ConfigStore {
@@ -141,13 +168,30 @@ export class ConfigStore {
                     claudeCodeSwitches: {
                         ...DEFAULT_CLAUDE_CODE_SWITCHES,
                         ...(loaded.claudeCodeSwitches || {})
-                    }
+                    },
+                    hyperspaceProxy: loaded.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY,
+                    aiCoreCredentials: loaded.aiCoreCredentials,
+                    enabledPlugins: loaded.enabledPlugins ?? []
                 };
             }
         } catch (error) {
             console.error('[ConfigStore] Error loading config:', error);
         }
-        return { ...DEFAULT_CONFIG };
+        return {
+            mcpServers: [...DEFAULT_MCP_SERVERS],
+            skipPermissions: false,
+            rules: '',
+            supervisorEnabled: false,
+            supervisorSystemPrompt: DEFAULT_SUPERVISOR_PROMPT,
+            autoFocusOnInput: false,
+            apiMode: 'default',
+            backend: 'claude-code',
+            opencodePort: 4096,
+            useLearnings: false,
+            claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
+            hyperspaceProxy: { ...DEFAULT_HYPERSPACE_PROXY },
+            enabledPlugins: []
+        };
     }
 
     private saveConfig(): void {
@@ -207,6 +251,12 @@ export class ConfigStore {
                 ...updates.claudeCodeSwitches
             };
         }
+        if (updates.hyperspaceProxy !== undefined) {
+            this.config.hyperspaceProxy = updates.hyperspaceProxy;
+        }
+        if (updates.aiCoreCredentials !== undefined) {
+            this.config.aiCoreCredentials = updates.aiCoreCredentials;
+        }
         this.saveConfig();
         return this.getConfig();
     }
@@ -250,7 +300,20 @@ export class ConfigStore {
     }
 
     resetToDefaults(): AppConfig {
-        this.config = { ...DEFAULT_CONFIG };
+        this.config = {
+            mcpServers: [...DEFAULT_MCP_SERVERS],
+            skipPermissions: false,
+            rules: '',
+            supervisorEnabled: false,
+            supervisorSystemPrompt: DEFAULT_SUPERVISOR_PROMPT,
+            autoFocusOnInput: false,
+            apiMode: 'default',
+            backend: 'claude-code',
+            opencodePort: 4096,
+            useLearnings: false,
+            claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
+            hyperspaceProxy: { ...DEFAULT_HYPERSPACE_PROXY }
+        };
         this.saveConfig();
         return this.getConfig();
     }
@@ -289,5 +352,39 @@ export class ConfigStore {
     setClaudeCodeSwitches(switches: ClaudeCodeSwitches): void {
         this.config.claudeCodeSwitches = switches;
         this.saveConfig();
+    }
+
+    getHyperspaceProxy(): HyperspaceProxyConfig {
+        return this.config.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY;
+    }
+
+    setHyperspaceProxy(config: HyperspaceProxyConfig): void {
+        this.config.hyperspaceProxy = config;
+        this.saveConfig();
+    }
+
+    getEnabledPlugins(): string[] {
+        return this.config.enabledPlugins ?? [];
+    }
+
+    isPluginEnabled(pluginName: string): boolean {
+        return this.getEnabledPlugins().includes(pluginName);
+    }
+
+    setPluginEnabled(pluginName: string, enabled: boolean): void {
+        const currentPlugins = this.getEnabledPlugins();
+        if (enabled) {
+            // Add plugin if not already enabled
+            if (!currentPlugins.includes(pluginName)) {
+                this.config.enabledPlugins = [...currentPlugins, pluginName];
+                this.saveConfig();
+            }
+        } else {
+            // Remove plugin if enabled
+            if (currentPlugins.includes(pluginName)) {
+                this.config.enabledPlugins = currentPlugins.filter(p => p !== pluginName);
+                this.saveConfig();
+            }
+        }
     }
 }
