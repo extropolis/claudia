@@ -1,0 +1,21 @@
+{
+  "name": "example-plugin",
+  "version": "1.0.0",
+  "type": "utility",
+  "displayName": "Example Plugin",
+  "description": "A simple example plugin demonstrating the plugin system",
+  "author": "Claudia Team",
+
+  "backend": {
+    "entry": "./index.js",
+    "provides": {
+      "routes": [
+        {
+          "path": "/hello",
+          "method": "GET",
+          "handler": "handleHello"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "name": "hai-proxy-plugin",
+  "version": "1.0.0",
+  "type": "ai-provider",
+  "displayName": "Hyperspace AI Proxy",
+  "description": "Hyperspace AI (HAI) proxy integration with automatic lifecycle management",
+  "author": "Hyperspace AI",
+
+  "backend": {
+    "entry": "./index.js",
+    "provides": {
+      "apiMode": "hyperspace-proxy",
+      "models": [
+        {
+          "id": "anthropic--claude-4.6-opus",
+          "name": "Claude 4.6 Opus"
+        },
+        {
+          "id": "anthropic--claude-4.6-sonnet",
+          "name": "Claude 4.6 Sonnet"
+        },
+        {
+          "id": "anthropic--claude-4.5-sonnet",
+          "name": "Claude 4.5 Sonnet"
+        },
+        {
+          "id": "anthropic--claude-3.7-sonnet",
+          "name": "Claude 3.7 Sonnet"
+        },
+        {
+          "id": "anthropic--claude-3.5-sonnet",
+          "name": "Claude 3.5 Sonnet"
+        },
+        {
+          "id": "anthropic--claude-3.5-haiku",
+          "name": "Claude 3.5 Haiku"
+        }
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "proxyUrl": {
+            "type": "string",
+            "description": "HAI proxy URL",
+            "default": "http://localhost:6655"
+          },
+          "apiKey": {
+            "type": "string",
+            "description": "API key for HAI proxy",
+            "sensitive": true
+          },
+          "model": {
+            "type": "string",
+            "description": "Model name to inject in responses"
+          },
+          "alwaysThinkingEnabled": {
+            "type": "boolean",
+            "description": "Enable always-thinking mode",
+            "default": false
+          }
+        }
+      },
+      "routes": [
+        {
+          "path": "/status",
+          "method": "GET",
+          "handler": "getStatus",
+          "description": "Check HAI proxy status"
+        },
+        {
+          "path": "/start",
+          "method": "POST",
+          "handler": "startProxy",
+          "description": "Start HAI proxy with generated API key"
+        },
+        {
+          "path": "/stop",
+          "method": "POST",
+          "handler": "stopProxy",
+          "description": "Stop HAI proxy"
+        }
+      ]
+    }
+  }
+}

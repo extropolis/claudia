@@ -3,22 +3,23 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import os from 'os';
+import { spawn, ChildProcess } from 'child_process';
 import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync } from 'fs';
 import { readFile } from 'fs/promises';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import multer from 'multer';
 import { TaskSpawner } from './task-spawner.js';
 import { WorkspaceStore } from './workspace-store.js';
 import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
-import { createAnthropicProxy } from './anthropic-proxy/index.js';
-import { createHyperspaceProxy } from './hyperspace-proxy/index.js';
 import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType } from '@claudia/shared';
 import { validateConfigUpdate, validateWorkspacePath, validateAICoreCredentials } from './validation.js';
 import { LearningsStore } from './learnings-store.js';
 import { createLogger } from './logger.js';
+import { PluginManager, PluginContext } from './plugin-system/index.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
 // - config-routes.ts: Config API routes template
@@ -26,6 +27,10 @@ import { createLogger } from './logger.js';
 // - ws-handlers.ts: WebSocket handlers template
 
 const logger = createLogger('[Server]');
+
+// ES module __dirname equivalent
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // Valid WebSocket message types for validation
 const VALID_WS_MESSAGE_TYPES = new Set([
@@ -98,53 +103,28 @@ export async function createApp(basePath?: string) {
     // Initialize configStore first to determine API mode
     const configStore = new ConfigStore(basePath);
 
+    // Initialize Plugin System
+    logger.info('Initializing plugin system...');
+    const pluginContext: PluginContext = {
+        configStore,
+        logger: createLogger('[Plugin]'),
+        express,
+        utils: { spawn, fetch }
+    };
+
+    const pluginManager = new PluginManager(pluginContext);
+
+    // Discover and load plugins from backend/plugins directory
+    const pluginsDir = join(__dirname, '..', 'plugins');
+    await pluginManager.discoverPlugins(pluginsDir);
+
     // Initialize LLM service with config store so it can use the correct model
     const { initializeLLMService } = await import('./llm-service.js');
     initializeLLMService(configStore);
 
-    // Mount Anthropic Proxy based on API mode
-    const apiMode = configStore.getApiMode();
-    const aiCoreCredentials = configStore.getAICoreCredentials();
 
-    // Store proxy instance for cache management
-    let currentProxyInstance: ReturnType<typeof createAnthropicProxy> | null = null;
-
-    // Always mount the Hyperspace proxy - it reads config on each request
-    // so it works as soon as the user sets apiMode to hyperspace-proxy
-    console.log('[Server] Mounting Hyperspace proxy at /hyperspace');
-    const hyperspaceProxyInstance = createHyperspaceProxy(configStore);
-    app.use('/hyperspace', hyperspaceProxyInstance.router);
-
-    // Check for env var override (legacy support)
-    const envConfigured = process.env.SAP_AICORE_CLIENT_ID && process.env.SAP_AICORE_CLIENT_SECRET;
-
-    if (apiMode === 'sap-ai-core' && aiCoreCredentials?.clientId) {
-        // Use credentials from config store
-        console.log('[Server] API mode: sap-ai-core (from config), mounting Anthropic proxy');
-        currentProxyInstance = createAnthropicProxy({
-            clientId: aiCoreCredentials.clientId,
-            clientSecret: aiCoreCredentials.clientSecret,
-            authUrl: aiCoreCredentials.authUrl,
-            baseUrl: aiCoreCredentials.baseUrl,
-            resourceGroup: aiCoreCredentials.resourceGroup || 'default',
-            requestTimeoutMs: aiCoreCredentials.timeoutMs || 120000
-        });
-        app.use('/', currentProxyInstance.router);
-    } else if (envConfigured) {
-        // Legacy: env vars override for SAP AI Core
-        console.log('[Server] SAP AI Core configured via env vars, mounting Anthropic proxy');
-        currentProxyInstance = createAnthropicProxy({
-            clientId: process.env.SAP_AICORE_CLIENT_ID!,
-            clientSecret: process.env.SAP_AICORE_CLIENT_SECRET!,
-            authUrl: process.env.SAP_AICORE_AUTH_URL || '',
-            baseUrl: process.env.SAP_AICORE_BASE_URL || '',
-            resourceGroup: process.env.SAP_AICORE_RESOURCE_GROUP || 'default',
-            requestTimeoutMs: parseInt(process.env.SAP_AICORE_TIMEOUT_MS || '120000', 10)
-        });
-        app.use('/', currentProxyInstance.router);
-    } else {
-        console.log(`[Server] API mode: ${apiMode}, Anthropic proxy not mounted`);
-    }
+    // Register plugin routes (handles both SAP AI Core and HAI Proxy)
+    pluginManager.registerRoutes(app);
 
     // Initialize remaining services
     const taskSpawner = new TaskSpawner(undefined, true, configStore);
@@ -885,6 +865,17 @@ export async function createApp(basePath?: string) {
         res.json({ status: 'ok' });
     });
 
+    // Plugin API routes
+    app.get('/api/plugins', (_req, res) => {
+        try {
+            const plugins = pluginManager.getPluginMetadata();
+            res.json({ success: true, plugins });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ success: false, error: message });
+        }
+    });
+
     // Usage tracking — receives the unique user ID from the frontend
     app.post('/api/user-id', (req, res) => {
         const { userId } = req.body as { userId?: string };
@@ -1159,39 +1150,23 @@ export async function createApp(basePath?: string) {
 
             logger.info('Validating SAP AI Core credentials');
 
-            // Create temporary proxy to test credentials
-            const tempProxy = createAnthropicProxy({
-                clientId: aiCoreCredentials.clientId,
-                clientSecret: aiCoreCredentials.clientSecret,
-                authUrl: aiCoreCredentials.authUrl,
-                baseUrl: aiCoreCredentials.baseUrl,
-                resourceGroup: aiCoreCredentials.resourceGroup || 'default',
-                requestTimeoutMs: aiCoreCredentials.timeoutMs || 120000
-            });
+            // Use plugin to test credentials
+            const sapPlugin = pluginManager.getPlugin('sap-ai-core-plugin');
+            if (!sapPlugin) {
+                return res.status(500).json({ error: 'SAP AI Core plugin not loaded' });
+            }
 
-            // Attempt to validate
-            const validationResult = await tempProxy.tokenProvider.validateCredentials();
-
-            if (!validationResult.valid) {
-                logger.warn('SAP AI Core credential validation failed', { error: validationResult.error });
+            const testResult = await sapPlugin.testConnection(aiCoreCredentials);
+            if (!testResult.success) {
+                logger.warn('SAP AI Core credential validation failed', { error: testResult.error });
                 return res.status(401).json({
                     valid: false,
-                    error: validationResult.error
+                    error: testResult.error
                 });
             }
 
-            // Also try to list models to ensure full access
-            try {
-                await tempProxy.deploymentCatalog.getModels();
-                logger.info('SAP AI Core credentials validated successfully');
-                res.json({ valid: true, message: 'Credentials are valid and can access deployments' });
-            } catch (error: any) {
-                logger.warn('Credentials valid but cannot list deployments', { error: error.message });
-                res.json({
-                    valid: true,
-                    warning: 'Credentials are valid but could not list deployments. You may need to check permissions or resource group.'
-                });
-            }
+            logger.info('SAP AI Core credentials validated successfully');
+            res.json({ valid: true, message: 'Credentials are valid and can access deployments' });
         } catch (error: any) {
             logger.error('Credential validation error', { error: error.message });
             res.status(500).json({
@@ -1262,58 +1237,28 @@ export async function createApp(basePath?: string) {
                 await taskSpawner.switchBackend(newBackend);
             }
 
-            // If SAP AI Core credentials changed, validate and clear cache
+            // If SAP AI Core credentials changed, notify the plugin
             if (validation.data!.aiCoreCredentials !== undefined) {
-                logger.info('SAP AI Core credentials changed, validating and clearing cache');
+                logger.info('SAP AI Core credentials changed, notifying plugin');
 
                 const newCredentials = validation.data!.aiCoreCredentials;
                 if (newCredentials) {
-                    // Create temporary proxy instance to validate credentials
-                    const tempProxy = createAnthropicProxy({
-                        clientId: newCredentials.clientId,
-                        clientSecret: newCredentials.clientSecret,
-                        authUrl: newCredentials.authUrl,
-                        baseUrl: newCredentials.baseUrl,
-                        resourceGroup: newCredentials.resourceGroup || 'default',
-                        requestTimeoutMs: newCredentials.timeoutMs || 120000
-                    });
+                    // Use plugin to validate credentials
+                    const sapPlugin = pluginManager.getPlugin('sap-ai-core-plugin');
+                    if (sapPlugin) {
+                        const testResult = await sapPlugin.testConnection(newCredentials);
+                        if (!testResult.success) {
+                            logger.error('Invalid SAP AI Core credentials', { error: testResult.error });
+                            return res.status(400).json({
+                                error: 'Invalid SAP AI Core credentials',
+                                details: testResult.error
+                            });
+                        }
+                        logger.info('SAP AI Core credentials validated successfully');
 
-                    // Validate credentials
-                    const validationResult = await tempProxy.tokenProvider.validateCredentials();
-                    if (!validationResult.valid) {
-                        logger.error('Invalid SAP AI Core credentials', { error: validationResult.error });
-                        return res.status(400).json({
-                            error: 'Invalid SAP AI Core credentials',
-                            details: validationResult.error
-                        });
+                        // Notify plugin of config change
+                        await sapPlugin.onConfigChange(updatedConfig);
                     }
-                    logger.info('SAP AI Core credentials validated successfully');
-                }
-
-                // Update config on existing proxy so it uses the new credentials
-                if (currentProxyInstance) {
-                    const newConfig = {
-                        clientId: newCredentials.clientId,
-                        clientSecret: newCredentials.clientSecret,
-                        authUrl: newCredentials.authUrl,
-                        baseUrl: newCredentials.baseUrl,
-                        resourceGroup: newCredentials.resourceGroup || 'default',
-                        requestTimeoutMs: newCredentials.timeoutMs || 120000
-                    };
-                    logger.info('Updating proxy config with new credentials');
-                    currentProxyInstance.updateConfig(newConfig);
-                } else {
-                    // No proxy mounted yet — create and mount one
-                    logger.info('No proxy mounted yet, creating new proxy with credentials');
-                    currentProxyInstance = createAnthropicProxy({
-                        clientId: newCredentials.clientId,
-                        clientSecret: newCredentials.clientSecret,
-                        authUrl: newCredentials.authUrl,
-                        baseUrl: newCredentials.baseUrl,
-                        resourceGroup: newCredentials.resourceGroup || 'default',
-                        requestTimeoutMs: newCredentials.timeoutMs || 120000
-                    });
-                    app.use('/', currentProxyInstance.router);
                 }
             }
 
@@ -1661,6 +1606,210 @@ export async function createApp(basePath?: string) {
             });
         }
     });
+
+    // ============================================================
+    // HAI Proxy Lifecycle Management
+    // ============================================================
+
+    // Module-level state for the managed HAI proxy process
+    let haiProxyProcess: ChildProcess | null = null;
+    let haiProxyApiKey: string | null = null;
+    const HAI_PROXY_PORT = 6655;
+    const HAI_PROXY_URL = `http://localhost:${HAI_PROXY_PORT}`;
+
+    async function checkHaiInstalled(): Promise<boolean> {
+        return new Promise(resolve => {
+            const proc = spawn('which', ['hai']);
+            proc.on('close', code => resolve(code === 0));
+            proc.on('error', () => resolve(false));
+        });
+    }
+
+    async function isHaiProxyRunning(apiKey: string): Promise<boolean> {
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 3000);
+            const resp = await fetch(`${HAI_PROXY_URL}/anthropic/v1/models`, {
+                headers: { 'x-api-key': apiKey },
+                signal: controller.signal
+            });
+            clearTimeout(timeout);
+            // 401 means proxy is running but wrong key, still "running"
+            return resp.status !== 404 && resp.status !== 0;
+        } catch {
+            return false;
+        }
+    }
+
+    // GET /api/hyperspace/status - check if hai is installed and proxy is running
+    app.get('/api/hyperspace/status', async (_req, res) => {
+        try {
+            const haiInstalled = await checkHaiInstalled();
+            const storedConfig = configStore.getHyperspaceProxy();
+            const currentApiKey = haiProxyApiKey || storedConfig?.apiKey || '';
+            const proxyRunning = currentApiKey ? await isHaiProxyRunning(currentApiKey) : false;
+
+            console.log(`[Server] HAI proxy status: installed=${haiInstalled}, running=${proxyRunning}`);
+            res.json({
+                haiInstalled,
+                proxyRunning,
+                apiKey: currentApiKey,
+                proxyUrl: HAI_PROXY_URL,
+                pid: haiProxyProcess?.pid || null
+            });
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ success: false, error: message });
+        }
+    });
+
+    // POST /api/hyperspace/start - start the HAI proxy with a generated API key
+    app.post('/api/hyperspace/start', async (_req, res) => {
+        try {
+            const haiInstalled = await checkHaiInstalled();
+            if (!haiInstalled) {
+                return res.status(400).json({ success: false, error: 'hai CLI not found. Please install it first.' });
+            }
+
+            // Reuse existing key if proxy is already running (in-memory or from stored config)
+            // This handles the server-restart case where haiProxyProcess is null but proxy still runs
+            const candidateKey = haiProxyApiKey || configStore.getHyperspaceProxy()?.apiKey || null;
+            if (candidateKey) {
+                const running = await isHaiProxyRunning(candidateKey);
+                if (running) {
+                    console.log('[Server] HAI proxy already running (restored from config), reusing key');
+                    haiProxyApiKey = candidateKey; // restore in-memory key
+                    return res.json({ success: true, apiKey: candidateKey, proxyUrl: HAI_PROXY_URL, alreadyRunning: true });
+                }
+            }
+
+            // Kill any stale process
+            if (haiProxyProcess) {
+                try { haiProxyProcess.kill(); } catch { }
+                haiProxyProcess = null;
+            }
+
+            // Generate a new API key
+            const { randomUUID } = await import('node:crypto');
+            const apiKey = randomUUID();
+            haiProxyApiKey = apiKey;
+
+            console.log(`[Server] Starting HAI proxy on port ${HAI_PROXY_PORT} with generated API key`);
+
+            // Start the proxy in headless mode
+            // detached: true + stdio: 'ignore' so it fully survives tsx watch restarts.
+            // Using pipes would tie the child to the parent and tsx watch would kill it.
+            const proc = spawn('hai', [
+                'proxy', 'start',
+                `--dangerous-api-key=${apiKey}`,
+                `--port=${HAI_PROXY_PORT}`,
+                '--headless'
+            ], {
+                detached: true,
+                stdio: 'ignore'
+            });
+
+            haiProxyProcess = proc;
+
+            // Fully detach — server can exit/restart without affecting this child
+            proc.unref();
+
+            proc.on('exit', (code) => {
+                console.log(`[Server] HAI proxy process exited with code ${code}`);
+                if (haiProxyProcess === proc) {
+                    haiProxyProcess = null;
+                }
+            });
+
+            // Wait up to 8 seconds for the proxy to be ready
+            let ready = false;
+            for (let i = 0; i < 16; i++) {
+                await new Promise(r => setTimeout(r, 500));
+                ready = await isHaiProxyRunning(apiKey);
+                if (ready) break;
+            }
+
+            if (!ready) {
+                try { proc.kill(); } catch { }
+                haiProxyProcess = null;
+                haiProxyApiKey = null;
+                return res.status(500).json({ success: false, error: 'HAI proxy did not start in time. Check that port 6655 is available.' });
+            }
+
+            // Configure Claude Code CLI to use this proxy
+            try {
+                await new Promise<void>((resolve, reject) => {
+                    const configProc = spawn('hai', [
+                        'configure', 'claude-code',
+                        `--api-key=${apiKey}`,
+                        `--port=${HAI_PROXY_PORT}`
+                    ], { stdio: 'ignore' });
+                    configProc.on('close', code => code === 0 ? resolve() : reject(new Error(`configure exited ${code}`)));
+                    configProc.on('error', reject);
+                });
+                console.log('[Server] hai configure claude-code completed');
+            } catch (configErr) {
+                console.warn('[Server] hai configure claude-code failed (non-fatal):', configErr);
+            }
+
+            // Persist to config store so the hyperspace proxy router picks it up
+            const hyperspaceConfig = {
+                proxyUrl: HAI_PROXY_URL,
+                apiKey,
+                model: configStore.getHyperspaceProxy()?.model || '',
+                alwaysThinkingEnabled: configStore.getHyperspaceProxy()?.alwaysThinkingEnabled || false
+            };
+            configStore.updateConfig({ hyperspaceProxy: hyperspaceConfig });
+            console.log('[Server] HAI proxy started and config saved');
+
+            res.json({ success: true, apiKey, proxyUrl: HAI_PROXY_URL, pid: proc.pid });
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error('[Server] Failed to start HAI proxy:', error);
+            res.status(500).json({ success: false, error: message });
+        }
+    });
+
+    // POST /api/hyperspace/stop - stop the managed HAI proxy process
+    app.post('/api/hyperspace/stop', async (_req, res) => {
+        try {
+            if (haiProxyProcess) {
+                haiProxyProcess.kill();
+                haiProxyProcess = null;
+                haiProxyApiKey = null;
+                console.log('[Server] HAI proxy stopped');
+                res.json({ success: true });
+            } else {
+                res.json({ success: true, message: 'No managed proxy process was running' });
+            }
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ success: false, error: message });
+        }
+    });
+
+    // ============================================================
+    // HAI Proxy Startup Recovery
+    // On server restart, check if the proxy is still running with the stored key
+    // and restore haiProxyApiKey so status/start calls work immediately.
+    // ============================================================
+    (async () => {
+        try {
+            const storedConfig = configStore.getHyperspaceProxy();
+            const storedKey = storedConfig?.apiKey;
+            if (storedKey) {
+                const running = await isHaiProxyRunning(storedKey);
+                if (running) {
+                    haiProxyApiKey = storedKey;
+                    console.log('[Server] HAI proxy already running after restart — restored API key from config store');
+                } else {
+                    console.log('[Server] HAI proxy not running after restart (stored key found but proxy unreachable)');
+                }
+            }
+        } catch (err) {
+            console.warn('[Server] HAI proxy startup recovery check failed:', err);
+        }
+    })();
 
     // ============================================================
     // Embeddings API - proxies to SAP AI Core for vector embeddings
@@ -2248,11 +2397,14 @@ Guidelines:
 
         // Give clients enough time to receive the message and for I/O to complete
         // 500ms provides a good balance between responsiveness and reliability
-        setTimeout(() => {
+        setTimeout(async () => {
             // Save all state synchronously before exit
             taskSpawner.saveNow();
             supervisorChat.saveChatHistoryNow();
             taskSpawner.destroy();
+
+            // Shutdown plugins
+            await pluginManager.shutdown();
 
             // Close WebSocket connections gracefully
             for (const client of clients) {
@@ -2267,5 +2419,5 @@ Guidelines:
     // Note: SIGINT/SIGTERM handlers are set up in index.ts to avoid duplicate handlers
     // The gracefulShutdown function is exported for use by the restart endpoint
 
-    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown };
+    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, pluginManager, gracefulShutdown };
 }
