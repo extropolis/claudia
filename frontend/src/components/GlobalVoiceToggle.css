@@ -36,6 +36,18 @@
     cursor: not-allowed;
 }
 
+.global-voice-toggle.needs-setup {
+    color: var(--text-muted);
+    border-color: var(--border-color);
+    cursor: pointer;
+}
+
+.global-voice-toggle.needs-setup:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border-color: var(--accent-color);
+}
+
 .global-voice-toggle .mic-active {
     animation: pulse-mic 1.5s ease-in-out infinite;
 }

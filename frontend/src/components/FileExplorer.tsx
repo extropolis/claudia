@@ -7,6 +7,7 @@ import {
     ArrowUp, ArrowDown
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
+import { FileContentModal } from './FileContentModal';
 import './FileExplorer.css';
 
 // ============== SHARED TYPES ==============
@@ -105,8 +106,8 @@ function getFileIcon(name: string): string {
 // ============== FILE TREE COMPONENTS ==============
 
 function DirectoryNode({
-    item, workspacePath, depth = 0,
-}: { item: FileItem; workspacePath: string; depth?: number }) {
+    item, workspacePath, depth = 0, onFileClick,
+}: { item: FileItem; workspacePath: string; depth?: number; onFileClick: (path: string) => void }) {
     const [expanded, setExpanded] = useState(false);
     const [children, setChildren] = useState<FileItem[]>([]);
     const [loading, setLoading] = useState(false);
@@ -157,9 +158,9 @@ function DirectoryNode({
                     )}
                     {children.map((child) =>
                         child.type === 'directory' ? (
-                            <DirectoryNode key={child.path} item={child} workspacePath={workspacePath} depth={depth + 1} />
+                            <DirectoryNode key={child.path} item={child} workspacePath={workspacePath} depth={depth + 1} onFileClick={onFileClick} />
                         ) : (
-                            <FileNode key={child.path} item={child} depth={depth + 1} />
+                            <FileNode key={child.path} item={child} depth={depth + 1} onFileClick={onFileClick} />
                         )
                     )}
                 </div>
@@ -168,12 +169,13 @@ function DirectoryNode({
     );
 }
 
-function FileNode({ item, depth = 0 }: { item: FileItem; depth?: number }) {
+function FileNode({ item, depth = 0, onFileClick }: { item: FileItem; depth?: number; onFileClick: (path: string) => void }) {
     const color = getFileColor(item.name);
     const badge = getFileIcon(item.name);
     return (
-        <div className="file-tree-item file" style={{ paddingLeft: `${depth * 16 + 8}px` }}
-            title={`${item.path}${item.size ? ` (${formatSize(item.size)})` : ''}`}>
+        <div className="file-tree-item file clickable" style={{ paddingLeft: `${depth * 16 + 8}px` }}
+            title={`${item.path}${item.size ? ` (${formatSize(item.size)})` : ''}`}
+            onClick={() => onFileClick(item.path)}>
             <span className="file-tree-chevron" />
             <span className="file-tree-icon file-icon" style={{ color }}>
                 {badge ? <span className="file-type-badge" style={{ color }}>{badge}</span> : <File size={14} />}
@@ -193,6 +195,7 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
     const [loading, setLoading] = useState(false);
     const [hasLoaded, setHasLoaded] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [selectedFile, setSelectedFile] = useState<string | null>(null);
     const prevWorkspaceRef = useRef<string | undefined>(undefined);
 
     const loadRootFiles = useCallback(async () => {
@@ -233,32 +236,45 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
         }
     }, [isActive, hasLoaded, workspacePath, loading, loadRootFiles]);
 
+    const handleFileClick = useCallback((path: string) => {
+        setSelectedFile(path);
+    }, []);
+
     const dirCount = rootItems.filter(i => i.type === 'directory').length;
     const fileCount = rootItems.filter(i => i.type === 'file').length;
 
     return (
-        <div className="fe-tab-content">
-            <div className="fe-tab-toolbar">
-                {rootItems.length > 0 && (
-                    <span className="fe-tab-stats">{dirCount} folders &bull; {fileCount} files</span>
-                )}
-                <button className="fe-toolbar-btn" onClick={() => loadRootFiles()} disabled={loading} title="Refresh">
-                    <RefreshCw size={13} className={loading ? 'spinning' : ''} />
-                </button>
+        <>
+            <div className="fe-tab-content">
+                <div className="fe-tab-toolbar">
+                    {rootItems.length > 0 && (
+                        <span className="fe-tab-stats">{dirCount} folders &bull; {fileCount} files</span>
+                    )}
+                    <button className="fe-toolbar-btn" onClick={() => loadRootFiles()} disabled={loading} title="Refresh">
+                        <RefreshCw size={13} className={loading ? 'spinning' : ''} />
+                    </button>
+                </div>
+                <div className="fe-tab-scroll">
+                    {loading && rootItems.length === 0 && (
+                        <div className="fe-loading"><RefreshCw size={16} className="spinning" /><span>Loading files...</span></div>
+                    )}
+                    {error && <div className="fe-error">{error}</div>}
+                    {!loading && !error && hasLoaded && rootItems.length === 0 && <div className="fe-empty">No files found</div>}
+                    {rootItems.map((item) =>
+                        item.type === 'directory'
+                            ? <DirectoryNode key={item.path} item={item} workspacePath={workspacePath} depth={0} onFileClick={handleFileClick} />
+                            : <FileNode key={item.path} item={item} depth={0} onFileClick={handleFileClick} />
+                    )}
+                </div>
             </div>
-            <div className="fe-tab-scroll">
-                {loading && rootItems.length === 0 && (
-                    <div className="fe-loading"><RefreshCw size={16} className="spinning" /><span>Loading files...</span></div>
-                )}
-                {error && <div className="fe-error">{error}</div>}
-                {!loading && !error && hasLoaded && rootItems.length === 0 && <div className="fe-empty">No files found</div>}
-                {rootItems.map((item) =>
-                    item.type === 'directory'
-                        ? <DirectoryNode key={item.path} item={item} workspacePath={workspacePath} depth={0} />
-                        : <FileNode key={item.path} item={item} depth={0} />
-                )}
-            </div>
-        </div>
+            {selectedFile && (
+                <FileContentModal
+                    workspacePath={workspacePath}
+                    filePath={selectedFile}
+                    onClose={() => setSelectedFile(null)}
+                />
+            )}
+        </>
     );
 }
 
@@ -268,6 +284,7 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
     const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
     const [loading, setLoading] = useState(false);
     const [hasLoaded, setHasLoaded] = useState(false);
+    const [selectedChange, setSelectedChange] = useState<{ path: string; staged: boolean } | null>(null);
     const prevWorkspaceRef = useRef<string | undefined>(undefined);
 
     const loadStatus = useCallback(async () => {
@@ -322,6 +339,14 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
 
     const statusLabel = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
+    const handleChangeClick = useCallback((path: string, staged: boolean, status: string) => {
+        // Don't show diff for deleted files or untracked files
+        if (status === 'deleted' || status === 'untracked') {
+            return;
+        }
+        setSelectedChange({ path, staged });
+    }, []);
+
     if (!gitStatus) {
         return (
             <div className="fe-tab-content">
@@ -348,48 +373,69 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
     const unstaged = gitStatus.changes.filter(c => !c.staged);
 
     return (
-        <div className="fe-tab-content">
-            <div className="fe-tab-toolbar">
-                <span className="fe-tab-stats">
-                    <GitBranch size={12} />
-                    <span className="fe-branch-name">{gitStatus.branch || 'HEAD'}</span>
-                    {gitStatus.ahead > 0 && <span className="fe-ahead" title={`${gitStatus.ahead} ahead`}><ArrowUp size={10} />{gitStatus.ahead}</span>}
-                    {gitStatus.behind > 0 && <span className="fe-behind" title={`${gitStatus.behind} behind`}><ArrowDown size={10} />{gitStatus.behind}</span>}
-                </span>
-                <button className="fe-toolbar-btn" onClick={() => loadStatus()} disabled={loading} title="Refresh">
-                    <RefreshCw size={13} className={loading ? 'spinning' : ''} />
-                </button>
+        <>
+            <div className="fe-tab-content">
+                <div className="fe-tab-toolbar">
+                    <span className="fe-tab-stats">
+                        <GitBranch size={12} />
+                        <span className="fe-branch-name">{gitStatus.branch || 'HEAD'}</span>
+                        {gitStatus.ahead > 0 && <span className="fe-ahead" title={`${gitStatus.ahead} ahead`}><ArrowUp size={10} />{gitStatus.ahead}</span>}
+                        {gitStatus.behind > 0 && <span className="fe-behind" title={`${gitStatus.behind} behind`}><ArrowDown size={10} />{gitStatus.behind}</span>}
+                    </span>
+                    <button className="fe-toolbar-btn" onClick={() => loadStatus()} disabled={loading} title="Refresh">
+                        <RefreshCw size={13} className={loading ? 'spinning' : ''} />
+                    </button>
+                </div>
+                <div className="fe-tab-scroll">
+                    {gitStatus.changes.length === 0 && (
+                        <div className="fe-empty">Working tree clean</div>
+                    )}
+                    {staged.length > 0 && (
+                        <div className="git-section">
+                            <div className="git-section-header">Staged ({staged.length})</div>
+                            {staged.map(c => (
+                                <div
+                                    key={`s-${c.path}`}
+                                    className={`git-change-item staged ${c.status} ${c.status !== 'deleted' && c.status !== 'untracked' ? 'clickable' : ''}`}
+                                    title={`${statusLabel(c.status)}: ${c.path}`}
+                                    onClick={() => handleChangeClick(c.path, c.staged, c.status)}
+                                >
+                                    {statusIcon(c)}
+                                    <span className="git-change-path">{c.path}</span>
+                                    <span className={`git-change-badge ${c.status}`}>{c.status[0].toUpperCase()}</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    {unstaged.length > 0 && (
+                        <div className="git-section">
+                            <div className="git-section-header">Changes ({unstaged.length})</div>
+                            {unstaged.map(c => (
+                                <div
+                                    key={`u-${c.path}`}
+                                    className={`git-change-item ${c.status} ${c.status !== 'deleted' && c.status !== 'untracked' ? 'clickable' : ''}`}
+                                    title={`${statusLabel(c.status)}: ${c.path}`}
+                                    onClick={() => handleChangeClick(c.path, c.staged, c.status)}
+                                >
+                                    {statusIcon(c)}
+                                    <span className="git-change-path">{c.path}</span>
+                                    <span className={`git-change-badge ${c.status}`}>{c.status[0].toUpperCase()}</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
             </div>
-            <div className="fe-tab-scroll">
-                {gitStatus.changes.length === 0 && (
-                    <div className="fe-empty">Working tree clean</div>
-                )}
-                {staged.length > 0 && (
-                    <div className="git-section">
-                        <div className="git-section-header">Staged ({staged.length})</div>
-                        {staged.map(c => (
-                            <div key={`s-${c.path}`} className={`git-change-item staged ${c.status}`} title={`${statusLabel(c.status)}: ${c.path}`}>
-                                {statusIcon(c)}
-                                <span className="git-change-path">{c.path}</span>
-                                <span className={`git-change-badge ${c.status}`}>{c.status[0].toUpperCase()}</span>
-                            </div>
-                        ))}
-                    </div>
-                )}
-                {unstaged.length > 0 && (
-                    <div className="git-section">
-                        <div className="git-section-header">Changes ({unstaged.length})</div>
-                        {unstaged.map(c => (
-                            <div key={`u-${c.path}`} className={`git-change-item ${c.status}`} title={`${statusLabel(c.status)}: ${c.path}`}>
-                                {statusIcon(c)}
-                                <span className="git-change-path">{c.path}</span>
-                                <span className={`git-change-badge ${c.status}`}>{c.status[0].toUpperCase()}</span>
-                            </div>
-                        ))}
-                    </div>
-                )}
-            </div>
-        </div>
+            {selectedChange && (
+                <FileContentModal
+                    workspacePath={workspacePath}
+                    filePath={selectedChange.path}
+                    isDiff={true}
+                    staged={selectedChange.staged}
+                    onClose={() => setSelectedChange(null)}
+                />
+            )}
+        </>
     );
 }
 

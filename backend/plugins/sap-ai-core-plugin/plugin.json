@@ -1,0 +1,85 @@
+{
+  "name": "sap-ai-core-plugin",
+  "version": "1.0.0",
+  "type": "ai-provider",
+  "displayName": "SAP AI Core",
+  "description": "SAP AI Core integration plugin for Claude models via AWS Bedrock",
+  "author": "SAP",
+
+  "backend": {
+    "entry": "./index.js",
+    "provides": {
+      "apiMode": "sap-ai-core",
+      "models": [
+        {
+          "id": "anthropic--claude-4.5-opus",
+          "name": "Claude 4.5 Opus"
+        },
+        {
+          "id": "anthropic--claude-opus-4",
+          "name": "Claude Opus 4"
+        },
+        {
+          "id": "anthropic--claude-sonnet-4",
+          "name": "Claude Sonnet 4"
+        },
+        {
+          "id": "anthropic--claude-4.5-sonnet",
+          "name": "Claude 4.5 Sonnet"
+        },
+        {
+          "id": "anthropic--claude-3.7-sonnet",
+          "name": "Claude 3.7 Sonnet"
+        },
+        {
+          "id": "anthropic--claude-3.5-sonnet",
+          "name": "Claude 3.5 Sonnet"
+        },
+        {
+          "id": "anthropic--claude-3.5-haiku",
+          "name": "Claude 3.5 Haiku"
+        },
+        {
+          "id": "anthropic--claude-3-opus",
+          "name": "Claude 3 Opus"
+        }
+      ],
+      "configSchema": {
+        "type": "object",
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "description": "SAP AI Core OAuth2 client ID",
+            "required": true
+          },
+          "clientSecret": {
+            "type": "string",
+            "description": "SAP AI Core OAuth2 client secret",
+            "required": true,
+            "sensitive": true
+          },
+          "authUrl": {
+            "type": "string",
+            "description": "SAP AI Core OAuth2 token endpoint URL",
+            "required": true
+          },
+          "baseUrl": {
+            "type": "string",
+            "description": "SAP AI Core API base URL",
+            "required": true
+          },
+          "resourceGroup": {
+            "type": "string",
+            "description": "SAP AI Core resource group name",
+            "default": "default"
+          },
+          "timeoutMs": {
+            "type": "number",
+            "description": "Request timeout in milliseconds",
+            "default": 120000
+          }
+        }
+      }
+    }
+  }
+}

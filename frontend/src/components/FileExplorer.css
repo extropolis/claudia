@@ -275,8 +275,10 @@
 }
 
 .file-tree-item.directory { cursor: pointer; }
+.file-tree-item.file.clickable { cursor: pointer; }
 .file-tree-item:hover { background: rgba(255, 255, 255, 0.04); }
 .file-tree-item.directory:hover { background: rgba(255, 255, 255, 0.06); }
+.file-tree-item.file.clickable:hover { background: rgba(255, 255, 255, 0.06); }
 
 .file-tree-chevron {
     width: 16px; height: 16px;
@@ -385,8 +387,16 @@
     transition: background 0.1s;
 }
 
+.git-change-item.clickable {
+    cursor: pointer;
+}
+
 .git-change-item:hover {
     background: rgba(255, 255, 255, 0.04);
+}
+
+.git-change-item.clickable:hover {
+    background: rgba(255, 255, 255, 0.06);
 }
 
 .git-change-path {

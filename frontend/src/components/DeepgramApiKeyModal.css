@@ -1,0 +1,119 @@
+.deepgram-modal {
+    max-width: 500px;
+    width: 90%;
+}
+
+.deepgram-info {
+    margin-bottom: 1.5rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.deepgram-steps {
+    margin-bottom: 1.5rem;
+    padding: 1rem;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+}
+
+.deepgram-steps ol {
+    margin: 0;
+    padding-left: 1.5rem;
+}
+
+.deepgram-steps li {
+    margin-bottom: 0.5rem;
+    color: var(--text-primary);
+    line-height: 1.6;
+}
+
+.deepgram-steps li:last-child {
+    margin-bottom: 0;
+}
+
+.deepgram-link {
+    color: var(--accent-color);
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    transition: opacity 0.2s;
+}
+
+.deepgram-link:hover {
+    opacity: 0.8;
+    text-decoration: underline;
+}
+
+.deepgram-input-container {
+    margin-bottom: 1rem;
+}
+
+.deepgram-label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.deepgram-input {
+    width: 100%;
+    padding: 0.75rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+    font-size: 13px;
+    transition: border-color 0.2s;
+}
+
+.deepgram-input:focus {
+    outline: none;
+    border-color: var(--accent-color);
+}
+
+.deepgram-input::placeholder {
+    color: var(--text-tertiary);
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+}
+
+.modal-button {
+    padding: 0.625rem 1.25rem;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.2s, background-color 0.2s;
+}
+
+.modal-button.secondary {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.modal-button.secondary:hover {
+    background: var(--bg-hover);
+}
+
+.modal-button.primary {
+    background: var(--accent-color);
+    color: white;
+}
+
+.modal-button.primary:hover:not(:disabled) {
+    opacity: 0.9;
+}
+
+.modal-button.primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
