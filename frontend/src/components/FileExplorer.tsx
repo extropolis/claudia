@@ -4,7 +4,7 @@ import {
     PanelRightClose, PanelRightOpen, RefreshCw,
     GitBranch, CircleDot, Plus, Trash2, Pencil, FileQuestion,
     CheckCircle2, XCircle, Clock, Loader2, SkipForward, ExternalLink,
-    ArrowUp, ArrowDown
+    ArrowUp, ArrowDown, GitPullRequest, MessageSquare, Tag, User
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { FileContentModal } from './FileContentModal';
@@ -55,7 +55,39 @@ interface CIStatus {
     error?: string;
 }
 
-type TabId = 'files' | 'changes' | 'ci';
+interface GitHubLabel {
+    name: string;
+    color: string;
+}
+
+interface GitHubUser {
+    login: string;
+}
+
+interface GitHubIssue {
+    number: number;
+    title: string;
+    state: string;
+    url: string;
+    createdAt: string;
+    updatedAt: string;
+    closedAt: string | null;
+    author: GitHubUser;
+    assignees: GitHubUser[];
+    labels: GitHubLabel[];
+    comments: number;
+    body: string;
+}
+
+interface GitHubIssuesStatus {
+    isGitRepo: boolean;
+    owner?: string;
+    repo?: string;
+    issues: GitHubIssue[];
+    error?: string;
+}
+
+type TabId = 'files' | 'changes' | 'ci' | 'issues';
 
 interface FileExplorerProps {
     workspacePath: string | undefined;
@@ -600,6 +632,230 @@ function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: b
     );
 }
 
+// ============== TAB: ISSUES ==============
+
+function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActive: boolean }) {
+    const [issuesStatus, setIssuesStatus] = useState<GitHubIssuesStatus | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [hasLoaded, setHasLoaded] = useState(false);
+    const [filterState, setFilterState] = useState<'open' | 'closed' | 'all'>('open');
+    const prevWorkspaceRef = useRef<string | undefined>(undefined);
+
+    const loadIssues = useCallback(async () => {
+        if (!workspacePath) return;
+        setLoading(true);
+        try {
+            const params = new URLSearchParams({
+                workspace: workspacePath,
+                state: filterState,
+                limit: '30'
+            });
+            const res = await fetch(`${getApiBaseUrl()}/api/workspaces/github-issues?${params}`);
+            if (res.ok) {
+                setIssuesStatus(await res.json());
+            }
+        } catch (err) {
+            console.error('[FileExplorer] Failed to load GitHub issues:', err);
+        } finally {
+            setLoading(false);
+            setHasLoaded(true);
+        }
+    }, [workspacePath, filterState]);
+
+    useEffect(() => {
+        if (workspacePath && workspacePath !== prevWorkspaceRef.current) {
+            prevWorkspaceRef.current = workspacePath;
+            setIssuesStatus(null);
+            setHasLoaded(false);
+            if (isActive) loadIssues();
+        }
+    }, [workspacePath, isActive, loadIssues]);
+
+    useEffect(() => {
+        if (isActive && !hasLoaded && workspacePath && !loading) {
+            loadIssues();
+        }
+    }, [isActive, hasLoaded, workspacePath, loading, loadIssues]);
+
+    // Reload when filter changes
+    useEffect(() => {
+        if (hasLoaded) {
+            loadIssues();
+        }
+    }, [filterState, hasLoaded]);
+
+    // Auto-refresh every 2 minutes when active
+    useEffect(() => {
+        if (!isActive || !workspacePath) return;
+        const interval = setInterval(loadIssues, 120000);
+        return () => clearInterval(interval);
+    }, [isActive, workspacePath, loadIssues]);
+
+    const formatDate = (dateStr: string) => {
+        const date = new Date(dateStr);
+        const now = new Date();
+        const diffMs = now.getTime() - date.getTime();
+        const diffMins = Math.floor(diffMs / 60000);
+        const diffHours = Math.floor(diffMs / 3600000);
+        const diffDays = Math.floor(diffMs / 86400000);
+
+        if (diffMins < 60) return `${diffMins}m ago`;
+        if (diffHours < 24) return `${diffHours}h ago`;
+        if (diffDays < 30) return `${diffDays}d ago`;
+        return date.toLocaleDateString();
+    };
+
+    if (!issuesStatus) {
+        return (
+            <div className="fe-tab-content">
+                <div className="fe-tab-scroll">
+                    {loading ? (
+                        <div className="fe-loading"><RefreshCw size={16} className="spinning" /><span>Loading...</span></div>
+                    ) : (
+                        <div className="fe-empty">No data</div>
+                    )}
+                </div>
+            </div>
+        );
+    }
+
+    if (!issuesStatus.isGitRepo) {
+        return (
+            <div className="fe-tab-content">
+                <div className="fe-tab-scroll"><div className="fe-empty">Not a git repository</div></div>
+            </div>
+        );
+    }
+
+    if (issuesStatus.error) {
+        return (
+            <div className="fe-tab-content">
+                <div className="fe-tab-toolbar">
+                    <span className="fe-tab-stats">
+                        {issuesStatus.owner && issuesStatus.repo && (
+                            <span className="fe-repo-name">{issuesStatus.owner}/{issuesStatus.repo}</span>
+                        )}
+                    </span>
+                    <button className="fe-toolbar-btn" onClick={() => loadIssues()} disabled={loading} title="Refresh">
+                        <RefreshCw size={13} className={loading ? 'spinning' : ''} />
+                    </button>
+                </div>
+                <div className="fe-tab-scroll">
+                    <div className="fe-error">{issuesStatus.error}</div>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="fe-tab-content">
+            <div className="fe-tab-toolbar">
+                <span className="fe-tab-stats">
+                    {issuesStatus.owner && issuesStatus.repo && (
+                        <span className="fe-repo-name">{issuesStatus.owner}/{issuesStatus.repo}</span>
+                    )}
+                    <span className="fe-issue-count">{issuesStatus.issues.length} issues</span>
+                </span>
+                <div className="fe-filter-buttons">
+                    <button
+                        className={`fe-filter-btn ${filterState === 'open' ? 'active' : ''}`}
+                        onClick={() => setFilterState('open')}
+                        title="Open issues"
+                    >
+                        Open
+                    </button>
+                    <button
+                        className={`fe-filter-btn ${filterState === 'closed' ? 'active' : ''}`}
+                        onClick={() => setFilterState('closed')}
+                        title="Closed issues"
+                    >
+                        Closed
+                    </button>
+                    <button
+                        className={`fe-filter-btn ${filterState === 'all' ? 'active' : ''}`}
+                        onClick={() => setFilterState('all')}
+                        title="All issues"
+                    >
+                        All
+                    </button>
+                </div>
+                <button className="fe-toolbar-btn" onClick={() => loadIssues()} disabled={loading} title="Refresh">
+                    <RefreshCw size={13} className={loading ? 'spinning' : ''} />
+                </button>
+            </div>
+            <div className="fe-tab-scroll">
+                {issuesStatus.issues.length === 0 && (
+                    <div className="fe-empty">No {filterState} issues</div>
+                )}
+                {issuesStatus.issues.map((issue) => (
+                    <a
+                        key={issue.number}
+                        className={`issue-item ${issue.state.toLowerCase()}`}
+                        href={issue.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={`#${issue.number}: ${issue.title}`}
+                    >
+                        <div className="issue-header">
+                            <span className={`issue-state-badge ${issue.state.toLowerCase()}`}>
+                                {issue.state === 'OPEN' ? (
+                                    <CircleDot size={12} />
+                                ) : (
+                                    <CheckCircle2 size={12} />
+                                )}
+                            </span>
+                            <span className="issue-number">#{issue.number}</span>
+                            <span className="issue-title">{issue.title}</span>
+                            <ExternalLink size={11} className="issue-external-icon" />
+                        </div>
+                        <div className="issue-meta">
+                            <span className="issue-author" title={`Author: ${issue.author.login}`}>
+                                <User size={11} />
+                                {issue.author.login}
+                            </span>
+                            {issue.comments > 0 && (
+                                <span className="issue-comments" title={`${issue.comments} comments`}>
+                                    <MessageSquare size={11} />
+                                    {issue.comments}
+                                </span>
+                            )}
+                            {issue.assignees.length > 0 && (
+                                <span className="issue-assignees" title={`Assigned to: ${issue.assignees.map(a => a.login).join(', ')}`}>
+                                    <User size={11} />
+                                    {issue.assignees.length}
+                                </span>
+                            )}
+                            <span className="issue-updated">{formatDate(issue.updatedAt)}</span>
+                        </div>
+                        {issue.labels.length > 0 && (
+                            <div className="issue-labels">
+                                {issue.labels.slice(0, 3).map((label, idx) => (
+                                    <span
+                                        key={idx}
+                                        className="issue-label"
+                                        style={{
+                                            backgroundColor: `#${label.color}20`,
+                                            color: `#${label.color}`,
+                                            borderColor: `#${label.color}40`
+                                        }}
+                                        title={label.name}
+                                    >
+                                        <Tag size={9} />
+                                        {label.name}
+                                    </span>
+                                ))}
+                                {issue.labels.length > 3 && (
+                                    <span className="issue-label-more">+{issue.labels.length - 3}</span>
+                                )}
+                            </div>
+                        )}
+                    </a>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 // ============== MAIN PANEL ==============
 
 const PANEL_WIDTH_KEY = 'claudia-file-explorer-width';
@@ -692,12 +948,18 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
                             <CircleDot size={13} />
                             <span>CI/CD</span>
                         </button>
+                        <button className={`fe-tab ${activeTab === 'issues' ? 'active' : ''}`}
+                            onClick={() => setActiveTab('issues')} title="GitHub Issues">
+                            <GitPullRequest size={13} />
+                            <span>Issues</span>
+                        </button>
                     </div>
 
                     {/* Tab content */}
                     {activeTab === 'files' && <FilesTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'files'} />}
                     {activeTab === 'changes' && <ChangesTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'changes'} />}
                     {activeTab === 'ci' && <CITab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'ci'} />}
+                    {activeTab === 'issues' && <IssuesTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'issues'} />}
                 </div>
             )}
         </div>
