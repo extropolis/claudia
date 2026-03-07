@@ -586,7 +586,6 @@
     flex-direction: column;
     gap: 4px;
     padding: 8px 10px;
-    text-decoration: none;
     color: inherit;
     transition: background 0.1s;
     border-bottom: 1px solid rgba(48, 54, 61, 0.3);
@@ -596,10 +595,36 @@
     background: rgba(255, 255, 255, 0.04);
 }
 
+.issue-checkbox {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    flex-shrink: 0;
+    accent-color: var(--accent-secondary, #00d4ff);
+}
+
+.issue-checkbox:hover {
+    opacity: 0.8;
+}
+
 .issue-header {
     display: flex;
     align-items: center;
     gap: 6px;
+}
+
+.issue-title-link {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+    text-decoration: none;
+    color: inherit;
+}
+
+.issue-title-link:hover .issue-title {
+    text-decoration: underline;
 }
 
 .issue-state-badge {
@@ -643,7 +668,7 @@
     transition: opacity 0.15s;
 }
 
-.issue-item:hover .issue-external-icon {
+.issue-title-link:hover .issue-external-icon {
     opacity: 1;
 }
 

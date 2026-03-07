@@ -2227,6 +2227,113 @@ export async function createApp(basePath?: string) {
         }
     });
 
+    // Close/Reopen GitHub Issue endpoint
+    app.patch('/api/workspaces/github-issues/:issueNumber', async (req, res) => {
+        const workspacePath = req.body.workspace as string;
+        const issueNumber = parseInt(req.params.issueNumber, 10);
+        const state = req.body.state as 'open' | 'closed';
+
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace is required' });
+        }
+        if (!issueNumber || isNaN(issueNumber)) {
+            return res.status(400).json({ error: 'Invalid issue number' });
+        }
+        if (!state || !['open', 'closed'].includes(state)) {
+            return res.status(400).json({ error: 'state must be "open" or "closed"' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+
+        try {
+            const execAsync = (await import('util')).promisify((await import('child_process')).exec);
+
+            // Check if it's a git repo
+            try {
+                await execAsync('git rev-parse --git-dir', { cwd: workspacePath });
+            } catch {
+                return res.status(400).json({ error: 'Not a git repository' });
+            }
+
+            // Get remote URL to determine owner/repo
+            let owner = '';
+            let repo = '';
+            try {
+                const { stdout: remotesOutput } = await execAsync('git remote', { cwd: workspacePath });
+                const remotes = remotesOutput.trim().split('\n').filter(r => r.length > 0);
+
+                let foundUrl = '';
+                for (const remote of remotes) {
+                    try {
+                        const { stdout } = await execAsync(`git remote get-url ${remote}`, { cwd: workspacePath });
+                        const url = stdout.trim();
+                        if (url.includes('github.com')) {
+                            foundUrl = url;
+                            break;
+                        }
+                        if (!foundUrl && url.match(/github[^:/]*[:/]/)) {
+                            foundUrl = url;
+                        }
+                    } catch {
+                        continue;
+                    }
+                }
+
+                if (foundUrl) {
+                    const match = foundUrl.match(/github[^:/]*[:/]([^/]+)\/([^/.]+)/);
+                    if (match) {
+                        owner = match[1];
+                        repo = match[2];
+                    }
+                }
+            } catch {
+                return res.status(400).json({ error: 'No remote origin' });
+            }
+
+            if (!owner || !repo) {
+                return res.status(400).json({ error: 'Not a GitHub repository' });
+            }
+
+            // Check if gh CLI is installed
+            try {
+                await execAsync('gh --version', { cwd: workspacePath });
+            } catch {
+                return res.status(400).json({ error: 'gh CLI not installed' });
+            }
+
+            // Close or reopen the issue using gh CLI
+            try {
+                const stateArg = state === 'closed' ? '--close' : '--reopen';
+                await execAsync(
+                    `gh issue ${state === 'closed' ? 'close' : 'reopen'} ${issueNumber} --repo ${owner}/${repo}`,
+                    { cwd: workspacePath }
+                );
+
+                res.json({
+                    success: true,
+                    issue: {
+                        number: issueNumber,
+                        state: state.toUpperCase()
+                    }
+                });
+            } catch (err) {
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                if (errorMsg.includes('authentication') || errorMsg.includes('HTTP 401')) {
+                    return res.status(401).json({
+                        error: 'GitHub authentication required. Run: gh auth login'
+                    });
+                }
+                return res.status(500).json({
+                    error: 'Failed to update issue: ' + errorMsg
+                });
+            }
+        } catch (err) {
+            logger.error('Failed to update GitHub issue', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to update GitHub issue' });
+        }
+    });
+
     // Read file contents endpoint
     app.get('/api/workspaces/read-file', async (req, res) => {
         const workspacePath = req.query.workspace as string;

@@ -708,6 +708,36 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
         }
     }, [createIssue]);
 
+    const toggleIssueState = useCallback(async (issueNumber: number, currentState: string) => {
+        if (!workspacePath) return;
+
+        const newState = currentState === 'OPEN' ? 'closed' : 'open';
+
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/workspaces/github-issues/${issueNumber}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    workspace: workspacePath,
+                    state: newState
+                })
+            });
+
+            if (res.ok) {
+                console.log(`[FileExplorer] Issue #${issueNumber} ${newState === 'closed' ? 'closed' : 'reopened'}`);
+                // Reload issues to show updated state
+                loadIssues();
+            } else {
+                const error = await res.json();
+                console.error('[FileExplorer] Failed to update issue:', error);
+                alert(`Failed to ${newState === 'closed' ? 'close' : 'reopen'} issue: ${error.error}`);
+            }
+        } catch (err) {
+            console.error('[FileExplorer] Failed to update issue:', err);
+            alert(`Failed to ${newState === 'closed' ? 'close' : 'reopen'} issue. Check console for details.`);
+        }
+    }, [workspacePath, loadIssues]);
+
     useEffect(() => {
         if (workspacePath && workspacePath !== prevWorkspaceRef.current) {
             prevWorkspaceRef.current = workspacePath;
@@ -850,15 +880,21 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
                     <div className="fe-empty">No {filterState} issues</div>
                 )}
                 {issuesStatus.issues.map((issue) => (
-                    <a
+                    <div
                         key={issue.number}
                         className={`issue-item ${issue.state.toLowerCase()}`}
-                        href={issue.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        title={`#${issue.number}: ${issue.title}`}
                     >
                         <div className="issue-header">
+                            <input
+                                type="checkbox"
+                                className="issue-checkbox"
+                                checked={issue.state === 'CLOSED'}
+                                onChange={(e) => {
+                                    e.stopPropagation();
+                                    toggleIssueState(issue.number, issue.state);
+                                }}
+                                title={issue.state === 'OPEN' ? 'Close issue' : 'Reopen issue'}
+                            />
                             <span className={`issue-state-badge ${issue.state.toLowerCase()}`}>
                                 {issue.state === 'OPEN' ? (
                                     <CircleDot size={12} />
@@ -867,8 +903,16 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
                                 )}
                             </span>
                             <span className="issue-number">#{issue.number}</span>
-                            <span className="issue-title">{issue.title}</span>
-                            <ExternalLink size={11} className="issue-external-icon" />
+                            <a
+                                href={issue.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="issue-title-link"
+                                title={`#${issue.number}: ${issue.title}`}
+                            >
+                                <span className="issue-title">{issue.title}</span>
+                                <ExternalLink size={11} className="issue-external-icon" />
+                            </a>
                         </div>
                         <div className="issue-meta">
                             <span className="issue-author" title={`Author: ${issue.author.login}`}>
@@ -911,7 +955,7 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
                                 )}
                             </div>
                         )}
-                    </a>
+                    </div>
                 ))}
             </div>
             {issuesStatus.owner && issuesStatus.repo && !issuesStatus.error && (
