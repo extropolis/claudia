@@ -39,5 +39,11 @@ jobs:
       - name: Build backend
         run: npm run build -w backend
 
+      - name: Build frontend
+        run: npm run build -w frontend
+
+      - name: Build Electron
+        run: npm run build:electron
+
       - name: Run unit tests
         run: npm test -w backend
