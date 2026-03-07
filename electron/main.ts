@@ -64,7 +64,7 @@ const originalPath = process.env.PATH || '';
 process.env.PATH = [...extraPaths, originalPath].join(sep);
 console.log(`[Main] Original PATH length: ${originalPath.length}, extra paths: ${extraPaths.join(', ')}`);
 
-// Set the app name for macOS menu
+// Set the app name for menu
 app.setName('Claudia');
 
 // Build application menu with standard Edit shortcuts (Cut/Copy/Paste/SelectAll).
@@ -118,7 +118,7 @@ async function createWindow(backendUrl: string): Promise<void> {
         },
         title: 'Claudia',
         backgroundColor: '#1a1a1a',
-        show: true // Show immediately on macOS to avoid visibility issues
+        show: true
     });
 
     if (process.platform === 'darwin' && app.dock) {
