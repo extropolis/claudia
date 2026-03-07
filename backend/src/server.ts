@@ -2190,9 +2190,10 @@ export async function createApp(basePath?: string) {
 
             // Create issue using gh CLI
             try {
-                const bodyArg = body ? `--body "${body.replace(/"/g, '\\"')}"` : '';
+                // gh CLI requires --body when running non-interactively, so provide empty string if not given
+                const bodyText = body || '';
                 const { stdout } = await execAsync(
-                    `gh issue create --repo ${owner}/${repo} --title "${title.replace(/"/g, '\\"')}" ${bodyArg}`,
+                    `gh issue create --repo ${owner}/${repo} --title "${title.replace(/"/g, '\\"')}" --body "${bodyText.replace(/"/g, '\\"')}"`,
                     { cwd: workspacePath }
                 );
                 // gh issue create returns the URL of the created issue
