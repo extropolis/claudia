@@ -28,6 +28,10 @@ interface Plugin {
     name: string;
     displayName: string;
     type: string;
+    version: string;
+    description: string;
+    author?: string;
+    enabled: boolean;
     apiMode?: string;
     models?: Array<{ id: string; name: string }>;
     configSchema?: any;
