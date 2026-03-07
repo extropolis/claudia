@@ -2192,8 +2192,9 @@ export async function createApp(basePath?: string) {
             try {
                 // gh CLI requires --body when running non-interactively, so provide empty string if not given
                 const bodyText = body || '';
+                // Auto-assign to current user (@me)
                 const { stdout } = await execAsync(
-                    `gh issue create --repo ${owner}/${repo} --title "${title.replace(/"/g, '\\"')}" --body "${bodyText.replace(/"/g, '\\"')}"`,
+                    `gh issue create --repo ${owner}/${repo} --title "${title.replace(/"/g, '\\"')}" --body "${bodyText.replace(/"/g, '\\"')}" --assignee @me`,
                     { cwd: workspacePath }
                 );
                 // gh issue create returns the URL of the created issue
