@@ -639,6 +639,9 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
     const [loading, setLoading] = useState(false);
     const [hasLoaded, setHasLoaded] = useState(false);
     const [filterState, setFilterState] = useState<'open' | 'closed' | 'all'>('open');
+    const [filterAssignee, setFilterAssignee] = useState<'all' | 'me'>('all');
+    const [newIssueTitle, setNewIssueTitle] = useState('');
+    const [creating, setCreating] = useState(false);
     const prevWorkspaceRef = useRef<string | undefined>(undefined);
 
     const loadIssues = useCallback(async () => {
@@ -650,6 +653,9 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
                 state: filterState,
                 limit: '30'
             });
+            if (filterAssignee === 'me') {
+                params.append('assignee', '@me');
+            }
             const res = await fetch(`${getApiBaseUrl()}/api/workspaces/github-issues?${params}`);
             if (res.ok) {
                 setIssuesStatus(await res.json());
@@ -660,7 +666,47 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
             setLoading(false);
             setHasLoaded(true);
         }
-    }, [workspacePath, filterState]);
+    }, [workspacePath, filterState, filterAssignee]);
+
+    const createIssue = useCallback(async () => {
+        if (!workspacePath || !newIssueTitle.trim() || creating) return;
+
+        setCreating(true);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/workspaces/github-issues`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    workspace: workspacePath,
+                    title: newIssueTitle.trim()
+                })
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                console.log('[FileExplorer] Created issue:', data);
+                setNewIssueTitle('');
+                // Reload issues to show the new one
+                loadIssues();
+            } else {
+                const error = await res.json();
+                console.error('[FileExplorer] Failed to create issue:', error);
+                alert(`Failed to create issue: ${error.error}`);
+            }
+        } catch (err) {
+            console.error('[FileExplorer] Failed to create issue:', err);
+            alert('Failed to create issue. Check console for details.');
+        } finally {
+            setCreating(false);
+        }
+    }, [workspacePath, newIssueTitle, creating, loadIssues]);
+
+    const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            createIssue();
+        }
+    }, [createIssue]);
 
     useEffect(() => {
         if (workspacePath && workspacePath !== prevWorkspaceRef.current) {
@@ -682,7 +728,7 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
         if (hasLoaded) {
             loadIssues();
         }
-    }, [filterState, hasLoaded]);
+    }, [filterState, filterAssignee, hasLoaded, loadIssues]);
 
     // Auto-refresh every 2 minutes when active
     useEffect(() => {
@@ -756,6 +802,22 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
                     )}
                     <span className="fe-issue-count">{issuesStatus.issues.length} issues</span>
                 </span>
+                <div className="fe-filter-buttons">
+                    <button
+                        className={`fe-filter-btn ${filterAssignee === 'all' ? 'active' : ''}`}
+                        onClick={() => setFilterAssignee('all')}
+                        title="All issues"
+                    >
+                        All
+                    </button>
+                    <button
+                        className={`fe-filter-btn ${filterAssignee === 'me' ? 'active' : ''}`}
+                        onClick={() => setFilterAssignee('me')}
+                        title="My issues"
+                    >
+                        Mine
+                    </button>
+                </div>
                 <div className="fe-filter-buttons">
                     <button
                         className={`fe-filter-btn ${filterState === 'open' ? 'active' : ''}`}
@@ -852,6 +914,20 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
                     </a>
                 ))}
             </div>
+            {issuesStatus.owner && issuesStatus.repo && !issuesStatus.error && (
+                <div className="issue-create-form">
+                    <input
+                        type="text"
+                        className="issue-create-input"
+                        placeholder="Create new issue... (press Enter)"
+                        value={newIssueTitle}
+                        onChange={(e) => setNewIssueTitle(e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        disabled={creating}
+                    />
+                    {creating && <Loader2 size={14} className="spinning issue-create-spinner" />}
+                </div>
+            )}
         </div>
     );
 }

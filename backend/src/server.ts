@@ -1983,6 +1983,7 @@ export async function createApp(basePath?: string) {
         const workspacePath = req.query.workspace as string;
         const state = req.query.state as string || 'open'; // open, closed, all
         const limit = parseInt(req.query.limit as string) || 30;
+        const assignee = req.query.assignee as string; // @me for current user, username, or empty
 
         if (!workspacePath) {
             return res.status(400).json({ error: 'workspace query parameter is required' });
@@ -2070,8 +2071,9 @@ export async function createApp(basePath?: string) {
 
             let issues: GitHubIssue[] = [];
             try {
+                const assigneeArg = assignee ? `--assignee ${assignee}` : '';
                 const { stdout } = await execAsync(
-                    `gh issue list --repo ${owner}/${repo} --state ${state} --limit ${limit} --json number,title,state,url,createdAt,updatedAt,closedAt,author,assignees,labels,comments,body`,
+                    `gh issue list --repo ${owner}/${repo} --state ${state} ${assigneeArg} --limit ${limit} --json number,title,state,url,createdAt,updatedAt,closedAt,author,assignees,labels,comments,body`,
                     { cwd: workspacePath }
                 );
                 issues = JSON.parse(stdout);
@@ -2107,6 +2109,116 @@ export async function createApp(basePath?: string) {
         } catch (err) {
             logger.error('Failed to get GitHub issues', { error: err instanceof Error ? err.message : String(err) });
             res.status(500).json({ error: 'Failed to get GitHub issues' });
+        }
+    });
+
+    // Create GitHub Issue endpoint
+    app.post('/api/workspaces/github-issues', async (req, res) => {
+        const workspacePath = req.body.workspace as string;
+        const title = req.body.title as string;
+        const body = req.body.body as string || '';
+
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace is required' });
+        }
+        if (!title || title.trim().length === 0) {
+            return res.status(400).json({ error: 'title is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+
+        try {
+            const execAsync = (await import('util')).promisify((await import('child_process')).exec);
+
+            // Check if it's a git repo
+            try {
+                await execAsync('git rev-parse --git-dir', { cwd: workspacePath });
+            } catch {
+                return res.status(400).json({ error: 'Not a git repository' });
+            }
+
+            // Get remote URL to determine owner/repo
+            let owner = '';
+            let repo = '';
+            try {
+                // Get all remotes
+                const { stdout: remotesOutput } = await execAsync('git remote', { cwd: workspacePath });
+                const remotes = remotesOutput.trim().split('\n').filter(r => r.length > 0);
+
+                // Try to find a github.com remote first
+                let foundUrl = '';
+                for (const remote of remotes) {
+                    try {
+                        const { stdout } = await execAsync(`git remote get-url ${remote}`, { cwd: workspacePath });
+                        const url = stdout.trim();
+                        if (url.includes('github.com')) {
+                            foundUrl = url;
+                            break;
+                        }
+                        // Keep first GitHub URL as fallback
+                        if (!foundUrl && url.match(/github[^:/]*[:/]/)) {
+                            foundUrl = url;
+                        }
+                    } catch {
+                        continue;
+                    }
+                }
+
+                if (foundUrl) {
+                    // Parse GitHub URL (supports github.com and GitHub Enterprise)
+                    const match = foundUrl.match(/github[^:/]*[:/]([^/]+)\/([^/.]+)/);
+                    if (match) {
+                        owner = match[1];
+                        repo = match[2];
+                    }
+                }
+            } catch {
+                return res.status(400).json({ error: 'No remote origin' });
+            }
+
+            if (!owner || !repo) {
+                return res.status(400).json({ error: 'Not a GitHub repository' });
+            }
+
+            // Check if gh CLI is installed
+            try {
+                await execAsync('gh --version', { cwd: workspacePath });
+            } catch {
+                return res.status(400).json({ error: 'gh CLI not installed. Install from https://cli.github.com' });
+            }
+
+            // Create issue using gh CLI
+            try {
+                const bodyArg = body ? `--body "${body.replace(/"/g, '\\"')}"` : '';
+                const { stdout } = await execAsync(
+                    `gh issue create --repo ${owner}/${repo} --title "${title.replace(/"/g, '\\"')}" ${bodyArg} --json number,url`,
+                    { cwd: workspacePath }
+                );
+                const created = JSON.parse(stdout);
+
+                res.json({
+                    success: true,
+                    issue: {
+                        number: created.number,
+                        url: created.url
+                    }
+                });
+            } catch (err) {
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                // Check if it's an auth error
+                if (errorMsg.includes('authentication') || errorMsg.includes('HTTP 401')) {
+                    return res.status(401).json({
+                        error: 'GitHub authentication required. Run: gh auth login'
+                    });
+                }
+                return res.status(500).json({
+                    error: 'Failed to create issue: ' + errorMsg
+                });
+            }
+        } catch (err) {
+            logger.error('Failed to create GitHub issue', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to create GitHub issue' });
         }
     });
 
