@@ -192,7 +192,7 @@ export async function createApp(basePath?: string) {
 
     // Initialize remaining services
     const persistencePath = basePath ? join(basePath, 'tasks.json') : undefined;
-    const taskSpawner = new TaskSpawner(persistencePath, true, configStore, pluginManager);
+    const taskSpawner = new TaskSpawner(persistencePath, true, configStore);
     const workspaceStore = new WorkspaceStore(basePath);
     // SupervisorChat now handles both auto-analysis (formerly TaskSupervisor) and chat
     const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore);
@@ -225,7 +225,7 @@ export async function createApp(basePath?: string) {
                     const workspace = workspaceStore.addWorkspace(workspacePath);
                     logger.info(`Added workspace: ${workspacePath}`, { workspace });
                 } catch (error) {
-                    logger.error(`Failed to add workspace ${workspacePath}:`, error);
+                    logger.error(`Failed to add workspace ${workspacePath}:`, { error });
                 }
             }
         }
@@ -1124,7 +1124,7 @@ export async function createApp(basePath?: string) {
             res.json({ success: true, message: `Plugin ${name} enabled successfully` });
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            logger.error(`[API] Error enabling plugin:`, error);
+            logger.error(`[API] Error enabling plugin:`, { error });
             res.status(500).json({ success: false, error: message });
         }
     });
@@ -1146,7 +1146,7 @@ export async function createApp(basePath?: string) {
             });
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            logger.error(`[API] Error disabling plugin:`, error);
+            logger.error(`[API] Error disabling plugin:`, { error });
             res.status(500).json({ success: false, error: message });
         }
     });

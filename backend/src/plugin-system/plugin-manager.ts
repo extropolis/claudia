@@ -58,7 +58,7 @@ export class PluginManager {
 
             logger.info(`Loaded ${this.plugins.size} plugin(s)`);
         } catch (error) {
-            logger.error('Error discovering plugins:', error);
+            logger.error('Error discovering plugins:', { error });
         }
     }
 
@@ -116,7 +116,7 @@ export class PluginManager {
 
             logger.info(`Plugin loaded successfully: ${manifest.displayName}`);
         } catch (error) {
-            logger.error(`Failed to load plugin from ${pluginPath}:`, error);
+            logger.error(`Failed to load plugin from ${pluginPath}:`, { error });
         }
     }
 
@@ -213,12 +213,12 @@ export class PluginManager {
                             enabled
                         });
                     } catch (error) {
-                        logger.error(`Error reading plugin manifest from ${manifestPath}:`, error);
+                        logger.error(`Error reading plugin manifest from ${manifestPath}:`, { error });
                     }
                 }
             }
         } catch (error) {
-            logger.error('Error listing available plugins:', error);
+            logger.error('Error listing available plugins:', { error });
         }
 
         return metadata;
@@ -243,7 +243,7 @@ export class PluginManager {
                     app.use('/anthropic', router);
                     logger.info(`Registered AI provider routes for ${name} at /v1 and /anthropic`);
                 } catch (error) {
-                    logger.error(`Error registering routes for ${name}:`, error);
+                    logger.error(`Error registering routes for ${name}:`, { error });
                 }
             }
         }
@@ -257,7 +257,7 @@ export class PluginManager {
                     app.use(basePath, router);
                     logger.info(`Registered routes for ${name} at ${basePath}`);
                 } catch (error) {
-                    logger.error(`Error registering routes for ${name}:`, error);
+                    logger.error(`Error registering routes for ${name}:`, { error });
                 }
             }
         }
@@ -272,7 +272,7 @@ export class PluginManager {
             try {
                 return plugin.getTaskEnvironment(config);
             } catch (error) {
-                logger.error(`Error getting task environment from plugin:`, error);
+                logger.error(`Error getting task environment from plugin:`, { error });
             }
         }
         return {};
@@ -329,7 +329,7 @@ export class PluginManager {
             try {
                 await plugin.onConfigChange(config);
             } catch (error) {
-                logger.error(`Error notifying plugin of config change:`, error);
+                logger.error(`Error notifying plugin of config change:`, { error });
             }
         }
     }
@@ -346,7 +346,7 @@ export class PluginManager {
                     await plugin.shutdown();
                     logger.info(`Plugin ${name} shut down successfully`);
                 } catch (error) {
-                    logger.error(`Error shutting down plugin ${name}:`, error);
+                    logger.error(`Error shutting down plugin ${name}:`, { error });
                 }
             }
         }
