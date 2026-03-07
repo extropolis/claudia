@@ -2192,16 +2192,20 @@ export async function createApp(basePath?: string) {
             try {
                 const bodyArg = body ? `--body "${body.replace(/"/g, '\\"')}"` : '';
                 const { stdout } = await execAsync(
-                    `gh issue create --repo ${owner}/${repo} --title "${title.replace(/"/g, '\\"')}" ${bodyArg} --json number,url`,
+                    `gh issue create --repo ${owner}/${repo} --title "${title.replace(/"/g, '\\"')}" ${bodyArg}`,
                     { cwd: workspacePath }
                 );
-                const created = JSON.parse(stdout);
+                // gh issue create returns the URL of the created issue
+                const issueUrl = stdout.trim();
+                // Extract issue number from URL (e.g., https://github.com/owner/repo/issues/123)
+                const match = issueUrl.match(/\/issues\/(\d+)$/);
+                const issueNumber = match ? parseInt(match[1], 10) : null;
 
                 res.json({
                     success: true,
                     issue: {
-                        number: created.number,
-                        url: created.url
+                        number: issueNumber,
+                        url: issueUrl
                     }
                 });
             } catch (err) {

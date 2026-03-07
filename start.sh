@@ -104,7 +104,7 @@ export CLAUDIA_BACKEND_PORT=$BACKEND_PORT
 export NODE_OPTIONS="--max-old-space-size=8192"
 
 # Start backend and frontend
-# Backend: tsx without watch - use restart button in UI to reload
+# Backend: tsx watch - auto-reloads on file changes (or use restart button in UI)
 # Frontend: Vite HMR auto-reloads on file changes
-npm run dev:no-watch -w backend & npm run dev -w frontend
+npm run dev -w backend & npm run dev -w frontend
 
