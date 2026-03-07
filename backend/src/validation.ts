@@ -41,7 +41,7 @@ export interface ConfigUpdatePayload {
     autoFocusOnInput?: boolean;
     supervisorEnabled?: boolean;
     supervisorSystemPrompt?: string;
-    apiMode?: 'default' | 'custom-anthropic';
+    apiMode?: 'default' | 'custom-anthropic' | 'sap-ai-core' | 'hyperspace-proxy';
     customAnthropicApiKey?: string;
     backend?: 'claude-code' | 'opencode';
     opencodePort?: number;
@@ -55,6 +55,21 @@ export interface ConfigUpdatePayload {
         appendSystemPrompt?: string;
     };
     deepgramApiKey?: string;
+    hyperspaceProxy?: {
+        proxyUrl?: string;
+        apiKey?: string;
+        model?: string;
+        alwaysThinkingEnabled?: boolean;
+    };
+    sapAiCore?: {
+        clientId?: string;
+        clientSecret?: string;
+        authUrl?: string;
+        baseUrl?: string;
+        resourceGroup?: string;
+        model?: string;
+        timeoutMs?: number;
+    };
 }
 
 /**
@@ -180,7 +195,7 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
 
     // Validate apiMode (optional enum)
     if (payload.apiMode !== undefined) {
-        const validModes = ['default', 'custom-anthropic'];
+        const validModes = ['default', 'custom-anthropic', 'sap-ai-core', 'hyperspace-proxy'];
         if (!validModes.includes(payload.apiMode as string)) {
             return { valid: false, error: `apiMode must be one of: ${validModes.join(', ')}` };
         }
@@ -281,6 +296,101 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
                 return { valid: false, error: 'claudeCodeSwitches.appendSystemPrompt must be a string' };
             }
             result.claudeCodeSwitches.appendSystemPrompt = switches.appendSystemPrompt;
+        }
+    }
+
+    // Validate hyperspaceProxy (optional object)
+    if (payload.hyperspaceProxy !== undefined) {
+        if (typeof payload.hyperspaceProxy !== 'object' || payload.hyperspaceProxy === null) {
+            return { valid: false, error: 'hyperspaceProxy must be an object' };
+        }
+        const config = payload.hyperspaceProxy as Record<string, unknown>;
+        result.hyperspaceProxy = {};
+
+        if (config.proxyUrl !== undefined) {
+            if (typeof config.proxyUrl !== 'string') {
+                return { valid: false, error: 'hyperspaceProxy.proxyUrl must be a string' };
+            }
+            result.hyperspaceProxy.proxyUrl = config.proxyUrl;
+        }
+
+        if (config.apiKey !== undefined) {
+            if (typeof config.apiKey !== 'string') {
+                return { valid: false, error: 'hyperspaceProxy.apiKey must be a string' };
+            }
+            result.hyperspaceProxy.apiKey = config.apiKey;
+        }
+
+        if (config.model !== undefined) {
+            if (typeof config.model !== 'string') {
+                return { valid: false, error: 'hyperspaceProxy.model must be a string' };
+            }
+            result.hyperspaceProxy.model = config.model;
+        }
+
+        if (config.alwaysThinkingEnabled !== undefined) {
+            if (typeof config.alwaysThinkingEnabled !== 'boolean') {
+                return { valid: false, error: 'hyperspaceProxy.alwaysThinkingEnabled must be a boolean' };
+            }
+            result.hyperspaceProxy.alwaysThinkingEnabled = config.alwaysThinkingEnabled;
+        }
+    }
+
+    // Validate sapAiCore (optional object)
+    if (payload.sapAiCore !== undefined) {
+        if (typeof payload.sapAiCore !== 'object' || payload.sapAiCore === null) {
+            return { valid: false, error: 'sapAiCore must be an object' };
+        }
+        const config = payload.sapAiCore as Record<string, unknown>;
+        result.sapAiCore = {};
+
+        if (config.clientId !== undefined) {
+            if (typeof config.clientId !== 'string') {
+                return { valid: false, error: 'sapAiCore.clientId must be a string' };
+            }
+            result.sapAiCore.clientId = config.clientId;
+        }
+
+        if (config.clientSecret !== undefined) {
+            if (typeof config.clientSecret !== 'string') {
+                return { valid: false, error: 'sapAiCore.clientSecret must be a string' };
+            }
+            result.sapAiCore.clientSecret = config.clientSecret;
+        }
+
+        if (config.authUrl !== undefined) {
+            if (typeof config.authUrl !== 'string') {
+                return { valid: false, error: 'sapAiCore.authUrl must be a string' };
+            }
+            result.sapAiCore.authUrl = config.authUrl;
+        }
+
+        if (config.baseUrl !== undefined) {
+            if (typeof config.baseUrl !== 'string') {
+                return { valid: false, error: 'sapAiCore.baseUrl must be a string' };
+            }
+            result.sapAiCore.baseUrl = config.baseUrl;
+        }
+
+        if (config.resourceGroup !== undefined) {
+            if (typeof config.resourceGroup !== 'string') {
+                return { valid: false, error: 'sapAiCore.resourceGroup must be a string' };
+            }
+            result.sapAiCore.resourceGroup = config.resourceGroup;
+        }
+
+        if (config.model !== undefined) {
+            if (typeof config.model !== 'string') {
+                return { valid: false, error: 'sapAiCore.model must be a string' };
+            }
+            result.sapAiCore.model = config.model;
+        }
+
+        if (config.timeoutMs !== undefined) {
+            if (typeof config.timeoutMs !== 'number' || config.timeoutMs < 0) {
+                return { valid: false, error: 'sapAiCore.timeoutMs must be a non-negative number' };
+            }
+            result.sapAiCore.timeoutMs = config.timeoutMs;
         }
     }
 

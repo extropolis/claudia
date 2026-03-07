@@ -21,8 +21,21 @@ interface MCPServerListItem {
     headers?: Record<string, string>;
 }
 
-type ApiMode = 'default' | 'custom-anthropic';
+type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core' | 'hyperspace-proxy';
 type BackendType = 'claude-code' | 'opencode';
+
+interface Plugin {
+    name: string;
+    displayName: string;
+    type: string;
+    version: string;
+    description: string;
+    author?: string;
+    enabled: boolean;
+    apiMode?: string;
+    models?: Array<{ id: string; name: string }>;
+    configSchema?: any;
+}
 
 interface BackendStatus {
     backend: BackendType;
@@ -69,6 +82,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         backend: false,
         api: false,
         mcp: false,
+        plugins: false,
         permissions: false,
         cliSwitches: false,
         rules: false,
@@ -122,10 +136,78 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     // API Mode state
     const [apiMode, setApiMode] = useState<ApiMode>('default');
     const [customAnthropicApiKey, setCustomAnthropicApiKey] = useState('');
+    const [plugins, setPlugins] = useState<Plugin[]>([]);
+
+    // SAP AI Core state - load from localStorage on mount
+    const [sapAiCoreClientId, setSapAiCoreClientId] = useState(() => {
+        try {
+            return localStorage.getItem('claudia_sap_ai_core_client_id') || '';
+        } catch {
+            return '';
+        }
+    });
+    const [sapAiCoreClientSecret, setSapAiCoreClientSecret] = useState(() => {
+        try {
+            return localStorage.getItem('claudia_sap_ai_core_client_secret') || '';
+        } catch {
+            return '';
+        }
+    });
+    const [sapAiCoreAuthUrl, setSapAiCoreAuthUrl] = useState(() => {
+        try {
+            return localStorage.getItem('claudia_sap_ai_core_auth_url') || '';
+        } catch {
+            return '';
+        }
+    });
+    const [sapAiCoreBaseUrl, setSapAiCoreBaseUrl] = useState(() => {
+        try {
+            return localStorage.getItem('claudia_sap_ai_core_base_url') || '';
+        } catch {
+            return '';
+        }
+    });
+    const [sapAiCoreResourceGroup, setSapAiCoreResourceGroup] = useState(() => {
+        try {
+            return localStorage.getItem('claudia_sap_ai_core_resource_group') || 'default';
+        } catch {
+            return 'default';
+        }
+    });
+    const [sapAiCoreModel, setSapAiCoreModel] = useState(() => {
+        try {
+            return localStorage.getItem('claudia_sap_ai_core_model') || 'anthropic--claude-4.5-sonnet';
+        } catch {
+            return 'anthropic--claude-4.5-sonnet';
+        }
+    });
+
+    // Hyperspace Proxy state
+    const [hyperspaceProxyUrl, setHyperspaceProxyUrl] = useState('http://localhost:6655');
+    const [hyperspaceApiKey, setHyperspaceApiKey] = useState('');
+    const [hyperspaceModel, setHyperspaceModel] = useState('anthropic--claude-4.5-sonnet');
+    const [hyperspaceAlwaysThinking, setHyperspaceAlwaysThinking] = useState(false);
 
     // Custom API key test state
     const [customApiKeyTestStatus, setCustomApiKeyTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [customApiKeyTestMessage, setCustomApiKeyTestMessage] = useState('');
+
+    // SAP AI Core test state
+    const [sapAiCoreTestStatus, setSapAiCoreTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+    const [sapAiCoreTestMessage, setSapAiCoreTestMessage] = useState('');
+    const [sapAiCoreModels, setSapAiCoreModels] = useState<Array<{ id: string; name: string }>>([]);
+
+    // Hyperspace Proxy test state
+    const [hyperspaceTestStatus, setHyperspaceTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+    const [hyperspaceTestMessage, setHyperspaceTestMessage] = useState('');
+    const [hyperspaceModels, setHyperspaceModels] = useState<Array<{ id: string; name: string }>>([]);
+
+    // Hyperspace Proxy control state
+    const [hyperspaceProxyStatus, setHyperspaceProxyStatus] = useState<{
+        proxyRunning: boolean;
+        haiInstalled: boolean;
+        loading: boolean;
+    }>({ proxyRunning: false, haiInstalled: false, loading: false });
 
     // Backend state
     const [backend, setBackend] = useState<BackendType>('claude-code');
@@ -156,6 +238,65 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     }, [expandedPanels.mcp]);
 
+    // Fetch Hyperspace proxy status when API mode is hyperspace-proxy
+    useEffect(() => {
+        if (apiMode === 'hyperspace-proxy') {
+            fetchHyperspaceProxyStatus();
+        }
+    }, [apiMode]);
+
+    // Auto-restore SAP AI Core credentials from localStorage to backend on mount
+    useEffect(() => {
+        const restoreSapAiCoreCredentials = async () => {
+            // Only restore if we have credentials in localStorage and settings menu is open
+            if (!isOpen) return;
+
+            const hasCredentials = sapAiCoreClientId && sapAiCoreClientSecret &&
+                                  sapAiCoreAuthUrl && sapAiCoreBaseUrl;
+
+            if (hasCredentials) {
+                try {
+                    // Check if backend already has the config
+                    const checkResponse = await fetch(`${getApiBaseUrl()}/api/config`);
+                    if (checkResponse.ok) {
+                        const config = await checkResponse.json();
+
+                        // Only restore if backend doesn't have SAP AI Core config or it's different
+                        const needsRestore = !config.sapAiCore ||
+                                            config.sapAiCore.clientId !== sapAiCoreClientId ||
+                                            config.sapAiCore.clientSecret !== sapAiCoreClientSecret;
+
+                        if (needsRestore) {
+                            console.log('[SettingsMenu] Restoring SAP AI Core credentials from localStorage to backend');
+                            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    sapAiCore: {
+                                        clientId: sapAiCoreClientId,
+                                        clientSecret: sapAiCoreClientSecret,
+                                        authUrl: sapAiCoreAuthUrl,
+                                        baseUrl: sapAiCoreBaseUrl,
+                                        resourceGroup: sapAiCoreResourceGroup,
+                                        model: sapAiCoreModel
+                                    }
+                                })
+                            });
+
+                            if (response.ok) {
+                                console.log('[SettingsMenu] SAP AI Core credentials restored successfully');
+                            }
+                        }
+                    }
+                } catch (error) {
+                    console.warn('[SettingsMenu] Failed to restore SAP AI Core credentials:', error);
+                }
+            }
+        };
+
+        restoreSapAiCoreCredentials();
+    }, [isOpen, sapAiCoreClientId, sapAiCoreClientSecret, sapAiCoreAuthUrl, sapAiCoreBaseUrl, sapAiCoreResourceGroup, sapAiCoreModel]);
+
     const fetchConfig = async () => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`);
@@ -170,6 +311,25 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 setCustomAnthropicApiKey(config.customAnthropicApiKey || '');
                 setBackend(config.backend || 'claude-code');
                 setUseLearnings(config.useLearnings || false);
+
+                // Load SAP AI Core config
+                if (config.sapAiCore) {
+                    setSapAiCoreClientId(config.sapAiCore.clientId || '');
+                    setSapAiCoreClientSecret(config.sapAiCore.clientSecret || '');
+                    setSapAiCoreAuthUrl(config.sapAiCore.authUrl || '');
+                    setSapAiCoreBaseUrl(config.sapAiCore.baseUrl || '');
+                    setSapAiCoreResourceGroup(config.sapAiCore.resourceGroup || 'default');
+                    setSapAiCoreModel(config.sapAiCore.model || 'anthropic--claude-4.5-sonnet');
+                }
+
+                // Load Hyperspace Proxy config
+                if (config.hyperspaceProxy) {
+                    setHyperspaceProxyUrl(config.hyperspaceProxy.proxyUrl || 'http://localhost:6655');
+                    setHyperspaceApiKey(config.hyperspaceProxy.apiKey || '');
+                    setHyperspaceModel(config.hyperspaceProxy.model || 'anthropic--claude-4.5-sonnet');
+                    setHyperspaceAlwaysThinking(config.hyperspaceProxy.alwaysThinkingEnabled || false);
+                }
+
                 if (config.claudeCodeSwitches) {
                     setCliSwitches({
                         verbose: config.claudeCodeSwitches.verbose || false,
@@ -180,6 +340,15 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                         disallowedTools: config.claudeCodeSwitches.disallowedTools || '',
                         appendSystemPrompt: config.claudeCodeSwitches.appendSystemPrompt || ''
                     });
+                }
+            }
+
+            // Fetch available plugins
+            const pluginsResponse = await fetch(`${getApiBaseUrl()}/api/plugins`);
+            if (pluginsResponse.ok) {
+                const pluginsData = await pluginsResponse.json();
+                if (pluginsData.success && pluginsData.plugins) {
+                    setPlugins(pluginsData.plugins);
                 }
             }
         } catch (error) {
@@ -639,8 +808,319 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     };
 
+    const saveSapAiCoreConfig = async () => {
+        try {
+            // Save to backend
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sapAiCore: {
+                        clientId: sapAiCoreClientId,
+                        clientSecret: sapAiCoreClientSecret,
+                        authUrl: sapAiCoreAuthUrl,
+                        baseUrl: sapAiCoreBaseUrl,
+                        resourceGroup: sapAiCoreResourceGroup,
+                        model: sapAiCoreModel
+                    }
+                })
+            });
+
+            if (response.ok) {
+                // Save to localStorage for persistence across server restarts
+                try {
+                    localStorage.setItem('claudia_sap_ai_core_client_id', sapAiCoreClientId);
+                    localStorage.setItem('claudia_sap_ai_core_client_secret', sapAiCoreClientSecret);
+                    localStorage.setItem('claudia_sap_ai_core_auth_url', sapAiCoreAuthUrl);
+                    localStorage.setItem('claudia_sap_ai_core_base_url', sapAiCoreBaseUrl);
+                    localStorage.setItem('claudia_sap_ai_core_resource_group', sapAiCoreResourceGroup);
+                    localStorage.setItem('claudia_sap_ai_core_model', sapAiCoreModel);
+                } catch (storageError) {
+                    console.warn('Failed to save SAP AI Core config to localStorage:', storageError);
+                }
+                showWarning('SAP AI Core configuration saved successfully');
+            } else {
+                showWarning('Failed to save SAP AI Core configuration');
+            }
+        } catch (error) {
+            showWarning('Failed to save SAP AI Core configuration');
+        }
+    };
+
+    const saveHyperspaceProxyConfig = async () => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    hyperspaceProxy: {
+                        proxyUrl: hyperspaceProxyUrl,
+                        apiKey: hyperspaceApiKey,
+                        model: hyperspaceModel,
+                        alwaysThinkingEnabled: hyperspaceAlwaysThinking
+                    }
+                })
+            });
+
+            if (response.ok) {
+                showWarning('Hyperspace Proxy configuration saved successfully');
+            } else {
+                showWarning('Failed to save Hyperspace Proxy configuration');
+            }
+        } catch (error) {
+            showWarning('Failed to save Hyperspace Proxy configuration');
+        }
+    };
+
+    const testSapAiCoreConnection = async () => {
+        if (!sapAiCoreClientId || !sapAiCoreClientSecret || !sapAiCoreAuthUrl || !sapAiCoreBaseUrl) {
+            setSapAiCoreTestStatus('error');
+            setSapAiCoreTestMessage('Please fill in all required fields');
+            return;
+        }
+
+        setSapAiCoreTestStatus('testing');
+        setSapAiCoreTestMessage('Testing connection...');
+
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/sap-ai-core/test`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    clientId: sapAiCoreClientId,
+                    clientSecret: sapAiCoreClientSecret,
+                    authUrl: sapAiCoreAuthUrl,
+                    baseUrl: sapAiCoreBaseUrl,
+                    resourceGroup: sapAiCoreResourceGroup
+                })
+            });
+
+            const result = await response.json();
+
+            if (response.ok && result.success) {
+                setSapAiCoreTestStatus('success');
+                setSapAiCoreTestMessage('Connection successful!');
+            } else {
+                setSapAiCoreTestStatus('error');
+                setSapAiCoreTestMessage(result.error || 'Connection failed');
+            }
+        } catch (error) {
+            setSapAiCoreTestStatus('error');
+            setSapAiCoreTestMessage('Failed to test connection');
+        }
+    };
+
+    const refreshSapAiCoreModels = async () => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/sap-ai-core/models`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+
+            const result = await response.json();
+
+            if (response.ok && result.success && result.models) {
+                setSapAiCoreModels(result.models);
+                showWarning(`Refreshed: ${result.models.length} models available`);
+            } else {
+                showWarning('Failed to fetch models from SAP AI Core plugin');
+            }
+        } catch (error) {
+            showWarning('Failed to fetch models from SAP AI Core plugin');
+        }
+    };
+
+    const testHyperspaceConnection = async () => {
+        if (!hyperspaceProxyUrl || !hyperspaceApiKey) {
+            setHyperspaceTestStatus('error');
+            setHyperspaceTestMessage('Please fill in Proxy URL and API Key');
+            return;
+        }
+
+        setHyperspaceTestStatus('testing');
+        setHyperspaceTestMessage('Testing connection...');
+
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/hyperspace-proxy/test`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    proxyUrl: hyperspaceProxyUrl,
+                    apiKey: hyperspaceApiKey
+                })
+            });
+
+            const result = await response.json();
+
+            if (response.ok && result.success) {
+                setHyperspaceTestStatus('success');
+                setHyperspaceTestMessage('Connection successful!');
+            } else {
+                setHyperspaceTestStatus('error');
+                setHyperspaceTestMessage(result.error || 'Connection failed');
+            }
+        } catch (error) {
+            setHyperspaceTestStatus('error');
+            setHyperspaceTestMessage('Failed to test connection');
+        }
+    };
+
+    const refreshHyperspaceModels = async () => {
+        if (!hyperspaceProxyUrl || !hyperspaceApiKey) {
+            showWarning('Please fill in Proxy URL and API Key first');
+            return;
+        }
+
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/hyperspace-proxy/models`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    proxyUrl: hyperspaceProxyUrl,
+                    apiKey: hyperspaceApiKey
+                })
+            });
+
+            const result = await response.json();
+
+            if (response.ok && result.success && result.models) {
+                setHyperspaceModels(result.models);
+                showWarning(`Refreshed: ${result.models.length} models available`);
+            } else {
+                showWarning('Failed to fetch models');
+            }
+        } catch (error) {
+            showWarning('Failed to fetch models');
+        }
+    };
+
+    const fetchHyperspaceProxyStatus = async () => {
+        try {
+            setHyperspaceProxyStatus(prev => ({ ...prev, loading: true }));
+            const response = await fetch(`${getApiBaseUrl()}/plugins/hai-proxy-plugin/status`);
+            const result = await response.json();
+
+            if (response.ok) {
+                setHyperspaceProxyStatus({
+                    proxyRunning: result.proxyRunning || false,
+                    haiInstalled: result.haiInstalled || false,
+                    loading: false
+                });
+
+                // Update API key if proxy is running and we have one
+                if (result.apiKey && result.proxyRunning) {
+                    setHyperspaceApiKey(result.apiKey);
+                }
+            } else {
+                setHyperspaceProxyStatus({ proxyRunning: false, haiInstalled: false, loading: false });
+            }
+        } catch (error) {
+            setHyperspaceProxyStatus({ proxyRunning: false, haiInstalled: false, loading: false });
+        }
+    };
+
+    const startHyperspaceProxy = async () => {
+        try {
+            setHyperspaceProxyStatus(prev => ({ ...prev, loading: true }));
+            showWarning('Starting HAI proxy...');
+
+            const response = await fetch(`${getApiBaseUrl()}/plugins/hai-proxy-plugin/start`, {
+                method: 'POST'
+            });
+            const result = await response.json();
+
+            if (response.ok && result.success) {
+                setHyperspaceApiKey(result.apiKey);
+                await fetchHyperspaceProxyStatus();
+                showWarning('HAI proxy started successfully!');
+            } else {
+                setHyperspaceProxyStatus(prev => ({ ...prev, loading: false }));
+                showWarning(`Failed to start proxy: ${result.error || 'Unknown error'}`);
+            }
+        } catch (error) {
+            setHyperspaceProxyStatus(prev => ({ ...prev, loading: false }));
+            showWarning('Failed to start HAI proxy');
+        }
+    };
+
+    const stopHyperspaceProxy = async () => {
+        try {
+            setHyperspaceProxyStatus(prev => ({ ...prev, loading: true }));
+            showWarning('Stopping HAI proxy...');
+
+            const response = await fetch(`${getApiBaseUrl()}/plugins/hai-proxy-plugin/stop`, {
+                method: 'POST'
+            });
+            const result = await response.json();
+
+            if (response.ok && result.success) {
+                await fetchHyperspaceProxyStatus();
+                showWarning('HAI proxy stopped successfully!');
+            } else {
+                setHyperspaceProxyStatus(prev => ({ ...prev, loading: false }));
+                showWarning('Failed to stop HAI proxy');
+            }
+        } catch (error) {
+            setHyperspaceProxyStatus(prev => ({ ...prev, loading: false }));
+            showWarning('Failed to stop HAI proxy');
+        }
+    };
+
     const togglePanel = (panel: string) => {
         setExpandedPanels(prev => ({ ...prev, [panel]: !prev[panel] }));
+    };
+
+    const handlePluginToggle = async (pluginName: string, enabled: boolean) => {
+        try {
+            const endpoint = enabled ? 'enable' : 'disable';
+            const url = `${getApiBaseUrl()}/api/plugins/${pluginName}/${endpoint}`;
+            console.log(`[Plugin Toggle] ${enabled ? 'Enabling' : 'Disabling'} plugin:`, pluginName);
+            console.log(`[Plugin Toggle] Request URL:`, url);
+
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            console.log(`[Plugin Toggle] Response status:`, response.status);
+
+            if (response.ok) {
+                const result = await response.json();
+                console.log(`[Plugin Toggle] Result:`, result);
+
+                // Refresh plugin list
+                const pluginsResponse = await fetch(`${getApiBaseUrl()}/api/plugins`);
+                if (pluginsResponse.ok) {
+                    const pluginsData = await pluginsResponse.json();
+                    if (pluginsData.success && pluginsData.plugins) {
+                        setPlugins(pluginsData.plugins);
+                        console.log(`[Plugin Toggle] Plugin list refreshed, total plugins:`, pluginsData.plugins.length);
+                    }
+                }
+
+                if (result.requiresRestart && !enabled) {
+                    showWarning('Plugin disabled. Restart server to fully unload.');
+                } else {
+                    showWarning(`Plugin ${enabled ? 'enabled' : 'disabled'} successfully!`);
+                }
+            } else {
+                const errorText = await response.text();
+                console.error(`[Plugin Toggle] Error response:`, errorText);
+                let errorMsg = 'Unknown error';
+                try {
+                    const errorJson = JSON.parse(errorText);
+                    errorMsg = errorJson.error || errorJson.message || errorText;
+                } catch {
+                    errorMsg = errorText;
+                }
+                showWarning(`Failed to ${enabled ? 'enable' : 'disable'} plugin: ${errorMsg}`);
+            }
+        } catch (error) {
+            console.error('[Plugin Toggle] Exception:', error);
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            showWarning(`Failed to toggle plugin: ${errorMsg}`);
+        }
     };
 
     const handleAddServer = async () => {
@@ -907,6 +1387,26 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                         </span>
                                     </div>
                                 </label>
+
+                                {/* Plugin-based API modes */}
+                                {plugins.filter(p => p.type === 'ai-provider' && p.enabled).map(plugin => (
+                                    <label key={plugin.name} className={`api-mode-option ${apiMode === plugin.apiMode ? 'selected' : ''}`}>
+                                        <input
+                                            type="radio"
+                                            name="apiMode"
+                                            value={plugin.apiMode}
+                                            checked={apiMode === plugin.apiMode}
+                                            onChange={() => handleApiModeChange(plugin.apiMode as ApiMode)}
+                                        />
+                                        <div className="api-mode-content">
+                                            <span className="api-mode-title">{plugin.displayName}</span>
+                                            <span className="api-mode-description">
+                                                {plugin.name === 'sap-ai-core-plugin' && 'Use SAP AI Core with your own credentials'}
+                                                {plugin.name === 'hai-proxy-plugin' && 'Use HAI Proxy for Anthropic Claude models'}
+                                            </span>
+                                        </div>
+                                    </label>
+                                ))}
                             </div>
 
                             {/* Custom Anthropic API Key fields */}
@@ -939,6 +1439,226 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                             disabled={!customAnthropicApiKey || customApiKeyTestStatus === 'testing'}
                                         >
                                             {customApiKeyTestStatus === 'testing' ? 'Testing...' : 'Test API Key'}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* SAP AI Core Plugin fields */}
+                            {apiMode === 'sap-ai-core' && (
+                                <div className="api-mode-fields">
+                                    <div className="aicore-field">
+                                        <label>Client ID</label>
+                                        <input
+                                            type="text"
+                                            value={sapAiCoreClientId}
+                                            onChange={(e) => setSapAiCoreClientId(e.target.value)}
+                                            placeholder="Client ID"
+                                            className="aicore-input"
+                                        />
+                                    </div>
+                                    <div className="aicore-field">
+                                        <label>Client Secret</label>
+                                        <input
+                                            type="password"
+                                            value={sapAiCoreClientSecret}
+                                            onChange={(e) => setSapAiCoreClientSecret(e.target.value)}
+                                            placeholder="Client Secret"
+                                            className="aicore-input"
+                                        />
+                                    </div>
+                                    <div className="aicore-field">
+                                        <label>Auth URL</label>
+                                        <input
+                                            type="text"
+                                            value={sapAiCoreAuthUrl}
+                                            onChange={(e) => setSapAiCoreAuthUrl(e.target.value)}
+                                            placeholder="https://..."
+                                            className="aicore-input"
+                                        />
+                                    </div>
+                                    <div className="aicore-field">
+                                        <label>Base URL</label>
+                                        <input
+                                            type="text"
+                                            value={sapAiCoreBaseUrl}
+                                            onChange={(e) => setSapAiCoreBaseUrl(e.target.value)}
+                                            placeholder="https://..."
+                                            className="aicore-input"
+                                        />
+                                    </div>
+                                    <div className="aicore-field">
+                                        <label>Resource Group</label>
+                                        <input
+                                            type="text"
+                                            value={sapAiCoreResourceGroup}
+                                            onChange={(e) => setSapAiCoreResourceGroup(e.target.value)}
+                                            placeholder="default"
+                                            className="aicore-input"
+                                        />
+                                    </div>
+                                    <div className="aicore-field">
+                                        <label>Model</label>
+                                        <select
+                                            value={sapAiCoreModel}
+                                            onChange={(e) => setSapAiCoreModel(e.target.value)}
+                                            className="aicore-input"
+                                        >
+                                            {sapAiCoreModels.length > 0 ? (
+                                                sapAiCoreModels.map(model => (
+                                                    <option key={model.id} value={model.id}>{model.name}</option>
+                                                ))
+                                            ) : (
+                                                <>
+                                                    <option value="anthropic--claude-4.5-opus">Claude 4.5 Opus</option>
+                                                    <option value="anthropic--claude-opus-4">Claude Opus 4</option>
+                                                    <option value="anthropic--claude-sonnet-4">Claude Sonnet 4</option>
+                                                    <option value="anthropic--claude-4.5-sonnet">Claude 4.5 Sonnet</option>
+                                                    <option value="anthropic--claude-3.7-sonnet">Claude 3.7 Sonnet</option>
+                                                    <option value="anthropic--claude-3.5-sonnet">Claude 3.5 Sonnet</option>
+                                                    <option value="anthropic--claude-3.5-haiku">Claude 3.5 Haiku</option>
+                                                    <option value="anthropic--claude-3-opus">Claude 3 Opus</option>
+                                                </>
+                                            )}
+                                        </select>
+                                    </div>
+
+                                    {sapAiCoreTestStatus !== 'idle' && (
+                                        <div className={`aicore-test-result ${sapAiCoreTestStatus}`}>
+                                            {sapAiCoreTestStatus === 'testing' && <Loader2 size={16} className="spinning" />}
+                                            {sapAiCoreTestStatus === 'success' && <CheckCircle size={16} />}
+                                            {sapAiCoreTestStatus === 'error' && <AlertCircle size={16} />}
+                                            <span>{sapAiCoreTestMessage}</span>
+                                        </div>
+                                    )}
+
+                                    <div className="aicore-buttons">
+                                        <button
+                                            className="aicore-test-btn"
+                                            onClick={testSapAiCoreConnection}
+                                            disabled={sapAiCoreTestStatus === 'testing'}
+                                        >
+                                            {sapAiCoreTestStatus === 'testing' ? 'Testing...' : 'Test Connection'}
+                                        </button>
+                                        <button
+                                            className="aicore-test-btn"
+                                            onClick={refreshSapAiCoreModels}
+                                        >
+                                            Refresh Models
+                                        </button>
+                                        <button
+                                            className="aicore-test-btn"
+                                            onClick={saveSapAiCoreConfig}
+                                        >
+                                            Save Configuration
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* HAI Proxy Plugin fields */}
+                            {apiMode === 'hyperspace-proxy' && (
+                                <div className="api-mode-fields">
+                                    <div className="aicore-field">
+                                        <label>Proxy URL</label>
+                                        <input
+                                            type="text"
+                                            value={hyperspaceProxyUrl}
+                                            onChange={(e) => setHyperspaceProxyUrl(e.target.value)}
+                                            placeholder="http://localhost:6655"
+                                            className="aicore-input"
+                                        />
+                                    </div>
+                                    <div className="aicore-field">
+                                        <label>API Key (ANTHROPIC_AUTH_TOKEN)</label>
+                                        <input
+                                            type="password"
+                                            value={hyperspaceApiKey}
+                                            onChange={(e) => setHyperspaceApiKey(e.target.value)}
+                                            placeholder="API Key"
+                                            className="aicore-input"
+                                        />
+                                    </div>
+                                    <div className="aicore-field">
+                                        <label>Model</label>
+                                        <select
+                                            value={hyperspaceModel}
+                                            onChange={(e) => setHyperspaceModel(e.target.value)}
+                                            className="aicore-input"
+                                        >
+                                            {hyperspaceModels.length > 0 ? (
+                                                hyperspaceModels.map(model => (
+                                                    <option key={model.id} value={model.id}>{model.name}</option>
+                                                ))
+                                            ) : (
+                                                <>
+                                                    <option value="anthropic--claude-4.6-opus">Claude 4.6 Opus</option>
+                                                    <option value="anthropic--claude-4.6-sonnet">Claude 4.6 Sonnet</option>
+                                                    <option value="anthropic--claude-4.5-sonnet">Claude 4.5 Sonnet</option>
+                                                    <option value="anthropic--claude-3.7-sonnet">Claude 3.7 Sonnet</option>
+                                                    <option value="anthropic--claude-3.5-sonnet">Claude 3.5 Sonnet</option>
+                                                    <option value="anthropic--claude-3.5-haiku">Claude 3.5 Haiku</option>
+                                                </>
+                                            )}
+                                        </select>
+                                    </div>
+                                    <div className="aicore-field">
+                                        <label className="checkbox-label">
+                                            <input
+                                                type="checkbox"
+                                                checked={hyperspaceAlwaysThinking}
+                                                onChange={(e) => setHyperspaceAlwaysThinking(e.target.checked)}
+                                            />
+                                            <span>Enable Always Thinking Mode</span>
+                                        </label>
+                                    </div>
+
+                                    {hyperspaceTestStatus !== 'idle' && (
+                                        <div className={`aicore-test-result ${hyperspaceTestStatus}`}>
+                                            {hyperspaceTestStatus === 'testing' && <Loader2 size={16} className="spinning" />}
+                                            {hyperspaceTestStatus === 'success' && <CheckCircle size={16} />}
+                                            {hyperspaceTestStatus === 'error' && <AlertCircle size={16} />}
+                                            <span>{hyperspaceTestMessage}</span>
+                                        </div>
+                                    )}
+
+                                    {/* Proxy Status */}
+                                    <div className={`aicore-test-result ${hyperspaceProxyStatus.proxyRunning ? 'success' : 'idle'}`}>
+                                        <span>
+                                            Proxy Status: {hyperspaceProxyStatus.loading ? 'Checking...' :
+                                                          hyperspaceProxyStatus.proxyRunning ? '🟢 Running' :
+                                                          hyperspaceProxyStatus.haiInstalled ? '🔴 Stopped' : '⚠️ HAI CLI Not Installed'}
+                                        </span>
+                                    </div>
+
+                                    <div className="aicore-buttons">
+                                        <button
+                                            className="aicore-test-btn"
+                                            onClick={testHyperspaceConnection}
+                                            disabled={hyperspaceTestStatus === 'testing'}
+                                        >
+                                            {hyperspaceTestStatus === 'testing' ? 'Testing...' : 'Test Connection'}
+                                        </button>
+                                        <button
+                                            className="aicore-test-btn"
+                                            onClick={refreshHyperspaceModels}
+                                        >
+                                            Refresh Models
+                                        </button>
+                                        <button
+                                            className={`aicore-test-btn ${hyperspaceProxyStatus.proxyRunning ? 'error' : 'success'}`}
+                                            onClick={hyperspaceProxyStatus.proxyRunning ? stopHyperspaceProxy : startHyperspaceProxy}
+                                            disabled={hyperspaceProxyStatus.loading || !hyperspaceProxyStatus.haiInstalled}
+                                        >
+                                            {hyperspaceProxyStatus.loading ? 'Loading...' :
+                                             hyperspaceProxyStatus.proxyRunning ? 'Stop Proxy' :
+                                             hyperspaceProxyStatus.haiInstalled ? 'Start Proxy' : 'HAI Not Installed'}
+                                        </button>
+                                        <button
+                                            className="aicore-test-btn"
+                                            onClick={saveHyperspaceProxyConfig}
+                                        >
+                                            Save Configuration
                                         </button>
                                     </div>
                                 </div>
@@ -1158,6 +1878,55 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                         </div>
                                     )}
                                 </>
+                            )}
+                        </div>
+                    </CollapsiblePanel>
+
+                    <CollapsiblePanel
+                        title="Plugins"
+                        icon={<Zap size={18} />}
+                        isExpanded={expandedPanels.plugins}
+                        onToggle={() => togglePanel('plugins')}
+                    >
+                        <div className="plugins-content">
+                            <div className="plugins-description">
+                                Enable or disable plugins to extend Claudia's functionality.
+                                Plugins are disabled by default for security.
+                            </div>
+                            {plugins.length === 0 ? (
+                                <div className="plugins-empty">
+                                    No plugins available. Add plugins to the backend/plugins/ directory.
+                                </div>
+                            ) : (
+                                <div className="plugins-list">
+                                    {plugins.map((plugin) => (
+                                        <div key={plugin.name} className="plugin-item">
+                                            <div className="plugin-info">
+                                                <div className="plugin-header">
+                                                    <span className="plugin-name">{plugin.displayName}</span>
+                                                    <span className="plugin-version">v{plugin.version}</span>
+                                                    <span className={`plugin-type plugin-type-${plugin.type}`}>
+                                                        {plugin.type}
+                                                    </span>
+                                                </div>
+                                                <span className="plugin-description">
+                                                    {plugin.description}
+                                                </span>
+                                                {plugin.author && (
+                                                    <span className="plugin-author">by {plugin.author}</span>
+                                                )}
+                                            </div>
+                                            <label className="toggle-switch">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={plugin.enabled}
+                                                    onChange={(e) => handlePluginToggle(plugin.name, e.target.checked)}
+                                                />
+                                                <span className="toggle-slider"></span>
+                                            </label>
+                                        </div>
+                                    ))}
+                                </div>
                             )}
                         </div>
                     </CollapsiblePanel>

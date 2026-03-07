@@ -83,7 +83,9 @@ describe('validateConfigUpdate', () => {
     it('should validate apiMode values', () => {
         expect(validateConfigUpdate({ apiMode: 'default' }).valid).toBe(true);
         expect(validateConfigUpdate({ apiMode: 'custom-anthropic' }).valid).toBe(true);
-        expect(validateConfigUpdate({ apiMode: 'hyperspace-proxy' }).valid).toBe(false);
+        expect(validateConfigUpdate({ apiMode: 'hyperspace-proxy' }).valid).toBe(true);
+        expect(validateConfigUpdate({ apiMode: 'sap-ai-core' }).valid).toBe(true);
+        expect(validateConfigUpdate({ apiMode: 'invalid-mode' }).valid).toBe(false);
     });
 
     it('should validate backend enum', () => {
