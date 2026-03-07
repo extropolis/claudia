@@ -59,47 +59,22 @@ trap cleanup EXIT INT TERM
 
 # Wait for frontend dev server to be ready
 echo "⏳ Waiting for frontend dev server (http://localhost:5173)..."
-READY=false
 for i in $(seq 1 30); do
-    echo "   Attempt $i/30..."
-    if curl -s -f http://localhost:5173 > /dev/null 2>&1; then
+    if curl -s http://localhost:5173 > /dev/null 2>&1; then
         echo "✅ Frontend dev server is ready"
-        READY=true
         break
     fi
     if [ $i -eq 30 ]; then
         echo "❌ Frontend dev server did not start within 30 seconds"
-        echo "   Debug: Checking if process is still running..."
-        if kill -0 "$FRONTEND_PID" 2>/dev/null; then
-            echo "   Frontend process is running (PID: $FRONTEND_PID)"
-            echo "   Trying to connect anyway..."
-            READY=true
-        else
-            echo "   Frontend process died unexpectedly"
-            exit 1
-        fi
+        exit 1
     fi
     sleep 1
 done
-
-if [ "$READY" = false ]; then
-    echo "❌ Frontend server check failed"
-    exit 1
-fi
 
 # ============================================
 # Step 5: Launch Electron
 # ============================================
 echo ""
 echo "🚀 Launching Claudia Electron..."
-echo "   NODE_ENV=development"
-echo "   Running: npx electron ."
 echo ""
-
-# Launch Electron and capture exit code
 NODE_ENV=development npx electron .
-ELECTRON_EXIT=$?
-
-echo ""
-echo "Electron exited with code: $ELECTRON_EXIT"
-
