@@ -53,6 +53,9 @@ function App() {
         pushToGithub,
         renameTask,
         renameWorkspace,
+        toggleReference,
+        addCustomReference,
+        removeReference,
         requestRecentWorkspaces,
         clearRecentWorkspace,
         wsRef
@@ -452,6 +455,9 @@ function App() {
                                 onContinueArchivedTask={continueArchivedTask}
                                 onRenameTask={renameTask}
                                 onRenameWorkspace={renameWorkspace}
+                                onToggleReference={toggleReference}
+                                onAddCustomReference={addCustomReference}
+                                onRemoveReference={removeReference}
                             />
                         </aside>
                     )
@@ -483,6 +489,9 @@ function App() {
                                 onContinueArchivedTask={continueArchivedTask}
                                 onRenameTask={renameTask}
                                 onRenameWorkspace={renameWorkspace}
+                                onToggleReference={toggleReference}
+                                onAddCustomReference={addCustomReference}
+                                onRemoveReference={removeReference}
                             />
                         </aside>
 

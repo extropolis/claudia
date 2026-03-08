@@ -3,7 +3,7 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
     Loader2, Square, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, FolderPlus
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
@@ -300,6 +300,11 @@ interface WorkspaceSectionProps {
     // Rename handlers
     onRenameTask?: (taskId: string, displayName: string) => void;
     onRenameWorkspace?: (workspaceId: string, displayName: string) => void;
+    // Reference handlers
+    allWorkspaces: Workspace[];
+    onToggleReference?: (workspaceId: string, referencePath: string) => void;
+    onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
+    onRemoveReference?: (workspaceId: string, referenceId: string) => void;
 }
 
 function WorkspaceSection({
@@ -330,10 +335,15 @@ function WorkspaceSection({
     onDragEnd,
     onReorderTasks,
     onRenameTask,
-    onRenameWorkspace
+    onRenameWorkspace,
+    allWorkspaces,
+    onToggleReference,
+    onAddCustomReference,
+    onRemoveReference
 }: WorkspaceSectionProps) {
     const [inputValue, setInputValue] = useState('');
     const [isEditingWorkspaceName, setIsEditingWorkspaceName] = useState(false);
+    const [showReferencesSubmenu, setShowReferencesSubmenu] = useState(false);
     const [workspaceEditValue, setWorkspaceEditValue] = useState('');
     const workspaceEditRef = useRef<HTMLInputElement>(null);
 
@@ -678,6 +688,15 @@ function WorkspaceSection({
                     {tasks.length > 0 && (
                         <span className="workspace-task-count">{tasks.length}</span>
                     )}
+                    {workspace.references && workspace.references.length > 0 && (
+                        <span
+                            className="workspace-ref-indicator"
+                            title={`References: ${workspace.references.map(r => r.name).join(', ')}`}
+                        >
+                            <Link2 size={11} />
+                            <span className="ref-count">{workspace.references.length}</span>
+                        </span>
+                    )}
                 </div>
                 <div className="workspace-menu-container">
                     <button
@@ -759,6 +778,82 @@ function WorkspaceSection({
                                 <FileText size={14} />
                                 <span>System Prompt</span>
                             </button>
+                            <div
+                                className="workspace-dropdown-item has-submenu"
+                                onMouseEnter={() => setShowReferencesSubmenu(true)}
+                                onMouseLeave={() => setShowReferencesSubmenu(false)}
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <Link2 size={14} />
+                                <span>References</span>
+                                <ChevronRight size={12} className="submenu-arrow" />
+                                {showReferencesSubmenu && (
+                                    <div className="workspace-submenu" onClick={(e) => e.stopPropagation()}>
+                                        {allWorkspaces.filter(w => w.id !== workspace.id).length > 0 && (
+                                            <>
+                                                {allWorkspaces.filter(w => w.id !== workspace.id).map(w => {
+                                                    const isReferenced = workspace.references?.some(r => r.path === w.id) || false;
+                                                    return (
+                                                        <button
+                                                            key={w.id}
+                                                            className={`workspace-dropdown-item reference-item ${isReferenced ? 'active' : ''}`}
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                onToggleReference?.(workspace.id, w.id);
+                                                            }}
+                                                        >
+                                                            <span className="reference-checkbox">
+                                                                {isReferenced ? <Check size={12} /> : <span className="checkbox-empty" />}
+                                                            </span>
+                                                            <span className="reference-name">{w.displayName || w.name}</span>
+                                                        </button>
+                                                    );
+                                                })}
+                                            </>
+                                        )}
+                                        {/* Custom (non-workspace) references */}
+                                        {workspace.references?.filter(r => !allWorkspaces.some(w => w.id === r.path)).map(ref => (
+                                            <div key={ref.id} className="workspace-dropdown-item reference-item custom-ref">
+                                                <FolderOpen size={12} />
+                                                <span className="reference-name" title={ref.path}>{ref.name}</span>
+                                                <button
+                                                    className="reference-remove-btn"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        onRemoveReference?.(workspace.id, ref.id);
+                                                    }}
+                                                    title="Remove reference"
+                                                >
+                                                    <X size={10} />
+                                                </button>
+                                            </div>
+                                        ))}
+                                        {(allWorkspaces.filter(w => w.id !== workspace.id).length > 0 ||
+                                          workspace.references?.filter(r => !allWorkspaces.some(w => w.id === r.path)).length) && (
+                                            <div className="workspace-dropdown-divider" />
+                                        )}
+                                        <button
+                                            className="workspace-dropdown-item"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                const path = window.prompt('Enter the full path to the reference folder:');
+                                                if (path?.trim()) {
+                                                    onAddCustomReference?.(workspace.id, path.trim());
+                                                }
+                                            }}
+                                        >
+                                            <FolderPlus size={14} />
+                                            <span>Add Custom Folder...</span>
+                                        </button>
+                                        {allWorkspaces.filter(w => w.id !== workspace.id).length === 0 &&
+                                         !workspace.references?.length && (
+                                            <div className="workspace-dropdown-item disabled">
+                                                <span className="reference-empty-hint">No other workspaces available</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
                             <button
                                 className="workspace-dropdown-item"
                                 onClick={(e) => {
@@ -991,6 +1086,9 @@ interface WorkspacePanelProps {
     onContinueArchivedTask?: (taskId: string) => void;
     onRenameTask?: (taskId: string, displayName: string) => void;
     onRenameWorkspace?: (workspaceId: string, displayName: string) => void;
+    onToggleReference?: (workspaceId: string, referencePath: string) => void;
+    onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
+    onRemoveReference?: (workspaceId: string, referenceId: string) => void;
 }
 
 export function WorkspacePanel({
@@ -1011,7 +1109,10 @@ export function WorkspacePanel({
     onDeleteArchivedTask,
     onContinueArchivedTask,
     onRenameTask,
-    onRenameWorkspace
+    onRenameWorkspace,
+    onToggleReference,
+    onAddCustomReference,
+    onRemoveReference
 }: WorkspacePanelProps) {
     const {
         tasks,
@@ -1213,6 +1314,10 @@ export function WorkspacePanel({
                             onReorderTasks={(fromIndex, toIndex) => reorderTasks(workspace.id, fromIndex, toIndex)}
                             onRenameTask={onRenameTask}
                             onRenameWorkspace={onRenameWorkspace}
+                            allWorkspaces={workspaces}
+                            onToggleReference={onToggleReference}
+                            onAddCustomReference={onAddCustomReference}
+                            onRemoveReference={onRemoveReference}
                         />
                     ))
                 )}
