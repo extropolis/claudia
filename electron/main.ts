@@ -64,7 +64,7 @@ const originalPath = process.env.PATH || '';
 process.env.PATH = [...extraPaths, originalPath].join(sep);
 console.log(`[Main] Original PATH length: ${originalPath.length}, extra paths: ${extraPaths.join(', ')}`);
 
-// Set the app name for macOS menu
+// Set the app name for menu
 app.setName('Claudia');
 
 // Build application menu with standard Edit shortcuts (Cut/Copy/Paste/SelectAll).
@@ -118,8 +118,14 @@ async function createWindow(backendUrl: string): Promise<void> {
         },
         title: 'Claudia',
         backgroundColor: '#1a1a1a',
-        show: false // Don't show until ready
+        show: true
     });
+
+    if (process.platform === 'darwin' && app.dock) {
+        app.dock.show();
+    }
+    mainWindow.show();
+    mainWindow.focus();
 
     // Pass backend URL as query parameter so it's available immediately on page load
     const urlParam = `backendUrl=${encodeURIComponent(backendUrl)}`;
@@ -128,7 +134,6 @@ async function createWindow(backendUrl: string): Promise<void> {
     if (isDev) {
         // In development, load from Vite dev server
         await mainWindow.loadURL(`http://localhost:5173?${urlParam}`);
-        mainWindow.webContents.openDevTools();
     } else {
         // In production, load from built files
         // When packaged, __dirname is /dist-electron, so we go up one level
@@ -137,10 +142,13 @@ async function createWindow(backendUrl: string): Promise<void> {
         await mainWindow.loadURL(`file://${indexPath}?${urlParam}`);
     }
 
-    // Show window when ready
+    // On macOS the window can be pushed behind other apps after loadURL;
+    // ready-to-show fires once the page is rendered, so re-raise it here.
     mainWindow.once('ready-to-show', () => {
-        mainWindow?.show();
-        // Flush buffered backend logs to DevTools console
+        if (mainWindow) {
+            mainWindow.show();
+            mainWindow.moveTop();
+        }
         setTimeout(() => (globalThis as any).__flushLogBuffer?.(), 500);
     });
 
