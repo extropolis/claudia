@@ -159,6 +159,7 @@ interface InternalTask extends Task {
     continuationSent?: boolean; // True if continuation prompt has been sent
     consecutiveOutputChanges?: number; // Count of consecutive polls with output changes (for idle→busy debouncing)
     inactiveOutputLogged?: boolean; // True if we've already logged the "dropping output" message for this inactive state
+    lastRefKey?: string; // Tracks which workspace references were last injected (sorted ref IDs)
 }
 
 /**

@@ -742,7 +742,12 @@ export async function createApp(basePath?: string) {
 
                         // Pass initial dimensions if provided
                         try {
-                            await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows);
+                            const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows);
+                            // Track which references were injected so we can detect changes on follow-ups
+                            const internalTask = taskSpawner.getTask(newTask.id);
+                            if (internalTask) {
+                                internalTask.lastRefKey = validRefs.map(r => r.id).sort().join(',');
+                            }
                         } catch (err) {
                             const errorMessage = err instanceof Error ? err.message : String(err);
                             logger.error('Failed to create task', { error: errorMessage });
@@ -781,10 +786,41 @@ export async function createApp(basePath?: string) {
                         const { taskId, input } = payload as { taskId?: string; input?: string };
                         if (!taskId || !input) break;
                         // Filter out focus events (ESC [ I and ESC [ O) that confuse Claude's TUI
-                        const filteredInput = input
+                        let filteredInput = input
                             .replace(/\x1b\[I/g, '')  // Focus in
                             .replace(/\x1b\[O/g, ''); // Focus out
                         if (filteredInput) {
+                            // Check if workspace references changed since last injection
+                            // If so, prepend updated reference context to the user's message
+                            const inputTask = taskSpawner.getTask(taskId);
+                            if (inputTask) {
+                                const endsWithEnter = filteredInput.endsWith('\r') || filteredInput.endsWith('\n');
+                                const hasMessageContent = filteredInput.length > 1 && endsWithEnter;
+                                if (hasMessageContent && (inputTask.state === 'idle' || inputTask.state === 'waiting_input')) {
+                                    const currentRefs = workspaceStore.getReferences(inputTask.workspaceId);
+                                    const currentValidRefs = currentRefs.filter(r => existsSync(r.path));
+                                    const currentRefKey = currentValidRefs.map(r => r.id).sort().join(',');
+
+                                    if (currentRefKey !== (inputTask.lastRefKey ?? '')) {
+                                        // References changed - prepend context to the user's message
+                                        if (currentValidRefs.length > 0) {
+                                            const refList = currentValidRefs.map(r => {
+                                                let s = `"${r.name}" (${r.path})`;
+                                                if (r.description) s += ` - ${r.description}`;
+                                                return s;
+                                            }).join('; ');
+                                            const refPrefix = `[CONTEXT UPDATE: Workspace references updated. Available reference directories (read files using absolute paths): ${refList}] `;
+                                            const msgContent = filteredInput.slice(0, -1);
+                                            const enterKey = filteredInput.slice(-1);
+                                            filteredInput = refPrefix + msgContent + enterKey;
+                                            logger.info('Injected updated references into follow-up message', { taskId, refCount: currentValidRefs.length });
+                                        } else {
+                                            logger.info('References cleared for task', { taskId });
+                                        }
+                                        inputTask.lastRefKey = currentRefKey;
+                                    }
+                                }
+                            }
                             taskSpawner.writeToTask(taskId, filteredInput);
                         }
                         break;
