@@ -139,8 +139,6 @@ export function sendBrowserNotification(
     
     try {
         const notification = new Notification(title, {
-            icon: '/claudia-icon.png',
-            badge: '/claudia-icon.png',
             ...options,
         });
         
@@ -424,16 +422,16 @@ export function playTestSound(): void {
  */
 export function sendTaskCompletionNotification(options: {
     taskName?: string;
-    lastOutput?: string;
+    lastMessage?: string;
     taskId?: string;
 }): boolean {
-    const { taskName, lastOutput, taskId } = options;
+    const { taskName, lastMessage, taskId } = options;
     const title = taskName
         ? taskName.length > 60 ? taskName.substring(0, 60) + '...' : taskName
         : 'Task Complete';
 
-    const body = lastOutput
-        ? lastOutput.length > 150 ? lastOutput.substring(lastOutput.length - 150) : lastOutput
+    const body = lastMessage
+        ? lastMessage.length > 200 ? lastMessage.substring(0, 200) + '...' : lastMessage
         : 'Task finished executing';
 
     const notification = sendBrowserNotification(title, {

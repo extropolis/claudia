@@ -47,8 +47,6 @@ export function useWebSocket() {
     const reconnectAttempts = useRef<number>(0);
     /** Track previous task states to detect busy→idle transitions */
     const taskStatesRef = useRef<Map<string, string>>(new Map());
-    /** Track recent output per task for notification body text */
-    const taskOutputRef = useRef<Map<string, string>>(new Map());
     /** Flag to skip sound on initial load */
     const initializedRef = useRef<boolean>(false);
 
@@ -125,16 +123,6 @@ export function useWebSocket() {
                     console.log('[WebSocket] Received:', message.type);
                 }
 
-                // Buffer recent output per task for notification body text
-                if (message.type === 'task:output') {
-                    const { taskId, data } = message.payload as { taskId: string; data: string };
-                    // Strip ANSI escape codes and keep last 200 chars
-                    const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][^\n]|\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, '');
-                    const existing = taskOutputRef.current.get(taskId) || '';
-                    const combined = existing + clean;
-                    taskOutputRef.current.set(taskId, combined.length > 500 ? combined.slice(-500) : combined);
-                }
-
                 switch (message.type) {
                     case 'init': {
                         const payload = message.payload as {
@@ -204,7 +192,6 @@ export function useWebSocket() {
                         const payload = message.payload as { taskId: string };
                         console.log(`[WebSocket] Task destroyed: ${payload.taskId}`);
                         taskStatesRef.current.delete(payload.taskId);
-                        taskOutputRef.current.delete(payload.taskId);
                         deleteTask(payload.taskId);
                         break;
                     }
@@ -269,8 +256,8 @@ export function useWebSocket() {
 
                         // Send browser notification for waiting input
                         {
-                            const { browserNotificationsEnabled, notifyOnWaitingInput, tasks } = useTaskStore.getState();
-                            if (browserNotificationsEnabled && notifyOnWaitingInput) {
+                            const { browserNotificationsEnabled, notifyOnWaitingInput, tasks, selectedTaskId: currentTaskId } = useTaskStore.getState();
+                            if (browserNotificationsEnabled && notifyOnWaitingInput && currentTaskId !== payload.taskId) {
                                 const task = tasks.get(payload.taskId);
                                 sendTaskWaitingInputNotification({
                                     taskName: task?.displayName || task?.prompt,
@@ -321,14 +308,25 @@ export function useWebSocket() {
                             // Play completion sound + browser notification on busy→idle transition
                             if (payload.task.state === 'idle' && previousState === 'busy' && initializedRef.current) {
                                 playTaskCompletionSound();
-                                const { browserNotificationsEnabled, notifyOnCompletion } = useTaskStore.getState();
-                                if (browserNotificationsEnabled && notifyOnCompletion) {
-                                    const lastOutput = taskOutputRef.current.get(payload.task.id) || '';
-                                    sendTaskCompletionNotification({
-                                        taskName: payload.task.displayName || payload.task.prompt,
-                                        lastOutput: lastOutput.trim(),
-                                        taskId: payload.task.id,
-                                    });
+                                const { browserNotificationsEnabled, notifyOnCompletion, selectedTaskId: currentTaskId } = useTaskStore.getState();
+                                if (browserNotificationsEnabled && notifyOnCompletion && currentTaskId !== payload.task.id) {
+                                    // Fetch last Claude message from conversation API for the notification body
+                                    const taskName = payload.task.displayName || payload.task.prompt;
+                                    const taskId = payload.task.id;
+                                    fetch(`${API_URL}/api/tasks/${taskId}/conversation`)
+                                        .then(res => res.ok ? res.json() : null)
+                                        .then(data => {
+                                            const messages = data?.messages || [];
+                                            const lastAssistant = [...messages].reverse().find((m: { role: string }) => m.role === 'assistant');
+                                            sendTaskCompletionNotification({
+                                                taskName,
+                                                lastMessage: lastAssistant?.content,
+                                                taskId,
+                                            });
+                                        })
+                                        .catch(() => {
+                                            sendTaskCompletionNotification({ taskName, taskId });
+                                        });
                                 }
                             }
 
