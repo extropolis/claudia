@@ -533,6 +533,27 @@
 
 .ci-check-link:hover { color: var(--accent-secondary, #00d4ff); }
 
+.ci-check-item.clickable {
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
+}
+
+.ci-check-item.clickable:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.ci-check-link-icon {
+    color: var(--text-muted, #6e7681);
+    flex-shrink: 0;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+
+.ci-check-item.clickable:hover .ci-check-link-icon {
+    opacity: 1;
+}
+
 .ci-success { color: #3fb950; }
 .ci-failure { color: #f85149; }
 .ci-running { color: #d29922; }
@@ -540,6 +561,344 @@
 .ci-skipped { color: #6e7681; }
 .ci-cancelled { color: #f85149; opacity: 0.7; }
 .ci-neutral { color: #8b949e; }
+
+/* ===== PR Sections ===== */
+.ci-section {
+    border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+}
+
+.ci-section-header-row {
+    display: flex;
+    align-items: center;
+}
+
+.ci-section-header-row .ci-section-header {
+    flex: 1;
+}
+
+.ci-edit-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    color: var(--text-muted, #6e7681);
+    cursor: pointer;
+    padding: 4px 8px;
+    transition: color 0.15s;
+    opacity: 0;
+}
+
+.ci-section-header-row:hover .ci-edit-btn {
+    opacity: 1;
+}
+
+.ci-edit-btn:hover {
+    color: var(--accent-secondary, #00d4ff);
+}
+
+.ci-section-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 7px 10px;
+    background: rgba(255, 255, 255, 0.02);
+    border: none;
+    color: var(--text-secondary, #8b949e);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    transition: background 0.1s, color 0.1s;
+}
+
+.ci-section-header:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-primary, #e6edf3);
+}
+
+.ci-section-count {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 0 5px;
+    border-radius: 8px;
+    background: rgba(139, 148, 158, 0.15);
+    color: var(--text-muted, #6e7681);
+    margin-left: auto;
+    line-height: 16px;
+}
+
+.ci-section-content {
+    padding: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    resize: vertical;
+    min-height: 40px;
+    max-height: 60vh;
+    position: relative;
+}
+
+/* Style the native resize handle to match theme */
+.ci-section-content::-webkit-resizer {
+    background: linear-gradient(135deg, transparent 40%, rgba(139, 148, 158, 0.3) 40%, rgba(139, 148, 158, 0.3) 45%, transparent 45%, transparent 60%, rgba(139, 148, 158, 0.3) 60%, rgba(139, 148, 158, 0.3) 65%, transparent 65%, transparent 80%, rgba(139, 148, 158, 0.3) 80%, rgba(139, 148, 158, 0.3) 85%, transparent 85%);
+    border-radius: 0 0 4px 0;
+}
+
+.ci-section-checks .ci-check-item {
+    border-bottom: none;
+}
+
+.ci-pr-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary, #e6edf3);
+    padding: 8px 10px 4px;
+    line-height: 1.4;
+}
+
+.ci-pr-body {
+    font-size: 12px;
+    color: var(--text-secondary, #8b949e);
+    padding: 4px 10px 10px;
+    line-height: 1.5;
+    word-break: break-word;
+    overflow-wrap: break-word;
+}
+
+.ci-pr-body-empty {
+    font-style: italic;
+    color: var(--text-muted, #6e7681);
+    padding: 8px 10px;
+}
+
+/* PR Edit */
+.ci-edit-container {
+    padding: 6px 10px 10px;
+}
+
+.ci-edit-textarea {
+    width: 100%;
+    background: var(--bg-primary, #0d1117);
+    border: 1px solid var(--border-color, #30363d);
+    border-radius: 4px;
+    color: var(--text-primary, #e6edf3);
+    font-size: 12px;
+    font-family: 'SF Mono', monospace;
+    line-height: 1.5;
+    padding: 8px;
+    resize: vertical;
+    min-height: 100px;
+    box-sizing: border-box;
+    transition: border-color 0.15s;
+}
+
+.ci-edit-textarea:focus {
+    outline: none;
+    border-color: var(--accent-secondary, #00d4ff);
+}
+
+.ci-edit-textarea:disabled {
+    opacity: 0.5;
+}
+
+.ci-edit-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+    justify-content: flex-end;
+}
+
+.ci-edit-save,
+.ci-edit-cancel {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 4px 12px;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    transition: all 0.15s;
+}
+
+.ci-edit-save {
+    background: rgba(63, 185, 80, 0.15);
+    color: #3fb950;
+}
+
+.ci-edit-save:hover {
+    background: rgba(63, 185, 80, 0.25);
+}
+
+.ci-edit-save:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.ci-edit-cancel {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-secondary, #8b949e);
+}
+
+.ci-edit-cancel:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary, #e6edf3);
+}
+
+.ci-edit-cancel:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* PR Comments */
+.ci-comment {
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(48, 54, 61, 0.3);
+}
+
+.ci-comment:last-child {
+    border-bottom: none;
+}
+
+.ci-comment-header {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-bottom: 4px;
+    color: var(--text-muted, #6e7681);
+    font-size: 11px;
+}
+
+.ci-comment-author {
+    font-weight: 600;
+    color: var(--text-secondary, #8b949e);
+}
+
+.ci-comment-time {
+    margin-left: auto;
+    font-size: 10px;
+}
+
+.ci-comment-body {
+    font-size: 12px;
+    color: var(--text-primary, #e6edf3);
+    line-height: 1.5;
+    word-break: break-word;
+    overflow-wrap: break-word;
+    overflow-y: auto;
+    padding-left: 16px;
+}
+
+/* Markdown rendering in PR body and comments */
+.ci-markdown {
+    white-space: normal;
+}
+
+.ci-markdown h1,
+.ci-markdown h2,
+.ci-markdown h3,
+.ci-markdown h4 {
+    margin: 8px 0 4px;
+    font-weight: 600;
+    color: var(--text-primary, #e6edf3);
+    line-height: 1.3;
+}
+
+.ci-markdown h1 { font-size: 15px; }
+.ci-markdown h2 { font-size: 13px; }
+.ci-markdown h3 { font-size: 12px; }
+.ci-markdown h4 { font-size: 11px; }
+
+.ci-markdown p {
+    margin: 4px 0;
+}
+
+.ci-markdown ul,
+.ci-markdown ol {
+    margin: 4px 0;
+    padding-left: 18px;
+}
+
+.ci-markdown li {
+    margin: 2px 0;
+}
+
+.ci-markdown code {
+    font-family: 'SF Mono', monospace;
+    font-size: 11px;
+    background: rgba(255, 255, 255, 0.06);
+    padding: 1px 4px;
+    border-radius: 3px;
+    color: var(--accent-secondary, #00d4ff);
+}
+
+.ci-markdown pre {
+    margin: 6px 0;
+    padding: 8px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 4px;
+    overflow-x: auto;
+}
+
+.ci-markdown pre code {
+    background: none;
+    padding: 0;
+    color: var(--text-primary, #e6edf3);
+}
+
+.ci-markdown blockquote {
+    margin: 4px 0;
+    padding: 2px 8px;
+    border-left: 3px solid var(--border-color, #30363d);
+    color: var(--text-secondary, #8b949e);
+}
+
+.ci-markdown a {
+    color: var(--accent-secondary, #00d4ff);
+    text-decoration: none;
+}
+
+.ci-markdown a:hover {
+    text-decoration: underline;
+}
+
+.ci-markdown hr {
+    border: none;
+    border-top: 1px solid rgba(48, 54, 61, 0.5);
+    margin: 8px 0;
+}
+
+.ci-markdown img {
+    max-width: 100%;
+    border-radius: 4px;
+}
+
+.ci-markdown table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 6px 0;
+    font-size: 11px;
+}
+
+.ci-markdown th,
+.ci-markdown td {
+    border: 1px solid rgba(48, 54, 61, 0.5);
+    padding: 4px 8px;
+    text-align: left;
+}
+
+.ci-markdown th {
+    background: rgba(255, 255, 255, 0.04);
+    font-weight: 600;
+}
+
+.ci-markdown input[type="checkbox"] {
+    margin-right: 4px;
+    accent-color: var(--accent-secondary, #00d4ff);
+}
 
 /* ===== ISSUES TAB ===== */
 .fe-repo-name {

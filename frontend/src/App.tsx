@@ -9,6 +9,7 @@ import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
 import { SystemStats } from './components/SystemStats';
 import { MobileAccessModal } from './components/MobileAccessModal';
 import { FileExplorer } from './components/FileExplorer';
+import { ShellTerminalView } from './components/ShellTerminalView';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
 import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2 } from 'lucide-react';
@@ -72,6 +73,10 @@ function App() {
 
     // On mobile, track whether the user is viewing the terminal (screen 2)
     const [mobileShowTerminal, setMobileShowTerminal] = useState(false);
+
+    // Embedded shell terminal state: which workspace has an active shell (null = no shell open)
+    const [activeShellWorkspaceId, setActiveShellWorkspaceId] = useState<string | null>(null);
+    const activeShellWorkspace = activeShellWorkspaceId ? workspaces.find(w => w.id === activeShellWorkspaceId) : undefined;
 
     // Count tasks that have running processes (not disconnected or archived)
     const activeTasks = Array.from(tasks.values()).filter(t =>
@@ -206,7 +211,22 @@ function App() {
         setShowProjectPicker(false);
     };
 
+    const handleOpenShell = useCallback((workspaceId: string) => {
+        // Toggle: if this shell is already open, close it
+        if (activeShellWorkspaceId === workspaceId) {
+            setActiveShellWorkspaceId(null);
+        } else {
+            setActiveShellWorkspaceId(workspaceId);
+        }
+    }, [activeShellWorkspaceId]);
+
+    const handleCloseShell = useCallback(() => {
+        setActiveShellWorkspaceId(null);
+    }, []);
+
     const handleSelectTask = (taskId: string) => {
+        // Clear shell view when selecting a task
+        setActiveShellWorkspaceId(null);
         // Only update local state - TerminalView will send task:select when it mounts
         useTaskStore.getState().selectTask(taskId);
 
@@ -442,6 +462,7 @@ function App() {
                                 onReorderWorkspaces={reorderWorkspaces}
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
+                                onOpenShell={handleOpenShell}
                                 onPushToGithub={pushToGithub}
                                 onSetSystemPrompt={setSystemPrompt}
                                 onCreateTask={createTask}
@@ -473,6 +494,7 @@ function App() {
                                 onReorderWorkspaces={reorderWorkspaces}
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
+                                onOpenShell={handleOpenShell}
                                 onPushToGithub={pushToGithub}
                                 onSetSystemPrompt={setSystemPrompt}
                                 onCreateTask={createTask}
@@ -492,7 +514,15 @@ function App() {
                         />
 
                         <section className="main-panel">
-                            {selectedTask ? (
+                            {activeShellWorkspaceId && activeShellWorkspace ? (
+                                <ShellTerminalView
+                                    key={`shell-${activeShellWorkspaceId}`}
+                                    workspaceId={activeShellWorkspaceId}
+                                    workspaceName={activeShellWorkspace.displayName || activeShellWorkspace.name}
+                                    wsRef={wsRef}
+                                    onClose={handleCloseShell}
+                                />
+                            ) : selectedTask ? (
                                 <TerminalView
                                     key={selectedTask.id}
                                     task={selectedTask}

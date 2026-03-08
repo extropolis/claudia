@@ -1,12 +1,17 @@
 {
   "workspaces": [
     {
-      "id": "C:\\Users\\14255\\Work\\claudia",
-      "name": "C:\\Users\\14255\\Work\\claudia",
-      "createdAt": "2026-03-04T18:57:22.692Z"
+      "id": "/Users/kovtcharov/Work/claudia",
+      "name": "claudia",
+      "createdAt": "2026-03-08T00:22:55.529Z"
+    },
+    {
+      "id": "/Users/kovtcharov/Work/neuralspeaker",
+      "name": "neuralspeaker",
+      "createdAt": "2026-03-08T00:51:43.666Z"
     }
   ],
-  "activeWorkspaceId": "C:\\Users\\14255\\Work\\claudia",
+  "activeWorkspaceId": "/Users/kovtcharov/Work/claudia",
   "recentWorkspaces": [
     {
       "id": "/Users/I850333/projects/experiments/openclaw",
