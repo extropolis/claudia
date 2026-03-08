@@ -346,8 +346,10 @@ function WorkspaceSection({
     const [inputValue, setInputValue] = useState('');
     const [isEditingWorkspaceName, setIsEditingWorkspaceName] = useState(false);
     const [showReferencesSubmenu, setShowReferencesSubmenu] = useState(false);
+    const [submenuPosition, setSubmenuPosition] = useState<{ top: number; left: number } | null>(null);
     const [workspaceEditValue, setWorkspaceEditValue] = useState('');
     const workspaceEditRef = useRef<HTMLInputElement>(null);
+    const referencesMenuItemRef = useRef<HTMLDivElement>(null);
 
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
@@ -798,16 +800,27 @@ function WorkspaceSection({
                                 <span>System Prompt</span>
                             </button>
                             <div
+                                ref={referencesMenuItemRef}
                                 className="workspace-dropdown-item has-submenu"
-                                onMouseEnter={() => setShowReferencesSubmenu(true)}
+                                onMouseEnter={() => {
+                                    setShowReferencesSubmenu(true);
+                                    if (referencesMenuItemRef.current) {
+                                        const rect = referencesMenuItemRef.current.getBoundingClientRect();
+                                        setSubmenuPosition({ top: rect.top - 4, left: rect.right - 4 });
+                                    }
+                                }}
                                 onMouseLeave={() => setShowReferencesSubmenu(false)}
                                 onClick={(e) => e.stopPropagation()}
                             >
                                 <Link2 size={14} />
                                 <span>References</span>
                                 <ChevronRight size={12} className="submenu-arrow" />
-                                {showReferencesSubmenu && (
-                                    <div className="workspace-submenu" onClick={(e) => e.stopPropagation()}>
+                                {showReferencesSubmenu && submenuPosition && (
+                                    <div
+                                        className="workspace-submenu"
+                                        style={{ position: 'fixed', top: submenuPosition.top, left: submenuPosition.left }}
+                                        onClick={(e) => e.stopPropagation()}
+                                    >
                                         {allWorkspaces.filter(w => w.id !== workspace.id).length > 0 && (
                                             <>
                                                 {allWorkspaces.filter(w => w.id !== workspace.id).map(w => {
@@ -853,11 +866,16 @@ function WorkspaceSection({
                                         )}
                                         <button
                                             className="workspace-dropdown-item"
-                                            onClick={(e) => {
+                                            onClick={async (e) => {
                                                 e.stopPropagation();
-                                                const path = window.prompt('Enter the full path to the reference folder:');
-                                                if (path?.trim()) {
-                                                    onAddCustomReference?.(workspace.id, path.trim());
+                                                try {
+                                                    const resp = await fetch(`${getApiBaseUrl()}/api/browse-folder`, { method: 'POST' });
+                                                    const data = await resp.json();
+                                                    if (data.success && data.path) {
+                                                        onAddCustomReference?.(workspace.id, data.path);
+                                                    }
+                                                } catch (err) {
+                                                    console.error('Failed to open folder picker:', err);
                                                 }
                                             }}
                                         >

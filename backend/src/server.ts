@@ -1383,6 +1383,49 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         res.json({ status: 'ok' });
     });
 
+    // Native folder picker dialog
+    app.post('/api/browse-folder', async (_req, res) => {
+        try {
+            const platform = process.platform;
+            let cmd: string;
+            let args: string[];
+
+            if (platform === 'darwin') {
+                cmd = 'osascript';
+                args = ['-e', 'POSIX path of (choose folder with prompt "Select reference folder")'];
+            } else if (platform === 'win32') {
+                cmd = 'powershell';
+                args = ['-Command', `Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Select reference folder'; if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }`];
+            } else {
+                // Linux - try zenity, then kdialog
+                cmd = 'zenity';
+                args = ['--file-selection', '--directory', '--title=Select reference folder'];
+            }
+
+            const child = spawn(cmd, args);
+            let stdout = '';
+            let stderr = '';
+            child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
+            child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+            child.on('close', (code: number | null) => {
+                const path = stdout.trim();
+                if (code === 0 && path) {
+                    res.json({ success: true, path });
+                } else {
+                    // User cancelled or error
+                    res.json({ success: false, cancelled: true });
+                }
+            });
+            child.on('error', (err: Error) => {
+                console.error('[browse-folder] Failed to open folder dialog:', err.message);
+                res.status(500).json({ success: false, error: err.message });
+            });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ success: false, error: message });
+        }
+    });
+
     // Plugin API routes
     app.get('/api/plugins', (_req, res) => {
         try {

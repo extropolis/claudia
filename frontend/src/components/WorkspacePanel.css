@@ -1414,16 +1414,13 @@
 }
 
 .workspace-submenu {
-    position: absolute;
-    left: calc(100% - 4px);
-    top: -4px;
     min-width: 200px;
     max-width: 300px;
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
     border-radius: 8px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-    z-index: 10001;
+    z-index: 100000;
     overflow: hidden;
     animation: dropdownFadeIn 0.1s ease;
     padding: 4px 0;
