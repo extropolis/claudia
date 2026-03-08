@@ -691,10 +691,16 @@ function WorkspaceSection({
                     {workspace.references && workspace.references.length > 0 && (
                         <span
                             className="workspace-ref-indicator"
-                            title={`References: ${workspace.references.map(r => r.name).join(', ')}`}
+                            onClick={(e) => e.stopPropagation()}
                         >
                             <Link2 size={11} />
                             <span className="ref-count">{workspace.references.length}</span>
+                            <span className="ref-tooltip">
+                                <strong>References:</strong>
+                                {workspace.references.map(r => (
+                                    <span key={r.id} className="ref-tooltip-item">{r.name}</span>
+                                ))}
+                            </span>
                         </span>
                     )}
                 </div>

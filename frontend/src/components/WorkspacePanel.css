@@ -258,8 +258,8 @@
     border: 1px solid var(--border-color);
     border-radius: 8px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-    z-index: 100;
-    overflow: hidden;
+    z-index: 10000;
+    overflow: visible;
     animation: dropdownFadeIn 0.15s ease;
 }
 
@@ -1349,11 +1349,49 @@
     font-size: 0.6875rem;
     cursor: default;
     flex-shrink: 0;
+    position: relative;
 }
 
 .workspace-ref-indicator .ref-count {
     font-weight: 600;
     line-height: 1;
+}
+
+.ref-tooltip {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 8px 10px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    z-index: 10000;
+    white-space: nowrap;
+    font-size: 0.75rem;
+    color: var(--text-primary);
+    min-width: 120px;
+}
+
+.ref-tooltip strong {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--text-secondary);
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.ref-tooltip-item {
+    display: block;
+    padding: 1px 0;
+    color: var(--accent-secondary);
+}
+
+.workspace-ref-indicator:hover .ref-tooltip {
+    display: block;
 }
 
 /* Submenu styles */
@@ -1362,6 +1400,11 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    cursor: default;
+}
+
+.workspace-dropdown-item.has-submenu:hover {
+    background: var(--bg-tertiary);
 }
 
 .submenu-arrow {
@@ -1372,7 +1415,7 @@
 
 .workspace-submenu {
     position: absolute;
-    left: 100%;
+    left: calc(100% - 4px);
     top: -4px;
     min-width: 200px;
     max-width: 300px;
@@ -1380,9 +1423,10 @@
     border: 1px solid var(--border-color);
     border-radius: 8px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-    z-index: 110;
+    z-index: 10001;
     overflow: hidden;
     animation: dropdownFadeIn 0.1s ease;
+    padding: 4px 0;
 }
 
 .workspace-submenu .workspace-dropdown-item {
