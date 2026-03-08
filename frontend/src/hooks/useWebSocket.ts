@@ -117,7 +117,10 @@ export function useWebSocket() {
         ws.onmessage = (event) => {
             try {
                 const message: WSMessage = JSON.parse(event.data);
-                console.log('[WebSocket] Received:', message.type);
+                // Skip logging high-frequency messages to reduce console noise
+                if (message.type !== 'task:output' && message.type !== 'supervisor:chat:typing') {
+                    console.log('[WebSocket] Received:', message.type);
+                }
 
                 switch (message.type) {
                     case 'init': {
@@ -388,7 +391,10 @@ export function useWebSocket() {
 
     const sendMessage = useCallback((type: string, payload: unknown) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
-            console.log(`[WebSocket] Sending: ${type}`, payload);
+            // Skip logging high-frequency messages to reduce console noise
+            if (type !== 'task:input' && type !== 'task:resize') {
+                console.log(`[WebSocket] Sending: ${type}`, payload);
+            }
             wsRef.current.send(JSON.stringify({ type, payload }));
         } else {
             console.warn(`[WebSocket] Cannot send ${type}: WebSocket not open (state: ${wsRef.current?.readyState})`);
