@@ -15,7 +15,7 @@ import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, PORTS } from '@claudia/shared';
+import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, PORTS } from '@claudia/shared';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
@@ -59,6 +59,9 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:openTerminal',
     'workspace:systemPrompt:get',
     'workspace:systemPrompt:set',
+    'workspace:references:add',
+    'workspace:references:remove',
+    'workspace:references:toggle',
     'git:push',
     'supervisor:action',
     'supervisor:analyze',
@@ -94,6 +97,25 @@ function sendWSError(ws: WebSocket, message: string, originalType?: string, code
         type: 'error' as WSMessageType,
         payload: errorPayload
     }));
+}
+
+/**
+ * Build system prompt context for workspace references.
+ * Tells Claude about referenced directories so it can read files from them.
+ */
+function buildReferenceContext(references: WorkspaceReference[]): string {
+    const lines = [
+        'You have access to the following reference directories. Use them as examples or context when relevant to the task. You can read files from these directories using their absolute paths.',
+        ''
+    ];
+    for (const ref of references) {
+        lines.push(`## Reference: "${ref.name}" (${ref.path})`);
+        if (ref.description) {
+            lines.push(ref.description);
+        }
+        lines.push('');
+    }
+    return lines.join('\n').trim();
 }
 
 export async function createApp(basePath?: string) {
@@ -621,8 +643,18 @@ export async function createApp(basePath?: string) {
                         // Use workspace system prompt if set, otherwise fall back to global rules
                         const workspaceSystemPrompt = workspaceStore.getSystemPrompt(workspaceId);
                         const rules = configStore.getRules();
-                        const systemPrompt = workspaceSystemPrompt?.trim() || rules?.trim() || undefined;
-                        logger.info(`Creating task with system prompt`, { hasSystemPrompt: !!systemPrompt, source: workspaceSystemPrompt ? 'workspace' : (rules ? 'rules' : 'none') });
+                        let systemPrompt = workspaceSystemPrompt?.trim() || rules?.trim() || undefined;
+
+                        // Inject workspace reference context into system prompt
+                        const references = workspaceStore.getReferences(workspaceId);
+                        const validRefs = references.filter(r => existsSync(r.path));
+                        if (validRefs.length > 0) {
+                            const refContext = buildReferenceContext(validRefs);
+                            systemPrompt = systemPrompt ? `${systemPrompt}\n\n${refContext}` : refContext;
+                            logger.info('Injected workspace references', { count: validRefs.length, names: validRefs.map(r => r.name) });
+                        }
+
+                        logger.info(`Creating task with system prompt`, { hasSystemPrompt: !!systemPrompt, source: workspaceSystemPrompt ? 'workspace' : (rules ? 'rules' : 'none'), references: validRefs.length });
 
                         // Pass initial dimensions if provided
                         try {
@@ -965,6 +997,51 @@ export async function createApp(basePath?: string) {
                             type: 'workspace:systemPrompt:result',
                             payload: { workspaceId, success }
                         }));
+                        break;
+                    }
+
+                    case 'workspace:references:add': {
+                        const { workspaceId, path, description } = payload as { workspaceId?: string; path?: string; description?: string };
+                        if (!workspaceId || !path) break;
+                        try {
+                            workspaceStore.addReference(workspaceId, path, description);
+                            const workspaces = workspaceStore.getWorkspaces();
+                            broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
+                        } catch (error) {
+                            const errorMessage = error instanceof Error ? error.message : String(error);
+                            logger.error('Failed to add reference', { workspaceId, path, error: errorMessage });
+                        }
+                        break;
+                    }
+
+                    case 'workspace:references:remove': {
+                        const { workspaceId, referenceId } = payload as { workspaceId?: string; referenceId?: string };
+                        if (!workspaceId || !referenceId) break;
+                        if (workspaceStore.removeReference(workspaceId, referenceId)) {
+                            const workspaces = workspaceStore.getWorkspaces();
+                            broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
+                        }
+                        break;
+                    }
+
+                    case 'workspace:references:toggle': {
+                        // Toggle a workspace reference on/off (for the checkbox UX)
+                        const { workspaceId, referencePath } = payload as { workspaceId?: string; referencePath?: string };
+                        if (!workspaceId || !referencePath) break;
+                        try {
+                            const refs = workspaceStore.getReferences(workspaceId);
+                            const existing = refs.find(r => r.path === referencePath);
+                            if (existing) {
+                                workspaceStore.removeReference(workspaceId, existing.id);
+                            } else {
+                                workspaceStore.addReference(workspaceId, referencePath);
+                            }
+                            const workspaces = workspaceStore.getWorkspaces();
+                            broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
+                        } catch (error) {
+                            const errorMessage = error instanceof Error ? error.message : String(error);
+                            logger.error('Failed to toggle reference', { workspaceId, referencePath, error: errorMessage });
+                        }
                         break;
                     }
 
