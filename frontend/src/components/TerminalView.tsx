@@ -228,7 +228,6 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // Handle resize - sync to backend
         term.onResize(({ cols, rows }) => {
             if (wsRef.current?.readyState === WebSocket.OPEN) {
-                console.log(`[TerminalView] Sending resize: ${cols}x${rows}`);
                 wsRef.current.send(JSON.stringify({
                     type: 'task:resize',
                     payload: { taskId: task.id, cols, rows }

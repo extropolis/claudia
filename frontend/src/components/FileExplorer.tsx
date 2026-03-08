@@ -4,8 +4,11 @@ import {
     PanelRightClose, PanelRightOpen, RefreshCw,
     GitBranch, CircleDot, Plus, Trash2, Pencil, FileQuestion,
     CheckCircle2, XCircle, Clock, Loader2, SkipForward, ExternalLink,
-    ArrowUp, ArrowDown, GitPullRequest, MessageSquare, Tag, User
+    ArrowUp, ArrowDown, GitPullRequest, MessageSquare, Tag, User,
+    FileText, Activity
 } from 'lucide-react';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { getApiBaseUrl } from '../config/api-config';
 import { FileContentModal } from './FileContentModal';
 import './FileExplorer.css';
@@ -43,6 +46,13 @@ interface CICheck {
     url: string | null;
 }
 
+interface PRComment {
+    author: string;
+    body: string;
+    createdAt: string;
+    url: string;
+}
+
 interface CIStatus {
     isGitRepo: boolean;
     branch?: string;
@@ -51,6 +61,9 @@ interface CIStatus {
     prNumber: number | null;
     prUrl: string | null;
     prState?: string | null;
+    prTitle?: string | null;
+    prBody?: string | null;
+    prComments?: PRComment[];
     checks: CICheck[];
     error?: string;
 }
@@ -471,13 +484,63 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
     );
 }
 
-// ============== TAB: CI/CD ==============
+// ============== TAB: PR ==============
+
+function timeAgo(dateStr: string): string {
+    const now = new Date();
+    const date = new Date(dateStr);
+    const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+    if (seconds < 60) return 'just now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 30) return `${days}d ago`;
+    return date.toLocaleDateString();
+}
 
 function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: boolean }) {
     const [ciStatus, setCIStatus] = useState<CIStatus | null>(null);
     const [loading, setLoading] = useState(false);
     const [hasLoaded, setHasLoaded] = useState(false);
+    const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
+        description: true,
+        comments: true,
+        checks: true,
+    });
+    const [editingBody, setEditingBody] = useState(false);
+    const [editBodyText, setEditBodyText] = useState('');
+    const [savingBody, setSavingBody] = useState(false);
     const prevWorkspaceRef = useRef<string | undefined>(undefined);
+
+    const toggleSection = (section: string) => {
+        setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
+    };
+
+    const startEditBody = () => {
+        setEditBodyText(ciStatus?.prBody || '');
+        setEditingBody(true);
+    };
+
+    const saveBody = async () => {
+        setSavingBody(true);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/workspaces/pr-description`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ workspace: workspacePath, body: editBodyText }),
+            });
+            if (res.ok) {
+                setCIStatus(prev => prev ? { ...prev, prBody: editBodyText } : prev);
+                setEditingBody(false);
+            }
+        } catch (err) {
+            console.error('[FileExplorer] Failed to save PR description:', err);
+        } finally {
+            setSavingBody(false);
+        }
+    };
 
     const loadCI = useCallback(async () => {
         if (!workspacePath) return;
@@ -572,6 +635,7 @@ function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: b
     const successCount = ciStatus.checks.filter(c => c.conclusion === 'success').length;
     const failCount = ciStatus.checks.filter(c => c.conclusion === 'failure').length;
     const runningCount = ciStatus.checks.filter(c => c.status === 'in_progress').length;
+    const comments = ciStatus.prComments || [];
 
     return (
         <div className="fe-tab-content">
@@ -585,48 +649,147 @@ function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: b
                 </button>
             </div>
             <div className="fe-tab-scroll">
-                {/* PR info */}
-                {ciStatus.prNumber ? (
-                    <div className="ci-pr-info">
-                        <span className={`ci-pr-badge ${ciStatus.prState?.toLowerCase() || ''}`}>
-                            PR #{ciStatus.prNumber}
-                        </span>
-                        {ciStatus.prUrl && (
-                            <a href={ciStatus.prUrl} target="_blank" rel="noopener noreferrer" className="ci-pr-link"
-                                title="Open PR on GitHub">
-                                <ExternalLink size={12} />
-                            </a>
-                        )}
-                        {ciStatus.checks.length > 0 && (
-                            <span className="ci-summary">
-                                {successCount > 0 && <span className="ci-success">{successCount} passed</span>}
-                                {failCount > 0 && <span className="ci-failure">{failCount} failed</span>}
-                                {runningCount > 0 && <span className="ci-running">{runningCount} running</span>}
-                            </span>
-                        )}
-                    </div>
-                ) : (
+                {!ciStatus.prNumber ? (
                     <div className="ci-no-pr">No PR found for this branch</div>
-                )}
+                ) : (
+                    <>
+                        {/* PR Header */}
+                        <div className="ci-pr-info">
+                            <span className={`ci-pr-badge ${ciStatus.prState?.toLowerCase() || ''}`}>
+                                PR #{ciStatus.prNumber}
+                            </span>
+                            {ciStatus.prUrl && (
+                                <a href={ciStatus.prUrl} target="_blank" rel="noopener noreferrer" className="ci-pr-link"
+                                    title="Open PR on GitHub">
+                                    <ExternalLink size={12} />
+                                </a>
+                            )}
+                            {ciStatus.checks.length > 0 && (
+                                <span className="ci-summary">
+                                    {successCount > 0 && <span className="ci-success">{successCount} passed</span>}
+                                    {failCount > 0 && <span className="ci-failure">{failCount} failed</span>}
+                                    {runningCount > 0 && <span className="ci-running">{runningCount} running</span>}
+                                </span>
+                            )}
+                        </div>
 
-                {/* Check runs */}
-                {ciStatus.checks.length === 0 && ciStatus.prNumber && (
-                    <div className="fe-empty">No CI checks configured</div>
+                        {/* Description Section */}
+                        <div className="ci-section">
+                            <div className="ci-section-header-row">
+                                <button className="ci-section-header" onClick={() => toggleSection('description')}>
+                                    {expandedSections.description ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                                    <FileText size={12} />
+                                    <span>Description</span>
+                                </button>
+                                {expandedSections.description && !editingBody && (
+                                    <button className="ci-edit-btn" onClick={startEditBody} title="Edit description">
+                                        <Pencil size={11} />
+                                    </button>
+                                )}
+                            </div>
+                            {expandedSections.description && (
+                                <div className="ci-section-content">
+                                    {ciStatus.prTitle && (
+                                        <div className="ci-pr-title">{ciStatus.prTitle}</div>
+                                    )}
+                                    {editingBody ? (
+                                        <div className="ci-edit-container">
+                                            <textarea
+                                                className="ci-edit-textarea"
+                                                value={editBodyText}
+                                                onChange={(e) => setEditBodyText(e.target.value)}
+                                                rows={12}
+                                                disabled={savingBody}
+                                            />
+                                            <div className="ci-edit-actions">
+                                                <button className="ci-edit-save" onClick={saveBody} disabled={savingBody}>
+                                                    {savingBody ? <Loader2 size={12} className="spinning" /> : 'Save'}
+                                                </button>
+                                                <button className="ci-edit-cancel" onClick={() => setEditingBody(false)} disabled={savingBody}>
+                                                    Cancel
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : ciStatus.prBody ? (
+                                        <div className="ci-pr-body ci-markdown"><Markdown remarkPlugins={[remarkGfm]}>{ciStatus.prBody}</Markdown></div>
+                                    ) : (
+                                        <div className="ci-pr-body ci-pr-body-empty">No description provided</div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Comments Section */}
+                        <div className="ci-section">
+                            <button className="ci-section-header" onClick={() => toggleSection('comments')}>
+                                {expandedSections.comments ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                                <MessageSquare size={12} />
+                                <span>Comments</span>
+                                {comments.length > 0 && (
+                                    <span className="ci-section-count">{comments.length}</span>
+                                )}
+                            </button>
+                            {expandedSections.comments && (
+                                <div className="ci-section-content">
+                                    {comments.length === 0 ? (
+                                        <div className="ci-pr-body ci-pr-body-empty">No comments yet</div>
+                                    ) : (
+                                        comments.map((comment, i) => (
+                                            <div key={i} className="ci-comment">
+                                                <div className="ci-comment-header">
+                                                    <User size={11} />
+                                                    <span className="ci-comment-author">{comment.author}</span>
+                                                    <span className="ci-comment-time">{timeAgo(comment.createdAt)}</span>
+                                                </div>
+                                                <div className="ci-comment-body ci-markdown"><Markdown remarkPlugins={[remarkGfm]}>{comment.body}</Markdown></div>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Checks Section */}
+                        <div className="ci-section">
+                            <button className="ci-section-header" onClick={() => toggleSection('checks')}>
+                                {expandedSections.checks ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                                <Activity size={12} />
+                                <span>Checks</span>
+                                {ciStatus.checks.length > 0 && (
+                                    <span className="ci-section-count">{ciStatus.checks.length}</span>
+                                )}
+                            </button>
+                            {expandedSections.checks && (
+                                <div className="ci-section-content ci-section-checks">
+                                    {ciStatus.checks.length === 0 && (
+                                        <div className="ci-pr-body ci-pr-body-empty">No CI checks configured</div>
+                                    )}
+                                    {ciStatus.checks.map((check, i) => (
+                                        check.url ? (
+                                            <a key={`${check.name}-${i}`} href={check.url} target="_blank" rel="noopener noreferrer"
+                                                className={`ci-check-item clickable ${check.conclusion || check.status}`}>
+                                                {checkIcon(check)}
+                                                <span className="ci-check-name">{check.name}</span>
+                                                <span className={`ci-check-status ${check.conclusion || check.status}`}>
+                                                    {checkLabel(check)}
+                                                </span>
+                                                <ExternalLink size={11} className="ci-check-link-icon" />
+                                            </a>
+                                        ) : (
+                                            <div key={`${check.name}-${i}`} className={`ci-check-item ${check.conclusion || check.status}`}>
+                                                {checkIcon(check)}
+                                                <span className="ci-check-name">{check.name}</span>
+                                                <span className={`ci-check-status ${check.conclusion || check.status}`}>
+                                                    {checkLabel(check)}
+                                                </span>
+                                            </div>
+                                        )
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </>
                 )}
-                {ciStatus.checks.map((check, i) => (
-                    <div key={`${check.name}-${i}`} className={`ci-check-item ${check.conclusion || check.status}`}>
-                        {checkIcon(check)}
-                        <span className="ci-check-name">{check.name}</span>
-                        <span className={`ci-check-status ${check.conclusion || check.status}`}>
-                            {checkLabel(check)}
-                        </span>
-                        {check.url && (
-                            <a href={check.url} target="_blank" rel="noopener noreferrer" className="ci-check-link" title="View details">
-                                <ExternalLink size={11} />
-                            </a>
-                        )}
-                    </div>
-                ))}
             </div>
         </div>
     );
@@ -1064,13 +1227,13 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
                             <span>Changes</span>
                         </button>
                         <button className={`fe-tab ${activeTab === 'ci' ? 'active' : ''}`}
-                            onClick={() => setActiveTab('ci')} title="CI/CD Status">
-                            <CircleDot size={13} />
-                            <span>CI/CD</span>
+                            onClick={() => setActiveTab('ci')} title="Pull Request">
+                            <GitPullRequest size={13} />
+                            <span>PR</span>
                         </button>
                         <button className={`fe-tab ${activeTab === 'issues' ? 'active' : ''}`}
                             onClick={() => setActiveTab('issues')} title="GitHub Issues">
-                            <GitPullRequest size={13} />
+                            <CircleDot size={13} />
                             <span>Issues</span>
                         </button>
                     </div>

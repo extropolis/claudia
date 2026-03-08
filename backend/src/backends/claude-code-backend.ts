@@ -209,6 +209,10 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
                 claudeArgs.push(...switchArgs);
                 logger.info('Applied CLI switches', { switchArgs });
             }
+            if (switches.effortLevel) {
+                environment = { ...environment, CLAUDE_CODE_EFFORT_LEVEL: switches.effortLevel };
+                logger.info('Effort level', { effortLevel: switches.effortLevel });
+            }
         }
 
         logger.info('Creating task', { taskId: id, workspaceId: config.workspaceId });
@@ -267,6 +271,9 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
             if (switchArgs.length > 0) {
                 claudeArgs.push(...switchArgs);
                 logger.info('Applied CLI switches for reconnect', { switchArgs });
+            }
+            if (switches.effortLevel) {
+                environment = { ...environment, CLAUDE_CODE_EFFORT_LEVEL: switches.effortLevel };
             }
         }
 
