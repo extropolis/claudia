@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, Zap } from 'lucide-react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, Zap, Bell } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
+import { hasBrowserNotifications, getNotificationPermission, requestNotificationPermission, sendBrowserNotification } from '../utils/browserCapabilities';
 import { useTaskStore } from '../stores/taskStore';
 import { useNotification } from './NotificationContainer';
 import './SettingsMenu.css';
@@ -74,10 +75,11 @@ function CollapsiblePanel({ title, icon, isExpanded, onToggle, children }: Colla
 }
 
 export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProps) {
-    const { showSystemStats, setShowSystemStats } = useTaskStore();
+    const { showSystemStats, setShowSystemStats, browserNotificationsEnabled, setBrowserNotificationsEnabled, notifyOnCompletion, setNotifyOnCompletion, notifyOnWaitingInput, setNotifyOnWaitingInput } = useTaskStore();
     const { showWarning } = useNotification();
     const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
         sound: false,
+        notifications: false,
         behavior: false,
         backend: false,
         api: false,
@@ -89,6 +91,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         supervisor: false,
         learnings: false
     });
+
+    const [notificationTestStatus, setNotificationTestStatus] = useState<'idle' | 'sent' | 'failed'>('idle');
 
     // Handle initial panel expansion when settings opens
     useEffect(() => {
@@ -124,7 +128,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         permissionMode: null as string | null,
         allowedTools: '',
         disallowedTools: '',
-        appendSystemPrompt: ''
+        appendSystemPrompt: '',
+        effortLevel: 'high'
     });
     const cliSwitchesTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -338,7 +343,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                         permissionMode: config.claudeCodeSwitches.permissionMode ?? null,
                         allowedTools: config.claudeCodeSwitches.allowedTools || '',
                         disallowedTools: config.claudeCodeSwitches.disallowedTools || '',
-                        appendSystemPrompt: config.claudeCodeSwitches.appendSystemPrompt || ''
+                        appendSystemPrompt: config.claudeCodeSwitches.appendSystemPrompt || '',
+                        effortLevel: config.claudeCodeSwitches.effortLevel || 'high'
                     });
                 }
             }
@@ -1223,6 +1229,117 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                     </CollapsiblePanel>
 
                     <CollapsiblePanel
+                        title="Notifications"
+                        icon={<Bell size={18} />}
+                        isExpanded={expandedPanels.notifications}
+                        onToggle={() => togglePanel('notifications')}
+                    >
+                        <div className="permissions-content">
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Browser Notifications</span>
+                                    <span className="permission-description">
+                                        {!hasBrowserNotifications()
+                                            ? 'Browser notifications are not supported in this environment.'
+                                            : getNotificationPermission() === 'denied'
+                                            ? 'Notifications are blocked. Please enable them in your browser settings.'
+                                            : 'Show desktop notifications when tasks complete or need input.'}
+                                    </span>
+                                </div>
+                                <label className="toggle-switch">
+                                    <input
+                                        type="checkbox"
+                                        checked={browserNotificationsEnabled}
+                                        disabled={!hasBrowserNotifications() || getNotificationPermission() === 'denied'}
+                                        onChange={async (e) => {
+                                            if (e.target.checked) {
+                                                const permission = await requestNotificationPermission();
+                                                if (permission === 'granted') {
+                                                    setBrowserNotificationsEnabled(true);
+                                                }
+                                            } else {
+                                                setBrowserNotificationsEnabled(false);
+                                            }
+                                        }}
+                                    />
+                                    <span className="toggle-slider"></span>
+                                </label>
+                            </div>
+                            {browserNotificationsEnabled && (
+                                <>
+                                    <div className="permission-item" style={{ marginTop: 12 }}>
+                                        <div className="permission-info">
+                                            <span className="permission-label">Task Completion</span>
+                                            <span className="permission-description">
+                                                Notify when a task finishes executing.
+                                            </span>
+                                        </div>
+                                        <label className="toggle-switch">
+                                            <input
+                                                type="checkbox"
+                                                checked={notifyOnCompletion}
+                                                onChange={(e) => setNotifyOnCompletion(e.target.checked)}
+                                            />
+                                            <span className="toggle-slider"></span>
+                                        </label>
+                                    </div>
+                                    <div className="permission-item" style={{ marginTop: 12 }}>
+                                        <div className="permission-info">
+                                            <span className="permission-label">Waiting for Input</span>
+                                            <span className="permission-description">
+                                                Notify when a task needs permission, has a question, or requires input.
+                                            </span>
+                                        </div>
+                                        <label className="toggle-switch">
+                                            <input
+                                                type="checkbox"
+                                                checked={notifyOnWaitingInput}
+                                                onChange={(e) => setNotifyOnWaitingInput(e.target.checked)}
+                                            />
+                                            <span className="toggle-slider"></span>
+                                        </label>
+                                    </div>
+                                </>
+                            )}
+                            {browserNotificationsEnabled && (
+                                <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border-color)' }}>
+                                    <button
+                                        className="mcp-add-btn"
+                                        onClick={() => {
+                                            const result = sendBrowserNotification('Test Notification', {
+                                                body: 'Browser notifications are working!',
+                                                tag: 'test-notification',
+                                            });
+                                            if (result) {
+                                                setNotificationTestStatus('sent');
+                                            } else {
+                                                setNotificationTestStatus('failed');
+                                            }
+                                        }}
+                                    >
+                                        <Bell size={16} />
+                                        Test Notification
+                                    </button>
+                                    {notificationTestStatus === 'sent' && (
+                                        <p className="permission-description" style={{ marginTop: 8, fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                            Notification sent. If you didn't see it, check that notifications are enabled
+                                            for your browser in <strong>System Settings &gt; Notifications</strong>.
+                                        </p>
+                                    )}
+                                    {notificationTestStatus === 'failed' && (
+                                        <p className="permission-description" style={{ marginTop: 8, fontSize: '0.75rem', color: 'var(--error-color, #e74c3c)' }}>
+                                            Failed to send notification. Please check browser permissions.
+                                        </p>
+                                    )}
+                                    <p className="permission-description" style={{ marginTop: 8, fontSize: '0.75rem' }}>
+                                        Task notifications only appear when the tab is in the background.
+                                    </p>
+                                </div>
+                            )}
+                        </div>
+                    </CollapsiblePanel>
+
+                    <CollapsiblePanel
                         title="Behavior"
                         icon={<MousePointer size={18} />}
                         isExpanded={expandedPanels.behavior}
@@ -1987,6 +2104,25 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     />
                                     <span className="toggle-slider"></span>
                                 </label>
+                            </div>
+
+                            {/* Effort Level */}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Effort Level</span>
+                                    <span className="permission-description">
+                                        Controls how much reasoning Claude invests before responding. Higher = more thinking tokens.
+                                    </span>
+                                </div>
+                                <select
+                                    className="cli-switch-select"
+                                    value={cliSwitches.effortLevel || 'high'}
+                                    onChange={(e) => handleCliSwitchToggle({ effortLevel: e.target.value })}
+                                >
+                                    <option value="low">Low (faster)</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="high">High (default)</option>
+                                </select>
                             </div>
 
                             {/* Max Turns */}

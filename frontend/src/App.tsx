@@ -9,6 +9,7 @@ import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
 import { SystemStats } from './components/SystemStats';
 import { MobileAccessModal } from './components/MobileAccessModal';
 import { FileExplorer } from './components/FileExplorer';
+import { ShellTerminalView } from './components/ShellTerminalView';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
 import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2 } from 'lucide-react';
@@ -75,6 +76,13 @@ function App() {
 
     // On mobile, track whether the user is viewing the terminal (screen 2)
     const [mobileShowTerminal, setMobileShowTerminal] = useState(false);
+
+    // Embedded shell terminal state
+    // activeShellWorkspaceId = which workspace has a shell PTY running (null = none)
+    // showingShell = whether we're currently displaying the shell (vs a task)
+    const [activeShellWorkspaceId, setActiveShellWorkspaceId] = useState<string | null>(null);
+    const [showingShell, setShowingShell] = useState(false);
+    const activeShellWorkspace = activeShellWorkspaceId ? workspaces.find(w => w.id === activeShellWorkspaceId) : undefined;
 
     // Count tasks that have running processes (not disconnected or archived)
     const activeTasks = Array.from(tasks.values()).filter(t =>
@@ -209,7 +217,29 @@ function App() {
         setShowProjectPicker(false);
     };
 
+    const handleOpenShell = useCallback((workspaceId: string) => {
+        if (activeShellWorkspaceId === workspaceId && showingShell) {
+            // Already viewing this shell - hide it (but keep PTY alive)
+            setShowingShell(false);
+        } else {
+            setActiveShellWorkspaceId(workspaceId);
+            setShowingShell(true);
+        }
+    }, [activeShellWorkspaceId, showingShell]);
+
+    const handleCloseShell = useCallback(() => {
+        // Kill the PTY and hide
+        setActiveShellWorkspaceId(null);
+        setShowingShell(false);
+    }, []);
+
+    const handleShowShell = useCallback(() => {
+        setShowingShell(true);
+    }, []);
+
     const handleSelectTask = (taskId: string) => {
+        // Hide shell view (but keep PTY alive) when selecting a task
+        setShowingShell(false);
         // Only update local state - TerminalView will send task:select when it mounts
         useTaskStore.getState().selectTask(taskId);
 
@@ -445,6 +475,7 @@ function App() {
                                 onReorderWorkspaces={reorderWorkspaces}
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
+                                onOpenShell={handleOpenShell}
                                 onPushToGithub={pushToGithub}
                                 onSetSystemPrompt={setSystemPrompt}
                                 onCreateTask={createTask}
@@ -479,6 +510,7 @@ function App() {
                                 onReorderWorkspaces={reorderWorkspaces}
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
+                                onOpenShell={handleOpenShell}
                                 onPushToGithub={pushToGithub}
                                 onSetSystemPrompt={setSystemPrompt}
                                 onCreateTask={createTask}
@@ -501,19 +533,47 @@ function App() {
                         />
 
                         <section className="main-panel">
-                            {selectedTask ? (
-                                <TerminalView
-                                    key={selectedTask.id}
-                                    task={selectedTask}
-                                    wsRef={wsRef}
-                                    workspace={selectedWorkspace}
-                                />
-                            ) : (
-                                <div className="empty-state-main">
-                                    <Terminal size={48} strokeWidth={1} />
-                                    <h2>Select a task to view its terminal</h2>
-                                    <p>Add a workspace and create a task to get started</p>
+                            {/* Shell terminal - always mounted when active, hidden via CSS to preserve xterm state */}
+                            {activeShellWorkspaceId && activeShellWorkspace && (
+                                <div className="shell-terminal-wrapper" style={{ display: showingShell ? 'flex' : 'none' }}>
+                                    <ShellTerminalView
+                                        key={`shell-${activeShellWorkspaceId}`}
+                                        workspaceId={activeShellWorkspaceId}
+                                        workspaceName={activeShellWorkspace.displayName || activeShellWorkspace.name}
+                                        wsRef={wsRef}
+                                        onClose={handleCloseShell}
+                                        visible={showingShell}
+                                    />
                                 </div>
+                            )}
+                            {/* Task terminal or empty state - shown when shell is hidden */}
+                            {!showingShell && (
+                                selectedTask ? (
+                                    <>
+                                        {activeShellWorkspaceId && activeShellWorkspace && (
+                                            <button
+                                                className="shell-switch-banner"
+                                                onClick={handleShowShell}
+                                                title="Switch back to the running shell"
+                                            >
+                                                <Terminal size={14} />
+                                                <span>Shell running — {activeShellWorkspace.displayName || activeShellWorkspace.name}</span>
+                                            </button>
+                                        )}
+                                        <TerminalView
+                                            key={selectedTask.id}
+                                            task={selectedTask}
+                                            wsRef={wsRef}
+                                            workspace={selectedWorkspace}
+                                        />
+                                    </>
+                                ) : (
+                                    <div className="empty-state-main">
+                                        <Terminal size={48} strokeWidth={1} />
+                                        <h2>Select a task to view its terminal</h2>
+                                        <p>Add a workspace and create a task to get started</p>
+                                    </div>
+                                )
                             )}
                         </section>
 

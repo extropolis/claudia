@@ -7,9 +7,11 @@ interface PathInputModalProps {
     onCancel: () => void;
     recentWorkspaces?: RecentWorkspace[];
     onRemoveRecent?: (workspaceId: string) => void;
+    onBrowse?: () => void;
+    isBrowsing?: boolean;
 }
 
-export function PathInputModal({ onSubmit, onCancel, recentWorkspaces = [], onRemoveRecent }: PathInputModalProps) {
+export function PathInputModal({ onSubmit, onCancel, recentWorkspaces = [], onRemoveRecent, onBrowse, isBrowsing = false }: PathInputModalProps) {
     const [path, setPath] = useState('');
 
     const handleSubmit = (e: React.FormEvent) => {
@@ -81,26 +83,33 @@ export function PathInputModal({ onSubmit, onCancel, recentWorkspaces = [], onRe
                 )}
 
                 <div className="path-input-section">
-                    <p className="modal-description">
-                        {recentWorkspaces.length > 0
-                            ? 'Or enter a new path manually:'
-                            : 'Enter the full absolute path to the folder you want to add as a workspace.'}
-                    </p>
                     <form onSubmit={handleSubmit}>
                         <div className="form-group">
-                            <label htmlFor="path-input">Folder Path:</label>
-                            <input
-                                id="path-input"
-                                type="text"
-                                value={path}
-                                onChange={(e) => setPath(e.target.value)}
-                                placeholder="/Users/username/projects/my-project"
-                                autoFocus
-                                className="path-input"
-                            />
-                            <small className="help-text">
-                                Example: /Users/I850333/projects/experiments/Minecraft
-                            </small>
+                            <label htmlFor="path-input">
+                                {recentWorkspaces.length > 0 ? 'Or add a new folder:' : 'Folder path'}
+                            </label>
+                            <div className="path-input-row">
+                                <input
+                                    id="path-input"
+                                    type="text"
+                                    value={path}
+                                    onChange={(e) => setPath(e.target.value)}
+                                    placeholder="/path/to/your/project"
+                                    autoFocus
+                                    className="path-input"
+                                />
+                                {onBrowse && (
+                                    <button
+                                        type="button"
+                                        onClick={onBrowse}
+                                        disabled={isBrowsing}
+                                        className="btn-browse"
+                                        title="Browse for folder"
+                                    >
+                                        {isBrowsing ? '...' : 'Browse'}
+                                    </button>
+                                )}
+                            </div>
                         </div>
                         <div className="modal-actions">
                             <button type="button" onClick={onCancel} className="btn-secondary">

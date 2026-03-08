@@ -287,6 +287,7 @@ interface WorkspaceSectionProps {
     onDeleteWorkspace: () => void;
     onOpenFolder: () => void;
     onOpenTerminal: () => void;
+    onOpenShell: () => void;
     onPushToGithub: () => void;
     onSystemPrompt: () => void;
     onToggleMenu: () => void;
@@ -326,6 +327,7 @@ function WorkspaceSection({
     onDeleteWorkspace,
     onOpenFolder,
     onOpenTerminal,
+    onOpenShell,
     onPushToGithub,
     onSystemPrompt,
     onToggleMenu,
@@ -732,12 +734,23 @@ function WorkspaceSection({
                                 className="workspace-dropdown-item"
                                 onClick={(e) => {
                                     e.stopPropagation();
+                                    onOpenShell();
+                                    onToggleMenu();
+                                }}
+                            >
+                                <Terminal size={14} />
+                                <span>Open Shell</span>
+                            </button>
+                            <button
+                                className="workspace-dropdown-item"
+                                onClick={(e) => {
+                                    e.stopPropagation();
                                     onOpenTerminal();
                                     onToggleMenu();
                                 }}
                             >
                                 <Terminal size={14} />
-                                <span>Open in Terminal</span>
+                                <span>Open External Terminal</span>
                             </button>
                             <button
                                 className="workspace-dropdown-item"
@@ -1082,6 +1095,7 @@ interface WorkspacePanelProps {
     onReorderWorkspaces: (fromIndex: number, toIndex: number) => void;
     onOpenFolder: (workspaceId: string) => void;
     onOpenTerminal: (workspaceId: string) => void;
+    onOpenShell: (workspaceId: string) => void;
     onPushToGithub: (workspaceId: string) => void;
     onSetSystemPrompt: (workspaceId: string, systemPrompt: string) => void;
     onCreateTask: (prompt: string, workspaceId: string, initialCols?: number, initialRows?: number) => void;
@@ -1106,6 +1120,7 @@ export function WorkspacePanel({
     onReorderWorkspaces,
     onOpenFolder,
     onOpenTerminal,
+    onOpenShell,
     onPushToGithub,
     onSetSystemPrompt,
     onCreateTask,
@@ -1310,6 +1325,7 @@ export function WorkspacePanel({
                             onDeleteWorkspace={() => onDeleteWorkspace(workspace.id)}
                             onOpenFolder={() => onOpenFolder(workspace.id)}
                             onOpenTerminal={() => onOpenTerminal(workspace.id)}
+                            onOpenShell={() => onOpenShell(workspace.id)}
                             onPushToGithub={() => onPushToGithub(workspace.id)}
                             onSystemPrompt={() => setSystemPromptWorkspace(workspace)}
                             onToggleMenu={() => setOpenMenuId(openMenuId === workspace.id ? null : workspace.id)}

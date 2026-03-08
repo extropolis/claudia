@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import os from 'os';
 import { spawn, ChildProcess } from 'child_process';
+import { spawn as ptySpawn, IPty } from 'node-pty';
 import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, statSync } from 'fs';
 import { readFile, readdir } from 'fs/promises';
 import { join, dirname, resolve } from 'path';
@@ -55,6 +56,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:delete',
     'workspace:reorder',
     'workspace:rename',
+    'workspace:browseFolder',
     'workspace:openFolder',
     'workspace:openTerminal',
     'workspace:systemPrompt:get',
@@ -62,6 +64,12 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:references:add',
     'workspace:references:remove',
     'workspace:references:toggle',
+    'workspace:recent:list',
+    'workspace:recent:clear',
+    'shell:create',
+    'shell:input',
+    'shell:resize',
+    'shell:close',
     'git:push',
     'supervisor:action',
     'supervisor:analyze',
@@ -435,6 +443,82 @@ export async function createApp(basePath?: string) {
     function queueTasksUpdated(): void {
         pendingTasksUpdated = true;
         scheduleBatchedBroadcast();
+    }
+
+    // ===== Embedded Shell Terminal Management =====
+    const isWindows = process.platform === 'win32';
+    const shellProcesses: Map<string, IPty> = new Map(); // workspaceId → PTY
+
+    function createShellTerminal(workspaceId: string, ws: WebSocket, cols?: number, rows?: number): void {
+        // If shell already exists for this workspace, just notify
+        if (shellProcesses.has(workspaceId)) {
+            logger.info('Shell already exists for workspace, reusing', { workspaceId });
+            ws.send(JSON.stringify({
+                type: 'shell:created',
+                payload: { workspaceId }
+            }));
+            return;
+        }
+
+        const shellCmd = isWindows
+            ? 'powershell.exe'
+            : (process.env.SHELL || '/bin/bash');
+
+        logger.info('Creating embedded shell', { workspaceId, shell: shellCmd, cols, rows });
+
+        const pty = ptySpawn(shellCmd, [], {
+            name: 'xterm-256color',
+            cols: cols || 120,
+            rows: rows || 40,
+            cwd: workspaceId,
+            env: { ...process.env, TERM: 'xterm-256color' } as Record<string, string>,
+        });
+
+        shellProcesses.set(workspaceId, pty);
+
+        pty.onData((data: string) => {
+            // Send to all connected clients (the frontend filters by workspaceId)
+            const msg = JSON.stringify({
+                type: 'shell:output',
+                payload: { workspaceId, data }
+            });
+            for (const client of clients) {
+                try {
+                    if (client.readyState === WebSocket.OPEN) {
+                        client.send(msg);
+                    }
+                } catch (err) {
+                    logger.error('Error sending shell output', { error: err });
+                }
+            }
+        });
+
+        pty.onExit(({ exitCode, signal }) => {
+            logger.info('Shell exited', { workspaceId, exitCode, signal });
+            shellProcesses.delete(workspaceId);
+            broadcast({
+                type: 'shell:exited' as WSMessageType,
+                payload: { workspaceId, exitCode, signal }
+            });
+        });
+
+        ws.send(JSON.stringify({
+            type: 'shell:created',
+            payload: { workspaceId }
+        }));
+    }
+
+    function closeShellTerminal(workspaceId: string): void {
+        const pty = shellProcesses.get(workspaceId);
+        if (pty) {
+            logger.info('Closing shell', { workspaceId });
+            pty.kill();
+            shellProcesses.delete(workspaceId);
+            broadcast({
+                type: 'shell:closed' as WSMessageType,
+                payload: { workspaceId }
+            });
+        }
     }
 
     // Wire up TaskSpawner events
@@ -896,6 +980,8 @@ export async function createApp(basePath?: string) {
                         // Remove a workspace
                         const { workspaceId } = payload as { workspaceId?: string };
                         if (!workspaceId) break;
+                        // Close any embedded shell for this workspace
+                        closeShellTerminal(workspaceId);
                         if (workspaceStore.deleteWorkspace(workspaceId)) {
                             broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId } });
                         }
@@ -922,6 +1008,67 @@ export async function createApp(basePath?: string) {
                             const workspaces = workspaceStore.getWorkspaces();
                             broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
                         }
+                        break;
+                    }
+
+                    case 'workspace:browseFolder': {
+                        // Open native OS folder picker dialog and return selected path
+                        const { execSync } = await import('child_process');
+                        const platform = process.platform;
+                        let selectedPath: string | null = null;
+
+                        try {
+                            if (platform === 'darwin') {
+                                const result = execSync(
+                                    `osascript -e 'POSIX path of (choose folder with prompt "Select a workspace folder")'`,
+                                    { encoding: 'utf-8', timeout: 120000 }
+                                ).trim();
+                                if (result) selectedPath = result.replace(/\/$/, ''); // remove trailing slash
+                            } else if (platform === 'win32') {
+                                const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = "Select a workspace folder"
+$dialog.ShowNewFolderButton = $true
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    Write-Output $dialog.SelectedPath
+}`;
+                                const result = execSync(
+                                    `powershell -NoProfile -Command "${psScript.replace(/\n/g, '; ')}"`,
+                                    { encoding: 'utf-8', timeout: 120000 }
+                                ).trim();
+                                if (result) selectedPath = result;
+                            } else {
+                                // Linux - try zenity first, then kdialog
+                                try {
+                                    const result = execSync(
+                                        `zenity --file-selection --directory --title="Select a workspace folder" 2>/dev/null`,
+                                        { encoding: 'utf-8', timeout: 120000 }
+                                    ).trim();
+                                    if (result) selectedPath = result;
+                                } catch {
+                                    try {
+                                        const result = execSync(
+                                            `kdialog --getexistingdirectory ~ --title "Select a workspace folder" 2>/dev/null`,
+                                            { encoding: 'utf-8', timeout: 120000 }
+                                        ).trim();
+                                        if (result) selectedPath = result;
+                                    } catch {
+                                        logger.warn('No folder dialog available (install zenity or kdialog)');
+                                    }
+                                }
+                            }
+                        } catch (err: any) {
+                            // User cancelled the dialog (exit code != 0) - not an error
+                            if (err.status !== 0) {
+                                logger.debug('Folder browse dialog cancelled or failed', { error: err.message });
+                            }
+                        }
+
+                        ws.send(JSON.stringify({
+                            type: 'workspace:browseFolder',
+                            payload: { path: selectedPath }
+                        }));
                         break;
                     }
 
@@ -1045,6 +1192,33 @@ export async function createApp(basePath?: string) {
                         break;
                     }
 
+                    case 'workspace:recent:list': {
+                        // Get recent (removed) workspaces
+                        const recentWorkspaces = workspaceStore.getRecentWorkspaces();
+                        ws.send(JSON.stringify({
+                            type: 'workspace:recent:list',
+                            payload: { recentWorkspaces }
+                        }));
+                        break;
+                    }
+
+                    case 'workspace:recent:clear': {
+                        // Clear a specific recent workspace or all
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (workspaceId) {
+                            workspaceStore.clearRecentWorkspace(workspaceId);
+                        } else {
+                            workspaceStore.clearAllRecentWorkspaces();
+                        }
+                        // Send back updated list
+                        const updatedRecent = workspaceStore.getRecentWorkspaces();
+                        ws.send(JSON.stringify({
+                            type: 'workspace:recent:list',
+                            payload: { recentWorkspaces: updatedRecent }
+                        }));
+                        break;
+                    }
+
                     case 'git:push': {
                         // Create a task to push changes to GitHub
                         const { workspaceId } = payload as { workspaceId?: string };
@@ -1137,6 +1311,40 @@ export async function createApp(basePath?: string) {
                         // Clear chat history
                         supervisorChat.clearHistory();
                         broadcast({ type: 'supervisor:chat:history' as WSMessageType, payload: { messages: [] } });
+                        break;
+                    }
+
+                    case 'shell:create': {
+                        const { workspaceId, cols, rows } = payload as { workspaceId?: string; cols?: number; rows?: number };
+                        if (!workspaceId) break;
+                        createShellTerminal(workspaceId, ws, cols, rows);
+                        break;
+                    }
+
+                    case 'shell:input': {
+                        const { workspaceId, input } = payload as { workspaceId?: string; input?: string };
+                        if (!workspaceId || input === undefined) break;
+                        const shellPty = shellProcesses.get(workspaceId);
+                        if (shellPty) {
+                            shellPty.write(input);
+                        }
+                        break;
+                    }
+
+                    case 'shell:resize': {
+                        const { workspaceId, cols, rows } = payload as { workspaceId?: string; cols?: number; rows?: number };
+                        if (!workspaceId || !cols || !rows) break;
+                        const shellPtyResize = shellProcesses.get(workspaceId);
+                        if (shellPtyResize) {
+                            shellPtyResize.resize(cols, rows);
+                        }
+                        break;
+                    }
+
+                    case 'shell:close': {
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) break;
+                        closeShellTerminal(workspaceId);
                         break;
                     }
 
@@ -1970,20 +2178,48 @@ export async function createApp(basePath?: string) {
             let prNumber: number | null = null;
             let prUrl: string | null = null;
             let prState: string | null = null;
+            let prTitle: string | null = null;
+            let prBody: string | null = null;
+            interface PRComment {
+                author: string;
+                body: string;
+                createdAt: string;
+                url: string;
+            }
+            let prComments: PRComment[] = [];
 
             try {
                 const { stdout: prOutput } = await execAsync(
-                    `gh pr view --json number,url,state --jq ".number,.url,.state"`,
+                    `gh pr view --json number,url,state,title,body`,
                     { cwd: workspacePath }
                 );
-                const prLines = prOutput.trim().split('\n');
-                if (prLines.length >= 3) {
-                    prNumber = parseInt(prLines[0], 10);
-                    prUrl = prLines[1];
-                    prState = prLines[2];
-                }
+                const prData = JSON.parse(prOutput.trim());
+                prNumber = prData.number;
+                prUrl = prData.url;
+                prState = prData.state;
+                prTitle = prData.title || null;
+                prBody = prData.body || null;
             } catch {
                 // No PR for this branch
+            }
+
+            // Get PR comments if PR exists
+            if (prNumber) {
+                try {
+                    const { stdout: commentsOutput } = await execAsync(
+                        `gh pr view --json comments --jq '.comments'`,
+                        { cwd: workspacePath }
+                    );
+                    const commentsData = JSON.parse(commentsOutput.trim());
+                    prComments = (commentsData || []).map((c: { author: { login: string }; body: string; createdAt: string; url?: string }) => ({
+                        author: c.author?.login || 'unknown',
+                        body: c.body || '',
+                        createdAt: c.createdAt || '',
+                        url: c.url || '',
+                    }));
+                } catch {
+                    // Failed to get comments
+                }
             }
 
             // Get check runs for current branch
@@ -2047,11 +2283,45 @@ export async function createApp(basePath?: string) {
                 prNumber,
                 prUrl,
                 prState,
+                prTitle,
+                prBody,
+                prComments,
                 checks,
             });
         } catch (err) {
             logger.error('Failed to get CI status', { error: err instanceof Error ? err.message : String(err) });
             res.status(500).json({ error: 'Failed to get CI status' });
+        }
+    });
+
+    // Update PR description
+    app.patch('/api/workspaces/pr-description', async (req, res) => {
+        const { workspace, body: prBody } = req.body;
+        if (!workspace) {
+            return res.status(400).json({ error: 'workspace is required' });
+        }
+        if (typeof prBody !== 'string') {
+            return res.status(400).json({ error: 'body is required' });
+        }
+        try {
+            const execAsync = (await import('util')).promisify((await import('child_process')).exec);
+            const os = await import('os');
+            const path = await import('path');
+            const fs = await import('fs/promises');
+            const tmpFile = path.join(os.tmpdir(), `pr-body-${Date.now()}.md`);
+            await fs.writeFile(tmpFile, prBody, 'utf-8');
+            try {
+                await execAsync(
+                    `gh pr edit --body-file "${tmpFile}"`,
+                    { cwd: workspace, maxBuffer: 10 * 1024 * 1024 }
+                );
+                res.json({ success: true });
+            } finally {
+                await fs.unlink(tmpFile).catch(() => {});
+            }
+        } catch (err) {
+            logger.error('Failed to update PR description', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to update PR description' });
         }
     });
 

@@ -132,6 +132,11 @@ export type WSMessageType =
     | 'workspace:recent:list'
     // Task reordering
     | 'tasks:reordered'
+    // Embedded shell terminals
+    | 'shell:created'
+    | 'shell:output'
+    | 'shell:exited'
+    | 'shell:closed'
     // Supervisor/Chat
     | 'task:summary'
     | 'supervisor:chat:response'
