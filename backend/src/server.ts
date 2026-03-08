@@ -23,7 +23,7 @@ import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
 import { getVoiceAgentPageHtml } from './voice-agent-page.js';
 import { VoiceSupervisor } from './voice-supervisor.js';
-import { ElevenLabsTTS } from './elevenlabs-tts.js';
+// import { ElevenLabsTTS } from './elevenlabs-tts.js'; // TODO: Implement ElevenLabs TTS
 import { createLogger } from './logger.js';
 import { PluginManager, PluginContext } from './plugin-system/index.js';
 
@@ -1672,35 +1672,42 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             const elevenlabsKey = process.env.ELEVENLABS_API_KEY;
             let ttsSession: any = null;
 
-            logger.info('[Voice API] ElevenLabs API key present:', !!elevenlabsKey);
+            logger.info('[Voice API] ElevenLabs API key present:', { hasKey: !!elevenlabsKey });
 
             if (elevenlabsKey) {
-                logger.info('[Voice API] Creating ElevenLabs streaming session...');
-                const { ElevenLabsTTS } = await import('./elevenlabs-tts.js');
-                const tts = new ElevenLabsTTS(elevenlabsKey);
-                ttsSession = tts.createStreamingSession();
+                try {
+                    logger.info('[Voice API] Creating ElevenLabs streaming session...');
+                    // @ts-ignore - ElevenLabs TTS module is optional
+                    const { ElevenLabsTTS } = await import('./elevenlabs-tts.js').catch(() => {
+                        throw new Error('ElevenLabs TTS module not available');
+                    });
+                    const tts = new ElevenLabsTTS(elevenlabsKey);
+                    ttsSession = tts.createStreamingSession();
 
-                // Forward audio chunks to client
-                ttsSession.on('audio', (audioChunk: Buffer) => {
-                    logger.info('[Voice API] Received audio chunk, length:', audioChunk.length);
-                    const base64Audio = audioChunk.toString('base64');
-                    res.write(`event: audio\ndata: ${JSON.stringify({ audio: base64Audio })}\n\n`);
-                });
+                    // Forward audio chunks to client
+                    ttsSession.on('audio', (audioChunk: Buffer) => {
+                        logger.info('[Voice API] Received audio chunk', { length: audioChunk.length });
+                        const base64Audio = audioChunk.toString('base64');
+                        res.write(`event: audio\ndata: ${JSON.stringify({ audio: base64Audio })}\n\n`);
+                    });
 
-                ttsSession.on('error', (error: Error) => {
-                    logger.error('[Voice API] TTS error', { error });
-                });
+                    ttsSession.on('error', (error: Error) => {
+                        logger.error('[Voice API] TTS error', { error });
+                    });
 
-                ttsSession.on('ready', () => {
-                    logger.info('[Voice API] ElevenLabs TTS session ready');
-                });
+                    ttsSession.on('ready', () => {
+                        logger.info('[Voice API] ElevenLabs TTS session ready');
+                    });
 
-                // Wait for TTS to be ready
-                logger.info('[Voice API] Waiting for TTS session to be ready...');
-                await new Promise((resolve) => {
-                    ttsSession.once('ready', resolve);
-                });
-                logger.info('[Voice API] TTS session is ready!');
+                    // Wait for TTS to be ready
+                    logger.info('[Voice API] Waiting for TTS session to be ready...');
+                    await new Promise((resolve) => {
+                        ttsSession.once('ready', resolve);
+                    });
+                    logger.info('[Voice API] TTS session is ready!');
+                } catch (error) {
+                    logger.warn('[Voice API] ElevenLabs TTS module not available, voice output disabled', { error: error instanceof Error ? error.message : String(error) });
+                }
             }
 
             // Start processing with callbacks
@@ -1710,13 +1717,13 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                 userId,
                 {
                     onTextChunk: (text: string) => {
-                        logger.info('[Voice API] Text chunk:', text);
+                        logger.info('[Voice API] Text chunk:', { text });
                         // Send text chunk to client
                         res.write(`event: text\ndata: ${JSON.stringify({ text })}\n\n`);
 
                         // Send to TTS for streaming audio generation
                         if (ttsSession) {
-                            logger.info('[Voice API] Sending text to TTS:', text);
+                            logger.info('[Voice API] Sending text to TTS:', { text });
                             ttsSession.sendText(text);
                         }
                     },
@@ -2010,7 +2017,10 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         }
 
         try {
-            const { ElevenLabsTTS } = await import('./elevenlabs-tts.js');
+            // @ts-ignore - ElevenLabs TTS module is optional
+            const { ElevenLabsTTS } = await import('./elevenlabs-tts.js').catch(() => {
+                throw new Error('ElevenLabs TTS module not available');
+            });
             const tts = new ElevenLabsTTS(apiKey);
             const voices = await tts.getVoices();
 
@@ -2041,7 +2051,10 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         }
 
         try {
-            const { ElevenLabsTTS } = await import('./elevenlabs-tts.js');
+            // @ts-ignore - ElevenLabs TTS module is optional
+            const { ElevenLabsTTS } = await import('./elevenlabs-tts.js').catch(() => {
+                throw new Error('ElevenLabs TTS module not available');
+            });
             const tts = new ElevenLabsTTS(apiKey);
             const audioBuffer = await tts.getVoicePreview(voiceId, sampleId as string | undefined);
 
