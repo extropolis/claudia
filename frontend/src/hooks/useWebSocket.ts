@@ -606,6 +606,19 @@ export function useWebSocket() {
         sendMessage('workspace:rename', { workspaceId, displayName });
     }, [sendMessage]);
 
+    // Workspace reference actions
+    const toggleReference = useCallback((workspaceId: string, referencePath: string) => {
+        sendMessage('workspace:references:toggle', { workspaceId, referencePath });
+    }, [sendMessage]);
+
+    const addCustomReference = useCallback((workspaceId: string, path: string, description?: string) => {
+        sendMessage('workspace:references:add', { workspaceId, path, description });
+    }, [sendMessage]);
+
+    const removeReference = useCallback((workspaceId: string, referenceId: string) => {
+        sendMessage('workspace:references:remove', { workspaceId, referenceId });
+    }, [sendMessage]);
+
     return {
         createTask,
         selectTaskOnServer,
@@ -637,6 +650,9 @@ export function useWebSocket() {
         pushToGithub,
         renameTask,
         renameWorkspace,
+        toggleReference,
+        addCustomReference,
+        removeReference,
         wsRef
     };
 }
