@@ -59,6 +59,8 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:openTerminal',
     'workspace:systemPrompt:get',
     'workspace:systemPrompt:set',
+    'workspace:recent:list',
+    'workspace:recent:clear',
     'git:push',
     'supervisor:action',
     'supervisor:analyze',
@@ -964,6 +966,33 @@ export async function createApp(basePath?: string) {
                         ws.send(JSON.stringify({
                             type: 'workspace:systemPrompt:result',
                             payload: { workspaceId, success }
+                        }));
+                        break;
+                    }
+
+                    case 'workspace:recent:list': {
+                        // Get recent (removed) workspaces
+                        const recentWorkspaces = workspaceStore.getRecentWorkspaces();
+                        ws.send(JSON.stringify({
+                            type: 'workspace:recent:list',
+                            payload: { recentWorkspaces }
+                        }));
+                        break;
+                    }
+
+                    case 'workspace:recent:clear': {
+                        // Clear a specific recent workspace or all
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (workspaceId) {
+                            workspaceStore.clearRecentWorkspace(workspaceId);
+                        } else {
+                            workspaceStore.clearAllRecentWorkspaces();
+                        }
+                        // Send back updated list
+                        const updatedRecent = workspaceStore.getRecentWorkspaces();
+                        ws.send(JSON.stringify({
+                            type: 'workspace:recent:list',
+                            payload: { recentWorkspaces: updatedRecent }
                         }));
                         break;
                     }
