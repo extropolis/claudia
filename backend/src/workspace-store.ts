@@ -5,7 +5,8 @@
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from 'fs';
 import { join, dirname, resolve, basename } from 'path';
 import { fileURLToPath } from 'url';
-import { Workspace, RecentWorkspace } from '@claudia/shared';
+import { Workspace, RecentWorkspace, WorkspaceReference } from '@claudia/shared';
+import { randomUUID } from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -236,5 +237,86 @@ export class WorkspaceStore {
     clearAllRecentWorkspaces(): void {
         this.config.recentWorkspaces = [];
         this.saveConfig();
+    }
+
+    // --- Workspace References ---
+
+    getReferences(workspaceId: string): WorkspaceReference[] {
+        const workspace = this.config.workspaces.find(w => w.id === workspaceId);
+        return workspace?.references || [];
+    }
+
+    addReference(workspaceId: string, path: string, description?: string): WorkspaceReference {
+        const workspace = this.config.workspaces.find(w => w.id === workspaceId);
+        if (!workspace) {
+            throw new Error(`Workspace not found: ${workspaceId}`);
+        }
+
+        const resolvedPath = resolve(path);
+
+        // Validate directory exists
+        if (!existsSync(resolvedPath)) {
+            throw new Error(`Directory does not exist: ${resolvedPath}`);
+        }
+
+        if (!workspace.references) {
+            workspace.references = [];
+        }
+
+        // Check for duplicates
+        if (workspace.references.some(r => r.path === resolvedPath)) {
+            throw new Error(`Reference already exists: ${resolvedPath}`);
+        }
+
+        // Don't allow self-reference
+        if (resolvedPath === workspaceId) {
+            throw new Error('Cannot reference the same workspace');
+        }
+
+        const reference: WorkspaceReference = {
+            id: randomUUID(),
+            path: resolvedPath,
+            name: basename(resolvedPath) || resolvedPath,
+            description,
+        };
+
+        workspace.references.push(reference);
+        this.saveConfig();
+        console.log(`[WorkspaceStore] Added reference ${reference.name} to workspace ${workspaceId}`);
+        return reference;
+    }
+
+    removeReference(workspaceId: string, referenceId: string): boolean {
+        const workspace = this.config.workspaces.find(w => w.id === workspaceId);
+        if (!workspace || !workspace.references) return false;
+
+        const index = workspace.references.findIndex(r => r.id === referenceId);
+        if (index === -1) return false;
+
+        const removed = workspace.references.splice(index, 1)[0];
+        if (workspace.references.length === 0) {
+            delete workspace.references;
+        }
+        this.saveConfig();
+        console.log(`[WorkspaceStore] Removed reference ${removed.name} from workspace ${workspaceId}`);
+        return true;
+    }
+
+    // Remove reference by path (convenience for toggling workspace references)
+    removeReferenceByPath(workspaceId: string, path: string): boolean {
+        const workspace = this.config.workspaces.find(w => w.id === workspaceId);
+        if (!workspace || !workspace.references) return false;
+
+        const resolvedPath = resolve(path);
+        const index = workspace.references.findIndex(r => r.path === resolvedPath);
+        if (index === -1) return false;
+
+        const removed = workspace.references.splice(index, 1)[0];
+        if (workspace.references.length === 0) {
+            delete workspace.references;
+        }
+        this.saveConfig();
+        console.log(`[WorkspaceStore] Removed reference ${removed.name} from workspace ${workspaceId}`);
+        return true;
     }
 }

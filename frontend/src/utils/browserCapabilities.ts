@@ -139,17 +139,21 @@ export function sendBrowserNotification(
     
     try {
         const notification = new Notification(title, {
-            icon: '/claudia-icon.png',
-            badge: '/claudia-icon.png',
             ...options,
         });
         
         // Auto-close after 5 seconds
         setTimeout(() => notification.close(), 5000);
-        
+
         // Focus window when notification is clicked
         notification.onclick = () => {
             window.focus();
+            // Dispatch custom event so the app can handle task focusing
+            if (options?.data?.taskId) {
+                window.dispatchEvent(new CustomEvent('notification:taskClick', {
+                    detail: { taskId: options.data.taskId }
+                }));
+            }
             notification.close();
         };
         
@@ -416,22 +420,60 @@ export function playTestSound(): void {
  * @param taskPrompt - The task prompt/description to include in notification
  * @returns true if notification was sent, false otherwise
  */
-export function sendTaskCompletionNotification(taskPrompt?: string): boolean {
-    // Only send notification if tab is not visible
-    if (!document.hidden) {
-        return false;
-    }
-    
-    const body = taskPrompt 
-        ? taskPrompt.length > 100 
-            ? taskPrompt.substring(0, 100) + '...'
-            : taskPrompt
-        : 'A task has finished executing';
-    
-    const notification = sendBrowserNotification('Task Complete', {
+export function sendTaskCompletionNotification(options: {
+    taskName?: string;
+    lastMessage?: string;
+    taskId?: string;
+}): boolean {
+    const { taskName, lastMessage, taskId } = options;
+    const title = taskName
+        ? taskName.length > 60 ? taskName.substring(0, 60) + '...' : taskName
+        : 'Task Complete';
+
+    const body = lastMessage
+        ? lastMessage.length > 200 ? lastMessage.substring(0, 200) + '...' : lastMessage
+        : 'Task finished executing';
+
+    const notification = sendBrowserNotification(title, {
         body,
-        tag: 'task-complete', // Prevents duplicate notifications
+        tag: `task-complete-${taskId || 'unknown'}`,
+        data: { taskId },
     });
-    
+
+    return notification !== null;
+}
+
+/**
+ * Send a notification when a task is waiting for user input
+ * @param taskPrompt - The task prompt/description
+ * @param inputType - The type of input being requested
+ * @returns true if notification was sent, false otherwise
+ */
+export function sendTaskWaitingInputNotification(options: {
+    taskName?: string;
+    recentOutput?: string;
+    inputType?: string;
+    taskId?: string;
+}): boolean {
+    const { taskName, recentOutput, inputType, taskId } = options;
+    const typeLabel = inputType === 'permission' ? 'Needs Permission'
+        : inputType === 'question' ? 'Has a Question'
+        : inputType === 'confirmation' ? 'Needs Confirmation'
+        : 'Needs Input';
+
+    const title = taskName
+        ? `${taskName.length > 50 ? taskName.substring(0, 50) + '...' : taskName} — ${typeLabel}`
+        : `Task ${typeLabel}`;
+
+    const body = recentOutput
+        ? recentOutput.length > 150 ? recentOutput.substring(recentOutput.length - 150) : recentOutput
+        : '';
+
+    const notification = sendBrowserNotification(title, {
+        body,
+        tag: `task-waiting-input-${taskId || 'unknown'}`,
+        data: { taskId },
+    });
+
     return notification !== null;
 }

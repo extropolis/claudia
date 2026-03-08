@@ -300,6 +300,8 @@ body {
   border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
+  position: relative;
+  z-index: 10;
 }
 
 /* Resize Handle */
@@ -527,6 +529,41 @@ body {
   display: flex;
   flex-direction: column;
   background: var(--bg-primary);
+  overflow: hidden;
+}
+
+/* Shell switch banner - shown when a shell PTY is running but user is viewing a task */
+.shell-switch-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: #0d2818;
+  border: none;
+  border-bottom: 1px solid #1a4028;
+  color: #0dbc79;
+  font-size: 12px;
+  font-family: "SF Mono", "Monaco", "Inconsolata", "Fira Code", monospace;
+  cursor: pointer;
+  flex-shrink: 0;
+  width: 100%;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.shell-switch-banner:hover {
+  background: #0f3520;
+}
+
+.shell-switch-banner span {
+  opacity: 0.9;
+}
+
+/* Shell terminal wrapper - fills main panel when visible */
+.shell-terminal-wrapper {
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
   overflow: hidden;
 }
 

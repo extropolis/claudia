@@ -44,12 +44,20 @@ export interface Task {
     displayName?: string;    // User-editable display name (shown instead of prompt when set)
 }
 
+export interface WorkspaceReference {
+    id: string;              // UUID
+    path: string;            // Absolute path to referenced directory
+    name: string;            // Display name (defaults to folder name)
+    description?: string;    // Optional user description of what this reference contains
+}
+
 export interface Workspace {
     id: string;              // Full path
     name: string;            // Folder name
     createdAt: string;
     systemPrompt?: string;   // Custom system prompt for this workspace
     displayName?: string;    // User-editable display name (shown instead of folder name when set)
+    references?: WorkspaceReference[];  // Referenced workspaces/folders for cross-workspace context
 }
 
 export interface RecentWorkspace {
@@ -124,6 +132,11 @@ export type WSMessageType =
     | 'workspace:recent:list'
     // Task reordering
     | 'tasks:reordered'
+    // Embedded shell terminals
+    | 'shell:created'
+    | 'shell:output'
+    | 'shell:exited'
+    | 'shell:closed'
     // Supervisor/Chat
     | 'task:summary'
     | 'supervisor:chat:response'

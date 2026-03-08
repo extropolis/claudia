@@ -78,4 +78,3 @@ echo ""
 echo "🚀 Launching Claudia Electron..."
 echo ""
 NODE_ENV=development npx electron .
-

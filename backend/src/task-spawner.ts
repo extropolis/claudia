@@ -159,6 +159,7 @@ interface InternalTask extends Task {
     continuationSent?: boolean; // True if continuation prompt has been sent
     consecutiveOutputChanges?: number; // Count of consecutive polls with output changes (for idle→busy debouncing)
     inactiveOutputLogged?: boolean; // True if we've already logged the "dropping output" message for this inactive state
+    lastRefKey?: string; // Tracks which workspace references were last injected (sorted ref IDs)
 }
 
 /**
@@ -820,6 +821,7 @@ export class TaskSpawner extends EventEmitter {
                             historySize: archived.outputHistory
                                 ? Math.floor(archived.outputHistory.length * 0.75)
                                 : archived.historySize || 0,
+                            displayName: archived.displayName,
                         };
                         this.archivedTasks.set(archived.id, metadata);
                     }
@@ -2435,6 +2437,7 @@ export class TaskSpawner extends EventEmitter {
                 gitState: task.gitState,
                 systemPrompt: task.systemPrompt,
                 historySize,
+                displayName: task.displayName,
             };
             this.archivedTasks.set(taskId, archivedMetadata);
 
@@ -2488,6 +2491,7 @@ export class TaskSpawner extends EventEmitter {
                 gitState: disconnected.gitState,
                 systemPrompt: disconnected.systemPrompt,
                 historySize: disconnected.outputHistory ? Math.floor(disconnected.outputHistory.length * 0.75) : 0,
+                displayName: disconnected.displayName,
             };
             this.archivedTasks.set(taskId, archivedMetadata);
             this.disconnectedTasks.delete(taskId);
@@ -2515,6 +2519,7 @@ export class TaskSpawner extends EventEmitter {
             lastActivity: new Date(persisted.lastActivity),
             gitState: persisted.gitState,
             systemPrompt: persisted.systemPrompt,
+            displayName: persisted.displayName,
         }));
     }
 

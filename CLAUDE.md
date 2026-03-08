@@ -55,6 +55,13 @@ The lock file will prevent accidental duplicate starts.
 - **macOS/Linux**: Use `./start.sh` for startup.
 - The codebase uses `@homebridge/node-pty-prebuilt-multiarch` for cross-platform PTY support.
 - CI runs on both Ubuntu and Windows to ensure compatibility.
+## Releasing
+
+1. Update `version.txt` to the new version number
+2. Run `node scripts/bump-version.mjs` to sync all `package.json` files
+3. Commit with message `chore: release vX.Y.Z`
+4. Push, tag (`vX.Y.Z`), and create a GitHub release
+
 <!-- CODEUI-RULES -->
 ## Custom Rules
 

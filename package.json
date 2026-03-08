@@ -1,7 +1,7 @@
 {
   "name": "@extropolis/claudia",
   "productName": "Claudia",
-  "version": "0.2.22",
+  "version": "0.2.25",
   "description": "Multi-instance Claude Code orchestrator web UI",
   "author": "Extropolis <contact@extropolis.ai>",
   "license": "MIT",
@@ -67,6 +67,7 @@
     "package:mac": "npm run build && electron-builder --mac",
     "package:win": "npm run build && electron-builder --win",
     "package:linux": "npm run build && electron-builder --linux",
+    "postinstall": "node -e \"const fs=require('fs'),p=require('path'),d=p.join('node_modules','node-pty','prebuilds');if(fs.existsSync(d)){fs.readdirSync(d).forEach(a=>{const h=p.join(d,a,'spawn-helper');if(fs.existsSync(h))fs.chmodSync(h,0o755)})}\"",
     "prepare": "npm run build -w shared && npm run build:backend",
     "start": "./start-electron.sh",
     "test": "npm run test:backend && npm run test:frontend",

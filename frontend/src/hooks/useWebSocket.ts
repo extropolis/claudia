@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { WSMessage, WSErrorPayload, Task, Workspace, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
 import { getWebSocketUrl, getApiBaseUrl, isTunnelAccess } from '../config/api-config';
-import { playTaskCompletionSound, sendTaskCompletionNotification } from '../utils/browserCapabilities';
+import { playTaskCompletionSound, sendTaskCompletionNotification, sendTaskWaitingInputNotification } from '../utils/browserCapabilities';
 
 const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
@@ -128,7 +128,11 @@ export function useWebSocket() {
         ws.onmessage = (event) => {
             try {
                 const message: WSMessage = JSON.parse(event.data);
-                console.log('[WebSocket] 📨 Received:', message.type);
+                // Skip logging high-frequency messages to reduce console noise
+                const msgType = message.type as string;
+                if (msgType !== 'task:output' && msgType !== 'shell:output' && msgType !== 'supervisor:chat:typing') {
+                    console.log('[WebSocket] Received:', message.type);
+                }
 
                 switch (message.type) {
                     case 'init': {
@@ -263,6 +267,20 @@ export function useWebSocket() {
                             timestamp: new Date()
                         });
 
+                        // Send browser notification for waiting input
+                        {
+                            const { browserNotificationsEnabled, notifyOnWaitingInput, tasks, selectedTaskId: currentTaskId } = useTaskStore.getState();
+                            if (browserNotificationsEnabled && notifyOnWaitingInput && currentTaskId !== payload.taskId) {
+                                const task = tasks.get(payload.taskId);
+                                sendTaskWaitingInputNotification({
+                                    taskName: task?.displayName || task?.prompt,
+                                    recentOutput: payload.recentOutput,
+                                    inputType: payload.inputType,
+                                    taskId: payload.taskId,
+                                });
+                            }
+                        }
+
                         // Auto-focus on the task if setting is enabled
                         const { autoFocusOnInput, selectedTaskId } = useTaskStore.getState();
                         if (autoFocusOnInput && selectedTaskId !== payload.taskId) {
@@ -302,9 +320,27 @@ export function useWebSocket() {
 
                             // Play completion sound + browser notification on busy→idle transition
                             if (payload.task.state === 'idle' && previousState === 'busy' && initializedRef.current) {
-                                console.log('[WebSocket] Task completed (busy→idle), playing completion sound:', payload.task.id);
                                 playTaskCompletionSound();
-                                sendTaskCompletionNotification(payload.task.prompt);
+                                const { browserNotificationsEnabled, notifyOnCompletion, selectedTaskId: currentTaskId } = useTaskStore.getState();
+                                if (browserNotificationsEnabled && notifyOnCompletion && currentTaskId !== payload.task.id) {
+                                    // Fetch last Claude message from conversation API for the notification body
+                                    const taskName = payload.task.displayName || payload.task.prompt;
+                                    const taskId = payload.task.id;
+                                    fetch(`${API_URL}/api/tasks/${taskId}/conversation`)
+                                        .then(res => res.ok ? res.json() : null)
+                                        .then(data => {
+                                            const messages = data?.messages || [];
+                                            const lastAssistant = [...messages].reverse().find((m: { role: string }) => m.role === 'assistant');
+                                            sendTaskCompletionNotification({
+                                                taskName,
+                                                lastMessage: lastAssistant?.content,
+                                                taskId,
+                                            });
+                                        })
+                                        .catch(() => {
+                                            sendTaskCompletionNotification({ taskName, taskId });
+                                        });
+                                }
                             }
 
                             // Auto-focus on task when it completes (becomes idle) if setting is enabled
@@ -401,7 +437,10 @@ export function useWebSocket() {
 
     const sendMessage = useCallback((type: string, payload: unknown) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
-            console.log(`[WebSocket] Sending: ${type}`, payload);
+            // Skip logging high-frequency messages to reduce console noise
+            if (type !== 'task:input' && type !== 'task:resize' && type !== 'shell:input' && type !== 'shell:resize') {
+                console.log(`[WebSocket] Sending: ${type}`, payload);
+            }
             wsRef.current.send(JSON.stringify({ type, payload }));
         } else {
             console.warn(`[WebSocket] Cannot send ${type}: WebSocket not open (state: ${wsRef.current?.readyState})`);
@@ -428,6 +467,21 @@ export function useWebSocket() {
         window.addEventListener('online', handleOnline);
         window.addEventListener('offline', handleOffline);
 
+        // Handle notification clicks to focus on specific tasks
+        const handleNotificationClick = (e: Event) => {
+            const taskId = (e as CustomEvent).detail?.taskId;
+            if (taskId) {
+                selectTask(taskId);
+                sendMessage('task:select', { taskId });
+                setTimeout(() => {
+                    window.dispatchEvent(new CustomEvent('terminal:scrollToBottom', {
+                        detail: { taskId }
+                    }));
+                }, 100);
+            }
+        };
+        window.addEventListener('notification:taskClick', handleNotificationClick);
+
         return () => {
             console.log('[WebSocket] 🧹 Cleanup - closing connection');
             if (reconnectTimeoutRef.current) {
@@ -435,6 +489,7 @@ export function useWebSocket() {
             }
             window.removeEventListener('online', handleOnline);
             window.removeEventListener('offline', handleOffline);
+            window.removeEventListener('notification:taskClick', handleNotificationClick);
             wsRef.current?.close();
         };
     }, []);
@@ -566,6 +621,19 @@ export function useWebSocket() {
         sendMessage('workspace:rename', { workspaceId, displayName });
     }, [sendMessage]);
 
+    // Workspace reference actions
+    const toggleReference = useCallback((workspaceId: string, referencePath: string) => {
+        sendMessage('workspace:references:toggle', { workspaceId, referencePath });
+    }, [sendMessage]);
+
+    const addCustomReference = useCallback((workspaceId: string, path: string, description?: string) => {
+        sendMessage('workspace:references:add', { workspaceId, path, description });
+    }, [sendMessage]);
+
+    const removeReference = useCallback((workspaceId: string, referenceId: string) => {
+        sendMessage('workspace:references:remove', { workspaceId, referenceId });
+    }, [sendMessage]);
+
     return {
         createTask,
         selectTaskOnServer,
@@ -597,6 +665,9 @@ export function useWebSocket() {
         pushToGithub,
         renameTask,
         renameWorkspace,
+        toggleReference,
+        addCustomReference,
+        removeReference,
         wsRef
     };
 }

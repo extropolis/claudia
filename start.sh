@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# Claudia - Clean Start Script
-# Kills existing processes and restarts on proper ports
+# Claudia - Start Script
 
 set -e
 
@@ -13,25 +12,17 @@ FRONTEND_PORT=5173
 OPENCODE_PORT=4097
 # ============================================
 
-# Lock file to prevent recursive starts
+# Lock file to prevent duplicate starts
 LOCK_FILE="/tmp/claudia-server.lock"
 
-# Check if server is already running (lock file exists and process is alive)
 if [ -f "$LOCK_FILE" ]; then
     LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
     if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
-        echo "🔄 Claudia is already running (PID: $LOCK_PID), killing it first..."
-        kill "$LOCK_PID" 2>/dev/null || true
-        # Wait for it to die
-        sleep 2
-        # Force kill if still running
-        if kill -0 "$LOCK_PID" 2>/dev/null; then
-            echo "   Force killing..."
-            kill -9 "$LOCK_PID" 2>/dev/null || true
-            sleep 1
-        fi
+        echo "❌ Claudia is already running (PID: $LOCK_PID)."
+        echo "   Stop it first or remove the lock file: rm $LOCK_FILE"
+        exit 1
     fi
-    # Remove lock file (stale or just killed)
+    # Remove stale lock file
     rm -f "$LOCK_FILE"
 fi
 
@@ -49,43 +40,61 @@ if [ -f .env ]; then
     set -a; source .env; set +a
 fi
 
-echo "🧹 Cleaning up existing processes..."
+# ============================================
+# DEPENDENCY CHECK
+# ============================================
+check_deps() {
+    local missing=0
 
-# Kill processes on our ports
-for port in $BACKEND_PORT $FRONTEND_PORT $OPENCODE_PORT; do
-    pids=$(lsof -ti:$port 2>/dev/null || true)
-    if [ -n "$pids" ]; then
-        echo "   Killing processes on port $port: $pids"
-        echo "$pids" | xargs kill -9 2>/dev/null || true
+    if ! command -v node &>/dev/null; then
+        echo "❌ Node.js is not installed."
+        echo "   Install it from https://nodejs.org/ or via your package manager."
+        missing=1
     fi
-done
 
-# Kill only processes specific to THIS project (codeui)
-# Use full paths or unique identifiers to avoid killing other projects
-pkill -f "codeui/backend.*tsx watch" 2>/dev/null || true
-pkill -f "codeui/backend/src/index.ts" 2>/dev/null || true
-pkill -f "codeui/backend/test-cli.ts" 2>/dev/null || true
-pkill -f "vite.*codeui" 2>/dev/null || true
-# Kill opencode processes only if they're related to codeui
-pkill -f "codeui.*opencode" 2>/dev/null || true
-# Kill stray Claude Code CLI processes (orphaned zombies)
-echo "Killing zombie Claude processes..."
-pkill -x "claude" 2>/dev/null || true
-pkill -f "claude" 2>/dev/null || true
-# Wait a bit longer for them to die
-sleep 1
+    if ! command -v npm &>/dev/null; then
+        echo "❌ npm is not installed."
+        echo "   It usually comes with Node.js. Install Node.js from https://nodejs.org/"
+        missing=1
+    fi
 
-# Wait for ports to be freed
-sleep 1
+    if [ ! -d "node_modules" ] || [ ! -x "node_modules/.bin/tsx" ] || [ ! -x "node_modules/.bin/vite" ]; then
+        echo "❌ Dependencies are not installed."
+        echo "   Run: npm install"
+        missing=1
+    fi
 
-# Verify ports are free
-for port in $BACKEND_PORT $FRONTEND_PORT $OPENCODE_PORT; do
-    if lsof -ti:$port >/dev/null 2>&1; then
-        echo "❌ Port $port is still in use. Please kill manually:"
-        lsof -i:$port
+    if [ $missing -eq 1 ]; then
+        echo ""
+        echo "Please install the missing dependencies and try again."
         exit 1
     fi
+}
+
+check_deps
+
+# Fix node-pty spawn-helper permissions (npm doesn't preserve execute bits)
+for helper in node_modules/node-pty/prebuilds/*/spawn-helper; do
+    [ -f "$helper" ] && chmod +x "$helper"
 done
+
+# Check if ports are available
+echo "🔍 Checking ports..."
+ports_busy=0
+for port in $BACKEND_PORT $FRONTEND_PORT $OPENCODE_PORT; do
+    if lsof -ti:$port >/dev/null 2>&1; then
+        echo "❌ Port $port is already in use:"
+        lsof -i:$port
+        ports_busy=1
+    fi
+done
+
+if [ $ports_busy -eq 1 ]; then
+    echo ""
+    echo "Please free the ports above and try again."
+    echo "You can kill processes on a port with: kill \$(lsof -ti:<port>)"
+    exit 1
+fi
 
 echo "✅ Ports are free"
 echo ""

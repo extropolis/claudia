@@ -75,6 +75,8 @@ interface TaskStore {
     aiCoreConfigured: boolean | null; // null = not checked yet, false = not configured, true = configured
     showSystemStats: boolean;
     browserNotificationsEnabled: boolean;
+    notifyOnCompletion: boolean;
+    notifyOnWaitingInput: boolean;
 
     // Actions
     setConnected: (connected: boolean) => void;
@@ -145,6 +147,8 @@ interface TaskStore {
     setAiCoreConfigured: (configured: boolean | null) => void;
     setShowSystemStats: (show: boolean) => void;
     setBrowserNotificationsEnabled: (enabled: boolean) => void;
+    setNotifyOnCompletion: (enabled: boolean) => void;
+    setNotifyOnWaitingInput: (enabled: boolean) => void;
 }
 
 // Storage key for localStorage
@@ -172,6 +176,8 @@ interface PersistedState {
     supervisorEnabled: boolean;
     showSystemStats: boolean;
     browserNotificationsEnabled: boolean;
+    notifyOnCompletion: boolean;
+    notifyOnWaitingInput: boolean;
     taskSummaries: [string, TaskSummary][];  // Stored as entries array
     chatMessages: ChatMessage[];
 }
@@ -233,6 +239,8 @@ export const useTaskStore = create<TaskStore>()(
             aiCoreConfigured: null,
             showSystemStats: false,
             browserNotificationsEnabled: false,
+            notifyOnCompletion: true,
+            notifyOnWaitingInput: true,
 
             // Actions
             setConnected: (connected) => {
@@ -595,7 +603,9 @@ export const useTaskStore = create<TaskStore>()(
             setSupervisorEnabled: (enabled) => set({ supervisorEnabled: enabled }),
             setAiCoreConfigured: (configured) => set({ aiCoreConfigured: configured }),
             setShowSystemStats: (show) => set({ showSystemStats: show }),
-            setBrowserNotificationsEnabled: (enabled) => set({ browserNotificationsEnabled: enabled })
+            setBrowserNotificationsEnabled: (enabled) => set({ browserNotificationsEnabled: enabled }),
+            setNotifyOnCompletion: (enabled) => set({ notifyOnCompletion: enabled }),
+            setNotifyOnWaitingInput: (enabled) => set({ notifyOnWaitingInput: enabled })
         }),
         {
             name: STORAGE_KEY,
@@ -622,6 +632,8 @@ export const useTaskStore = create<TaskStore>()(
                 supervisorEnabled: state.supervisorEnabled,
                 showSystemStats: state.showSystemStats,
                 browserNotificationsEnabled: state.browserNotificationsEnabled,
+                notifyOnCompletion: state.notifyOnCompletion,
+                notifyOnWaitingInput: state.notifyOnWaitingInput,
                 taskSummaries: Array.from(state.taskSummaries.entries()),
                 chatMessages: state.chatMessages,
             }),
@@ -664,6 +676,8 @@ export const useTaskStore = create<TaskStore>()(
                     supervisorEnabled: persisted.supervisorEnabled ?? currentState.supervisorEnabled,
                     showSystemStats: persisted.showSystemStats ?? currentState.showSystemStats,
                     browserNotificationsEnabled: persisted.browserNotificationsEnabled ?? currentState.browserNotificationsEnabled,
+                    notifyOnCompletion: persisted.notifyOnCompletion ?? currentState.notifyOnCompletion,
+                    notifyOnWaitingInput: persisted.notifyOnWaitingInput ?? currentState.notifyOnWaitingInput,
                     taskSummaries: persisted.taskSummaries
                         ? new Map(persisted.taskSummaries)
                         : currentState.taskSummaries,

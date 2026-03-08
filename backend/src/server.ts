@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import os from 'os';
 import { spawn, ChildProcess } from 'child_process';
+import { spawn as ptySpawn, IPty } from 'node-pty';
 import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, statSync } from 'fs';
 import { readFile, readdir } from 'fs/promises';
 import { join, dirname, resolve } from 'path';
@@ -15,7 +16,7 @@ import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, PORTS } from '@claudia/shared';
+import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, PORTS } from '@claudia/shared';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
@@ -58,12 +59,20 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:delete',
     'workspace:reorder',
     'workspace:rename',
+    'workspace:browseFolder',
     'workspace:openFolder',
     'workspace:openTerminal',
     'workspace:systemPrompt:get',
     'workspace:systemPrompt:set',
+    'workspace:references:add',
+    'workspace:references:remove',
+    'workspace:references:toggle',
     'workspace:recent:list',
     'workspace:recent:clear',
+    'shell:create',
+    'shell:input',
+    'shell:resize',
+    'shell:close',
     'git:push',
     'supervisor:action',
     'supervisor:analyze',
@@ -99,6 +108,25 @@ function sendWSError(ws: WebSocket, message: string, originalType?: string, code
         type: 'error' as WSMessageType,
         payload: errorPayload
     }));
+}
+
+/**
+ * Build system prompt context for workspace references.
+ * Tells Claude about referenced directories so it can read files from them.
+ */
+function buildReferenceContext(references: WorkspaceReference[]): string {
+    const lines = [
+        'You have access to the following reference directories. Use them as examples or context when relevant to the task. You can read files from these directories using their absolute paths.',
+        ''
+    ];
+    for (const ref of references) {
+        lines.push(`## Reference: "${ref.name}" (${ref.path})`);
+        if (ref.description) {
+            lines.push(ref.description);
+        }
+        lines.push('');
+    }
+    return lines.join('\n').trim();
 }
 
 export async function createApp(basePath?: string) {
@@ -427,6 +455,82 @@ export async function createApp(basePath?: string) {
         scheduleBatchedBroadcast();
     }
 
+    // ===== Embedded Shell Terminal Management =====
+    const isWindows = process.platform === 'win32';
+    const shellProcesses: Map<string, IPty> = new Map(); // workspaceId → PTY
+
+    function createShellTerminal(workspaceId: string, ws: WebSocket, cols?: number, rows?: number): void {
+        // If shell already exists for this workspace, just notify
+        if (shellProcesses.has(workspaceId)) {
+            logger.info('Shell already exists for workspace, reusing', { workspaceId });
+            ws.send(JSON.stringify({
+                type: 'shell:created',
+                payload: { workspaceId }
+            }));
+            return;
+        }
+
+        const shellCmd = isWindows
+            ? 'powershell.exe'
+            : (process.env.SHELL || '/bin/bash');
+
+        logger.info('Creating embedded shell', { workspaceId, shell: shellCmd, cols, rows });
+
+        const pty = ptySpawn(shellCmd, [], {
+            name: 'xterm-256color',
+            cols: cols || 120,
+            rows: rows || 40,
+            cwd: workspaceId,
+            env: { ...process.env, TERM: 'xterm-256color' } as Record<string, string>,
+        });
+
+        shellProcesses.set(workspaceId, pty);
+
+        pty.onData((data: string) => {
+            // Send to all connected clients (the frontend filters by workspaceId)
+            const msg = JSON.stringify({
+                type: 'shell:output',
+                payload: { workspaceId, data }
+            });
+            for (const client of clients) {
+                try {
+                    if (client.readyState === WebSocket.OPEN) {
+                        client.send(msg);
+                    }
+                } catch (err) {
+                    logger.error('Error sending shell output', { error: err });
+                }
+            }
+        });
+
+        pty.onExit(({ exitCode, signal }) => {
+            logger.info('Shell exited', { workspaceId, exitCode, signal });
+            shellProcesses.delete(workspaceId);
+            broadcast({
+                type: 'shell:exited' as WSMessageType,
+                payload: { workspaceId, exitCode, signal }
+            });
+        });
+
+        ws.send(JSON.stringify({
+            type: 'shell:created',
+            payload: { workspaceId }
+        }));
+    }
+
+    function closeShellTerminal(workspaceId: string): void {
+        const pty = shellProcesses.get(workspaceId);
+        if (pty) {
+            logger.info('Closing shell', { workspaceId });
+            pty.kill();
+            shellProcesses.delete(workspaceId);
+            broadcast({
+                type: 'shell:closed' as WSMessageType,
+                payload: { workspaceId }
+            });
+        }
+    }
+
     // Wire up TaskSpawner events
     taskSpawner.on('taskCreated', (task: Task) => {
         broadcast({ type: 'task:created', payload: { task } });
@@ -633,12 +737,27 @@ export async function createApp(basePath?: string) {
                         // Use workspace system prompt if set, otherwise fall back to global rules
                         const workspaceSystemPrompt = workspaceStore.getSystemPrompt(workspaceId);
                         const rules = configStore.getRules();
-                        const systemPrompt = workspaceSystemPrompt?.trim() || rules?.trim() || undefined;
-                        logger.info(`Creating task with system prompt`, { hasSystemPrompt: !!systemPrompt, source: workspaceSystemPrompt ? 'workspace' : (rules ? 'rules' : 'none') });
+                        let systemPrompt = workspaceSystemPrompt?.trim() || rules?.trim() || undefined;
+
+                        // Inject workspace reference context into system prompt
+                        const references = workspaceStore.getReferences(workspaceId);
+                        const validRefs = references.filter(r => existsSync(r.path));
+                        if (validRefs.length > 0) {
+                            const refContext = buildReferenceContext(validRefs);
+                            systemPrompt = systemPrompt ? `${systemPrompt}\n\n${refContext}` : refContext;
+                            logger.info('Injected workspace references', { count: validRefs.length, names: validRefs.map(r => r.name) });
+                        }
+
+                        logger.info(`Creating task with system prompt`, { hasSystemPrompt: !!systemPrompt, source: workspaceSystemPrompt ? 'workspace' : (rules ? 'rules' : 'none'), references: validRefs.length });
 
                         // Pass initial dimensions if provided
                         try {
-                            await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows);
+                            const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows);
+                            // Track which references were injected so we can detect changes on follow-ups
+                            const internalTask = taskSpawner.getTask(newTask.id);
+                            if (internalTask) {
+                                internalTask.lastRefKey = validRefs.map(r => r.id).sort().join(',');
+                            }
                         } catch (err) {
                             const errorMessage = err instanceof Error ? err.message : String(err);
                             logger.error('Failed to create task', { error: errorMessage });
@@ -677,10 +796,41 @@ export async function createApp(basePath?: string) {
                         const { taskId, input } = payload as { taskId?: string; input?: string };
                         if (!taskId || !input) break;
                         // Filter out focus events (ESC [ I and ESC [ O) that confuse Claude's TUI
-                        const filteredInput = input
+                        let filteredInput = input
                             .replace(/\x1b\[I/g, '')  // Focus in
                             .replace(/\x1b\[O/g, ''); // Focus out
                         if (filteredInput) {
+                            // Check if workspace references changed since last injection
+                            // If so, prepend updated reference context to the user's message
+                            const inputTask = taskSpawner.getTask(taskId);
+                            if (inputTask) {
+                                const endsWithEnter = filteredInput.endsWith('\r') || filteredInput.endsWith('\n');
+                                const hasMessageContent = filteredInput.length > 1 && endsWithEnter;
+                                if (hasMessageContent && (inputTask.state === 'idle' || inputTask.state === 'waiting_input')) {
+                                    const currentRefs = workspaceStore.getReferences(inputTask.workspaceId);
+                                    const currentValidRefs = currentRefs.filter(r => existsSync(r.path));
+                                    const currentRefKey = currentValidRefs.map(r => r.id).sort().join(',');
+
+                                    if (currentRefKey !== (inputTask.lastRefKey ?? '')) {
+                                        // References changed - prepend context to the user's message
+                                        if (currentValidRefs.length > 0) {
+                                            const refList = currentValidRefs.map(r => {
+                                                let s = `"${r.name}" (${r.path})`;
+                                                if (r.description) s += ` - ${r.description}`;
+                                                return s;
+                                            }).join('; ');
+                                            const refPrefix = `[CONTEXT UPDATE: Workspace references updated. Available reference directories (read files using absolute paths): ${refList}] `;
+                                            const msgContent = filteredInput.slice(0, -1);
+                                            const enterKey = filteredInput.slice(-1);
+                                            filteredInput = refPrefix + msgContent + enterKey;
+                                            logger.info('Injected updated references into follow-up message', { taskId, refCount: currentValidRefs.length });
+                                        } else {
+                                            logger.info('References cleared for task', { taskId });
+                                        }
+                                        inputTask.lastRefKey = currentRefKey;
+                                    }
+                                }
+                            }
                             taskSpawner.writeToTask(taskId, filteredInput);
                         }
                         break;
@@ -876,6 +1026,8 @@ export async function createApp(basePath?: string) {
                         // Remove a workspace
                         const { workspaceId } = payload as { workspaceId?: string };
                         if (!workspaceId) break;
+                        // Close any embedded shell for this workspace
+                        closeShellTerminal(workspaceId);
                         if (workspaceStore.deleteWorkspace(workspaceId)) {
                             broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId } });
                         }
@@ -902,6 +1054,67 @@ export async function createApp(basePath?: string) {
                             const workspaces = workspaceStore.getWorkspaces();
                             broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
                         }
+                        break;
+                    }
+
+                    case 'workspace:browseFolder': {
+                        // Open native OS folder picker dialog and return selected path
+                        const { execSync } = await import('child_process');
+                        const platform = process.platform;
+                        let selectedPath: string | null = null;
+
+                        try {
+                            if (platform === 'darwin') {
+                                const result = execSync(
+                                    `osascript -e 'POSIX path of (choose folder with prompt "Select a workspace folder")'`,
+                                    { encoding: 'utf-8', timeout: 120000 }
+                                ).trim();
+                                if (result) selectedPath = result.replace(/\/$/, ''); // remove trailing slash
+                            } else if (platform === 'win32') {
+                                const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = "Select a workspace folder"
+$dialog.ShowNewFolderButton = $true
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    Write-Output $dialog.SelectedPath
+}`;
+                                const result = execSync(
+                                    `powershell -NoProfile -Command "${psScript.replace(/\n/g, '; ')}"`,
+                                    { encoding: 'utf-8', timeout: 120000 }
+                                ).trim();
+                                if (result) selectedPath = result;
+                            } else {
+                                // Linux - try zenity first, then kdialog
+                                try {
+                                    const result = execSync(
+                                        `zenity --file-selection --directory --title="Select a workspace folder" 2>/dev/null`,
+                                        { encoding: 'utf-8', timeout: 120000 }
+                                    ).trim();
+                                    if (result) selectedPath = result;
+                                } catch {
+                                    try {
+                                        const result = execSync(
+                                            `kdialog --getexistingdirectory ~ --title "Select a workspace folder" 2>/dev/null`,
+                                            { encoding: 'utf-8', timeout: 120000 }
+                                        ).trim();
+                                        if (result) selectedPath = result;
+                                    } catch {
+                                        logger.warn('No folder dialog available (install zenity or kdialog)');
+                                    }
+                                }
+                            }
+                        } catch (err: any) {
+                            // User cancelled the dialog (exit code != 0) - not an error
+                            if (err.status !== 0) {
+                                logger.debug('Folder browse dialog cancelled or failed', { error: err.message });
+                            }
+                        }
+
+                        ws.send(JSON.stringify({
+                            type: 'workspace:browseFolder',
+                            payload: { path: selectedPath }
+                        }));
                         break;
                     }
 
@@ -977,6 +1190,51 @@ export async function createApp(basePath?: string) {
                             type: 'workspace:systemPrompt:result',
                             payload: { workspaceId, success }
                         }));
+                        break;
+                    }
+
+                    case 'workspace:references:add': {
+                        const { workspaceId, path, description } = payload as { workspaceId?: string; path?: string; description?: string };
+                        if (!workspaceId || !path) break;
+                        try {
+                            workspaceStore.addReference(workspaceId, path, description);
+                            const workspaces = workspaceStore.getWorkspaces();
+                            broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
+                        } catch (error) {
+                            const errorMessage = error instanceof Error ? error.message : String(error);
+                            logger.error('Failed to add reference', { workspaceId, path, error: errorMessage });
+                        }
+                        break;
+                    }
+
+                    case 'workspace:references:remove': {
+                        const { workspaceId, referenceId } = payload as { workspaceId?: string; referenceId?: string };
+                        if (!workspaceId || !referenceId) break;
+                        if (workspaceStore.removeReference(workspaceId, referenceId)) {
+                            const workspaces = workspaceStore.getWorkspaces();
+                            broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
+                        }
+                        break;
+                    }
+
+                    case 'workspace:references:toggle': {
+                        // Toggle a workspace reference on/off (for the checkbox UX)
+                        const { workspaceId, referencePath } = payload as { workspaceId?: string; referencePath?: string };
+                        if (!workspaceId || !referencePath) break;
+                        try {
+                            const refs = workspaceStore.getReferences(workspaceId);
+                            const existing = refs.find(r => r.path === referencePath);
+                            if (existing) {
+                                workspaceStore.removeReference(workspaceId, existing.id);
+                            } else {
+                                workspaceStore.addReference(workspaceId, referencePath);
+                            }
+                            const workspaces = workspaceStore.getWorkspaces();
+                            broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
+                        } catch (error) {
+                            const errorMessage = error instanceof Error ? error.message : String(error);
+                            logger.error('Failed to toggle reference', { workspaceId, referencePath, error: errorMessage });
+                        }
                         break;
                     }
 
@@ -1102,6 +1360,40 @@ export async function createApp(basePath?: string) {
                         break;
                     }
 
+                    case 'shell:create': {
+                        const { workspaceId, cols, rows } = payload as { workspaceId?: string; cols?: number; rows?: number };
+                        if (!workspaceId) break;
+                        createShellTerminal(workspaceId, ws, cols, rows);
+                        break;
+                    }
+
+                    case 'shell:input': {
+                        const { workspaceId, input } = payload as { workspaceId?: string; input?: string };
+                        if (!workspaceId || input === undefined) break;
+                        const shellPty = shellProcesses.get(workspaceId);
+                        if (shellPty) {
+                            shellPty.write(input);
+                        }
+                        break;
+                    }
+
+                    case 'shell:resize': {
+                        const { workspaceId, cols, rows } = payload as { workspaceId?: string; cols?: number; rows?: number };
+                        if (!workspaceId || !cols || !rows) break;
+                        const shellPtyResize = shellProcesses.get(workspaceId);
+                        if (shellPtyResize) {
+                            shellPtyResize.resize(cols, rows);
+                        }
+                        break;
+                    }
+
+                    case 'shell:close': {
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) break;
+                        closeShellTerminal(workspaceId);
+                        break;
+                    }
+
                     case 'tunnel:status': {
                         // Request tunnel status
                         ws.send(JSON.stringify({
@@ -1135,6 +1427,49 @@ export async function createApp(basePath?: string) {
     // REST API routes
     app.get('/api/health', (_req, res) => {
         res.json({ status: 'ok' });
+    });
+
+    // Native folder picker dialog
+    app.post('/api/browse-folder', async (_req, res) => {
+        try {
+            const platform = process.platform;
+            let cmd: string;
+            let args: string[];
+
+            if (platform === 'darwin') {
+                cmd = 'osascript';
+                args = ['-e', 'POSIX path of (choose folder with prompt "Select reference folder")'];
+            } else if (platform === 'win32') {
+                cmd = 'powershell';
+                args = ['-Command', `Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Select reference folder'; if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }`];
+            } else {
+                // Linux - try zenity, then kdialog
+                cmd = 'zenity';
+                args = ['--file-selection', '--directory', '--title=Select reference folder'];
+            }
+
+            const child = spawn(cmd, args);
+            let stdout = '';
+            let stderr = '';
+            child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
+            child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+            child.on('close', (code: number | null) => {
+                const path = stdout.trim();
+                if (code === 0 && path) {
+                    res.json({ success: true, path });
+                } else {
+                    // User cancelled or error
+                    res.json({ success: false, cancelled: true });
+                }
+            });
+            child.on('error', (err: Error) => {
+                console.error('[browse-folder] Failed to open folder dialog:', err.message);
+                res.status(500).json({ success: false, error: err.message });
+            });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({ success: false, error: message });
+        }
     });
 
     // Plugin API routes
@@ -2214,20 +2549,48 @@ export async function createApp(basePath?: string) {
             let prNumber: number | null = null;
             let prUrl: string | null = null;
             let prState: string | null = null;
+            let prTitle: string | null = null;
+            let prBody: string | null = null;
+            interface PRComment {
+                author: string;
+                body: string;
+                createdAt: string;
+                url: string;
+            }
+            let prComments: PRComment[] = [];
 
             try {
                 const { stdout: prOutput } = await execAsync(
-                    `gh pr view --json number,url,state --jq ".number,.url,.state"`,
+                    `gh pr view --json number,url,state,title,body`,
                     { cwd: workspacePath }
                 );
-                const prLines = prOutput.trim().split('\n');
-                if (prLines.length >= 3) {
-                    prNumber = parseInt(prLines[0], 10);
-                    prUrl = prLines[1];
-                    prState = prLines[2];
-                }
+                const prData = JSON.parse(prOutput.trim());
+                prNumber = prData.number;
+                prUrl = prData.url;
+                prState = prData.state;
+                prTitle = prData.title || null;
+                prBody = prData.body || null;
             } catch {
                 // No PR for this branch
+            }
+
+            // Get PR comments if PR exists
+            if (prNumber) {
+                try {
+                    const { stdout: commentsOutput } = await execAsync(
+                        `gh pr view --json comments --jq '.comments'`,
+                        { cwd: workspacePath }
+                    );
+                    const commentsData = JSON.parse(commentsOutput.trim());
+                    prComments = (commentsData || []).map((c: { author: { login: string }; body: string; createdAt: string; url?: string }) => ({
+                        author: c.author?.login || 'unknown',
+                        body: c.body || '',
+                        createdAt: c.createdAt || '',
+                        url: c.url || '',
+                    }));
+                } catch {
+                    // Failed to get comments
+                }
             }
 
             // Get check runs for current branch
@@ -2291,11 +2654,45 @@ export async function createApp(basePath?: string) {
                 prNumber,
                 prUrl,
                 prState,
+                prTitle,
+                prBody,
+                prComments,
                 checks,
             });
         } catch (err) {
             logger.error('Failed to get CI status', { error: err instanceof Error ? err.message : String(err) });
             res.status(500).json({ error: 'Failed to get CI status' });
+        }
+    });
+
+    // Update PR description
+    app.patch('/api/workspaces/pr-description', async (req, res) => {
+        const { workspace, body: prBody } = req.body;
+        if (!workspace) {
+            return res.status(400).json({ error: 'workspace is required' });
+        }
+        if (typeof prBody !== 'string') {
+            return res.status(400).json({ error: 'body is required' });
+        }
+        try {
+            const execAsync = (await import('util')).promisify((await import('child_process')).exec);
+            const os = await import('os');
+            const path = await import('path');
+            const fs = await import('fs/promises');
+            const tmpFile = path.join(os.tmpdir(), `pr-body-${Date.now()}.md`);
+            await fs.writeFile(tmpFile, prBody, 'utf-8');
+            try {
+                await execAsync(
+                    `gh pr edit --body-file "${tmpFile}"`,
+                    { cwd: workspace, maxBuffer: 10 * 1024 * 1024 }
+                );
+                res.json({ success: true });
+            } finally {
+                await fs.unlink(tmpFile).catch(() => {});
+            }
+        } catch (err) {
+            logger.error('Failed to update PR description', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to update PR description' });
         }
     });
 
