@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, Zap, Bell } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
-import { hasBrowserNotifications, getNotificationPermission, requestNotificationPermission } from '../utils/browserCapabilities';
+import { hasBrowserNotifications, getNotificationPermission, requestNotificationPermission, sendBrowserNotification } from '../utils/browserCapabilities';
 import { useTaskStore } from '../stores/taskStore';
 import { useNotification } from './NotificationContainer';
 import './SettingsMenu.css';
@@ -91,6 +91,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         supervisor: false,
         learnings: false
     });
+
+    const [notificationTestStatus, setNotificationTestStatus] = useState<'idle' | 'sent' | 'failed'>('idle');
 
     // Handle initial panel expansion when settings opens
     useEffect(() => {
@@ -1298,6 +1300,41 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                         </label>
                                     </div>
                                 </>
+                            )}
+                            {browserNotificationsEnabled && (
+                                <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border-color)' }}>
+                                    <button
+                                        className="mcp-add-btn"
+                                        onClick={() => {
+                                            const result = sendBrowserNotification('Test Notification', {
+                                                body: 'Browser notifications are working!',
+                                                tag: 'test-notification',
+                                            });
+                                            if (result) {
+                                                setNotificationTestStatus('sent');
+                                            } else {
+                                                setNotificationTestStatus('failed');
+                                            }
+                                        }}
+                                    >
+                                        <Bell size={16} />
+                                        Test Notification
+                                    </button>
+                                    {notificationTestStatus === 'sent' && (
+                                        <p className="permission-description" style={{ marginTop: 8, fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                            Notification sent. If you didn't see it, check that notifications are enabled
+                                            for your browser in <strong>System Settings &gt; Notifications</strong>.
+                                        </p>
+                                    )}
+                                    {notificationTestStatus === 'failed' && (
+                                        <p className="permission-description" style={{ marginTop: 8, fontSize: '0.75rem', color: 'var(--error-color, #e74c3c)' }}>
+                                            Failed to send notification. Please check browser permissions.
+                                        </p>
+                                    )}
+                                    <p className="permission-description" style={{ marginTop: 8, fontSize: '0.75rem' }}>
+                                        Task notifications only appear when the tab is in the background.
+                                    </p>
+                                </div>
                             )}
                         </div>
                     </CollapsiblePanel>

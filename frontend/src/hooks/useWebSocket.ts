@@ -47,6 +47,8 @@ export function useWebSocket() {
     const reconnectAttempts = useRef<number>(0);
     /** Track previous task states to detect busy→idle transitions */
     const taskStatesRef = useRef<Map<string, string>>(new Map());
+    /** Track recent output per task for notification body text */
+    const taskOutputRef = useRef<Map<string, string>>(new Map());
     /** Flag to skip sound on initial load */
     const initializedRef = useRef<boolean>(false);
 
@@ -123,6 +125,16 @@ export function useWebSocket() {
                     console.log('[WebSocket] Received:', message.type);
                 }
 
+                // Buffer recent output per task for notification body text
+                if (message.type === 'task:output') {
+                    const { taskId, data } = message.payload as { taskId: string; data: string };
+                    // Strip ANSI escape codes and keep last 200 chars
+                    const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][^\n]|\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, '');
+                    const existing = taskOutputRef.current.get(taskId) || '';
+                    const combined = existing + clean;
+                    taskOutputRef.current.set(taskId, combined.length > 500 ? combined.slice(-500) : combined);
+                }
+
                 switch (message.type) {
                     case 'init': {
                         const payload = message.payload as {
@@ -192,6 +204,7 @@ export function useWebSocket() {
                         const payload = message.payload as { taskId: string };
                         console.log(`[WebSocket] Task destroyed: ${payload.taskId}`);
                         taskStatesRef.current.delete(payload.taskId);
+                        taskOutputRef.current.delete(payload.taskId);
                         deleteTask(payload.taskId);
                         break;
                     }
@@ -259,7 +272,12 @@ export function useWebSocket() {
                             const { browserNotificationsEnabled, notifyOnWaitingInput, tasks } = useTaskStore.getState();
                             if (browserNotificationsEnabled && notifyOnWaitingInput) {
                                 const task = tasks.get(payload.taskId);
-                                sendTaskWaitingInputNotification(task?.prompt, payload.inputType);
+                                sendTaskWaitingInputNotification({
+                                    taskName: task?.displayName || task?.prompt,
+                                    recentOutput: payload.recentOutput,
+                                    inputType: payload.inputType,
+                                    taskId: payload.taskId,
+                                });
                             }
                         }
 
@@ -302,11 +320,15 @@ export function useWebSocket() {
 
                             // Play completion sound + browser notification on busy→idle transition
                             if (payload.task.state === 'idle' && previousState === 'busy' && initializedRef.current) {
-                                console.log('[WebSocket] Task completed (busy→idle), playing completion sound:', payload.task.id);
                                 playTaskCompletionSound();
                                 const { browserNotificationsEnabled, notifyOnCompletion } = useTaskStore.getState();
                                 if (browserNotificationsEnabled && notifyOnCompletion) {
-                                    sendTaskCompletionNotification(payload.task.prompt);
+                                    const lastOutput = taskOutputRef.current.get(payload.task.id) || '';
+                                    sendTaskCompletionNotification({
+                                        taskName: payload.task.displayName || payload.task.prompt,
+                                        lastOutput: lastOutput.trim(),
+                                        taskId: payload.task.id,
+                                    });
                                 }
                             }
 
@@ -433,12 +455,28 @@ export function useWebSocket() {
         window.addEventListener('online', handleOnline);
         window.addEventListener('offline', handleOffline);
 
+        // Handle notification clicks to focus on specific tasks
+        const handleNotificationClick = (e: Event) => {
+            const taskId = (e as CustomEvent).detail?.taskId;
+            if (taskId) {
+                selectTask(taskId);
+                sendMessage('task:select', { taskId });
+                setTimeout(() => {
+                    window.dispatchEvent(new CustomEvent('terminal:scrollToBottom', {
+                        detail: { taskId }
+                    }));
+                }, 100);
+            }
+        };
+        window.addEventListener('notification:taskClick', handleNotificationClick);
+
         return () => {
             if (reconnectTimeoutRef.current) {
                 clearTimeout(reconnectTimeoutRef.current);
             }
             window.removeEventListener('online', handleOnline);
             window.removeEventListener('offline', handleOffline);
+            window.removeEventListener('notification:taskClick', handleNotificationClick);
             wsRef.current?.close();
         };
     }, []);

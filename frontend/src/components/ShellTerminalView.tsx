@@ -11,9 +11,10 @@ interface ShellTerminalViewProps {
     workspaceName: string;
     wsRef: React.RefObject<WebSocket | null>;
     onClose: () => void;
+    visible?: boolean;
 }
 
-export function ShellTerminalView({ workspaceId, workspaceName, wsRef, onClose }: ShellTerminalViewProps) {
+export function ShellTerminalView({ workspaceId, workspaceName, wsRef, onClose, visible = true }: ShellTerminalViewProps) {
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
@@ -207,6 +208,20 @@ export function ShellTerminalView({ workspaceId, workspaceName, wsRef, onClose }
             fitAddonRef.current = null;
         };
     }, [workspaceId, wsRef]);
+
+    // Refit terminal when becoming visible (xterm can't measure when hidden)
+    useEffect(() => {
+        if (visible && fitAddonRef.current && xtermRef.current) {
+            // Small delay to let the DOM update display before measuring
+            const timer = setTimeout(() => {
+                try {
+                    fitAddonRef.current?.fit();
+                    xtermRef.current?.scrollToBottom();
+                } catch {}
+            }, 50);
+            return () => clearTimeout(timer);
+        }
+    }, [visible]);
 
     const handleClose = () => {
         // Close the shell on the backend
