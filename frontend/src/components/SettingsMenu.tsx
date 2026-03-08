@@ -124,7 +124,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         permissionMode: null as string | null,
         allowedTools: '',
         disallowedTools: '',
-        appendSystemPrompt: ''
+        appendSystemPrompt: '',
+        effortLevel: 'high'
     });
     const cliSwitchesTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -338,7 +339,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                         permissionMode: config.claudeCodeSwitches.permissionMode ?? null,
                         allowedTools: config.claudeCodeSwitches.allowedTools || '',
                         disallowedTools: config.claudeCodeSwitches.disallowedTools || '',
-                        appendSystemPrompt: config.claudeCodeSwitches.appendSystemPrompt || ''
+                        appendSystemPrompt: config.claudeCodeSwitches.appendSystemPrompt || '',
+                        effortLevel: config.claudeCodeSwitches.effortLevel || 'high'
                     });
                 }
             }
@@ -1987,6 +1989,25 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     />
                                     <span className="toggle-slider"></span>
                                 </label>
+                            </div>
+
+                            {/* Effort Level */}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Effort Level</span>
+                                    <span className="permission-description">
+                                        Controls how much reasoning Claude invests before responding. Higher = more thinking tokens.
+                                    </span>
+                                </div>
+                                <select
+                                    className="cli-switch-select"
+                                    value={cliSwitches.effortLevel || 'high'}
+                                    onChange={(e) => handleCliSwitchToggle({ effortLevel: e.target.value })}
+                                >
+                                    <option value="low">Low (faster)</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="high">High (default)</option>
+                                </select>
                             </div>
 
                             {/* Max Turns */}

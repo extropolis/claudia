@@ -211,6 +211,15 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
             }
         }
 
+        // Set effort level via environment variable
+        if (this.configStore) {
+            const switches = this.configStore.getClaudeCodeSwitches();
+            if (switches.effortLevel) {
+                environment = { ...environment, CLAUDE_CODE_EFFORT_LEVEL: switches.effortLevel };
+                logger.info('Effort level', { effortLevel: switches.effortLevel });
+            }
+        }
+
         logger.info('Creating task', { taskId: id, workspaceId: config.workspaceId });
         logger.debug('Command args', { args: claudeArgs });
 
@@ -267,6 +276,9 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
             if (switchArgs.length > 0) {
                 claudeArgs.push(...switchArgs);
                 logger.info('Applied CLI switches for reconnect', { switchArgs });
+            }
+            if (switches.effortLevel) {
+                environment = { ...environment, CLAUDE_CODE_EFFORT_LEVEL: switches.effortLevel };
             }
         }
 
