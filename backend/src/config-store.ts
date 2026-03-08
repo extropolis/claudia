@@ -72,13 +72,6 @@ const DEFAULT_HYPERSPACE_PROXY: HyperspaceProxyConfig = {
     alwaysThinkingEnabled: false
 };
 
-const DEFAULT_HYPERSPACE_PROXY: HyperspaceProxyConfig = {
-    proxyUrl: 'http://localhost:6655',
-    apiKey: '',
-    model: 'anthropic--claude-4.5-sonnet',
-    alwaysThinkingEnabled: false
-};
-
 export interface AppConfig {
     mcpServers: MCPServerConfig[];
     skipPermissions: boolean;
