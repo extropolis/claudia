@@ -43,6 +43,10 @@ interface TaskStore {
     voicePitch: number;
     voiceVolume: number;
 
+    // ElevenLabs voice state
+    elevenLabsVoiceId: string | null;
+    elevenLabsVoiceName: string | null;
+
     // Global voice mode state
     globalVoiceEnabled: boolean;
     focusedInputId: string | null;
@@ -104,6 +108,7 @@ interface TaskStore {
     setVoiceEnabled: (enabled: boolean) => void;
     setAutoSpeakResponses: (enabled: boolean) => void;
     setVoiceSettings: (settings: VoiceSettings) => void;
+    setElevenLabsVoice: (voiceId: string, voiceName: string) => void;
 
     // Global voice mode actions
     setGlobalVoiceEnabled: (enabled: boolean) => void;
@@ -157,6 +162,8 @@ interface PersistedState {
     voiceRate: number;
     voicePitch: number;
     voiceVolume: number;
+    elevenLabsVoiceId: string | null;
+    elevenLabsVoiceName: string | null;
     globalVoiceEnabled: boolean;
     autoSendEnabled: boolean;
     autoSendDelayMs: number;
@@ -193,6 +200,10 @@ export const useTaskStore = create<TaskStore>()(
             voiceRate: 1.0,
             voicePitch: 1.0,
             voiceVolume: 1.0,
+
+            // ElevenLabs voice initial state
+            elevenLabsVoiceId: null,
+            elevenLabsVoiceName: null,
 
             // Global voice mode initial state
             globalVoiceEnabled: false,
@@ -481,6 +492,10 @@ export const useTaskStore = create<TaskStore>()(
                 voicePitch: settings.pitch,
                 voiceVolume: settings.volume
             }),
+            setElevenLabsVoice: (voiceId, voiceName) => set({
+                elevenLabsVoiceId: voiceId,
+                elevenLabsVoiceName: voiceName
+            }),
 
             // Global voice mode actions
             setGlobalVoiceEnabled: (enabled) => set({ globalVoiceEnabled: enabled }),
@@ -597,6 +612,8 @@ export const useTaskStore = create<TaskStore>()(
                 voiceRate: state.voiceRate,
                 voicePitch: state.voicePitch,
                 voiceVolume: state.voiceVolume,
+                elevenLabsVoiceId: state.elevenLabsVoiceId,
+                elevenLabsVoiceName: state.elevenLabsVoiceName,
                 globalVoiceEnabled: state.globalVoiceEnabled,
                 autoSendEnabled: state.autoSendEnabled,
                 autoSendDelayMs: state.autoSendDelayMs,
@@ -637,6 +654,8 @@ export const useTaskStore = create<TaskStore>()(
                     voiceRate: persisted.voiceRate ?? currentState.voiceRate,
                     voicePitch: persisted.voicePitch ?? currentState.voicePitch,
                     voiceVolume: persisted.voiceVolume ?? currentState.voiceVolume,
+                    elevenLabsVoiceId: persisted.elevenLabsVoiceId ?? currentState.elevenLabsVoiceId,
+                    elevenLabsVoiceName: persisted.elevenLabsVoiceName ?? currentState.elevenLabsVoiceName,
                     globalVoiceEnabled: persisted.globalVoiceEnabled ?? currentState.globalVoiceEnabled,
                     autoSendEnabled: persisted.autoSendEnabled ?? currentState.autoSendEnabled,
                     autoSendDelayMs: persisted.autoSendDelayMs ?? currentState.autoSendDelayMs,

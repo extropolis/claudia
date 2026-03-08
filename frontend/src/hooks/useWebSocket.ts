@@ -22,18 +22,20 @@ async function warmUpTunnel(): Promise<boolean> {
     if (!isTunnelAccess()) return true; // no warmup needed for local connections
 
     try {
-        console.log('[WebSocket] Tunnel detected, warming up HTTP connection first...');
+        console.log('[WebSocket] 🌐 Tunnel detected, warming up HTTP connection first...');
+        console.log('[WebSocket] Fetching:', `${API_URL}/api/tunnel/status`);
         const res = await fetch(`${API_URL}/api/tunnel/status`, {
             credentials: 'include', // Ensure cookies are sent/received
         });
+        console.log('[WebSocket] Warmup fetch response status:', res.status, res.statusText);
         if (res.ok) {
-            console.log('[WebSocket] Tunnel warmup succeeded');
+            console.log('[WebSocket] ✓ Tunnel warmup succeeded');
             return true;
         }
-        console.warn('[WebSocket] Tunnel warmup returned status:', res.status);
+        console.warn('[WebSocket] ⚠️ Tunnel warmup returned non-OK status:', res.status);
         return false;
     } catch (err) {
-        console.warn('[WebSocket] Tunnel warmup failed:', err);
+        console.warn('[WebSocket] ❌ Tunnel warmup failed with error:', err);
         return false;
     }
 }
@@ -73,54 +75,64 @@ export function useWebSocket() {
     } = useTaskStore();
 
     const connect = useCallback(async () => {
+        const currentState = wsRef.current?.readyState;
+        console.log(`[WebSocket] connect() called - current state: ${currentState}, isTunnel: ${isTunnelAccess()}`);
+
         if (wsRef.current?.readyState === WebSocket.OPEN ||
-            wsRef.current?.readyState === WebSocket.CONNECTING) return;
+            wsRef.current?.readyState === WebSocket.CONNECTING) {
+            console.log('[WebSocket] Skipping connect - already OPEN or CONNECTING');
+            return;
+        }
 
         // For tunnel connections, warm up with HTTP first to ensure
         // the tunnel proxy is responsive before attempting WebSocket
         if (isTunnelAccess()) {
+            console.log('[WebSocket] Tunnel detected - starting warmup...');
             const warmupOk = await warmUpTunnel();
             if (!warmupOk) {
-                console.warn('[WebSocket] Tunnel warmup failed, retrying in 2s...');
+                console.warn('[WebSocket] ❌ Tunnel warmup FAILED - scheduling retry in 2s...');
                 reconnectTimeoutRef.current = window.setTimeout(connect, 2000);
                 return;
             }
+            console.log('[WebSocket] ✓ Tunnel warmup SUCCESS - proceeding with WebSocket...');
         }
 
-        console.log('[WebSocket] Connecting to', WS_URL);
+        console.log('[WebSocket] Creating WebSocket connection to:', WS_URL);
         const ws = new WebSocket(WS_URL);
+        console.log('[WebSocket] WebSocket object created, readyState:', ws.readyState);
 
         ws.onopen = () => {
-            console.log('[WebSocket] Connected');
+            console.log('[WebSocket] ✓✓✓ CONNECTION OPENED SUCCESSFULLY ✓✓✓');
             setConnected(true);
             // Reset reconnection attempts on successful connection
             reconnectAttempts.current = 0;
         };
 
         ws.onclose = (event) => {
-            console.log(`[WebSocket] Disconnected - code: ${event.code}, reason: ${event.reason || 'none'}, wasClean: ${event.wasClean}`);
+            console.log(`[WebSocket] ❌ DISCONNECTED - code: ${event.code}, reason: ${event.reason || 'none'}, wasClean: ${event.wasClean}`);
             setConnected(false);
             // Exponential backoff: delay = min(base * 2^attempts, max)
             const delay = Math.min(
                 RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts.current),
                 RECONNECT_MAX_DELAY
             );
-            console.log(`[WebSocket] Reconnecting in ${delay}ms (attempt ${reconnectAttempts.current + 1})`);
+            console.log(`[WebSocket] ⏱️ Scheduling reconnect in ${delay}ms (attempt ${reconnectAttempts.current + 1})`);
             reconnectAttempts.current++;
             reconnectTimeoutRef.current = window.setTimeout(connect, delay);
         };
 
         ws.onerror = (error) => {
-            console.error('[WebSocket] Error:', error);
+            console.error('[WebSocket] ❌❌❌ ERROR EVENT:', error);
         };
 
         ws.onmessage = (event) => {
             try {
                 const message: WSMessage = JSON.parse(event.data);
-                console.log('[WebSocket] Received:', message.type);
+                console.log('[WebSocket] 📨 Received:', message.type);
 
                 switch (message.type) {
                     case 'init': {
+                        console.log('[WebSocket] 🎉 RECEIVED INIT MESSAGE - clearing reload state');
                         const payload = message.payload as {
                             tasks: Task[];
                             workspaces: Workspace[];
@@ -136,6 +148,7 @@ export function useWebSocket() {
                         initializedRef.current = true;
                         // Clear reloading state when we get initialized
                         setServerReloading(false);
+                        console.log('[WebSocket] ✓ Init complete - isServerReloading set to FALSE');
 
                         // Fetch config to get settings
                         fetch(`${API_URL}/api/config`)
@@ -327,13 +340,13 @@ export function useWebSocket() {
                         break;
                     }
                     case 'server:reloading': {
-                        console.log('[WebSocket] Server is reloading (hot reload)');
+                        console.log('[WebSocket] 🔄 SERVER IS RELOADING - setting isServerReloading=true');
                         setServerReloading(true);
                         break;
                     }
                     case 'server:reconnecting': {
                         const payload = message.payload as { message?: string };
-                        console.log('[WebSocket] Server is reconnecting tasks:', payload.message);
+                        console.log('[WebSocket] 🔄 SERVER RECONNECTING TASKS:', payload.message);
                         // Show reconnecting state in UI (reuse reloading state for now)
                         setServerReloading(true);
                         break;
@@ -396,18 +409,19 @@ export function useWebSocket() {
     }, []);
 
     useEffect(() => {
+        console.log('[WebSocket] 🚀 useEffect mounting - initiating first connection');
         connect();
 
         // Listen for online/offline events
         const handleOnline = () => {
-            console.log('[Network] Browser is online');
+            console.log('[Network] 📡 Browser is ONLINE - attempting reconnect');
             setOffline(false);
             // Attempt to reconnect when coming back online
             connect();
         };
 
         const handleOffline = () => {
-            console.log('[Network] Browser is offline');
+            console.log('[Network] ❌ Browser is OFFLINE');
             setOffline(true);
         };
 
@@ -415,6 +429,7 @@ export function useWebSocket() {
         window.addEventListener('offline', handleOffline);
 
         return () => {
+            console.log('[WebSocket] 🧹 Cleanup - closing connection');
             if (reconnectTimeoutRef.current) {
                 clearTimeout(reconnectTimeoutRef.current);
             }

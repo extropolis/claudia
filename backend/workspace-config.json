@@ -1,42 +1,118 @@
 {
   "workspaces": [
     {
-      "id": "C:\\Users\\14255\\Work\\claudia",
-      "name": "C:\\Users\\14255\\Work\\claudia",
-      "createdAt": "2026-03-04T18:57:22.692Z"
-    }
-  ],
-  "activeWorkspaceId": "C:\\Users\\14255\\Work\\claudia",
-  "recentWorkspaces": [
-    {
-      "id": "/Users/I850333/projects/experiments/openclaw",
-      "name": "openclaw",
-      "removedAt": "2026-02-27T19:33:38.936Z"
+      "id": "/Users/I850333/projects/experiments/claudia",
+      "name": "claudia",
+      "createdAt": "2026-03-07T18:00:52.699Z",
+      "systemPrompt": "always use this repo for this project https://github.com/extropolis/claudia.git "
     },
     {
-      "id": "/Users/I850333/projects/experiments/skill_learner",
-      "name": "skill_learner",
-      "removedAt": "2026-02-25T21:20:50.295Z"
+      "id": "/Users/I850333/projects/experiments/noa-examples-master",
+      "name": "noa-examples-master",
+      "createdAt": "2026-03-07T18:00:52.705Z"
     },
     {
-      "id": "/Users/I850333/projects/experiments/skylive",
-      "name": "skylive",
-      "removedAt": "2026-02-25T18:59:24.967Z"
-    },
-    {
-      "id": "/Users/I850333/projects/Worldcraft/Assets",
-      "name": "Assets",
-      "removedAt": "2026-02-24T17:20:50.724Z"
+      "id": "/Users/I850333/projects/experiments/Minecraft",
+      "name": "Minecraft",
+      "createdAt": "2026-03-07T18:00:52.717Z"
     },
     {
       "id": "/Users/I850333/projects/experiments/mine",
       "name": "mine",
-      "removedAt": "2026-02-24T01:36:47.768Z"
+      "createdAt": "2026-03-07T18:39:52.609Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/particle",
+      "name": "particle",
+      "createdAt": "2026-03-07T18:39:52.630Z"
     },
     {
       "id": "/Users/I850333/projects/experiments/codeui",
       "name": "codeui",
-      "removedAt": "2026-02-20T17:15:21.207Z"
+      "createdAt": "2026-03-07T18:39:52.643Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments",
+      "name": "experiments",
+      "createdAt": "2026-03-07T18:47:42.147Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/joule_expense",
+      "name": "joule_expense",
+      "createdAt": "2026-03-07T18:47:42.148Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/agent-runtime",
+      "name": "agent-runtime",
+      "createdAt": "2026-03-07T18:47:42.159Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/skynative",
+      "name": "skynative",
+      "createdAt": "2026-03-07T18:47:42.166Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/openclaw",
+      "name": "openclaw",
+      "createdAt": "2026-03-07T18:47:42.176Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/skill_learner",
+      "name": "skill_learner",
+      "createdAt": "2026-03-07T18:47:42.183Z"
+    }
+  ],
+  "activeWorkspaceId": "/Users/I850333/projects/experiments/claudia",
+  "recentWorkspaces": [
+    {
+      "id": "/Users/I850333/projects/experiments/backend-for-joule",
+      "name": "backend-for-joule",
+      "removedAt": "2026-03-07T18:47:17.910Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/claudia/backend",
+      "name": "backend",
+      "removedAt": "2026-03-07T18:47:13.990Z"
+    },
+    {
+      "id": "/tmp",
+      "name": "tmp",
+      "removedAt": "2026-03-07T18:47:10.884Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/sweep",
+      "name": "sweep",
+      "removedAt": "2026-03-07T18:47:05.931Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/skybound",
+      "name": "skybound",
+      "removedAt": "2026-03-07T18:47:01.649Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/joule-concur-expense-develop",
+      "name": "joule-concur-expense-develop",
+      "removedAt": "2026-03-07T18:46:57.222Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/magic",
+      "name": "magic",
+      "removedAt": "2026-03-07T18:44:14.456Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/dashboard_claudia",
+      "name": "dashboard_claudia",
+      "removedAt": "2026-03-07T18:44:11.015Z"
+    },
+    {
+      "id": "/Users/I850333/projects/Worldcraft/Assets",
+      "name": "Assets",
+      "removedAt": "2026-03-07T18:44:04.548Z"
+    },
+    {
+      "id": "/Users/I850333/projects/experiments/skylive",
+      "name": "skylive",
+      "removedAt": "2026-03-07T18:44:00.910Z"
     }
   ]
 }

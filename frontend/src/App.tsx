@@ -11,7 +11,7 @@ import { MobileAccessModal } from './components/MobileAccessModal';
 import { FileExplorer } from './components/FileExplorer';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2 } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic } from 'lucide-react';
 import { getApiBaseUrl } from './config/api-config';
 
 // Hook: returns true when viewport is ≤768px wide
@@ -291,6 +291,26 @@ function App() {
         }
     };
 
+    // Open voice agent in new tab
+    const handleOpenVoiceAgent = useCallback(async () => {
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/tunnel/status`);
+            const data = await res.json();
+            let token = data.token;
+
+            // If no tunnel token, generate a temporary local token
+            if (!token) {
+                token = 'local-' + Math.random().toString(36).substring(2, 15);
+            }
+
+            const voiceUrl = `${getApiBaseUrl()}/voice?token=${token}`;
+            window.open(voiceUrl, '_blank');
+        } catch (error) {
+            console.error('Failed to open voice agent:', error);
+            alert('Failed to open voice agent. Please try again.');
+        }
+    }, []);
+
     // Check tunnel status on mount
     useEffect(() => {
         (async () => {
@@ -397,6 +417,16 @@ function App() {
                             <span className="btn-label">{tunnelLoading ? 'Connecting...' : 'Mobile'}</span>
                         </button>
                     )}
+                    {!isMobile && (
+                        <button
+                            className="chat-toggle-button voice-agent-button"
+                            onClick={handleOpenVoiceAgent}
+                            title="Open Voice Agent"
+                        >
+                            <Mic size={18} />
+                            <span className="btn-label">Voice Agent</span>
+                        </button>
+                    )}
                     <GlobalVoiceToggle />
                     <button
                         className="restart-button"
@@ -427,6 +457,8 @@ function App() {
                                 wsRef={wsRef}
                                 workspace={selectedWorkspace}
                                 isMobile={true}
+                                onInterruptTask={interruptTask}
+                                isConnected={isConnected}
                             />
                         </section>
                     ) : (
@@ -498,6 +530,8 @@ function App() {
                                     task={selectedTask}
                                     wsRef={wsRef}
                                     workspace={selectedWorkspace}
+                                    onInterruptTask={interruptTask}
+                                    isConnected={isConnected}
                                 />
                             ) : (
                                 <div className="empty-state-main">
