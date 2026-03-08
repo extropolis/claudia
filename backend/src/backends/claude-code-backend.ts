@@ -209,11 +209,6 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
                 claudeArgs.push(...switchArgs);
                 logger.info('Applied CLI switches', { switchArgs });
             }
-        }
-
-        // Set effort level via environment variable
-        if (this.configStore) {
-            const switches = this.configStore.getClaudeCodeSwitches();
             if (switches.effortLevel) {
                 environment = { ...environment, CLAUDE_CODE_EFFORT_LEVEL: switches.effortLevel };
                 logger.info('Effort level', { effortLevel: switches.effortLevel });
