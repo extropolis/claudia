@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { WSMessage, WSErrorPayload, Task, Workspace, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
 import { getWebSocketUrl, getApiBaseUrl, isTunnelAccess } from '../config/api-config';
-import { playTaskCompletionSound, sendTaskCompletionNotification } from '../utils/browserCapabilities';
+import { playTaskCompletionSound, sendTaskCompletionNotification, sendTaskWaitingInputNotification } from '../utils/browserCapabilities';
 
 const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
@@ -118,7 +118,8 @@ export function useWebSocket() {
             try {
                 const message: WSMessage = JSON.parse(event.data);
                 // Skip logging high-frequency messages to reduce console noise
-                if (message.type !== 'task:output' && message.type !== 'supervisor:chat:typing') {
+                const msgType = message.type as string;
+                if (msgType !== 'task:output' && msgType !== 'shell:output' && msgType !== 'supervisor:chat:typing') {
                     console.log('[WebSocket] Received:', message.type);
                 }
 
@@ -253,6 +254,15 @@ export function useWebSocket() {
                             timestamp: new Date()
                         });
 
+                        // Send browser notification for waiting input
+                        {
+                            const { browserNotificationsEnabled, notifyOnWaitingInput, tasks } = useTaskStore.getState();
+                            if (browserNotificationsEnabled && notifyOnWaitingInput) {
+                                const task = tasks.get(payload.taskId);
+                                sendTaskWaitingInputNotification(task?.prompt, payload.inputType);
+                            }
+                        }
+
                         // Auto-focus on the task if setting is enabled
                         const { autoFocusOnInput, selectedTaskId } = useTaskStore.getState();
                         if (autoFocusOnInput && selectedTaskId !== payload.taskId) {
@@ -294,7 +304,10 @@ export function useWebSocket() {
                             if (payload.task.state === 'idle' && previousState === 'busy' && initializedRef.current) {
                                 console.log('[WebSocket] Task completed (busy→idle), playing completion sound:', payload.task.id);
                                 playTaskCompletionSound();
-                                sendTaskCompletionNotification(payload.task.prompt);
+                                const { browserNotificationsEnabled, notifyOnCompletion } = useTaskStore.getState();
+                                if (browserNotificationsEnabled && notifyOnCompletion) {
+                                    sendTaskCompletionNotification(payload.task.prompt);
+                                }
                             }
 
                             // Auto-focus on task when it completes (becomes idle) if setting is enabled
@@ -392,7 +405,7 @@ export function useWebSocket() {
     const sendMessage = useCallback((type: string, payload: unknown) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
             // Skip logging high-frequency messages to reduce console noise
-            if (type !== 'task:input' && type !== 'task:resize') {
+            if (type !== 'task:input' && type !== 'task:resize' && type !== 'shell:input' && type !== 'shell:resize') {
                 console.log(`[WebSocket] Sending: ${type}`, payload);
             }
             wsRef.current.send(JSON.stringify({ type, payload }));

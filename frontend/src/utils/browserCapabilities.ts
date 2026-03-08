@@ -421,17 +421,46 @@ export function sendTaskCompletionNotification(taskPrompt?: string): boolean {
     if (!document.hidden) {
         return false;
     }
-    
-    const body = taskPrompt 
-        ? taskPrompt.length > 100 
+
+    const body = taskPrompt
+        ? taskPrompt.length > 100
             ? taskPrompt.substring(0, 100) + '...'
             : taskPrompt
         : 'A task has finished executing';
-    
+
     const notification = sendBrowserNotification('Task Complete', {
         body,
         tag: 'task-complete', // Prevents duplicate notifications
     });
-    
+
+    return notification !== null;
+}
+
+/**
+ * Send a notification when a task is waiting for user input
+ * @param taskPrompt - The task prompt/description
+ * @param inputType - The type of input being requested
+ * @returns true if notification was sent, false otherwise
+ */
+export function sendTaskWaitingInputNotification(taskPrompt?: string, inputType?: string): boolean {
+    // Only send notification if tab is not visible
+    if (!document.hidden) {
+        return false;
+    }
+
+    const typeLabel = inputType === 'permission' ? 'needs permission'
+        : inputType === 'question' ? 'has a question'
+        : inputType === 'confirmation' ? 'needs confirmation'
+        : 'needs input';
+
+    const body = taskPrompt
+        ? `${taskPrompt.length > 80 ? taskPrompt.substring(0, 80) + '...' : taskPrompt}`
+        : `A task ${typeLabel}`;
+
+    const notification = sendBrowserNotification(`Task ${typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1)}`, {
+        body,
+        tag: 'task-waiting-input', // Prevents duplicate notifications
+    });
+
     return notification !== null;
 }
