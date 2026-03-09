@@ -13,6 +13,8 @@
     justify-content: space-between;
     padding: 14px 16px;
     border-bottom: 1px solid var(--border-color);
+    position: relative;
+    z-index: 2; /* Stay above scrolling content and dropdowns */
 }
 
 .workspace-panel-header h2 {
@@ -48,6 +50,8 @@
     flex: 1;
     overflow-y: auto;
     padding: 8px 0;
+    position: relative;
+    z-index: 1; /* Establish stacking context so scrollbar stays on top of children */
 }
 
 /* Empty State */
@@ -1031,6 +1035,8 @@
 .archived-tasks-section {
     border-bottom: 1px solid var(--border-color);
     background: var(--bg-tertiary);
+    position: relative;
+    z-index: 2; /* Stay above scrolling content */
 }
 
 .archived-tasks-header {
