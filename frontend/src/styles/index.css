@@ -2466,6 +2466,7 @@ body {
 
   .sidebar.mobile-full {
     flex: 1;
+    min-height: 0; /* Allow flex item to shrink below content size so children can scroll */
   }
 
   .main-panel {

@@ -3,6 +3,7 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+    min-height: 0; /* Allow panel to shrink in flex layout so workspace-panel-content can scroll */
     background: var(--bg-secondary);
 }
 
@@ -1236,6 +1237,17 @@
 
 /* ===== MOBILE RESPONSIVE ===== */
 @media (max-width: 768px) {
+    /* Ensure workspace panel can shrink and scroll on mobile */
+    .workspace-panel {
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    /* Task list max-height: account for larger 44px mobile touch targets */
+    .task-list {
+        max-height: calc(5 * 44px);
+    }
+
     /* Larger touch targets for task items */
     .workspace-panel .task-item {
         padding: 10px 12px;
