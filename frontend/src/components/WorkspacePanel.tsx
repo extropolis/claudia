@@ -233,12 +233,12 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                     {displayPrompt}
                 </span>
             )}
-            {task.state !== 'busy' && task.state !== 'starting' && task.lastActivity && (
-                <span className="task-time-ago" title={new Date(task.lastActivity).toLocaleString()}>
-                    {formatTimeAgo(task.lastActivity)}
-                </span>
-            )}
             <div className="task-actions">
+                {task.state !== 'busy' && task.state !== 'starting' && task.lastActivity && (
+                    <span className="task-time-ago" title={new Date(task.lastActivity).toLocaleString()}>
+                        {formatTimeAgo(task.lastActivity)}
+                    </span>
+                )}
                 {canInterrupt && (
                     <button
                         className="task-action-button stop"
