@@ -922,46 +922,6 @@ function WorkspaceSection({
             </div>
             {isExpanded && (
                 <div className="workspace-content">
-                    {tasks.length === 0 ? (
-                        <div className="empty-tasks">No tasks yet</div>
-                    ) : (
-                        <div className="task-list-container">
-                            <div
-                                ref={taskListRef}
-                                className={`task-list ${isResizing ? 'resizing' : ''}`}
-                                style={taskListHeight ? { maxHeight: `${taskListHeight}px` } : undefined}
-                            >
-                                {tasks.map((task, idx) => (
-                                    <TaskItem
-                                        key={task.id}
-                                        task={task}
-                                        index={idx}
-                                        isSelected={selectedTaskId === task.id}
-                                        hasActiveQuestion={waitingInputTaskIds.has(task.id)}
-                                        onDeleteTask={onDeleteTask}
-                                        onInterruptTask={onInterruptTask}
-                                        onArchiveTask={onArchiveTask}
-                                        onRevertTask={onRevertTask}
-                                        onSelectTask={onSelectTask}
-                                        onRenameTask={onRenameTask}
-                                        isDragging={taskDragIndex !== null}
-                                        dragIndex={taskDragIndex}
-                                        dragOverIndex={taskDragOverIndex}
-                                        onDragStart={handleTaskDragStart}
-                                        onDragEnter={handleTaskDragEnter}
-                                        onDragEnd={handleTaskDragEnd}
-                                    />
-                                ))}
-                            </div>
-                            <div
-                                className="task-list-resize-handle"
-                                onMouseDown={handleResizeStart}
-                                title="Drag to resize task list"
-                            >
-                                <GripHorizontal size={12} />
-                            </div>
-                        </div>
-                    )}
                     <form
                         className={`task-input-form ${isImageDragging ? 'dragging' : ''}`}
                         onSubmit={handleSubmit}
@@ -1012,7 +972,7 @@ function WorkspaceSection({
                                     onKeyDown={handleKeyDown}
                                     onFocus={handleFocus}
                                     onBlur={handleBlur}
-                                    rows={2}
+                                    rows={1}
                                 />
                                 {showInterim && (
                                     <span className="interim-indicator">{voiceInterimTranscript}</span>
@@ -1044,6 +1004,46 @@ function WorkspaceSection({
                             </button>
                         </div>
                     </form>
+                    {tasks.length === 0 ? (
+                        <div className="empty-tasks">No tasks yet</div>
+                    ) : (
+                        <div className="task-list-container">
+                            <div
+                                ref={taskListRef}
+                                className={`task-list ${isResizing ? 'resizing' : ''}`}
+                                style={taskListHeight ? { maxHeight: `${taskListHeight}px` } : undefined}
+                            >
+                                {tasks.map((task, idx) => (
+                                    <TaskItem
+                                        key={task.id}
+                                        task={task}
+                                        index={idx}
+                                        isSelected={selectedTaskId === task.id}
+                                        hasActiveQuestion={waitingInputTaskIds.has(task.id)}
+                                        onDeleteTask={onDeleteTask}
+                                        onInterruptTask={onInterruptTask}
+                                        onArchiveTask={onArchiveTask}
+                                        onRevertTask={onRevertTask}
+                                        onSelectTask={onSelectTask}
+                                        onRenameTask={onRenameTask}
+                                        isDragging={taskDragIndex !== null}
+                                        dragIndex={taskDragIndex}
+                                        dragOverIndex={taskDragOverIndex}
+                                        onDragStart={handleTaskDragStart}
+                                        onDragEnter={handleTaskDragEnter}
+                                        onDragEnd={handleTaskDragEnd}
+                                    />
+                                ))}
+                            </div>
+                            <div
+                                className="task-list-resize-handle"
+                                onMouseDown={handleResizeStart}
+                                title="Drag to resize task list"
+                            >
+                                <GripHorizontal size={12} />
+                            </div>
+                        </div>
+                    )}
                 </div>
             )}
         </div>
