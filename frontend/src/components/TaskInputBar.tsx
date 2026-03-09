@@ -1,5 +1,5 @@
 import { useRef, useEffect, useCallback, useState } from 'react';
-import { Send, MessageSquare, ImagePlus, X } from 'lucide-react';
+import { Send, MessageSquare, ImagePlus, X, Clipboard } from 'lucide-react';
 import { Task } from '@claudia/shared';
 import { useTaskStore } from '../stores/taskStore';
 import { getApiBaseUrl } from '../config/api-config';
@@ -22,6 +22,7 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isDragging, setIsDragging] = useState(false);
+    const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
 
     const {
@@ -170,6 +171,53 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
         await handleFileSelect(files);
     };
 
+    // Handle clipboard paste - intercept pasted images (e.g. from Print Screen, Snipping Tool)
+    const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+        const clipboardItems = e.clipboardData?.items;
+        if (!clipboardItems) return;
+
+        const imageItems: DataTransferItem[] = [];
+        for (let i = 0; i < clipboardItems.length; i++) {
+            const item = clipboardItems[i];
+            if (item.type.startsWith('image/')) {
+                imageItems.push(item);
+            }
+        }
+
+        // If no images in clipboard, let the default paste behavior handle text
+        if (imageItems.length === 0) return;
+
+        // Prevent the default paste behavior so image data doesn't get inserted as text
+        e.preventDefault();
+
+        console.log(`[TaskInputBar] Pasting ${imageItems.length} image(s) from clipboard`);
+        setIsUploading(true);
+
+        for (const item of imageItems) {
+            const file = item.getAsFile();
+            if (!file) {
+                console.warn('[TaskInputBar] Failed to get file from clipboard item');
+                continue;
+            }
+
+            // Give pasted images a meaningful name with timestamp
+            const extension = file.type.split('/')[1] || 'png';
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const namedFile = new File([file], `clipboard-${timestamp}.${extension}`, {
+                type: file.type
+            });
+
+            console.log(`[TaskInputBar] Uploading pasted image: ${namedFile.name} (${namedFile.size} bytes, ${namedFile.type})`);
+            const uploaded = await uploadImage(namedFile);
+            if (uploaded) {
+                setImages(prev => [...prev, uploaded]);
+                console.log(`[TaskInputBar] Successfully uploaded pasted image: ${uploaded.filename}`);
+            }
+        }
+
+        setIsUploading(false);
+    };
+
     const sendMessage = useCallback(() => {
         if (!message.trim() && images.length === 0) return;
         if (wsRef.current?.readyState !== WebSocket.OPEN) return;
@@ -277,7 +325,13 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
                 </div>
             )}
 
-            {/* Upload error message */}
+            {/* Upload status messages */}
+            {isUploading && (
+                <div className="task-input-uploading">
+                    <Clipboard size={14} />
+                    <span>Uploading pasted image...</span>
+                </div>
+            )}
             {uploadError && (
                 <div className="task-input-error">{uploadError}</div>
             )}
@@ -298,6 +352,7 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
                         value={message}
                         onChange={(e) => setMessage(e.target.value)}
                         onKeyDown={handleKeyDown}
+                        onPaste={handlePaste}
                         onFocus={handleFocus}
                         onBlur={handleBlur}
                         placeholder={isDisabled ? 'Task is not running...' : 'Type a message to Claude...'}
@@ -338,7 +393,7 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
                 </button>
             </div>
             <div className="task-input-hint">
-                Press Enter to send, Shift+Enter for new line
+                Enter to send, Shift+Enter for new line, Ctrl+V to paste screenshots
                 {globalVoiceEnabled && isFocused && <span className="voice-hint"> | Voice active</span>}
             </div>
         </div>

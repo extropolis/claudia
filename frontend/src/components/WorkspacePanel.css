@@ -578,6 +578,24 @@
     flex-shrink: 0;
 }
 
+/* Time-ago indicator - subtle, hidden on hover */
+.workspace-panel .task-item .task-time-ago {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+    opacity: 0.7;
+    font-variant-numeric: tabular-nums;
+    transition: opacity 0.15s ease;
+    pointer-events: none;
+}
+
+.workspace-panel .task-item:hover .task-time-ago {
+    opacity: 0;
+    width: 0;
+    overflow: hidden;
+}
+
 .workspace-panel .task-item:hover {
     background: var(--bg-tertiary);
 }
@@ -1319,6 +1337,11 @@
 
     .workspace-panel .task-item .task-prompt {
         font-size: 0.8125rem;
+    }
+
+    /* On mobile, hide time-ago since action buttons are always visible */
+    .workspace-panel .task-item .task-time-ago {
+        display: none;
     }
 
     /* Make action buttons always visible & larger on mobile (no hover) */

@@ -104,11 +104,28 @@ interface TaskItemProps {
     onDragEnd: () => void;
 }
 
+/** Format a time-ago string from a Date/string, e.g. "5s", "2m", "1h", "3d" */
+function formatTimeAgo(date: Date | string): string {
+    const now = Date.now();
+    const then = typeof date === 'string' ? new Date(date).getTime() : date.getTime();
+    const diffMs = now - then;
+    if (diffMs < 0) return '';
+    const seconds = Math.floor(diffMs / 1000);
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h`;
+    const days = Math.floor(hours / 24);
+    return `${days}d`;
+}
+
 function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, isSelected, hasActiveQuestion, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
     const [stopClicked, setStopClicked] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
     const [editValue, setEditValue] = useState('');
     const editInputRef = useRef<HTMLInputElement>(null);
+    const [, setTick] = useState(0);
 
     // Reset stopClicked when task state changes from busy
     useEffect(() => {
@@ -116,6 +133,12 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
             setStopClicked(false);
         }
     }, [task.state]);
+
+    // Tick every 30s to keep the time-ago indicator up to date
+    useEffect(() => {
+        const interval = setInterval(() => setTick(t => t + 1), 30000);
+        return () => clearInterval(interval);
+    }, []);
 
     // Split prompt by ⏺ dots and get the last segment for display
     const segments = task.prompt.split('⏺').map(s => s.trim()).filter(Boolean);
@@ -208,6 +231,11 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                     title={task.prompt}
                 >
                     {displayPrompt}
+                </span>
+            )}
+            {task.state !== 'busy' && task.state !== 'starting' && task.lastActivity && (
+                <span className="task-time-ago" title={new Date(task.lastActivity).toLocaleString()}>
+                    {formatTimeAgo(task.lastActivity)}
                 </span>
             )}
             <div className="task-actions">
