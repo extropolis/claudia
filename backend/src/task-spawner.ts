@@ -2373,7 +2373,8 @@ export class TaskSpawner extends EventEmitter {
         // Only emit once, regardless of which map(s) the task was in
         if (destroyed) {
             logger.info(`Task destroyed`, { taskId, source });
-            this.scheduleSave();
+            // Save immediately — destructive operations must not be lost to debounce
+            this.saveTasks();
             this.emit('taskDestroyed', taskId);
         } else {
             logger.warn(`Task not found in any map`, { taskId });
@@ -2500,7 +2501,8 @@ export class TaskSpawner extends EventEmitter {
 
         // Only emit once, regardless of which map(s) the task was in
         if (archived) {
-            this.scheduleSave();
+            // Save immediately — destructive operations must not be lost to debounce
+            this.saveTasks();
             this.emit('taskDestroyed', taskId);
             console.log(`[TaskSpawner] Archived ${wasLive ? 'live' : 'disconnected'} task ${taskId}`);
         }

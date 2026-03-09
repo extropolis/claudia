@@ -234,18 +234,28 @@ export async function createApp(basePath?: string) {
 
     // Backfill workspaces from existing tasks
     // This ensures tasks created before workspace tracking still show up in UI
+    // BUT: never re-add workspaces that the user explicitly deleted (in recentWorkspaces)
     try {
         const tasks = taskSpawner.getAllTasks();
         logger.info(`Backfill: Found ${tasks.length} tasks`);
         const workspacePathsToAdd = new Set<string>();
 
+        // Get recently deleted workspaces so we don't re-add them
+        const recentWorkspaces = workspaceStore.getRecentWorkspaces();
+        const recentlyDeletedIds = new Set(recentWorkspaces.map(r => r.id));
+        logger.info(`Backfill: ${recentlyDeletedIds.size} recently deleted workspace(s) will be excluded`);
+
         for (const task of tasks) {
             if (task.workspaceId) {
                 const exists = existsSync(task.workspaceId);
                 const alreadyInStore = workspaceStore.getWorkspace(task.workspaceId);
-                logger.info(`Backfill: Task ${task.id} workspace ${task.workspaceId} exists=${exists} inStore=${!!alreadyInStore}`);
+                const wasDeleted = recentlyDeletedIds.has(task.workspaceId);
 
-                if (!alreadyInStore && exists) {
+                if (process.env.DEBUG_TASKS) {
+                    logger.info(`Backfill: Task ${task.id} workspace ${task.workspaceId} exists=${exists} inStore=${!!alreadyInStore} wasDeleted=${wasDeleted}`);
+                }
+
+                if (!alreadyInStore && exists && !wasDeleted) {
                     workspacePathsToAdd.add(task.workspaceId);
                 }
             }
@@ -2207,6 +2217,54 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         }
     });
 
+    // Git log endpoint - get commit history
+    app.get('/api/workspaces/git-log', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        const count = parseInt(req.query.count as string, 10) || 50;
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+
+        try {
+            const execAsync = (await import('util')).promisify((await import('child_process')).exec);
+
+            // Check if it's a git repo
+            try {
+                await execAsync('git rev-parse --git-dir', { cwd: workspacePath });
+            } catch {
+                return res.json({ commits: [] });
+            }
+
+            const separator = '---COMMIT_SEP---';
+            const format = `%H${separator}%h${separator}%an${separator}%aI${separator}%s`;
+            const { stdout } = await execAsync(
+                `git log --pretty=format:"${format}" -n ${Math.min(count, 200)}`,
+                { cwd: workspacePath, maxBuffer: 1024 * 1024 }
+            );
+
+            const commits = stdout.trim().split('\n')
+                .filter(line => line.length > 0)
+                .map(line => {
+                    const parts = line.split(separator);
+                    return {
+                        hash: parts[0] || '',
+                        shortHash: parts[1] || '',
+                        author: parts[2] || '',
+                        date: parts[3] || '',
+                        message: parts[4] || '',
+                    };
+                });
+
+            res.json({ commits });
+        } catch (err) {
+            logger.error('Failed to get git log', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to get git log' });
+        }
+    });
+
     // CI/CD checks endpoint - get PR check status from GitHub
     app.get('/api/workspaces/ci-status', async (req, res) => {
         const workspacePath = req.query.workspace as string;
@@ -3866,7 +3924,17 @@ Guidelines:
 
     // Graceful shutdown handler
     function gracefulShutdown(signal: string): void {
-        console.log(`[Server] Shutting down (${signal}), notifying clients and saving state...`);
+        console.log(`[Server] Shutting down (${signal}), saving state immediately...`);
+
+        // CRITICAL: Save all state IMMEDIATELY before anything else.
+        // On Windows, tsx watch may kill the process abruptly — the 500ms
+        // timeout below is NOT guaranteed to fire.
+        try {
+            taskSpawner.saveNow();
+            supervisorChat.saveChatHistoryNow();
+        } catch (err) {
+            console.error('[Server] Error during immediate save on shutdown:', err);
+        }
 
         // Clear heartbeat interval
         clearInterval(heartbeatInterval);
@@ -3874,15 +3942,11 @@ Guidelines:
         // Notify all connected clients that the server is reloading
         broadcast({ type: 'server:reloading' as WSMessageType, payload: {} });
 
-        // Give clients enough time to receive the message and for I/O to complete
-        // 500ms provides a good balance between responsiveness and reliability
+        // Give clients time to receive the message, then clean up
         setTimeout(() => {
             // Stop tunnel if active
             tunnelManager.stop().catch(() => {});
 
-            // Save all state synchronously before exit
-            taskSpawner.saveNow();
-            supervisorChat.saveChatHistoryNow();
             taskSpawner.destroy();
 
             // Close WebSocket connections gracefully
