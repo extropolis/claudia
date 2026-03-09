@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Smartphone, Copy, Check } from 'lucide-react';
+import { X, Smartphone, Copy, Check, StopCircle, Play } from 'lucide-react';
 import QRCode from 'qrcode';
 import { getApiBaseUrl } from '../config/api-config';
 import './MobileAccessModal.css';
@@ -17,9 +17,13 @@ interface MobileAccessModalProps {
     isOpen: boolean;
     onClose: () => void;
     error?: string | null;
+    tunnelActive?: boolean;
+    tunnelLoading?: boolean;
+    onStopTunnel?: () => void;
+    onStartTunnel?: () => void;
 }
 
-export function MobileAccessModal({ isOpen, onClose, error }: MobileAccessModalProps) {
+export function MobileAccessModal({ isOpen, onClose, error, tunnelLoading, onStopTunnel, onStartTunnel }: MobileAccessModalProps) {
     const [status, setStatus] = useState<TunnelStatus | null>(null);
     const [copied, setCopied] = useState(false);
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -57,9 +61,9 @@ export function MobileAccessModal({ isOpen, onClose, error }: MobileAccessModalP
         return () => clearInterval(interval);
     }, [isOpen, error, fetchStatus]);
 
-    // Generate QR code when URL changes
+    // Generate QR code when URL changes or modal reopens (canvas is a new DOM element each time)
     useEffect(() => {
-        if (!status?.active || !status.url || !status.token || !canvasRef.current) return;
+        if (!isOpen || !status?.active || !status.url || !status.token || !canvasRef.current) return;
 
         const mobileUrl = `${status.url}/?token=${status.token}`;
         console.log('[MobileAccess] Generating QR for:', mobileUrl);
@@ -74,7 +78,7 @@ export function MobileAccessModal({ isOpen, onClose, error }: MobileAccessModalP
         }).catch((err: Error) => {
             console.error('[MobileAccess] QR generation failed:', err);
         });
-    }, [status?.active, status?.url, status?.token]);
+    }, [isOpen, status?.active, status?.url, status?.token]);
 
     // Copy URL to clipboard
     const copyUrl = () => {
@@ -106,15 +110,17 @@ export function MobileAccessModal({ isOpen, onClose, error }: MobileAccessModalP
 
                 {/* Status */}
                 <div className="tunnel-status">
-                    <span className={`status-dot ${status?.active ? 'active' : error ? 'error' : 'starting'}`} />
+                    <span className={`status-dot ${status?.active ? 'active' : error ? 'error' : tunnelLoading ? 'starting' : 'inactive'}`} />
                     <span>
                         {status?.active
                             ? 'Tunnel active'
                             : error
                                 ? 'Connection failed'
-                                : 'Starting tunnel...'}
+                                : tunnelLoading
+                                    ? 'Starting tunnel...'
+                                    : 'Tunnel not running'}
                     </span>
-                    {!status?.active && !error && <span className="loading-spinner" />}
+                    {tunnelLoading && <span className="loading-spinner" />}
                 </div>
 
                 {/* Error message */}
@@ -132,45 +138,33 @@ export function MobileAccessModal({ isOpen, onClose, error }: MobileAccessModalP
                         <div className="qr-placeholder error">
                             Failed
                         </div>
-                    ) : (
+                    ) : tunnelLoading ? (
                         <div className="qr-placeholder">
                             Starting...
+                        </div>
+                    ) : (
+                        <div className="qr-placeholder">
+                            Not connected
                         </div>
                     )}
                 </div>
 
-                {/* URL */}
-                {status?.active && mobileUrl && (
-                    <div className="tunnel-url-area">
-                        <label>Mobile URL</label>
-                        <div className="tunnel-url-row">
-                            <input type="text" readOnly value={mobileUrl} />
-                            <button onClick={copyUrl} title="Copy URL">
-                                {copied ? <Check size={14} /> : <Copy size={14} />}
-                                {copied ? 'Copied!' : 'Copy'}
-                            </button>
-                        </div>
+                {/* URL - always rendered to maintain layout */}
+                <div className="tunnel-url-area">
+                    <label>Mobile URL</label>
+                    <div className="tunnel-url-row">
+                        <input type="text" readOnly value={mobileUrl || ''} placeholder="Not connected" />
+                        <button onClick={copyUrl} title="Copy URL" disabled={!mobileUrl}>
+                            {copied ? <Check size={14} /> : <Copy size={14} />}
+                            {copied ? 'Copied!' : 'Copy'}
+                        </button>
                     </div>
-                )}
-
-                {/* Tunnel password hint - only shown for random ngrok URLs that have an interstitial */}
-                {status?.active && status?.publicIp && status?.url && !status.url.includes('ngrok-free.app') && (
-                    <div className="tunnel-password-hint">
-                        <label>Tunnel Password</label>
-                        <div className="tunnel-password-value">{status.publicIp}</div>
-                        <span className="tunnel-password-note">
-                            Enter this when the tunnel page asks for a password
-                        </span>
-                    </div>
-                )}
+                </div>
 
                 {/* Instructions */}
                 <div className="mobile-instructions">
                     <ol>
                         <li>Scan the QR code with your phone's camera</li>
-                        {status?.url && !status.url.includes('ngrok-free.app') && (
-                            <li>Enter the tunnel password shown above when prompted</li>
-                        )}
                         <li>Tap the mic button to talk to the AI Supervisor</li>
                         <li>You can also type messages using the text input</li>
                     </ol>
@@ -178,6 +172,18 @@ export function MobileAccessModal({ isOpen, onClose, error }: MobileAccessModalP
 
                 {/* Actions */}
                 <div className="mobile-access-actions">
+                    {status?.active && onStopTunnel && (
+                        <button className="danger" onClick={onStopTunnel}>
+                            <StopCircle size={14} />
+                            Stop Tunnel
+                        </button>
+                    )}
+                    {!status?.active && !tunnelLoading && onStartTunnel && (
+                        <button className="primary" onClick={onStartTunnel}>
+                            <Play size={14} />
+                            Start Tunnel
+                        </button>
+                    )}
                     <button onClick={onClose}>Close</button>
                 </div>
             </div>

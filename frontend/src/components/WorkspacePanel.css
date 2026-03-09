@@ -3,6 +3,7 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+    min-height: 0; /* Allow panel to shrink in flex layout so workspace-panel-content can scroll */
     background: var(--bg-secondary);
 }
 
@@ -12,6 +13,8 @@
     justify-content: space-between;
     padding: 14px 16px;
     border-bottom: 1px solid var(--border-color);
+    position: relative;
+    z-index: 2; /* Stay above scrolling content and dropdowns */
 }
 
 .workspace-panel-header h2 {
@@ -47,6 +50,8 @@
     flex: 1;
     overflow-y: auto;
     padding: 8px 0;
+    position: relative;
+    z-index: 1; /* Establish stacking context so scrollbar stays on top of children */
 }
 
 /* Empty State */
@@ -1030,6 +1035,8 @@
 .archived-tasks-section {
     border-bottom: 1px solid var(--border-color);
     background: var(--bg-tertiary);
+    position: relative;
+    z-index: 2; /* Stay above scrolling content */
 }
 
 .archived-tasks-header {
@@ -1236,6 +1243,17 @@
 
 /* ===== MOBILE RESPONSIVE ===== */
 @media (max-width: 768px) {
+    /* Ensure workspace panel can shrink and scroll on mobile */
+    .workspace-panel {
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    /* Task list max-height: account for larger 44px mobile touch targets */
+    .task-list {
+        max-height: calc(5 * 44px);
+    }
+
     /* Larger touch targets for task items */
     .workspace-panel .task-item {
         padding: 10px 12px;

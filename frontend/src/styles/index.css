@@ -2069,6 +2069,34 @@ body {
   border-color: var(--accent-secondary);
 }
 
+/* Mobile tunnel button - green active state */
+.mobile-tunnel-btn.tunnel-active {
+  background: rgba(63, 185, 80, 0.15);
+  color: #3fb950;
+  border-color: #3fb950;
+}
+
+.mobile-tunnel-btn.tunnel-active:hover {
+  background: rgba(63, 185, 80, 0.25);
+  color: #3fb950;
+  border-color: #3fb950;
+}
+
+.tunnel-active-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3fb950;
+  flex-shrink: 0;
+  animation: tunnel-dot-pulse 2s ease-in-out infinite;
+  box-shadow: 0 0 6px rgba(63, 185, 80, 0.6);
+}
+
+@keyframes tunnel-dot-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 6px rgba(63, 185, 80, 0.6); }
+  50% { opacity: 0.6; box-shadow: 0 0 3px rgba(63, 185, 80, 0.3); }
+}
+
 .message-badge {
   position: absolute;
   top: -6px;
@@ -2438,6 +2466,7 @@ body {
 
   .sidebar.mobile-full {
     flex: 1;
+    min-height: 0; /* Allow flex item to shrink below content size so children can scroll */
   }
 
   .main-panel {
