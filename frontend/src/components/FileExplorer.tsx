@@ -5,7 +5,7 @@ import {
     GitBranch, CircleDot, Plus, Trash2, Pencil, FileQuestion,
     CheckCircle2, XCircle, Clock, Loader2, SkipForward, ExternalLink,
     ArrowUp, ArrowDown, GitPullRequest, MessageSquare, Tag, User,
-    FileText, Activity
+    FileText, Activity, GitCommit
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -27,6 +27,14 @@ interface GitChange {
     path: string;
     status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked';
     staged: boolean;
+}
+
+interface GitLogEntry {
+    hash: string;
+    shortHash: string;
+    author: string;
+    date: string;
+    message: string;
 }
 
 interface GitStatus {
@@ -327,10 +335,22 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
 
 function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActive: boolean }) {
     const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
+    const [gitLog, setGitLog] = useState<GitLogEntry[]>([]);
     const [loading, setLoading] = useState(false);
+    const [logLoading, setLogLoading] = useState(false);
     const [hasLoaded, setHasLoaded] = useState(false);
+    const [hasLogLoaded, setHasLogLoaded] = useState(false);
     const [selectedChange, setSelectedChange] = useState<{ path: string; staged: boolean } | null>(null);
+    const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
+        staged: true,
+        changes: true,
+        history: true,
+    });
     const prevWorkspaceRef = useRef<string | undefined>(undefined);
+
+    const toggleSection = (section: string) => {
+        setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
+    };
 
     const loadStatus = useCallback(async () => {
         if (!workspacePath) return;
@@ -349,14 +369,37 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
         }
     }, [workspacePath]);
 
+    const loadLog = useCallback(async () => {
+        if (!workspacePath) return;
+        setLogLoading(true);
+        try {
+            const params = new URLSearchParams({ workspace: workspacePath, count: '50' });
+            const res = await fetch(`${getApiBaseUrl()}/api/workspaces/git-log?${params}`);
+            if (res.ok) {
+                const data = await res.json();
+                setGitLog(data.commits || []);
+            }
+        } catch (err) {
+            console.error('[FileExplorer] Failed to load git log:', err);
+        } finally {
+            setLogLoading(false);
+            setHasLogLoaded(true);
+        }
+    }, [workspacePath]);
+
     useEffect(() => {
         if (workspacePath && workspacePath !== prevWorkspaceRef.current) {
             prevWorkspaceRef.current = workspacePath;
             setGitStatus(null);
+            setGitLog([]);
             setHasLoaded(false);
-            if (isActive) loadStatus();
+            setHasLogLoaded(false);
+            if (isActive) {
+                loadStatus();
+                loadLog();
+            }
         }
-    }, [workspacePath, isActive, loadStatus]);
+    }, [workspacePath, isActive, loadStatus, loadLog]);
 
     useEffect(() => {
         if (isActive && !hasLoaded && workspacePath && !loading) {
@@ -364,12 +407,22 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
         }
     }, [isActive, hasLoaded, workspacePath, loading, loadStatus]);
 
-    // Auto-refresh every 10s when active
+    useEffect(() => {
+        if (isActive && !hasLogLoaded && workspacePath && !logLoading) {
+            loadLog();
+        }
+    }, [isActive, hasLogLoaded, workspacePath, logLoading, loadLog]);
+
+    // Auto-refresh status every 10s, log every 30s
     useEffect(() => {
         if (!isActive || !workspacePath) return;
-        const interval = setInterval(loadStatus, 10000);
-        return () => clearInterval(interval);
-    }, [isActive, workspacePath, loadStatus]);
+        const statusInterval = setInterval(loadStatus, 10000);
+        const logInterval = setInterval(loadLog, 30000);
+        return () => {
+            clearInterval(statusInterval);
+            clearInterval(logInterval);
+        };
+    }, [isActive, workspacePath, loadStatus, loadLog]);
 
     const statusIcon = (change: GitChange) => {
         switch (change.status) {
@@ -391,6 +444,11 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
         }
         setSelectedChange({ path, staged });
     }, []);
+
+    const handleRefresh = useCallback(() => {
+        loadStatus();
+        loadLog();
+    }, [loadStatus, loadLog]);
 
     if (!gitStatus) {
         return (
@@ -427,7 +485,7 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
                         {gitStatus.ahead > 0 && <span className="fe-ahead" title={`${gitStatus.ahead} ahead`}><ArrowUp size={10} />{gitStatus.ahead}</span>}
                         {gitStatus.behind > 0 && <span className="fe-behind" title={`${gitStatus.behind} behind`}><ArrowDown size={10} />{gitStatus.behind}</span>}
                     </span>
-                    <button className="fe-toolbar-btn" onClick={() => loadStatus()} disabled={loading} title="Refresh">
+                    <button className="fe-toolbar-btn" onClick={handleRefresh} disabled={loading} title="Refresh">
                         <RefreshCw size={13} className={loading ? 'spinning' : ''} />
                     </button>
                 </div>
@@ -435,40 +493,92 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
                     {gitStatus.changes.length === 0 && (
                         <div className="fe-empty">Working tree clean</div>
                     )}
+
+                    {/* STAGED section */}
                     {staged.length > 0 && (
                         <div className="git-section">
-                            <div className="git-section-header">Staged ({staged.length})</div>
-                            {staged.map(c => (
-                                <div
-                                    key={`s-${c.path}`}
-                                    className={`git-change-item staged ${c.status} ${c.status !== 'deleted' && c.status !== 'untracked' ? 'clickable' : ''}`}
-                                    title={`${statusLabel(c.status)}: ${c.path}`}
-                                    onClick={() => handleChangeClick(c.path, c.staged, c.status)}
-                                >
-                                    {statusIcon(c)}
-                                    <span className="git-change-path">{c.path}</span>
-                                    <span className={`git-change-badge ${c.status}`}>{c.status[0].toUpperCase()}</span>
+                            <button className="git-section-header-btn" onClick={() => toggleSection('staged')}>
+                                {expandedSections.staged ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                                <span>Staged</span>
+                                <span className="git-section-count">{staged.length}</span>
+                            </button>
+                            {expandedSections.staged && (
+                                <div className="git-section-content">
+                                    {staged.map(c => (
+                                        <div
+                                            key={`s-${c.path}`}
+                                            className={`git-change-item staged ${c.status} ${c.status !== 'deleted' && c.status !== 'untracked' ? 'clickable' : ''}`}
+                                            title={`${statusLabel(c.status)}: ${c.path}`}
+                                            onClick={() => handleChangeClick(c.path, c.staged, c.status)}
+                                        >
+                                            {statusIcon(c)}
+                                            <span className="git-change-path">{c.path}</span>
+                                            <span className={`git-change-badge ${c.status}`}>{c.status[0].toUpperCase()}</span>
+                                        </div>
+                                    ))}
                                 </div>
-                            ))}
+                            )}
                         </div>
                     )}
+
+                    {/* CHANGES section */}
                     {unstaged.length > 0 && (
                         <div className="git-section">
-                            <div className="git-section-header">Changes ({unstaged.length})</div>
-                            {unstaged.map(c => (
-                                <div
-                                    key={`u-${c.path}`}
-                                    className={`git-change-item ${c.status} ${c.status !== 'deleted' && c.status !== 'untracked' ? 'clickable' : ''}`}
-                                    title={`${statusLabel(c.status)}: ${c.path}`}
-                                    onClick={() => handleChangeClick(c.path, c.staged, c.status)}
-                                >
-                                    {statusIcon(c)}
-                                    <span className="git-change-path">{c.path}</span>
-                                    <span className={`git-change-badge ${c.status}`}>{c.status[0].toUpperCase()}</span>
+                            <button className="git-section-header-btn" onClick={() => toggleSection('changes')}>
+                                {expandedSections.changes ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                                <span>Changes</span>
+                                <span className="git-section-count">{unstaged.length}</span>
+                            </button>
+                            {expandedSections.changes && (
+                                <div className="git-section-content">
+                                    {unstaged.map(c => (
+                                        <div
+                                            key={`u-${c.path}`}
+                                            className={`git-change-item ${c.status} ${c.status !== 'deleted' && c.status !== 'untracked' ? 'clickable' : ''}`}
+                                            title={`${statusLabel(c.status)}: ${c.path}`}
+                                            onClick={() => handleChangeClick(c.path, c.staged, c.status)}
+                                        >
+                                            {statusIcon(c)}
+                                            <span className="git-change-path">{c.path}</span>
+                                            <span className={`git-change-badge ${c.status}`}>{c.status[0].toUpperCase()}</span>
+                                        </div>
+                                    ))}
                                 </div>
-                            ))}
+                            )}
                         </div>
                     )}
+
+                    {/* HISTORY section */}
+                    <div className="git-section">
+                        <button className="git-section-header-btn" onClick={() => toggleSection('history')}>
+                            {expandedSections.history ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                            <span>History</span>
+                            <span className="git-section-count">{gitLog.length}</span>
+                        </button>
+                        {expandedSections.history && (
+                            <div className="git-section-content">
+                                {logLoading && gitLog.length === 0 ? (
+                                    <div className="fe-loading" style={{ padding: '8px 10px' }}><RefreshCw size={12} className="spinning" /><span>Loading...</span></div>
+                                ) : gitLog.length === 0 ? (
+                                    <div className="fe-empty" style={{ padding: '8px 10px', fontSize: '11px' }}>No commits</div>
+                                ) : (
+                                    gitLog.map(commit => (
+                                        <div key={commit.hash} className="git-log-item" title={`${commit.hash}\n${commit.author}\n${commit.date}`}>
+                                            <GitCommit size={12} className="git-log-icon" />
+                                            <div className="git-log-details">
+                                                <div className="git-log-message">{commit.message}</div>
+                                                <div className="git-log-meta">
+                                                    <span className="git-log-hash">{commit.shortHash}</span>
+                                                    <span className="git-log-author">{commit.author}</span>
+                                                    <span className="git-log-date">{timeAgo(commit.date)}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
             {selectedChange && (
