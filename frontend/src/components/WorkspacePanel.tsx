@@ -3,7 +3,7 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
     Loader2, Square, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, FolderPlus
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, FolderPlus, Clipboard
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
@@ -353,6 +353,7 @@ function WorkspaceSection({
 
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
+    const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -512,6 +513,53 @@ function WorkspaceSection({
         await handleFileSelect(files);
     };
 
+    // Handle clipboard paste - intercept pasted images (e.g. from Print Screen, Snipping Tool)
+    const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+        const clipboardItems = e.clipboardData?.items;
+        if (!clipboardItems) return;
+
+        const imageItems: DataTransferItem[] = [];
+        for (let i = 0; i < clipboardItems.length; i++) {
+            const item = clipboardItems[i];
+            if (item.type.startsWith('image/')) {
+                imageItems.push(item);
+            }
+        }
+
+        // If no images in clipboard, let the default paste behavior handle text
+        if (imageItems.length === 0) return;
+
+        // Prevent the default paste behavior so image data doesn't get inserted as text
+        e.preventDefault();
+
+        console.log(`[WorkspacePanel] Pasting ${imageItems.length} image(s) from clipboard`);
+        setIsUploading(true);
+
+        for (const item of imageItems) {
+            const file = item.getAsFile();
+            if (!file) {
+                console.warn('[WorkspacePanel] Failed to get file from clipboard item');
+                continue;
+            }
+
+            // Give pasted images a meaningful name with timestamp
+            const extension = file.type.split('/')[1] || 'png';
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const namedFile = new File([file], `clipboard-${timestamp}.${extension}`, {
+                type: file.type
+            });
+
+            console.log(`[WorkspacePanel] Uploading pasted image: ${namedFile.name} (${namedFile.size} bytes, ${namedFile.type})`);
+            const uploaded = await uploadImage(namedFile);
+            if (uploaded) {
+                setImages(prev => [...prev, uploaded]);
+                console.log(`[WorkspacePanel] Successfully uploaded pasted image: ${uploaded.filename}`);
+            }
+        }
+
+        setIsUploading(false);
+    };
+
     // Cleanup preview URLs on unmount
     useEffect(() => {
         return () => {
@@ -641,7 +689,7 @@ function WorkspaceSection({
 
     return (
         <div
-            className={`workspace-section ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
+            className={`workspace-section ${isExpanded ? 'expanded' : ''} ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
             onDragOver={(e) => e.preventDefault()}
             onDragEnter={() => onDragEnter(index)}
         >
@@ -949,7 +997,13 @@ function WorkspaceSection({
                             </div>
                         )}
 
-                        {/* Upload error message */}
+                        {/* Upload status messages */}
+                        {isUploading && (
+                            <div className="new-task-uploading">
+                                <Clipboard size={12} />
+                                <span>Uploading pasted image...</span>
+                            </div>
+                        )}
                         {uploadError && (
                             <div className="new-task-upload-error">{uploadError}</div>
                         )}
@@ -966,10 +1020,11 @@ function WorkspaceSection({
                             <div className={`task-input-wrapper ${isFocused && globalVoiceEnabled ? 'voice-active' : ''}`}>
                                 <textarea
                                     className="task-input"
-                                    placeholder="Type or speak a task..."
+                                    placeholder="Type or speak a task... (Ctrl+V to paste screenshots)"
                                     value={inputValue}
                                     onChange={(e) => setInputValue(e.target.value)}
                                     onKeyDown={handleKeyDown}
+                                    onPaste={handlePaste}
                                     onFocus={handleFocus}
                                     onBlur={handleBlur}
                                     rows={1}
