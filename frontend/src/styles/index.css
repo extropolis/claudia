@@ -120,7 +120,8 @@ body {
 /* Settings Button */
 .settings-button,
 .restart-button,
-.push-button {
+.push-button,
+.notification-toggle-button {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -149,6 +150,21 @@ body {
   background: var(--bg-tertiary);
   color: var(--accent-success, #10b981);
   border-color: var(--accent-success, #10b981);
+}
+
+.notification-toggle-button:hover {
+  background: var(--bg-tertiary);
+  color: var(--accent-secondary);
+  border-color: var(--accent-secondary);
+}
+
+.notification-toggle-button.muted {
+  color: var(--text-muted, #6e7681);
+}
+
+.notification-toggle-button.muted:hover {
+  color: var(--accent-warning, #f59e0b);
+  border-color: var(--accent-warning, #f59e0b);
 }
 
 .push-button:disabled {

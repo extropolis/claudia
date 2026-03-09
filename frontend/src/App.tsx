@@ -12,8 +12,9 @@ import { FileExplorer } from './components/FileExplorer';
 import { ShellTerminalView } from './components/ShellTerminalView';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2 } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Bell, BellOff } from 'lucide-react';
 import { getApiBaseUrl } from './config/api-config';
+import { isSoundEnabled, setSoundEnabled } from './utils/browserCapabilities';
 
 // Hook: returns true when viewport is ≤768px wide
 function useIsMobile(breakpoint = 768) {
@@ -126,6 +127,7 @@ function App() {
     const [settingsInitialPanel, setSettingsInitialPanel] = useState<string | undefined>(undefined);
     const [showChatPanel, setShowChatPanel] = useState(false);
     const [showMobileAccess, setShowMobileAccess] = useState(false);
+    const [soundMuted, setSoundMuted] = useState(() => !isSoundEnabled());
     const [tunnelActive, setTunnelActive] = useState(false);
     const [tunnelLoading, setTunnelLoading] = useState(false);
     const [tunnelError, setTunnelError] = useState<string | null>(null);
@@ -438,6 +440,17 @@ function App() {
                         </button>
                     )}
                     <GlobalVoiceToggle />
+                    <button
+                        className={`notification-toggle-button ${soundMuted ? 'muted' : ''}`}
+                        onClick={() => {
+                            const newMuted = !soundMuted;
+                            setSoundMuted(newMuted);
+                            setSoundEnabled(!newMuted);
+                        }}
+                        title={soundMuted ? 'Unmute Notifications' : 'Mute Notifications'}
+                    >
+                        {soundMuted ? <BellOff size={isMobile ? 18 : 20} /> : <Bell size={isMobile ? 18 : 20} />}
+                    </button>
                     <button
                         className="restart-button"
                         onClick={handleRestartServer}
