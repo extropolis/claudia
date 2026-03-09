@@ -135,16 +135,71 @@ export class TunnelManager extends EventEmitter {
 
         this.ngrokProcess = ngrok;
 
+        // Collect stderr + stdout output during startup so we can surface actual ngrok errors
+        const startupOutput: string[] = [];
+
         ngrok.stderr?.on('data', (data: Buffer) => {
             const msg = data.toString().trim();
-            if (msg) logger.warn('Ngrok stderr', { output: msg });
+            if (msg) {
+                logger.warn('Ngrok stderr', { output: msg });
+                startupOutput.push(msg);
+            }
+        });
+
+        ngrok.stdout?.on('data', (data: Buffer) => {
+            const msg = data.toString().trim();
+            if (msg) {
+                logger.info('Ngrok stdout', { output: msg });
+                startupOutput.push(msg);
+            }
         });
 
         ngrok.on('error', (err) => {
             logger.error('Ngrok process error', { error: err.message });
+            startupOutput.push(err.message);
             this.emit('tunnel:error', err.message);
         });
 
+        // Create a promise that rejects if ngrok exits early (before we get a URL)
+        const earlyExitPromise = new Promise<never>((_resolve, reject) => {
+            ngrok.on('close', (code) => {
+                logger.info('Ngrok process exited during startup', { code, output: startupOutput.join('\n') });
+                this.ngrokProcess = null;
+                this.url = null;
+
+                if (!this.stopping) {
+                    // During startup, reject immediately with the real error
+                    const errorDetail = startupOutput.length > 0
+                        ? startupOutput.join(' | ')
+                        : `exit code ${code}`;
+                    reject(new Error(`ngrok failed to start: ${errorDetail}`));
+                }
+            });
+        });
+
+        // Race: poll for URL vs. early process exit
+        let url: string | null;
+        try {
+            url = await Promise.race([
+                this.pollNgrokApi(15000),
+                earlyExitPromise,
+            ]);
+        } catch (err) {
+            // Process exited early — throw the captured error
+            ngrok.kill();
+            throw err;
+        }
+
+        if (!url) {
+            ngrok.kill();
+            const errorDetail = startupOutput.length > 0
+                ? startupOutput.join(' | ')
+                : 'no response from ngrok local API';
+            throw new Error(`ngrok startup timeout: ${errorDetail}`);
+        }
+
+        // Success — now install the long-running close handler for reconnection
+        ngrok.removeAllListeners('close');
         ngrok.on('close', (code) => {
             logger.info('Ngrok process exited', { code });
             this.ngrokProcess = null;
@@ -160,13 +215,6 @@ export class TunnelManager extends EventEmitter {
                 this.emit('tunnel:closed');
             }
         });
-
-        // Poll ngrok's local API to get the tunnel URL
-        const url = await this.pollNgrokApi(15000);
-        if (!url) {
-            ngrok.kill();
-            throw new Error('ngrok startup timeout: could not get tunnel URL from local API');
-        }
 
         this.url = url;
         this.startedAt = new Date().toISOString();

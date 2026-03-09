@@ -337,39 +337,45 @@ function App() {
         })();
     }, []);
 
-    // Toggle tunnel: start + show modal, or stop tunnel
-    const handleMobileToggle = useCallback(async () => {
-        if (tunnelActive) {
-            try {
-                await fetch(`${getApiBaseUrl()}/api/tunnel/stop`, { method: 'POST' });
-            } catch {
-                // ignore
-            }
-            setTunnelActive(false);
-            setShowMobileAccess(false);
-        } else {
-            setShowMobileAccess(true);
-            setTunnelLoading(true);
-            setTunnelError(null);
-            try {
-                const res = await fetch(`${getApiBaseUrl()}/api/tunnel/start`, { method: 'POST' });
-                const data = await res.json();
-                if (data.error) {
-                    console.error('[Tunnel] Failed to start:', data.error);
-                    setTunnelActive(false);
-                    setTunnelError(data.error);
-                } else {
-                    setTunnelActive(true);
-                }
-            } catch (err) {
-                console.error('[Tunnel] Failed to start:', err);
+    // Start tunnel (used by both the header button and the modal's Start button)
+    const startTunnel = useCallback(async () => {
+        setTunnelLoading(true);
+        setTunnelError(null);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/tunnel/start`, { method: 'POST' });
+            const data = await res.json();
+            if (data.error) {
+                console.error('[Tunnel] Failed to start:', data.error);
                 setTunnelActive(false);
-                setTunnelError(err instanceof Error ? err.message : 'Failed to connect');
-            } finally {
-                setTunnelLoading(false);
+                setTunnelError(data.error);
+            } else {
+                setTunnelActive(true);
             }
+        } catch (err) {
+            console.error('[Tunnel] Failed to start:', err);
+            setTunnelActive(false);
+            setTunnelError(err instanceof Error ? err.message : 'Failed to connect');
+        } finally {
+            setTunnelLoading(false);
         }
-    }, [tunnelActive]);
+    }, []);
+
+    // Mobile button: just open the modal — user starts tunnel explicitly from inside
+    const handleMobileToggle = useCallback(() => {
+        setShowMobileAccess(true);
+    }, []);
+
+    // Explicitly stop tunnel (called from modal) — keep modal open so user can restart
+    const handleStopTunnel = useCallback(async () => {
+        try {
+            await fetch(`${getApiBaseUrl()}/api/tunnel/stop`, { method: 'POST' });
+        } catch {
+            // ignore
+        }
+        setTunnelActive(false);
+        setTunnelLoading(false);
+        setTunnelError(null);
+    }, []);
 
     // Determine what to show on mobile
     const mobileShowingTerminal = isMobile && mobileShowTerminal && selectedTask;
@@ -421,13 +427,14 @@ function App() {
                     )}
                     {!isMobile && (
                         <button
-                            className={`chat-toggle-button ${tunnelActive ? 'active' : ''} ${tunnelLoading ? 'loading' : ''}`}
+                            className={`chat-toggle-button mobile-tunnel-btn ${tunnelActive ? 'tunnel-active' : ''} ${tunnelLoading ? 'loading' : ''}`}
                             onClick={handleMobileToggle}
-                            title={tunnelActive ? 'Stop Tunnel' : 'Start Mobile Tunnel'}
+                            title={tunnelActive ? 'View Mobile Tunnel' : 'Start Mobile Tunnel'}
                             disabled={tunnelLoading}
                         >
                             <Smartphone size={18} />
                             <span className="btn-label">{tunnelLoading ? 'Connecting...' : 'Mobile'}</span>
+                            {tunnelActive && <span className="tunnel-active-dot" />}
                         </button>
                     )}
                     <GlobalVoiceToggle />
@@ -618,7 +625,7 @@ function App() {
 
             <ProjectPicker onSelect={handleProjectSelect} wsRef={wsRef} requestRecentWorkspaces={requestRecentWorkspaces} clearRecentWorkspace={clearRecentWorkspace} />
             <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
-            {!isMobile && <MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} error={tunnelError} />}
+            {!isMobile && <MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} error={tunnelError} tunnelActive={tunnelActive} tunnelLoading={tunnelLoading} onStopTunnel={handleStopTunnel} onStartTunnel={startTunnel} />}
             <GlobalVoiceManager />
 
             {/* Offline warning overlay */}

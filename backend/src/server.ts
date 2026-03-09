@@ -144,8 +144,9 @@ export async function createApp(basePath?: string) {
 
     // ===== Tunnel → React Frontend Proxy =====
     // When accessed through the tunnel, proxy non-API requests to the Vite
-    // dev server (development) or let them fall through to the static server (production).
-    const isDev = process.env.NODE_ENV === 'development' || process.env.CLAUDIA_DEV === '1';
+    // dev server (development) or fall through to the static server (production).
+    // Instead of relying on env vars, we try Vite first and fall back to static
+    // if Vite isn't running (connection refused = production mode).
 
     function isTunnelHost(host: string): boolean {
         return host.includes('.loca.lt') || host.includes('localtunnel') ||
@@ -172,12 +173,9 @@ export async function createApp(basePath?: string) {
             return next();
         }
 
-        // In production, let requests fall through to the static file server
-        if (!isDev) {
-            return next();
-        }
-
-        // In development, proxy to the Vite dev server
+        // Try proxying to the Vite dev server first. If Vite isn't running
+        // (production), the connection is refused and we fall through to the
+        // static file server registered later in the middleware chain.
         const proxyReq = httpRequest({
             hostname: 'localhost',
             port: PORTS.FRONTEND,
@@ -189,8 +187,13 @@ export async function createApp(basePath?: string) {
             proxyRes.pipe(res);
         });
         proxyReq.on('error', (err) => {
+            // Connection refused → Vite not running → fall through to static files
+            if ((err as NodeJS.ErrnoException).code === 'ECONNREFUSED') {
+                logger.info('Vite dev server not running, falling through to static files', { path: req.path });
+                return next();
+            }
             logger.error('Vite proxy error', { error: err.message, path: req.path });
-            res.status(502).send('Frontend proxy error — is Vite running?');
+            res.status(502).send('Frontend proxy error');
         });
         req.pipe(proxyReq);
     });
