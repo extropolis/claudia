@@ -350,6 +350,7 @@ function WorkspaceSection({
     const [workspaceEditValue, setWorkspaceEditValue] = useState('');
     const workspaceEditRef = useRef<HTMLInputElement>(null);
     const referencesMenuItemRef = useRef<HTMLDivElement>(null);
+    const submenuCloseTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
@@ -607,6 +608,15 @@ function WorkspaceSection({
         }
     }, [isEditingWorkspaceName]);
 
+    // Cleanup submenu close timeout on unmount
+    useEffect(() => {
+        return () => {
+            if (submenuCloseTimeoutRef.current) {
+                clearTimeout(submenuCloseTimeoutRef.current);
+            }
+        };
+    }, []);
+
     const handleStartWorkspaceEdit = (e?: React.MouseEvent) => {
         if (e) e.stopPropagation();
         setWorkspaceEditValue(workspace.displayName || workspace.name);
@@ -803,13 +813,34 @@ function WorkspaceSection({
                                 ref={referencesMenuItemRef}
                                 className="workspace-dropdown-item has-submenu"
                                 onMouseEnter={() => {
+                                    // Clear any pending close timeout
+                                    if (submenuCloseTimeoutRef.current) {
+                                        clearTimeout(submenuCloseTimeoutRef.current);
+                                        submenuCloseTimeoutRef.current = null;
+                                    }
                                     setShowReferencesSubmenu(true);
                                     if (referencesMenuItemRef.current) {
                                         const rect = referencesMenuItemRef.current.getBoundingClientRect();
-                                        setSubmenuPosition({ top: rect.top - 4, left: rect.right - 4 });
+                                        // Position submenu to overlap slightly with parent to avoid gaps
+                                        setSubmenuPosition({ top: rect.top, left: rect.right - 8 });
                                     }
                                 }}
-                                onMouseLeave={() => setShowReferencesSubmenu(false)}
+                                onMouseLeave={(e) => {
+                                    // Only close if mouse is NOT moving towards the submenu area
+                                    const rect = referencesMenuItemRef.current?.getBoundingClientRect();
+                                    if (rect) {
+                                        const mouseX = e.clientX;
+                                        const mouseY = e.clientY;
+                                        // If mouse is to the right of the parent item, it's likely moving to submenu
+                                        if (mouseX > rect.right - 10 && mouseY >= rect.top && mouseY <= rect.bottom) {
+                                            return; // Don't close, user is moving to submenu
+                                        }
+                                    }
+                                    // Delay closing to allow mouse to move to submenu
+                                    submenuCloseTimeoutRef.current = setTimeout(() => {
+                                        setShowReferencesSubmenu(false);
+                                    }, 200);
+                                }}
                                 onClick={(e) => e.stopPropagation()}
                             >
                                 <Link2 size={14} />
@@ -820,6 +851,30 @@ function WorkspaceSection({
                                         className="workspace-submenu"
                                         style={{ position: 'fixed', top: submenuPosition.top, left: submenuPosition.left }}
                                         onClick={(e) => e.stopPropagation()}
+                                        onMouseEnter={() => {
+                                            // Cancel close when mouse enters submenu
+                                            if (submenuCloseTimeoutRef.current) {
+                                                clearTimeout(submenuCloseTimeoutRef.current);
+                                                submenuCloseTimeoutRef.current = null;
+                                            }
+                                        }}
+                                        onMouseLeave={(e) => {
+                                            // Check if mouse is leaving towards the parent item
+                                            const rect = referencesMenuItemRef.current?.getBoundingClientRect();
+                                            if (rect) {
+                                                const mouseX = e.clientX;
+                                                const mouseY = e.clientY;
+                                                // If mouse is back in the parent item area, keep open
+                                                if (mouseX >= rect.left && mouseX <= rect.right &&
+                                                    mouseY >= rect.top && mouseY <= rect.bottom) {
+                                                    return;
+                                                }
+                                            }
+                                            // Close when mouse leaves submenu (with small delay for edge cases)
+                                            submenuCloseTimeoutRef.current = setTimeout(() => {
+                                                setShowReferencesSubmenu(false);
+                                            }, 100);
+                                        }}
                                     >
                                         {allWorkspaces.filter(w => w.id !== workspace.id).length > 0 && (
                                             <>
