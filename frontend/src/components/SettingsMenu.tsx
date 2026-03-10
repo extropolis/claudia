@@ -48,7 +48,7 @@ interface BackendStatus {
 }
 
 interface CollapsiblePanelProps {
-    title: string;
+    title: React.ReactNode;
     icon: React.ReactNode;
     isExpanded: boolean;
     onToggle: () => void;
@@ -89,7 +89,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         cliSwitches: false,
         rules: false,
         supervisor: false,
-        learnings: false
+        learnings: false,
+        claudiaMcp: false
     });
 
     const [notificationTestStatus, setNotificationTestStatus] = useState<'idle' | 'sent' | 'failed'>('idle');
@@ -119,6 +120,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [supervisorSystemPrompt, setSupervisorSystemPrompt] = useState('');
     const [autoFocusOnInput, setAutoFocusOnInput] = useState(false);
     const [useLearnings, setUseLearnings] = useState(false);
+    const [claudiaMcpServerEnabled, setClaudiaMcpServerEnabled] = useState(false);
 
     // CLI Switches state
     const [cliSwitches, setCliSwitches] = useState({
@@ -316,6 +318,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 setCustomAnthropicApiKey(config.customAnthropicApiKey || '');
                 setBackend(config.backend || 'claude-code');
                 setUseLearnings(config.useLearnings || false);
+                setClaudiaMcpServerEnabled(config.claudiaMcpServerEnabled || false);
 
                 // Load SAP AI Core config
                 if (config.sapAiCore) {
@@ -671,6 +674,21 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             }
         } catch (error) {
             console.error('Failed to save use learnings setting:', error);
+        }
+    };
+
+    const saveClaudiaMcpServerEnabled = async (value: boolean) => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ claudiaMcpServerEnabled: value })
+            });
+            if (response.ok) {
+                setClaudiaMcpServerEnabled(value);
+            }
+        } catch (error) {
+            console.error('Failed to save Claudia MCP server setting:', error);
         }
     };
 
@@ -2374,6 +2392,43 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 To add learnings, click the "Learn" button on a completed task.
                                 Learnings are stored with embeddings and matched based on semantic
                                 similarity to new task prompts.
+                            </p>
+                        </div>
+                    </CollapsiblePanel>
+
+                    <CollapsiblePanel
+                        title={<>Claudia MCP Server <span className="settings-badge settings-badge-experimental">Experimental</span></>}
+                        icon={<Zap size={18} />}
+                        isExpanded={expandedPanels.claudiaMcp}
+                        onToggle={() => togglePanel('claudiaMcp')}
+                    >
+                        <div className="permissions-content">
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Enable Claudia MCP Server</span>
+                                    <span className="permission-description">
+                                        When enabled, Claude Code sessions spawned by Claudia will have
+                                        access to MCP tools for interacting with the orchestrator &mdash;
+                                        creating new tasks, listing workspaces, checking task status, and
+                                        delegating work to parallel agents.
+                                    </span>
+                                </div>
+                                <label className="toggle-switch">
+                                    <input
+                                        type="checkbox"
+                                        checked={claudiaMcpServerEnabled}
+                                        onChange={(e) => saveClaudiaMcpServerEnabled(e.target.checked)}
+                                    />
+                                    <span className="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <p className="api-config-note" style={{ marginTop: '12px' }}>
+                                Tools available: <code>claudia_list_tasks</code>,
+                                <code>claudia_get_task_status</code>, <code>claudia_get_task_output</code>,
+                                <code>claudia_create_task</code>,
+                                <code>claudia_send_input</code>, <code>claudia_archive_task</code>.
+                                Tasks are scoped to the current workspace.
+                                Requires server restart for running tasks to pick up the change.
                             </p>
                         </div>
                     </CollapsiblePanel>

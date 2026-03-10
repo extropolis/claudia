@@ -160,6 +160,7 @@ interface InternalTask extends Task {
     consecutiveOutputChanges?: number; // Count of consecutive polls with output changes (for idle→busy debouncing)
     inactiveOutputLogged?: boolean; // True if we've already logged the "dropping output" message for this inactive state
     lastRefKey?: string; // Tracks which workspace references were last injected (sorted ref IDs)
+    processStartedAt?: Date; // When the current busy/starting state began (for elapsed timer)
 }
 
 /**
@@ -299,6 +300,13 @@ export class TaskSpawner extends EventEmitter {
                 task.waitingInputType = backendTask.waitingInputType;
                 task.lastActivity = backendTask.lastActivity;
 
+                // Reset processStartedAt when transitioning into busy/starting from a non-active state
+                if (oldState !== task.state && (task.state === 'busy' || task.state === 'starting')) {
+                    if (oldState !== 'busy' && oldState !== 'starting') {
+                        task.processStartedAt = new Date();
+                    }
+                }
+
                 if (oldState !== task.state) {
                     logger.debug('Task state changed via backend', { taskId: task.id, oldState, newState: task.state });
                     this.emit('taskStateChanged', this.toPublicTask(task));
@@ -316,7 +324,9 @@ export class TaskSpawner extends EventEmitter {
             if (task && !task.sessionId) {
                 task.sessionId = sessionId;
                 this.sessionToTaskId.set(sessionId, taskId);
-                this.scheduleSave();
+                // Save immediately - session IDs are critical state that must survive
+                // tsx watch restarts on Windows (TerminateProcess skips all handlers)
+                this.saveTasks();
             }
         });
 
@@ -341,10 +351,14 @@ export class TaskSpawner extends EventEmitter {
      * Build the MCP config object from the current config store settings.
      * Returns null if no enabled MCP servers are found.
      */
-    private buildMcpConfig(): { mcpConfig: Record<string, Record<string, unknown>>; enabledMcpServers: { name: string }[] } | null {
+    private buildMcpConfig(workspaceId?: string): { mcpConfig: Record<string, Record<string, unknown>>; enabledMcpServers: { name: string }[] } | null {
         const mcpServers = this.configStore?.getMCPServers() || [];
         const enabledMcpServers = mcpServers.filter(s => s.enabled);
-        if (enabledMcpServers.length === 0) return null;
+
+        // Check if Claudia MCP server should be injected
+        const claudiaMcpEnabled = this.configStore?.getClaudioMcpServerEnabled() ?? false;
+
+        if (enabledMcpServers.length === 0 && !claudiaMcpEnabled) return null;
 
         const mcpConfig: Record<string, Record<string, unknown>> = {};
         for (const server of enabledMcpServers) {
@@ -369,6 +383,23 @@ export class TaskSpawner extends EventEmitter {
                 if (server.description) config.description = server.description;
                 mcpConfig[server.name] = config;
             }
+        }
+
+        // Inject the Claudia MCP server if enabled (experimental)
+        // Scoped to the task's workspace via CLAUDIA_WORKSPACE_ID env var
+        if (claudiaMcpEnabled) {
+            const mcpServerPath = join(__dirname, 'claudia-mcp-server.ts');
+            const claudiaConfig: Record<string, unknown> = {
+                command: exe('npx'),
+                args: ['tsx', mcpServerPath]
+            };
+            // Pass workspace ID so the MCP server is scoped to this workspace
+            if (workspaceId) {
+                claudiaConfig.env = { CLAUDIA_WORKSPACE_ID: workspaceId };
+            }
+            mcpConfig['claudia'] = claudiaConfig;
+            enabledMcpServers.push({ name: 'claudia', enabled: true });
+            logger.info('Injected Claudia MCP server into MCP config', { path: mcpServerPath, workspaceId: workspaceId || '(global)' });
         }
 
         return { mcpConfig, enabledMcpServers };
@@ -945,7 +976,9 @@ export class TaskSpawner extends EventEmitter {
     }
 
     private workspaceToClaudeFolder(workspacePath: string): string {
-        return workspacePath.replace(/\//g, '-');
+        // Claude Code converts workspace paths to folder names by replacing
+        // every non-alphanumeric character (except dashes) with a dash individually
+        return workspacePath.replace(/[^a-zA-Z0-9-]/g, '-');
     }
 
     private getClaudeProjectsDir(workspacePath: string): string {
@@ -996,7 +1029,10 @@ export class TaskSpawner extends EventEmitter {
                             logger.info(`Captured session for task`, { taskId, sessionId });
                             task.sessionId = sessionId;
                             this.sessionToTaskId.set(sessionId, taskId);
-                            this.scheduleSave();
+                            // Save immediately (not debounced) - session IDs are critical state
+                            // that must survive tsx watch restarts on Windows where TerminateProcess
+                            // skips all signal/exit handlers
+                            this.saveTasks();
                         }
 
                         this.clearSessionCapture(taskId);
@@ -1566,7 +1602,7 @@ export class TaskSpawner extends EventEmitter {
         // Add MCP server configurations
         // IMPORTANT: Claude doesn't automatically load MCP servers from ~/.claude.json in non-interactive mode
         // We must explicitly pass --mcp-config to load MCP servers
-        const mcpResult = this.buildMcpConfig();
+        const mcpResult = this.buildMcpConfig(workspaceId);
         if (mcpResult) {
             const { mcpConfig, enabledMcpServers } = mcpResult;
             const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
@@ -1632,6 +1668,7 @@ export class TaskSpawner extends EventEmitter {
             workspaceId,
             process: ptyProcess,
             state: 'starting',  // Start in 'starting' state until Claude actually begins processing
+            processStartedAt: now,
             outputHistory: [],
             lastActivity: now,
             createdAt: now,
@@ -1750,6 +1787,7 @@ export class TaskSpawner extends EventEmitter {
             workspaceId: task.workspaceId,
             lastActivity: task.lastActivity,
             createdAt: task.createdAt,
+            processStartedAt: task.processStartedAt,
             gitState: task.gitState,
             waitingInputType: task.waitingInputType,
             systemPrompt: task.systemPrompt,
@@ -2559,6 +2597,7 @@ export class TaskSpawner extends EventEmitter {
             outputHistory,
             gitState: archived.gitState,
             systemPrompt: archived.systemPrompt,
+            displayName: archived.displayName,
         };
 
         // Move from archived to disconnected
@@ -2588,6 +2627,8 @@ export class TaskSpawner extends EventEmitter {
             lastActivity: new Date(archived.lastActivity),
             gitState: archived.gitState,
             systemPrompt: archived.systemPrompt,
+            displayName: archived.displayName,
+            sessionId: archived.sessionId || undefined,
         };
     }
 
@@ -2653,6 +2694,10 @@ export class TaskSpawner extends EventEmitter {
             createdAt: new Date(persisted.createdAt),
             lastActivity: new Date(persisted.lastActivity),
             displayName: persisted.displayName,
+            sessionId: persisted.sessionId || undefined,
+            gitState: persisted.gitState,
+            systemPrompt: persisted.systemPrompt,
+            backendType: this.taskBackends.get(persisted.id) || 'claude-code' as const,
         }));
 
         return [...liveTasks, ...disconnectedTasks];
@@ -2738,7 +2783,7 @@ export class TaskSpawner extends EventEmitter {
             }
 
             // Add MCP server configurations for reconnection
-            const mcpResult = this.buildMcpConfig();
+            const mcpResult = this.buildMcpConfig(persisted.workspaceId);
             if (mcpResult) {
                 const mcpConfigJson = JSON.stringify({ mcpServers: mcpResult.mcpConfig }, null, 2);
                 const mcpConfigFile = join(tmpdir(), `claudia-mcp-${taskId}-reconnect.json`);
@@ -2814,15 +2859,26 @@ export class TaskSpawner extends EventEmitter {
             hasStartedProcessing: !shouldContinue,  // Will be set true when continuation starts
             shouldContinue,
             continuationSent: false,
+            displayName: persisted.displayName,  // Preserve user-set display name across reconnection
+            systemPrompt: persisted.systemPrompt,  // Preserve custom system prompt
+            gitStateBefore: persisted.gitState ? persisted.gitState : undefined,  // Preserve git state
         };
 
         console.log(`[TaskSpawner] reconnectTask: Setting up process handlers for ${task.id}, ptyPid=${ptyProcess.pid}`);
         this.setupProcessHandlers(task);
         this.tasks.set(task.id, task);
-        console.log(`[TaskSpawner] reconnectTask: Task ${task.id} added to tasks map`);
+        this.taskBackends.set(task.id, taskBackendType);
+        console.log(`[TaskSpawner] reconnectTask: Task ${task.id} added to tasks map (backend: ${taskBackendType})`);
 
         this.disconnectedTasks.delete(taskId);
         this.scheduleSave();
+
+        // Start session capture so we detect the new/resumed session file
+        // This is critical for fresh starts (no sessionId) and also covers cases where
+        // Claude Code creates a new session file even when resuming
+        if (taskBackendType === 'claude-code') {
+            this.startSessionCapture(taskId, persisted.workspaceId);
+        }
 
         this.emit('taskStateChanged', this.toPublicTask(task));
         return this.toPublicTask(task);
@@ -2881,7 +2937,7 @@ export class TaskSpawner extends EventEmitter {
             console.error(`[TaskSpawner] Failed to kill process for ${taskId}:`, e);
         }
 
-        // Create persisted task entry
+        // Create persisted task entry - preserve all metadata from the active task
         const persisted: PersistedTask = {
             id: task.id,
             prompt: task.prompt,
@@ -2893,8 +2949,9 @@ export class TaskSpawner extends EventEmitter {
             // We don't save full history to memory here, it's already on disk/in memory
             backendType: this.taskBackends.get(task.id) || 'claude-code',
             outputHistory: undefined, // Will be lazy loaded
-            gitState: undefined,
-            systemPrompt: undefined,
+            gitState: task.gitState,
+            systemPrompt: task.systemPrompt,
+            displayName: task.displayName,
             wasInterrupted: true, // Mark as interrupted so it shows correct state on resume
             shouldContinue: false,
         };

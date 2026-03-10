@@ -2026,6 +2026,29 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         });
     });
 
+    // Get task output - returns recent terminal output for a task
+    // Used by the Claudia MCP server to let agents read sibling task output
+    app.get('/api/tasks/:taskId/output', (req, res) => {
+        const { taskId } = req.params;
+        const maxBytes = Math.min(parseInt(req.query.maxBytes as string) || 8192, 32768);
+        const task = taskSpawner.getTask(taskId);
+
+        if (!task) {
+            return res.status(404).json({ error: 'Task not found' });
+        }
+
+        const output = taskSpawner.getRecentOutputForDebug(taskId, maxBytes);
+
+        res.json({
+            taskId,
+            state: task.state,
+            prompt: task.prompt,
+            workspaceId: task.workspaceId,
+            output,
+            lastActivity: task.lastActivity
+        });
+    });
+
     app.get('/api/workspaces', (_req, res) => {
         res.json(workspaceStore.getWorkspaces());
     });
