@@ -589,6 +589,11 @@
     pointer-events: none;
 }
 
+.workspace-panel .task-item .task-time-ago.busy {
+    color: var(--accent-secondary);
+    opacity: 0.5;
+}
+
 .workspace-panel .task-item:hover .task-time-ago {
     display: none;
 }

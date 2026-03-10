@@ -134,11 +134,13 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
         }
     }, [task.state]);
 
-    // Tick every 30s to keep the time-ago indicator up to date
+    // Tick to keep the time indicator up to date
+    // Every 1s when busy (live elapsed timer), every 30s otherwise
+    const isBusy = task.state === 'busy' || task.state === 'starting';
     useEffect(() => {
-        const interval = setInterval(() => setTick(t => t + 1), 30000);
+        const interval = setInterval(() => setTick(t => t + 1), isBusy ? 1000 : 30000);
         return () => clearInterval(interval);
-    }, []);
+    }, [isBusy]);
 
     // Split prompt by ⏺ dots and get the last segment for display
     const segments = task.prompt.split('⏺').map(s => s.trim()).filter(Boolean);
@@ -234,9 +236,15 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                 </span>
             )}
             <div className="task-actions">
-                {task.state !== 'busy' && task.state !== 'starting' && task.lastActivity && (
-                    <span className="task-time-ago" title={new Date(task.lastActivity).toLocaleString()}>
-                        {formatTimeAgo(task.lastActivity)}
+                {task.lastActivity && (
+                    <span
+                        className={`task-time-ago ${isBusy ? 'busy' : ''}`}
+                        title={isBusy
+                            ? `Started ${new Date(task.createdAt).toLocaleString()}`
+                            : new Date(task.lastActivity).toLocaleString()
+                        }
+                    >
+                        {formatTimeAgo(isBusy ? task.createdAt : task.lastActivity)}
                     </span>
                 )}
                 {canInterrupt && (
