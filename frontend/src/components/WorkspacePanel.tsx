@@ -240,11 +240,11 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                     <span
                         className={`task-time-ago ${isBusy ? 'busy' : ''}`}
                         title={isBusy
-                            ? `Started ${new Date(task.createdAt).toLocaleString()}`
+                            ? `Started ${new Date(task.processStartedAt || task.createdAt).toLocaleString()}`
                             : new Date(task.lastActivity).toLocaleString()
                         }
                     >
-                        {formatTimeAgo(isBusy ? task.createdAt : task.lastActivity)}
+                        {formatTimeAgo(isBusy ? (task.processStartedAt || task.createdAt) : task.lastActivity)}
                     </span>
                 )}
                 {canInterrupt && (
