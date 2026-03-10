@@ -829,7 +829,8 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
 
     private getClaudeProjectsDir(workspacePath: string): string {
         const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-        const folderName = workspacePath.replace(/\//g, '-');
+        // Claude Code replaces every non-alphanumeric character (except dashes) with a dash
+        const folderName = workspacePath.replace(/[^a-zA-Z0-9-]/g, '-');
         return join(homeDir, '.claude', 'projects', folderName);
     }
 

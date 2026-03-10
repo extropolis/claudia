@@ -538,6 +538,30 @@
     background: rgba(63, 185, 80, 0.04);
 }
 
+.git-change-open-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted, #6e7681);
+    cursor: pointer;
+    padding: 1px 3px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+}
+
+.git-change-item:hover .git-change-open-btn {
+    opacity: 1;
+}
+
+.git-change-open-btn:hover {
+    background: rgba(0, 212, 255, 0.15);
+    color: var(--accent-secondary, #00d4ff);
+}
+
 /* ===== CI/CD TAB ===== */
 .ci-pr-info {
     display: flex;

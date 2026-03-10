@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react';
-import { X, File, GitBranch, Loader2, Download, Copy, Check, Edit3, Save } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { X, File, GitBranch, Loader2, Download, Copy, Check, Edit3, Save, Eye, Code } from 'lucide-react';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { getApiBaseUrl } from '../config/api-config';
 import './FileContentModal.css';
 
@@ -20,6 +23,15 @@ export function FileContentModal({ workspacePath, filePath, isDiff = false, stag
     const [saving, setSaving] = useState(false);
     const [copied, setCopied] = useState(false);
     const [saved, setSaved] = useState(false);
+
+    // Detect markdown files by extension
+    const isMarkdownFile = /\.(md|mdx|markdown)$/i.test(filePath);
+    const [showRendered, setShowRendered] = useState(isMarkdownFile);
+
+    // Sync showRendered when filePath changes (in case modal is reused with different files)
+    useEffect(() => {
+        setShowRendered(/\.(md|mdx|markdown)$/i.test(filePath));
+    }, [filePath]);
 
     useEffect(() => {
         loadContent();
@@ -134,7 +146,10 @@ export function FileContentModal({ workspacePath, filePath, isDiff = false, stag
         return <div key={index} className="diff-line diff-context">{line}</div>;
     };
 
-    return (
+    // Use createPortal to render at document.body level so the modal
+    // escapes the FileExplorer's stacking context (z-index: 5) and
+    // floats above everything including the WorkspacePanel.
+    return createPortal(
         <div className="file-content-modal-backdrop" onClick={handleBackdropClick}>
             <div className="file-content-modal">
                 {/* Header */}
@@ -148,6 +163,16 @@ export function FileContentModal({ workspacePath, filePath, isDiff = false, stag
                         {saved && <span className="file-content-badge saved">Saved!</span>}
                     </div>
                     <div className="file-content-modal-actions">
+                        {isMarkdownFile && !isDiff && !isEditing && (
+                            <button
+                                className={`file-content-action-btn md-toggle-btn ${showRendered ? 'active' : ''}`}
+                                onClick={() => setShowRendered(!showRendered)}
+                                title={showRendered ? 'Show raw markdown' : 'Show rendered markdown'}
+                                disabled={loading || !!error}
+                            >
+                                {showRendered ? <Code size={14} /> : <Eye size={14} />}
+                            </button>
+                        )}
                         {!isDiff && !isEditing && (
                             <button
                                 className="file-content-action-btn"
@@ -218,7 +243,12 @@ export function FileContentModal({ workspacePath, filePath, isDiff = false, stag
                             autoFocus
                         />
                     )}
-                    {!loading && !error && !isEditing && content && (
+                    {!loading && !error && !isEditing && content && isMarkdownFile && showRendered && !isDiff && (
+                        <div className="file-content-markdown-rendered">
+                            <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+                        </div>
+                    )}
+                    {!loading && !error && !isEditing && content && !(isMarkdownFile && showRendered && !isDiff) && (
                         <pre className={`file-content-pre ${isDiff ? 'diff-view' : ''}`}>
                             {isDiff ? (
                                 <code className="file-content-code">
@@ -236,6 +266,7 @@ export function FileContentModal({ workspacePath, filePath, isDiff = false, stag
                     )}
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body
     );
 }

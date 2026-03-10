@@ -341,6 +341,7 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
     const [hasLoaded, setHasLoaded] = useState(false);
     const [hasLogLoaded, setHasLogLoaded] = useState(false);
     const [selectedChange, setSelectedChange] = useState<{ path: string; staged: boolean } | null>(null);
+    const [selectedFile, setSelectedFile] = useState<string | null>(null);
     const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
         staged: true,
         changes: true,
@@ -438,11 +439,21 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
     const statusLabel = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
     const handleChangeClick = useCallback((path: string, staged: boolean, status: string) => {
-        // Don't show diff for deleted files or untracked files
-        if (status === 'deleted' || status === 'untracked') {
+        // Deleted files can't be opened
+        if (status === 'deleted') {
+            return;
+        }
+        // Untracked files have no diff, open as file content
+        if (status === 'untracked') {
+            setSelectedFile(path);
             return;
         }
         setSelectedChange({ path, staged });
+    }, []);
+
+    const handleOpenFile = useCallback((e: React.MouseEvent, path: string) => {
+        e.stopPropagation(); // Don't trigger the row's diff click
+        setSelectedFile(path);
     }, []);
 
     const handleRefresh = useCallback(() => {
@@ -507,12 +518,21 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
                                     {staged.map(c => (
                                         <div
                                             key={`s-${c.path}`}
-                                            className={`git-change-item staged ${c.status} ${c.status !== 'deleted' && c.status !== 'untracked' ? 'clickable' : ''}`}
+                                            className={`git-change-item staged ${c.status} ${c.status !== 'deleted' ? 'clickable' : ''}`}
                                             title={`${statusLabel(c.status)}: ${c.path}`}
                                             onClick={() => handleChangeClick(c.path, c.staged, c.status)}
                                         >
                                             {statusIcon(c)}
                                             <span className="git-change-path">{c.path}</span>
+                                            {c.status !== 'deleted' && (
+                                                <button
+                                                    className="git-change-open-btn"
+                                                    title="Open file"
+                                                    onClick={(e) => handleOpenFile(e, c.path)}
+                                                >
+                                                    <ExternalLink size={11} />
+                                                </button>
+                                            )}
                                             <span className={`git-change-badge ${c.status}`}>{c.status[0].toUpperCase()}</span>
                                         </div>
                                     ))}
@@ -534,12 +554,21 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
                                     {unstaged.map(c => (
                                         <div
                                             key={`u-${c.path}`}
-                                            className={`git-change-item ${c.status} ${c.status !== 'deleted' && c.status !== 'untracked' ? 'clickable' : ''}`}
+                                            className={`git-change-item ${c.status} ${c.status !== 'deleted' ? 'clickable' : ''}`}
                                             title={`${statusLabel(c.status)}: ${c.path}`}
                                             onClick={() => handleChangeClick(c.path, c.staged, c.status)}
                                         >
                                             {statusIcon(c)}
                                             <span className="git-change-path">{c.path}</span>
+                                            {c.status !== 'deleted' && (
+                                                <button
+                                                    className="git-change-open-btn"
+                                                    title="Open file"
+                                                    onClick={(e) => handleOpenFile(e, c.path)}
+                                                >
+                                                    <ExternalLink size={11} />
+                                                </button>
+                                            )}
                                             <span className={`git-change-badge ${c.status}`}>{c.status[0].toUpperCase()}</span>
                                         </div>
                                     ))}
@@ -588,6 +617,13 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
                     isDiff={true}
                     staged={selectedChange.staged}
                     onClose={() => setSelectedChange(null)}
+                />
+            )}
+            {selectedFile && (
+                <FileContentModal
+                    workspacePath={workspacePath}
+                    filePath={selectedFile}
+                    onClose={() => setSelectedFile(null)}
                 />
             )}
         </>
