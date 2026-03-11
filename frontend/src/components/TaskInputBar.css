@@ -238,6 +238,17 @@
     pointer-events: none;
 }
 
+/* Upload status: uploading indicator */
+.task-input-uploading {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--accent-secondary);
+    font-size: 12px;
+    padding: 4px 0;
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
 /* Upload error message */
 .task-input-error {
     color: var(--accent-red);

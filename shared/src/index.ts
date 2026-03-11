@@ -35,6 +35,7 @@ export interface Task {
     workspaceId: string;     // Workspace (folder) this task runs in
     createdAt: Date;
     lastActivity: Date;
+    processStartedAt?: Date; // When the current process run started (resets on restart/continue)
     gitState?: TaskGitState; // Git state for revert functionality
     waitingInputType?: WaitingInputType; // Type of input Claude is waiting for
     systemPrompt?: string;   // Custom system prompt for this task

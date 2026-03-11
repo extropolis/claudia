@@ -49,9 +49,12 @@
 .workspace-panel-content {
     flex: 1;
     overflow-y: auto;
-    padding: 8px 0;
+    padding: 8px 8px;
     position: relative;
     z-index: 1; /* Establish stacking context so scrollbar stays on top of children */
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
 }
 
 /* Empty State */
@@ -86,10 +89,16 @@
     border-style: solid;
 }
 
-/* Workspace Section */
+/* Workspace Section - Card style */
 .workspace-section {
-    margin-bottom: 4px;
-    transition: transform 0.15s ease, opacity 0.15s ease;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    transition: transform 0.15s ease, opacity 0.15s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.workspace-section:hover {
+    border-color: rgba(139, 148, 158, 0.35);
 }
 
 .workspace-section.dragging {
@@ -97,13 +106,15 @@
 }
 
 .workspace-section.drop-target {
-    background: rgba(0, 212, 255, 0.1);
-    border-top: 2px solid var(--accent-secondary);
+    border-color: var(--accent-secondary);
+    box-shadow: 0 0 0 1px var(--accent-secondary), 0 0 12px rgba(0, 212, 255, 0.15);
+    background: rgba(0, 212, 255, 0.03);
 }
 
 .workspace-section.active {
-    border-left: 3px solid var(--accent-secondary);
-    background: rgba(0, 212, 255, 0.05);
+    border-color: var(--accent-secondary);
+    box-shadow: 0 0 0 1px rgba(0, 212, 255, 0.3), 0 2px 8px rgba(0, 212, 255, 0.1);
+    background: var(--bg-secondary);
 }
 
 .workspace-header {
@@ -112,12 +123,22 @@
     justify-content: space-between;
     gap: 8px;
     padding: 10px 12px;
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    border-bottom: none;
     transition: background 0.15s ease;
     font-size: 0.875rem;
     font-weight: 600;
     color: var(--text-primary);
+    border-radius: 9px; /* Match parent minus 1px for border */
+}
+
+/* When expanded, header only rounds top corners and content rounds bottom */
+.workspace-header + .workspace-content {
+    border-top: 1px solid var(--border-color);
+}
+
+.workspace-section.expanded .workspace-header {
+    border-radius: 9px 9px 0 0;
 }
 
 .workspace-drag-handle {
@@ -156,7 +177,7 @@
 }
 
 .workspace-header:hover {
-    background: var(--bg-tertiary);
+    background: rgba(33, 38, 45, 0.85);
 }
 
 .workspace-icon {
@@ -328,7 +349,9 @@
 
 .workspace-content {
     background: var(--bg-primary);
-    padding-left: 8px;
+    border-top: none;
+    border-radius: 0 0 9px 9px;
+    overflow: hidden;
 }
 
 .empty-projects {
@@ -468,7 +491,7 @@
 }
 
 .empty-tasks {
-    padding: 8px 12px;
+    padding: 10px 14px;
     font-size: 0.75rem;
     color: var(--text-muted);
     font-style: italic;
@@ -481,13 +504,15 @@
 
 .workspace-panel .task-item {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 6px;
-    padding: 6px 8px;
+    padding: 6px 10px;
     cursor: grab;
     transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
     border-left: 2px solid transparent;
-    font-size: 0.9375rem;
+    font-size: 0.8125rem;
+    font-weight: 400;
+    color: var(--text-secondary);
 }
 
 .workspace-panel .task-item:active {
@@ -536,6 +561,8 @@
     flex: 1;
     line-height: 1.3;
     word-break: break-word;
+    font-weight: 400;
+    color: var(--text-secondary);
     /* Limit to 1 line max */
     display: -webkit-box;
     -webkit-line-clamp: 1;
@@ -551,6 +578,26 @@
     flex-shrink: 0;
 }
 
+/* Time-ago indicator - subtle, hidden on hover to reveal action buttons */
+.workspace-panel .task-item .task-time-ago {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+    opacity: 0.7;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+}
+
+.workspace-panel .task-item .task-time-ago.busy {
+    color: var(--accent-secondary);
+    opacity: 0.5;
+}
+
+.workspace-panel .task-item:hover .task-time-ago {
+    display: none;
+}
+
 .workspace-panel .task-item:hover {
     background: var(--bg-tertiary);
 }
@@ -560,16 +607,25 @@
     border-left-color: var(--accent-secondary);
 }
 
+.workspace-panel .task-item.selected .task-prompt,
+.workspace-panel .task-item.selected .task-name {
+    color: var(--text-primary);
+}
+
 .workspace-panel .task-name {
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: var(--text-primary);
+    color: var(--text-secondary);
+    font-weight: 400;
 }
 
 .workspace-panel .status-icon {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    vertical-align: middle;
 }
 
 .workspace-panel .status-icon.spinning {
@@ -640,7 +696,7 @@
 }
 
 .task-action-button {
-    display: flex;
+    display: none;
     align-items: center;
     justify-content: center;
     padding: 3px;
@@ -649,12 +705,11 @@
     background: transparent;
     color: var(--text-muted);
     cursor: pointer;
-    opacity: 0;
     transition: all 0.15s ease;
 }
 
 .workspace-panel .task-item:hover .task-action-button {
-    opacity: 1;
+    display: flex;
 }
 
 .task-action-button:hover {
@@ -673,7 +728,6 @@
 }
 
 .task-action-button.stop {
-    opacity: 1;
     color: var(--accent-red);
 }
 
@@ -683,7 +737,6 @@
 }
 
 .task-action-button.revert {
-    opacity: 1;
     color: var(--accent-yellow);
 }
 
@@ -830,33 +883,36 @@
 .task-input-form {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding: 12px;
+    gap: 4px;
+    padding: 8px 10px;
     background: var(--bg-secondary);
-    border-top: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
 }
 
 .task-input-row {
     display: flex;
-    align-items: flex-start;
-    gap: 8px;
+    align-items: center;
+    gap: 6px;
 }
 
 .task-input {
     flex: 1;
     width: 100%;
-    padding: 10px 14px;
+    padding: 6px 10px;
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: 6px;
     background: var(--bg-primary);
     color: var(--text-primary);
-    font-size: 0.875rem;
+    font-size: 0.8125rem;
     outline: none;
     transition: all 0.2s ease;
     resize: none;
     font-family: inherit;
-    line-height: 1.4;
-    min-height: 60px;
+    line-height: 1.3;
+    min-height: unset;
+    height: 30px;
+    max-height: 80px;
+    overflow: hidden;
 }
 
 .task-input:focus {
@@ -872,10 +928,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
+    width: 28px;
+    height: 28px;
     border: none;
-    border-radius: 8px;
+    border-radius: 6px;
     background: var(--accent-secondary);
     color: var(--bg-primary);
     cursor: pointer;
@@ -929,10 +985,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
+    width: 28px;
+    height: 28px;
     border: none;
-    border-radius: 8px;
+    border-radius: 6px;
     background: var(--bg-tertiary);
     color: var(--text-secondary);
     cursor: pointer;
@@ -1194,6 +1250,16 @@
     background: var(--accent-red);
 }
 
+.new-task-uploading {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--accent-secondary);
+    font-size: 0.75rem;
+    padding: 4px 0;
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
 .new-task-upload-error {
     color: var(--accent-red);
     font-size: 0.75rem;
@@ -1224,10 +1290,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
+    width: 28px;
+    height: 28px;
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: 6px;
     background: transparent;
     color: var(--text-muted);
     cursor: pointer;
@@ -1249,6 +1315,15 @@
         overflow: hidden;
     }
 
+    .workspace-panel-content {
+        padding: 6px 6px;
+        gap: 6px;
+    }
+
+    .workspace-section {
+        border-radius: 8px;
+    }
+
     /* Task list max-height: account for larger 44px mobile touch targets */
     .task-list {
         max-height: calc(5 * 44px);
@@ -1258,11 +1333,16 @@
     .workspace-panel .task-item {
         padding: 10px 12px;
         min-height: 44px;
-        font-size: 0.9375rem;
+        font-size: 0.8125rem;
     }
 
     .workspace-panel .task-item .task-prompt {
-        font-size: 0.9375rem;
+        font-size: 0.8125rem;
+    }
+
+    /* On mobile, hide time-ago since action buttons are always visible */
+    .workspace-panel .task-item .task-time-ago {
+        display: none;
     }
 
     /* Make action buttons always visible & larger on mobile (no hover) */
@@ -1290,20 +1370,21 @@
 
     /* Task input form */
     .task-input-form {
-        padding: 10px 12px;
+        padding: 8px 10px;
     }
 
     .task-input {
-        font-size: 1rem;
-        min-height: 52px;
-        padding: 12px 14px;
+        font-size: 0.875rem;
+        min-height: unset;
+        height: 36px;
+        padding: 8px 12px;
     }
 
     .task-submit-button,
     .task-image-button,
     .task-voice-button {
-        width: 44px;
-        height: 44px;
+        width: 36px;
+        height: 36px;
     }
 
     /* Archived tasks */

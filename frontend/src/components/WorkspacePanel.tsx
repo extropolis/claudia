@@ -3,7 +3,7 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
     Loader2, Square, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, FolderPlus
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, FolderPlus, Clipboard
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
@@ -104,11 +104,28 @@ interface TaskItemProps {
     onDragEnd: () => void;
 }
 
+/** Format a time-ago string from a Date/string, e.g. "5s", "2m", "1h", "3d" */
+function formatTimeAgo(date: Date | string): string {
+    const now = Date.now();
+    const then = typeof date === 'string' ? new Date(date).getTime() : date.getTime();
+    const diffMs = now - then;
+    if (diffMs < 0) return '';
+    const seconds = Math.floor(diffMs / 1000);
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h`;
+    const days = Math.floor(hours / 24);
+    return `${days}d`;
+}
+
 function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, isSelected, hasActiveQuestion, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
     const [stopClicked, setStopClicked] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
     const [editValue, setEditValue] = useState('');
     const editInputRef = useRef<HTMLInputElement>(null);
+    const [, setTick] = useState(0);
 
     // Reset stopClicked when task state changes from busy
     useEffect(() => {
@@ -116,6 +133,14 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
             setStopClicked(false);
         }
     }, [task.state]);
+
+    // Tick to keep the time indicator up to date
+    // Every 1s when busy (live elapsed timer), every 30s otherwise
+    const isBusy = task.state === 'busy' || task.state === 'starting';
+    useEffect(() => {
+        const interval = setInterval(() => setTick(t => t + 1), isBusy ? 1000 : 30000);
+        return () => clearInterval(interval);
+    }, [isBusy]);
 
     // Split prompt by ⏺ dots and get the last segment for display
     const segments = task.prompt.split('⏺').map(s => s.trim()).filter(Boolean);
@@ -211,6 +236,17 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                 </span>
             )}
             <div className="task-actions">
+                {task.lastActivity && (
+                    <span
+                        className={`task-time-ago ${isBusy ? 'busy' : ''}`}
+                        title={isBusy
+                            ? `Started ${new Date(task.processStartedAt || task.createdAt).toLocaleString()}`
+                            : new Date(task.lastActivity).toLocaleString()
+                        }
+                    >
+                        {formatTimeAgo(isBusy ? (task.processStartedAt || task.createdAt) : task.lastActivity)}
+                    </span>
+                )}
                 {canInterrupt && (
                     <button
                         className="task-action-button stop"
@@ -354,6 +390,7 @@ function WorkspaceSection({
 
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
+    const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -513,6 +550,53 @@ function WorkspaceSection({
         await handleFileSelect(files);
     };
 
+    // Handle clipboard paste - intercept pasted images (e.g. from Print Screen, Snipping Tool)
+    const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+        const clipboardItems = e.clipboardData?.items;
+        if (!clipboardItems) return;
+
+        const imageItems: DataTransferItem[] = [];
+        for (let i = 0; i < clipboardItems.length; i++) {
+            const item = clipboardItems[i];
+            if (item.type.startsWith('image/')) {
+                imageItems.push(item);
+            }
+        }
+
+        // If no images in clipboard, let the default paste behavior handle text
+        if (imageItems.length === 0) return;
+
+        // Prevent the default paste behavior so image data doesn't get inserted as text
+        e.preventDefault();
+
+        console.log(`[WorkspacePanel] Pasting ${imageItems.length} image(s) from clipboard`);
+        setIsUploading(true);
+
+        for (const item of imageItems) {
+            const file = item.getAsFile();
+            if (!file) {
+                console.warn('[WorkspacePanel] Failed to get file from clipboard item');
+                continue;
+            }
+
+            // Give pasted images a meaningful name with timestamp
+            const extension = file.type.split('/')[1] || 'png';
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const namedFile = new File([file], `clipboard-${timestamp}.${extension}`, {
+                type: file.type
+            });
+
+            console.log(`[WorkspacePanel] Uploading pasted image: ${namedFile.name} (${namedFile.size} bytes, ${namedFile.type})`);
+            const uploaded = await uploadImage(namedFile);
+            if (uploaded) {
+                setImages(prev => [...prev, uploaded]);
+                console.log(`[WorkspacePanel] Successfully uploaded pasted image: ${uploaded.filename}`);
+            }
+        }
+
+        setIsUploading(false);
+    };
+
     // Cleanup preview URLs on unmount
     useEffect(() => {
         return () => {
@@ -651,7 +735,7 @@ function WorkspaceSection({
 
     return (
         <div
-            className={`workspace-section ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
+            className={`workspace-section ${isExpanded ? 'expanded' : ''} ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
             onDragOver={(e) => e.preventDefault()}
             onDragEnter={() => onDragEnter(index)}
         >
@@ -977,6 +1061,95 @@ function WorkspaceSection({
             </div>
             {isExpanded && (
                 <div className="workspace-content">
+                    <form
+                        className={`task-input-form ${isImageDragging ? 'dragging' : ''}`}
+                        onSubmit={handleSubmit}
+                        onDragEnter={handleImageDragEnter}
+                        onDragLeave={handleImageDragLeave}
+                        onDragOver={handleImageDragOver}
+                        onDrop={handleImageDrop}
+                    >
+                        {/* Image previews */}
+                        {images.length > 0 && (
+                            <div className="new-task-images">
+                                {images.map(img => (
+                                    <div key={img.filename} className="new-task-image-preview">
+                                        <img src={img.previewUrl} alt={img.originalName} />
+                                        <button
+                                            type="button"
+                                            className="new-task-image-remove"
+                                            onClick={() => deleteImage(img)}
+                                            title="Remove image"
+                                        >
+                                            <X size={12} />
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Upload status messages */}
+                        {isUploading && (
+                            <div className="new-task-uploading">
+                                <Clipboard size={12} />
+                                <span>Uploading pasted image...</span>
+                            </div>
+                        )}
+                        {uploadError && (
+                            <div className="new-task-upload-error">{uploadError}</div>
+                        )}
+
+                        {/* Drop zone overlay */}
+                        {isImageDragging && (
+                            <div className="new-task-dropzone">
+                                <ImagePlus size={24} />
+                                <span>Drop images here</span>
+                            </div>
+                        )}
+
+                        <div className="task-input-row">
+                            <div className={`task-input-wrapper ${isFocused && globalVoiceEnabled ? 'voice-active' : ''}`}>
+                                <textarea
+                                    className="task-input"
+                                    placeholder="Type or speak a task... (Ctrl+V to paste screenshots)"
+                                    value={inputValue}
+                                    onChange={(e) => setInputValue(e.target.value)}
+                                    onKeyDown={handleKeyDown}
+                                    onPaste={handlePaste}
+                                    onFocus={handleFocus}
+                                    onBlur={handleBlur}
+                                    rows={1}
+                                />
+                                {showInterim && (
+                                    <span className="interim-indicator">{voiceInterimTranscript}</span>
+                                )}
+                            </div>
+                            {/* Image upload button */}
+                            <button
+                                type="button"
+                                onClick={() => fileInputRef.current?.click()}
+                                className="task-image-button"
+                                title="Attach image"
+                            >
+                                <ImagePlus size={16} />
+                            </button>
+                            <input
+                                ref={fileInputRef}
+                                type="file"
+                                accept="image/*"
+                                multiple
+                                onChange={(e) => handleFileSelect(e.target.files)}
+                                style={{ display: 'none' }}
+                            />
+                            <button
+                                type="submit"
+                                className="task-submit-button"
+                                disabled={!inputValue.trim() && images.length === 0}
+                            >
+                                <Send size={16} />
+                            </button>
+                        </div>
+                    </form>
                     {tasks.length === 0 ? (
                         <div className="empty-tasks">No tasks yet</div>
                     ) : (
@@ -1017,88 +1190,6 @@ function WorkspaceSection({
                             </div>
                         </div>
                     )}
-                    <form
-                        className={`task-input-form ${isImageDragging ? 'dragging' : ''}`}
-                        onSubmit={handleSubmit}
-                        onDragEnter={handleImageDragEnter}
-                        onDragLeave={handleImageDragLeave}
-                        onDragOver={handleImageDragOver}
-                        onDrop={handleImageDrop}
-                    >
-                        {/* Image previews */}
-                        {images.length > 0 && (
-                            <div className="new-task-images">
-                                {images.map(img => (
-                                    <div key={img.filename} className="new-task-image-preview">
-                                        <img src={img.previewUrl} alt={img.originalName} />
-                                        <button
-                                            type="button"
-                                            className="new-task-image-remove"
-                                            onClick={() => deleteImage(img)}
-                                            title="Remove image"
-                                        >
-                                            <X size={12} />
-                                        </button>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-
-                        {/* Upload error message */}
-                        {uploadError && (
-                            <div className="new-task-upload-error">{uploadError}</div>
-                        )}
-
-                        {/* Drop zone overlay */}
-                        {isImageDragging && (
-                            <div className="new-task-dropzone">
-                                <ImagePlus size={24} />
-                                <span>Drop images here</span>
-                            </div>
-                        )}
-
-                        <div className="task-input-row">
-                            <div className={`task-input-wrapper ${isFocused && globalVoiceEnabled ? 'voice-active' : ''}`}>
-                                <textarea
-                                    className="task-input"
-                                    placeholder="Type or speak a task..."
-                                    value={inputValue}
-                                    onChange={(e) => setInputValue(e.target.value)}
-                                    onKeyDown={handleKeyDown}
-                                    onFocus={handleFocus}
-                                    onBlur={handleBlur}
-                                    rows={2}
-                                />
-                                {showInterim && (
-                                    <span className="interim-indicator">{voiceInterimTranscript}</span>
-                                )}
-                            </div>
-                            {/* Image upload button */}
-                            <button
-                                type="button"
-                                onClick={() => fileInputRef.current?.click()}
-                                className="task-image-button"
-                                title="Attach image"
-                            >
-                                <ImagePlus size={16} />
-                            </button>
-                            <input
-                                ref={fileInputRef}
-                                type="file"
-                                accept="image/*"
-                                multiple
-                                onChange={(e) => handleFileSelect(e.target.files)}
-                                style={{ display: 'none' }}
-                            />
-                            <button
-                                type="submit"
-                                className="task-submit-button"
-                                disabled={!inputValue.trim() && images.length === 0}
-                            >
-                                <Send size={16} />
-                            </button>
-                        </div>
-                    </form>
                 </div>
             )}
         </div>

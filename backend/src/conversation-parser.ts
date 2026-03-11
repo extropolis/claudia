@@ -71,8 +71,8 @@ interface OpenCodePart {
  * e.g., /Users/I850333/projects/experiments/codeui -> -Users-I850333-projects-experiments-codeui
  */
 function workspacePathToClaudeFolderName(workspacePath: string): string {
-    // Replace all forward slashes with dashes, and remove leading slash
-    return workspacePath.replace(/\//g, '-');
+    // Claude Code replaces every non-alphanumeric character (except dashes) with a dash
+    return workspacePath.replace(/[^a-zA-Z0-9-]/g, '-');
 }
 
 /**
