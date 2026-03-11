@@ -1,18 +1,17 @@
 {
   "mcpServers": {
     "playwright": {
-      "command": "node",
+      "command": "npx",
       "args": [
-        "/Users/I850333/projects/experiments/claudia/node_modules/@playwright/mcp/cli.js"
+        "@playwright/mcp"
       ]
     },
-    "jira_mcp": {
-      "type": "http",
-      "url": "https://litellm.concur.click/mcp/jira_mcp",
-      "timeout": 30,
-      "headers": {
-        "x-litellm-api-key": "Bearer sk-6yb7wLytysnrvttLItnDag"
-      }
+    "claudia": {
+      "command": "npx",
+      "args": [
+        "tsx",
+        "C:\\Users\\14255\\Work\\claudia\\backend\\src\\claudia-mcp-server.ts"
+      ]
     }
   }
 }

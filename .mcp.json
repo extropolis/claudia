@@ -5,6 +5,13 @@
       "args": [
         "@playwright/mcp"
       ]
+    },
+    "claudia": {
+      "command": "npx",
+      "args": [
+        "tsx",
+        "C:\\Users\\14255\\Work\\claudia\\backend\\src\\claudia-mcp-server.ts"
+      ]
     }
   }
 }

@@ -117,6 +117,7 @@ interface PersistedTask {
     shouldContinue?: boolean;  // True if task should auto-continue on reconnect
     backendType?: BackendType; // Which backend created this task (for reconnection)
     displayName?: string;      // User-editable display name
+    processStartedAt?: string; // When the current processing run started (preserved across reconnect)
 }
 
 // Lightweight metadata for archived tasks (no outputHistory - loaded lazily from disk)
@@ -390,7 +391,7 @@ export class TaskSpawner extends EventEmitter {
         if (claudiaMcpEnabled) {
             const mcpServerPath = join(__dirname, 'claudia-mcp-server.ts');
             const claudiaConfig: Record<string, unknown> = {
-                command: exe('npx'),
+                command: 'npx',
                 args: ['tsx', mcpServerPath]
             };
             // Pass workspace ID so the MCP server is scoped to this workspace
@@ -651,6 +652,13 @@ export class TaskSpawner extends EventEmitter {
             }
 
             console.log(`[TaskSpawner] Polling: task ${task.id} → ${newState} (${reason})`);
+
+            // Reset processStartedAt when transitioning into busy/starting from a non-active state
+            if ((newState === 'busy' || newState === 'starting') && oldState !== 'busy' && oldState !== 'starting') {
+                task.processStartedAt = new Date();
+                console.log(`[TaskSpawner] Reset processStartedAt for task ${task.id} to ${task.processStartedAt.toISOString()} (transition: ${oldState} → ${newState})`);
+            }
+
             task.state = newState;
             task.waitingInputType = waitingInputType;
             this.emit('taskStateChanged', this.toPublicTask(task));
@@ -937,6 +945,7 @@ export class TaskSpawner extends EventEmitter {
                     systemPrompt: task.systemPrompt,
                     backendType: taskBackendType,
                     displayName: task.displayName,
+                    processStartedAt: task.processStartedAt?.toISOString(),
                 });
             }
 
@@ -1390,6 +1399,7 @@ export class TaskSpawner extends EventEmitter {
 
         // For follow-up input, transition to busy state before sending Enter
         if (!isInitialPrompt && (task.state === 'idle' || task.state === 'waiting_input')) {
+            task.processStartedAt = new Date();
             task.state = 'busy';
             task.waitingInputType = undefined;
             this.emit('taskStateChanged', this.toPublicTask(task));
@@ -1591,6 +1601,39 @@ export class TaskSpawner extends EventEmitter {
         if (this.configStore?.getSkipPermissions()) {
             claudeArgs.push('--dangerously-skip-permissions');
             logger.info(`Skip permissions enabled`);
+        }
+
+        // Inject Claudia MCP orchestration guidance into system prompt when enabled
+        const claudiaMcpEnabled = this.configStore?.getClaudioMcpServerEnabled() ?? false;
+        if (claudiaMcpEnabled) {
+            const orchestrationGuidance = `
+## Claudia Multi-Agent Orchestration
+
+You are running as an agent inside Claudia, a multi-agent orchestrator. You have access to Claudia MCP tools (claudia_*) that let you collaborate with other agents.
+
+**When to spawn parallel tasks:**
+- When your work can be naturally decomposed into independent pieces (e.g., backend + frontend + tests)
+- When you need to research multiple topics simultaneously
+- When building a feature that has separable components
+
+**How to orchestrate:**
+1. Plan first — break the work into independent, parallelizable pieces
+2. Use \`claudia_create_task\` to spawn each piece as a separate task with a clear, specific prompt
+3. Use \`claudia_get_task_status\` to monitor progress of spawned tasks
+4. Use \`claudia_get_task_output\` to read results when tasks complete
+5. Integrate and review the combined output
+
+**Guidelines:**
+- Each spawned task should be self-contained with enough context to work independently
+- Prefer 2-4 parallel tasks — don't over-decompose simple work
+- Only spawn tasks when parallelization provides real value; do simple work yourself
+- After spawning tasks, monitor them periodically and handle any that need input (via \`claudia_send_input\`)
+- When all tasks complete, review the combined changes for integration issues
+`;
+            systemPrompt = systemPrompt
+                ? `${systemPrompt}\n\n${orchestrationGuidance}`
+                : orchestrationGuidance;
+            logger.info('Injected Claudia MCP orchestration guidance into system prompt');
         }
 
         // Add custom system prompt if provided
@@ -2847,6 +2890,9 @@ export class TaskSpawner extends EventEmitter {
             workspaceId: persisted.workspaceId,
             process: ptyProcess,
             state: shouldContinue ? 'starting' : 'idle',  // 'starting' if we need to send continuation
+            processStartedAt: shouldContinue
+                ? (persisted.processStartedAt ? new Date(persisted.processStartedAt) : now)
+                : undefined,  // Preserve original start time across reconnect, or use now as fallback
             outputHistory: [Buffer.from(resumeMessage)], // Start fresh, only resume message
             lazyHistoryBase64, // Store base64 for lazy loading instead of decoding now
             lastActivity: now,
