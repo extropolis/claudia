@@ -70,6 +70,7 @@ export interface ConfigUpdatePayload {
         model?: string;
         timeoutMs?: number;
     };
+    claudiaMcpServerEnabled?: boolean;
 }
 
 /**
@@ -173,7 +174,8 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
     const booleanFields: (keyof ConfigUpdatePayload)[] = [
         'skipPermissions',
         'autoFocusOnInput',
-        'supervisorEnabled'
+        'supervisorEnabled',
+        'claudiaMcpServerEnabled'
     ];
 
     for (const field of booleanFields) {
