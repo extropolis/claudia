@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { User, Bot, History, X, Copy, Check } from 'lucide-react';
+import { getApiBaseUrl } from '../config/api-config';
 import './ConversationHistory.css';
 
 interface ConversationMessage {
@@ -56,7 +57,7 @@ export function ConversationHistory({ taskId, workspaceId, onClose }: Conversati
                 setLoading(true);
                 setError(null);
 
-                const response = await fetch(`http://localhost:3001/api/tasks/${taskId}/conversation`);
+                const response = await fetch(`${getApiBaseUrl()}/api/tasks/${taskId}/conversation`);
 
                 if (response.ok) {
                     const data = await response.json();
@@ -65,7 +66,7 @@ export function ConversationHistory({ taskId, workspaceId, onClose }: Conversati
                 } else if (response.status === 404) {
                     // No session for this task, load session list
                     const sessionResp = await fetch(
-                        `http://localhost:3001/api/workspaces/${encodeURIComponent(workspaceId)}/sessions`
+                        `${getApiBaseUrl()}/api/workspaces/${encodeURIComponent(workspaceId)}/sessions`
                     );
                     if (sessionResp.ok) {
                         const sessionData = await sessionResp.json();
@@ -98,7 +99,7 @@ export function ConversationHistory({ taskId, workspaceId, onClose }: Conversati
             // We need to directly parse the session file
             // For now, we'll use the workspace sessions endpoint and fetch each message
             const response = await fetch(
-                `http://localhost:3001/api/sessions/${sessionId}/conversation?workspaceId=${encodeURIComponent(workspaceId)}`
+                `${getApiBaseUrl()}/api/sessions/${sessionId}/conversation?workspaceId=${encodeURIComponent(workspaceId)}`
             );
 
             if (response.ok) {

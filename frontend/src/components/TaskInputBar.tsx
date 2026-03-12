@@ -287,10 +287,14 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
         }, 100);
     };
 
+    // Track images in a ref so cleanup always has the latest list
+    const imagesRef = useRef<UploadedImage[]>([]);
+    imagesRef.current = images;
+
     // Cleanup preview URLs on unmount
     useEffect(() => {
         return () => {
-            images.forEach(img => URL.revokeObjectURL(img.previewUrl));
+            imagesRef.current.forEach(img => URL.revokeObjectURL(img.previewUrl));
         };
     }, []);
 

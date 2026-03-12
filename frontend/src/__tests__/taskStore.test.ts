@@ -5,6 +5,7 @@ import { Task, Workspace, TaskSummary, ChatMessage } from '@claudia/shared';
 describe('taskStore', () => {
     beforeEach(() => {
         // Reset store state before each test
+        // Must match ALL fields from the store's initial state exactly
         useTaskStore.setState({
             tasks: new Map(),
             archivedTasks: [],
@@ -13,8 +14,10 @@ describe('taskStore', () => {
             isConnected: false,
             isServerReloading: false,
             isOffline: false,
+            errorNotification: null,
             workspaces: [],
             expandedWorkspaces: new Set(),
+            expandedWorkspacesInitialized: false,
             showProjectPicker: false,
             voiceEnabled: false,
             autoSpeakResponses: false,
@@ -28,6 +31,7 @@ describe('taskStore', () => {
             voiceInterimTranscript: '',
             autoSendEnabled: false,
             autoSendDelayMs: 3000,
+            deepgramApiKey: '',
             taskSummaries: new Map(),
             chatMessages: [],
             chatTyping: false,
@@ -36,7 +40,10 @@ describe('taskStore', () => {
             autoFocusOnInput: false,
             supervisorEnabled: false,
             aiCoreConfigured: null,
-            showSystemStats: true,
+            showSystemStats: false,
+            browserNotificationsEnabled: false,
+            notifyOnCompletion: true,
+            notifyOnWaitingInput: true,
         });
         // Clear localStorage
         localStorage.clear();
@@ -473,8 +480,213 @@ describe('taskStore', () => {
         });
 
         it('should set show system stats', () => {
+            useTaskStore.getState().setShowSystemStats(true);
+            expect(useTaskStore.getState().showSystemStats).toBe(true);
+
             useTaskStore.getState().setShowSystemStats(false);
             expect(useTaskStore.getState().showSystemStats).toBe(false);
+        });
+
+        it('should set browser notifications enabled', () => {
+            useTaskStore.getState().setBrowserNotificationsEnabled(true);
+            expect(useTaskStore.getState().browserNotificationsEnabled).toBe(true);
+
+            useTaskStore.getState().setBrowserNotificationsEnabled(false);
+            expect(useTaskStore.getState().browserNotificationsEnabled).toBe(false);
+        });
+
+        it('should set notify on completion', () => {
+            // Default is true
+            expect(useTaskStore.getState().notifyOnCompletion).toBe(true);
+
+            useTaskStore.getState().setNotifyOnCompletion(false);
+            expect(useTaskStore.getState().notifyOnCompletion).toBe(false);
+        });
+
+        it('should set notify on waiting input', () => {
+            // Default is true
+            expect(useTaskStore.getState().notifyOnWaitingInput).toBe(true);
+
+            useTaskStore.getState().setNotifyOnWaitingInput(false);
+            expect(useTaskStore.getState().notifyOnWaitingInput).toBe(false);
+        });
+    });
+
+    describe('error notifications', () => {
+        it('should set error notification', () => {
+            useTaskStore.getState().setErrorNotification('Something went wrong', 'ERR_001');
+
+            const notification = useTaskStore.getState().errorNotification;
+            expect(notification).not.toBeNull();
+            expect(notification!.message).toBe('Something went wrong');
+            expect(notification!.code).toBe('ERR_001');
+            expect(notification!.timestamp).toBeInstanceOf(Date);
+        });
+
+        it('should set error notification without code', () => {
+            useTaskStore.getState().setErrorNotification('Connection lost');
+
+            const notification = useTaskStore.getState().errorNotification;
+            expect(notification).not.toBeNull();
+            expect(notification!.message).toBe('Connection lost');
+            expect(notification!.code).toBeUndefined();
+        });
+
+        it('should clear error notification', () => {
+            useTaskStore.getState().setErrorNotification('Error');
+            useTaskStore.getState().clearErrorNotification();
+
+            expect(useTaskStore.getState().errorNotification).toBeNull();
+        });
+    });
+
+    describe('task reordering within workspace', () => {
+        const now = new Date();
+        const tasks: Task[] = [
+            { id: 'task-a', prompt: 'Task A', state: 'idle', workspaceId: '/ws1', createdAt: new Date(now.getTime() - 3000), lastActivity: now },
+            { id: 'task-b', prompt: 'Task B', state: 'idle', workspaceId: '/ws1', createdAt: new Date(now.getTime() - 2000), lastActivity: now },
+            { id: 'task-c', prompt: 'Task C', state: 'idle', workspaceId: '/ws1', createdAt: new Date(now.getTime() - 1000), lastActivity: now },
+            { id: 'task-d', prompt: 'Task D', state: 'idle', workspaceId: '/ws2', createdAt: now, lastActivity: now },
+        ];
+
+        beforeEach(() => {
+            for (const task of tasks) {
+                useTaskStore.getState().addTask(task);
+            }
+        });
+
+        it('should reorder tasks within a workspace', () => {
+            // Reorder first task to last position in /ws1
+            useTaskStore.getState().reorderTasks('/ws1', 0, 2);
+
+            const storedTasks = useTaskStore.getState().tasks;
+            // All tasks should have order fields after reorder
+            const ws1Tasks = Array.from(storedTasks.values())
+                .filter(t => t.workspaceId === '/ws1')
+                .sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
+
+            expect(ws1Tasks).toHaveLength(3);
+            // After reorder, order fields should be set
+            expect(ws1Tasks[0].order).toBe(0);
+            expect(ws1Tasks[1].order).toBe(1);
+            expect(ws1Tasks[2].order).toBe(2);
+        });
+
+        it('should not reorder tasks with same index', () => {
+            const before = useTaskStore.getState().tasks;
+            useTaskStore.getState().reorderTasks('/ws1', 1, 1);
+            // No change expected - same Map reference (early return)
+            const after = useTaskStore.getState().tasks;
+            expect(after).toBe(before);
+        });
+
+        it('should not reorder tasks with out of bounds index', () => {
+            const before = new Map(useTaskStore.getState().tasks);
+            useTaskStore.getState().reorderTasks('/ws1', -1, 0);
+            // Should not throw, just return
+            expect(useTaskStore.getState().tasks.size).toBe(4);
+        });
+
+        it('should not affect tasks in other workspaces', () => {
+            useTaskStore.getState().reorderTasks('/ws1', 0, 2);
+
+            const ws2Task = useTaskStore.getState().tasks.get('task-d');
+            expect(ws2Task?.workspaceId).toBe('/ws2');
+            // task-d should not have an order field set by the reorder
+            expect(ws2Task?.order).toBeUndefined();
+        });
+    });
+
+    describe('workspace deduplication', () => {
+        it('should deduplicate workspaces with same id', () => {
+            const ws1: Workspace = { id: '/ws1', name: 'ws1', createdAt: new Date().toISOString() };
+            const ws1Dup: Workspace = { id: '/ws1', name: 'ws1-duplicate', createdAt: new Date().toISOString() };
+
+            useTaskStore.getState().setWorkspaces([ws1, ws1Dup]);
+
+            expect(useTaskStore.getState().workspaces).toHaveLength(1);
+            expect(useTaskStore.getState().workspaces[0].name).toBe('ws1');
+        });
+
+        it('should not add duplicate workspace via addWorkspace', () => {
+            const ws: Workspace = { id: '/ws1', name: 'ws1', createdAt: new Date().toISOString() };
+
+            useTaskStore.getState().addWorkspace(ws);
+            useTaskStore.getState().addWorkspace(ws);
+
+            expect(useTaskStore.getState().workspaces).toHaveLength(1);
+        });
+    });
+
+    describe('task state regression prevention', () => {
+        it('should keep newer local task over older incoming task in setTasks', () => {
+            const newerTime = new Date('2026-03-11T12:00:00Z');
+            const olderTime = new Date('2026-03-11T11:00:00Z');
+
+            const localTask: Task = {
+                id: 'task-1',
+                prompt: 'Test',
+                state: 'busy',
+                workspaceId: '/ws1',
+                createdAt: olderTime,
+                lastActivity: newerTime,
+            };
+
+            const incomingTask: Task = {
+                id: 'task-1',
+                prompt: 'Test',
+                state: 'idle',
+                workspaceId: '/ws1',
+                createdAt: olderTime,
+                lastActivity: olderTime,
+            };
+
+            useTaskStore.getState().addTask(localTask);
+            useTaskStore.getState().setTasks([incomingTask]);
+
+            // Should keep the local (newer) task
+            const task = useTaskStore.getState().tasks.get('task-1');
+            expect(task?.state).toBe('busy');
+            expect(task?.lastActivity).toEqual(newerTime);
+        });
+
+        it('should skip updateTask if existing task is newer', () => {
+            const newerTime = new Date('2026-03-11T12:00:00Z');
+            const olderTime = new Date('2026-03-11T11:00:00Z');
+
+            const localTask: Task = {
+                id: 'task-1',
+                prompt: 'Test',
+                state: 'busy',
+                workspaceId: '/ws1',
+                createdAt: olderTime,
+                lastActivity: newerTime,
+            };
+
+            const olderUpdate: Task = {
+                id: 'task-1',
+                prompt: 'Test',
+                state: 'idle',
+                workspaceId: '/ws1',
+                createdAt: olderTime,
+                lastActivity: olderTime,
+            };
+
+            useTaskStore.getState().addTask(localTask);
+            useTaskStore.getState().updateTask(olderUpdate);
+
+            // Should keep the local (newer) task
+            const task = useTaskStore.getState().tasks.get('task-1');
+            expect(task?.state).toBe('busy');
+        });
+    });
+
+    describe('deepgram API key', () => {
+        it('should set deepgram API key', () => {
+            // Note: setDeepgramApiKey also fires a fetch to sync to backend,
+            // which will fail in test env (expected, tested for state only)
+            useTaskStore.getState().setDeepgramApiKey('test-key-123');
+            expect(useTaskStore.getState().deepgramApiKey).toBe('test-key-123');
         });
     });
 });
