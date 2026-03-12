@@ -43,6 +43,7 @@ function App() {
         createWorkspace,
         deleteWorkspace,
         reorderWorkspaces,
+        reorderTasks: reorderTasksOnServer,
         openFolder,
         openTerminal,
         setSystemPrompt,
@@ -493,6 +494,7 @@ function App() {
                                 onCreateWorkspace={createWorkspace}
                                 onDeleteWorkspace={deleteWorkspace}
                                 onReorderWorkspaces={reorderWorkspaces}
+                                onReorderTasksOnServer={reorderTasksOnServer}
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
                                 onOpenShell={handleOpenShell}
@@ -528,6 +530,7 @@ function App() {
                                 onCreateWorkspace={createWorkspace}
                                 onDeleteWorkspace={deleteWorkspace}
                                 onReorderWorkspaces={reorderWorkspaces}
+                                onReorderTasksOnServer={reorderTasksOnServer}
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
                                 onOpenShell={handleOpenShell}

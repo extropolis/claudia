@@ -271,7 +271,11 @@ export const useTaskStore = create<TaskStore>()(
                             console.log(`[TaskStore] Keeping existing task ${task.id} (local: ${existingTime}, incoming: ${incomingTime})`);
                             taskMap.set(task.id, existing);
                         } else {
-                            taskMap.set(task.id, task);
+                            // Preserve existing order if incoming task doesn't have one
+                            const mergedTask = task.order === undefined && existing.order !== undefined
+                                ? { ...task, order: existing.order }
+                                : task;
+                            taskMap.set(task.id, mergedTask);
                         }
                     } else {
                         taskMap.set(task.id, task);
@@ -317,8 +321,13 @@ export const useTaskStore = create<TaskStore>()(
                     }
                 }
 
+                // Preserve existing order if incoming task doesn't have one
+                const mergedTask = existing && task.order === undefined && existing.order !== undefined
+                    ? { ...task, order: existing.order }
+                    : task;
+
                 const newTasks = new Map(tasks);
-                newTasks.set(task.id, task);
+                newTasks.set(task.id, mergedTask);
                 set({ tasks: newTasks });
             },
 

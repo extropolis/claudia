@@ -1206,6 +1206,7 @@ interface WorkspacePanelProps {
     onCreateWorkspace: (path: string) => void;
     onDeleteWorkspace: (workspaceId: string) => void;
     onReorderWorkspaces: (fromIndex: number, toIndex: number) => void;
+    onReorderTasksOnServer: (taskOrders: { taskId: string; order: number }[]) => void;
     onOpenFolder: (workspaceId: string) => void;
     onOpenTerminal: (workspaceId: string) => void;
     onOpenShell: (workspaceId: string) => void;
@@ -1231,6 +1232,7 @@ export function WorkspacePanel({
     onRevertTask,
     onDeleteWorkspace,
     onReorderWorkspaces,
+    onReorderTasksOnServer,
     onOpenFolder,
     onOpenTerminal,
     onOpenShell,
@@ -1446,7 +1448,17 @@ export function WorkspacePanel({
                             onDragStart={handleDragStart}
                             onDragEnter={handleDragEnter}
                             onDragEnd={handleDragEnd}
-                            onReorderTasks={(fromIndex, toIndex) => reorderTasks(workspace.id, fromIndex, toIndex)}
+                            onReorderTasks={(fromIndex, toIndex) => {
+                                reorderTasks(workspace.id, fromIndex, toIndex);
+                                // After local reorder, get updated tasks and send order to backend
+                                const updatedTasks = useTaskStore.getState().tasks;
+                                const taskOrders = Array.from(updatedTasks.values())
+                                    .filter(t => t.workspaceId === workspace.id && t.order !== undefined)
+                                    .map(t => ({ taskId: t.id, order: t.order! }));
+                                if (taskOrders.length > 0) {
+                                    onReorderTasksOnServer(taskOrders);
+                                }
+                            }}
                             onRenameTask={onRenameTask}
                             onRenameWorkspace={onRenameWorkspace}
                             allWorkspaces={workspaces}

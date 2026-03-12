@@ -118,6 +118,7 @@ interface PersistedTask {
     backendType?: BackendType; // Which backend created this task (for reconnection)
     displayName?: string;      // User-editable display name
     processStartedAt?: string; // When the current processing run started (preserved across reconnect)
+    order?: number;            // Display order within workspace (lower = higher in list)
 }
 
 // Lightweight metadata for archived tasks (no outputHistory - loaded lazily from disk)
@@ -263,6 +264,9 @@ export class TaskSpawner extends EventEmitter {
     private initializeBackend(): void {
         // Shutdown existing backend if any
         if (this.backend) {
+            // Remove all event listeners before shutting down to prevent
+            // stale handlers from firing on the old backend instance
+            this.backend.removeAllListeners();
             this.backend.shutdown().catch(err => {
                 logger.error('Failed to shutdown previous backend', { error: err });
             });
@@ -352,7 +356,7 @@ export class TaskSpawner extends EventEmitter {
      * Build the MCP config object from the current config store settings.
      * Returns null if no enabled MCP servers are found.
      */
-    private buildMcpConfig(workspaceId?: string): { mcpConfig: Record<string, Record<string, unknown>>; enabledMcpServers: { name: string }[] } | null {
+    private buildMcpConfig(workspaceId?: string, taskId?: string): { mcpConfig: Record<string, Record<string, unknown>>; enabledMcpServers: { name: string }[] } | null {
         const mcpServers = this.configStore?.getMCPServers() || [];
         const enabledMcpServers = mcpServers.filter(s => s.enabled);
 
@@ -394,9 +398,12 @@ export class TaskSpawner extends EventEmitter {
                 command: 'npx',
                 args: ['tsx', mcpServerPath]
             };
-            // Pass workspace ID so the MCP server is scoped to this workspace
-            if (workspaceId) {
-                claudiaConfig.env = { CLAUDIA_WORKSPACE_ID: workspaceId };
+            // Pass workspace ID and task ID so the MCP server is scoped appropriately
+            const mcpEnv: Record<string, string> = {};
+            if (workspaceId) mcpEnv.CLAUDIA_WORKSPACE_ID = workspaceId;
+            if (taskId) mcpEnv.CLAUDIA_TASK_ID = taskId;
+            if (Object.keys(mcpEnv).length > 0) {
+                claudiaConfig.env = mcpEnv;
             }
             mcpConfig['claudia'] = claudiaConfig;
             enabledMcpServers.push({ name: 'claudia', enabled: true });
@@ -616,7 +623,9 @@ export class TaskSpawner extends EventEmitter {
                         this.emit('taskWaitingInput', task.id, inputType, recentOutput);
                     } else {
                         this.transitionTaskState(task, 'idle', undefined, 'polling: output stable');
-                        this.captureGitStateAfterTask(task.id);
+                        this.captureGitStateAfterTask(task.id).catch(err => {
+                            logger.error('Unhandled error in captureGitStateAfterTask', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+                        });
                     }
                 }
                 // Don't transition 'starting' → 'idle' - leave it in starting until Enter is accepted
@@ -946,6 +955,7 @@ export class TaskSpawner extends EventEmitter {
                     backendType: taskBackendType,
                     displayName: task.displayName,
                     processStartedAt: task.processStartedAt?.toISOString(),
+                    order: task.order,
                 });
             }
 
@@ -1023,6 +1033,8 @@ export class TaskSpawner extends EventEmitter {
             startTime: Date.now()
         });
 
+        // Store the interval IMMEDIATELY to prevent leaks if code between
+        // setInterval and set() were to throw (defensive programming)
         const checkInterval = setInterval(() => {
             try {
                 if (!existsSync(claudeDir)) return;
@@ -1060,8 +1072,6 @@ export class TaskSpawner extends EventEmitter {
                 // Ignore errors during session capture
             }
         }, 500);
-
-        // Store the interval so we can clear it later
         this.sessionCaptureIntervals.set(taskId, checkInterval);
     }
 
@@ -1076,6 +1086,27 @@ export class TaskSpawner extends EventEmitter {
             this.sessionCaptureIntervals.delete(taskId);
         }
         this.pendingSessionCapture.delete(taskId);
+    }
+
+    /**
+     * Clean up MCP temporary config files for a task.
+     * These are written to tmpdir() on task creation and reconnection.
+     */
+    private cleanupMcpTempFiles(taskId: string): void {
+        const filesToClean = [
+            join(tmpdir(), `claudia-mcp-${taskId}.json`),
+            join(tmpdir(), `claudia-mcp-${taskId}-reconnect.json`),
+        ];
+        for (const filePath of filesToClean) {
+            try {
+                if (existsSync(filePath)) {
+                    unlinkSync(filePath);
+                    logger.debug('Cleaned up MCP temp file', { filePath });
+                }
+            } catch (e) {
+                logger.warn('Failed to clean up MCP temp file', { filePath, error: e instanceof Error ? e.message : String(e) });
+            }
+        }
     }
 
     /**
@@ -1445,12 +1476,17 @@ export class TaskSpawner extends EventEmitter {
         let injectedLearnings: LearningSearchResult[] = [];
         if (this.configStore?.getUseLearnings() && this.learningsStore) {
             try {
-                injectedLearnings = await this.learningsStore.searchLearnings({
+                // Add a timeout to prevent learnings search from blocking task creation
+                const learningsPromise = this.learningsStore.searchLearnings({
                     query: sanitizedPrompt,
                     workspaceId,
                     topK: 5,
                     minScore: 0.3
                 });
+                const timeoutPromise = new Promise<LearningSearchResult[]>((_, reject) =>
+                    setTimeout(() => reject(new Error('Learnings search timed out')), 5000)
+                );
+                injectedLearnings = await Promise.race([learningsPromise, timeoutPromise]);
 
                 if (injectedLearnings.length > 0) {
                     const learningsContext = this.learningsStore.formatForContext(injectedLearnings);
@@ -1611,24 +1647,33 @@ export class TaskSpawner extends EventEmitter {
 
 You are running as an agent inside Claudia, a multi-agent orchestrator. You have access to Claudia MCP tools (claudia_*) that let you collaborate with other agents.
 
+**IMPORTANT — Avoid duplicate work:**
+- Before starting any implementation, ALWAYS call \`claudia_list_tasks\` to see what other agents are already working on in this workspace
+- If another task is already handling a piece of work, do NOT implement it yourself — wait for that task to finish and read its output instead
+- After spawning tasks, your role shifts to **coordinator**: monitor, unblock, and integrate — do NOT start implementing the same work in parallel
+
 **When to spawn parallel tasks:**
 - When your work can be naturally decomposed into independent pieces (e.g., backend + frontend + tests)
 - When you need to research multiple topics simultaneously
 - When building a feature that has separable components
 
 **How to orchestrate:**
-1. Plan first — break the work into independent, parallelizable pieces
-2. Use \`claudia_create_task\` to spawn each piece as a separate task with a clear, specific prompt
-3. Use \`claudia_get_task_status\` to monitor progress of spawned tasks
-4. Use \`claudia_get_task_output\` to read results when tasks complete
-5. Integrate and review the combined output
+1. Check existing tasks first — call \`claudia_list_tasks\` to see what's already running
+2. Plan — break remaining work into independent, parallelizable pieces
+3. Spawn — use \`claudia_create_task\` for each piece with a clear, self-contained prompt that includes all necessary context
+4. Wait and monitor — poll \`claudia_get_task_status\` periodically (every 30-60s) until tasks complete. Handle any that need input via \`claudia_send_input\`
+5. Review — use \`claudia_get_task_output\` to read results from completed tasks
+6. Integrate — review the combined changes for conflicts or integration issues, then fix any problems yourself
+
+**Task naming:**
+- When creating tasks, always provide a short \`displayName\` (e.g., "Build API endpoint", "Write unit tests") so tasks are easy to identify in the sidebar
+- Use \`claudia_rename_task\` to update your own task name if your work evolves beyond the original prompt
 
 **Guidelines:**
-- Each spawned task should be self-contained with enough context to work independently
 - Prefer 2-4 parallel tasks — don't over-decompose simple work
 - Only spawn tasks when parallelization provides real value; do simple work yourself
-- After spawning tasks, monitor them periodically and handle any that need input (via \`claudia_send_input\`)
-- When all tasks complete, review the combined changes for integration issues
+- Each spawned task prompt should be fully self-contained — include file paths, context, and constraints so it can work independently
+- While waiting for spawned tasks, do NOT start implementing features that overlap with what they're doing
 `;
             systemPrompt = systemPrompt
                 ? `${systemPrompt}\n\n${orchestrationGuidance}`
@@ -1645,7 +1690,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // Add MCP server configurations
         // IMPORTANT: Claude doesn't automatically load MCP servers from ~/.claude.json in non-interactive mode
         // We must explicitly pass --mcp-config to load MCP servers
-        const mcpResult = this.buildMcpConfig(workspaceId);
+        const mcpResult = this.buildMcpConfig(workspaceId, id);
         if (mcpResult) {
             const { mcpConfig, enabledMcpServers } = mcpResult;
             const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
@@ -1807,6 +1852,9 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             // Clean up session capture interval to prevent memory leak
             this.clearSessionCapture(task.id);
 
+            // Clean up MCP temp config files to prevent disk space leak
+            this.cleanupMcpTempFiles(task.id);
+
             // Only emit events if task still exists in map (not being destroyed)
             if (!this.tasks.has(task.id)) {
                 console.log(`[TaskSpawner] Task ${task.id} already removed, skipping state change`);
@@ -1837,6 +1885,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             sessionId: task.sessionId || undefined,
             backendType,
             displayName: task.displayName,
+            order: task.order,
         };
     }
 
@@ -1930,6 +1979,34 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
         console.log(`[TaskSpawner] Cannot rename: task ${taskId} not found`);
         return false;
+    }
+
+    /**
+     * Reorder tasks within a workspace by updating their order values.
+     * Takes a map of taskId -> order value.
+     */
+    reorderTasks(taskOrders: { taskId: string; order: number }[]): boolean {
+        let changed = false;
+        for (const { taskId, order } of taskOrders) {
+            // Try active tasks
+            const task = this.tasks.get(taskId);
+            if (task) {
+                task.order = order;
+                changed = true;
+                continue;
+            }
+            // Try disconnected tasks
+            const persisted = this.disconnectedTasks.get(taskId);
+            if (persisted) {
+                persisted.order = order;
+                changed = true;
+            }
+        }
+        if (changed) {
+            this.scheduleSave();
+            console.log(`[TaskSpawner] Reordered ${taskOrders.length} tasks`);
+        }
+        return changed;
     }
 
     getDisconnectedTask(taskId: string): { id: string; workspaceId: string; sessionId: string | null; prompt: string; backendType?: BackendType } | undefined {
@@ -2406,6 +2483,9 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // Clean up any pending session capture for this task
         this.clearSessionCapture(taskId);
 
+        // Clean up MCP temp config files
+        this.cleanupMcpTempFiles(taskId);
+
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
 
@@ -2741,6 +2821,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             gitState: persisted.gitState,
             systemPrompt: persisted.systemPrompt,
             backendType: this.taskBackends.get(persisted.id) || 'claude-code' as const,
+            order: persisted.order,
         }));
 
         return [...liveTasks, ...disconnectedTasks];
@@ -2826,7 +2907,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             }
 
             // Add MCP server configurations for reconnection
-            const mcpResult = this.buildMcpConfig(persisted.workspaceId);
+            const mcpResult = this.buildMcpConfig(persisted.workspaceId, taskId);
             if (mcpResult) {
                 const mcpConfigJson = JSON.stringify({ mcpServers: mcpResult.mcpConfig }, null, 2);
                 const mcpConfigFile = join(tmpdir(), `claudia-mcp-${taskId}-reconnect.json`);
@@ -2931,6 +3012,12 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     }
 
     destroy(): void {
+        // Cancel any pending debounced save FIRST to prevent it from firing
+        // after tasks.clear() — which would overwrite valid data with an empty list
+        if (this.saveDebounceTimer) {
+            clearTimeout(this.saveDebounceTimer);
+            this.saveDebounceTimer = null;
+        }
         this.saveTasks();
 
         // Stop state polling
@@ -2945,6 +3032,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         }
 
         for (const task of this.tasks.values()) {
+            // Clean up MCP temp files
+            this.cleanupMcpTempFiles(task.id);
             try {
                 task.process.kill();
             } catch (_e) {

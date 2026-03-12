@@ -211,6 +211,12 @@ export function useWebSocket() {
                         setWorkspaces(payload.workspaces);
                         break;
                     }
+                    case 'tasks:reordered': {
+                        const payload = message.payload as { tasks: Task[] };
+                        console.log('[WebSocket] Tasks reordered');
+                        setTasks(payload.tasks);
+                        break;
+                    }
                     case 'workspace:updated': {
                         const payload = message.payload as { workspaces: Workspace[] };
                         console.log('[WebSocket] Workspaces updated');
@@ -533,6 +539,10 @@ export function useWebSocket() {
         sendMessage('workspace:reorder', { fromIndex, toIndex });
     }, [sendMessage]);
 
+    const reorderTasks = useCallback((taskOrders: { taskId: string; order: number }[]) => {
+        sendMessage('task:reorder', { taskOrders });
+    }, [sendMessage]);
+
     const openFolder = useCallback((workspaceId: string) => {
         sendMessage('workspace:openFolder', { workspaceId });
     }, [sendMessage]);
@@ -633,6 +643,7 @@ export function useWebSocket() {
         createWorkspace,
         deleteWorkspace,
         reorderWorkspaces,
+        reorderTasks,
         openFolder,
         openTerminal,
         setSystemPrompt,

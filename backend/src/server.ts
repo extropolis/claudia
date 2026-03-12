@@ -5,7 +5,7 @@ import cors from 'cors';
 import os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { spawn as ptySpawn, IPty } from 'node-pty';
-import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, statSync } from 'fs';
+import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, statSync, rmdirSync } from 'fs';
 import { readFile, readdir } from 'fs/promises';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -48,6 +48,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'task:revert',
     'task:restore',
     'task:rename',
+    'task:reorder',
     'task:archived:list',
     'task:archived:restore',
     'task:archived:continue',
@@ -895,6 +896,18 @@ export async function createApp(basePath?: string) {
                         const renamed = taskSpawner.renameTask(taskId, displayName);
                         if (renamed) {
                             broadcast({ type: 'task:stateChanged' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
+                        }
+                        break;
+                    }
+
+                    case 'task:reorder': {
+                        // Reorder tasks within a workspace
+                        const { taskOrders } = payload as { taskOrders?: { taskId: string; order: number }[] };
+                        if (!taskOrders || !Array.isArray(taskOrders)) break;
+                        const reordered = taskSpawner.reorderTasks(taskOrders);
+                        if (reordered) {
+                            // Broadcast updated task list to all clients (including sender)
+                            broadcast({ type: 'tasks:reordered' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
                         }
                         break;
                     }
@@ -1787,11 +1800,14 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         res.json({ ok: true });
     });
 
-    // Image upload configuration
-    const uploadsDir = join(basePath || process.cwd(), 'uploads');
+    // Image upload configuration - store in ~/.claudia/cache/images/
+    const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
+    const claudiaCacheDir = join(homeDir, '.claudia', 'cache', 'images');
+    const uploadsDir = claudiaCacheDir;
     if (!existsSync(uploadsDir)) {
         mkdirSync(uploadsDir, { recursive: true });
     }
+    logger.info(`Image cache directory: ${uploadsDir}`);
 
     const storage = multer.diskStorage({
         destination: (_req, _file, cb) => {
@@ -1840,7 +1856,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     app.delete('/api/upload/image/:filename', (req, res) => {
         const { filename } = req.params;
         // Validate filename to prevent directory traversal
-        if (filename.includes('/') || filename.includes('..')) {
+        if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
             return res.status(400).json({ error: 'Invalid filename' });
         }
         const filePath = join(uploadsDir, filename);
@@ -1883,6 +1899,41 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     // Run cleanup on startup and every hour
     cleanupOldUploads();
     setInterval(cleanupOldUploads, 60 * 60 * 1000);
+
+    // One-time migration: clean up old uploads from previous {basePath}/uploads/ location
+    const oldUploadsDir = join(basePath || process.cwd(), 'uploads');
+    if (oldUploadsDir !== uploadsDir && existsSync(oldUploadsDir)) {
+        try {
+            const oldFiles = readdirSync(oldUploadsDir);
+            for (const file of oldFiles) {
+                try {
+                    unlinkSync(join(oldUploadsDir, file));
+                } catch { /* ignore */ }
+            }
+            // Try to remove the directory if empty
+            try {
+                rmdirSync(oldUploadsDir);
+                logger.info(`Migrated: removed old uploads directory ${oldUploadsDir}`);
+            } catch { /* directory may not be empty */ }
+        } catch (error) {
+            logger.warn(`Could not clean up old uploads dir: ${error}`);
+        }
+    }
+
+    // Serve cached images for frontend preview
+    app.get('/api/cache/images/:filename', (req, res) => {
+        const { filename } = req.params;
+        // Validate filename to prevent directory traversal
+        if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+            return res.status(400).json({ error: 'Invalid filename' });
+        }
+        const filePath = join(uploadsDir, filename);
+        if (existsSync(filePath)) {
+            res.sendFile(filePath);
+        } else {
+            res.status(404).json({ error: 'Image not found' });
+        }
+    });
 
     // Backend status endpoint - check which backend is configured and its status
     app.get('/api/backend/status', async (_req, res) => {
