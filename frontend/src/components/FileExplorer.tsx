@@ -804,7 +804,8 @@ function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: b
     // Group checks by status category
     const failedChecks = ciStatus.checks.filter(c => c.conclusion === 'failure' || c.conclusion === 'cancelled');
     const runningChecks = ciStatus.checks.filter(c => c.status === 'in_progress' || c.status === 'queued' || c.status === 'waiting' || c.status === 'pending' || c.status === 'neutral');
-    const passedChecks = ciStatus.checks.filter(c => c.status === 'completed' && c.conclusion !== 'failure' && c.conclusion !== 'cancelled');
+    const passedChecks = ciStatus.checks.filter(c => c.status === 'completed' && c.conclusion !== 'failure' && c.conclusion !== 'cancelled' && c.conclusion !== 'skipped');
+    const skippedChecks = ciStatus.checks.filter(c => c.conclusion === 'skipped');
 
     const successCount = passedChecks.length;
     const failCount = failedChecks.length;
@@ -969,6 +970,17 @@ function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: b
                                                 <span className="ci-check-group-count">{passedChecks.length}</span>
                                             </div>
                                             {passedChecks.map((check, i) => renderCheckItem(check, i))}
+                                        </div>
+                                    )}
+
+                                    {skippedChecks.length > 0 && (
+                                        <div className="ci-check-group">
+                                            <div className="ci-check-group-header ci-check-group-skipped">
+                                                <SkipForward size={12} />
+                                                <span>Skipped</span>
+                                                <span className="ci-check-group-count">{skippedChecks.length}</span>
+                                            </div>
+                                            {skippedChecks.map((check, i) => renderCheckItem(check, i))}
                                         </div>
                                     )}
                                 </div>

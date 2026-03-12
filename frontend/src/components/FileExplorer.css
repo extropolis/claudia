@@ -812,6 +812,10 @@
     color: #3fb950;
 }
 
+.ci-check-group-header.ci-check-group-skipped {
+    color: #6e7681;
+}
+
 .ci-check-group-count {
     font-size: 9px;
     padding: 0 4px;
