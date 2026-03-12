@@ -3,7 +3,7 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
     Loader2, Square, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, FolderPlus, Clipboard
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, FolderPlus, Clipboard, Columns2
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
@@ -1261,7 +1261,9 @@ export function WorkspacePanel({
         archivedTasks,
         showArchivedTasks,
         setShowArchivedTasks,
-        reorderTasks
+        reorderTasks,
+        workspaceColumns,
+        setWorkspaceColumns
     } = useTaskStore();
 
     // Drag and drop state
@@ -1372,6 +1374,20 @@ export function WorkspacePanel({
                     >
                         <Archive size={16} />
                     </button>
+                    <div className="column-selector" title="Workspace columns">
+                        <Columns2 size={14} className="column-selector-icon" />
+                        <select
+                            className="column-selector-select"
+                            value={workspaceColumns}
+                            onChange={(e) => setWorkspaceColumns(Number(e.target.value))}
+                        >
+                            <option value={0}>Auto</option>
+                            <option value={1}>1 col</option>
+                            <option value={2}>2 col</option>
+                            <option value={3}>3 col</option>
+                            <option value={4}>4 col</option>
+                        </select>
+                    </div>
                     <button
                         className="add-workspace-button"
                         onClick={handleAddWorkspace}
@@ -1407,7 +1423,10 @@ export function WorkspacePanel({
                 </div>
             )}
 
-            <div className="workspace-panel-content">
+            <div
+                className="workspace-panel-content"
+                style={workspaceColumns > 0 ? { gridTemplateColumns: `repeat(${workspaceColumns}, 1fr)` } : undefined}
+            >
                 {workspaces.length === 0 ? (
                     <div className="empty-state">
                         <p>No workspaces yet.</p>
