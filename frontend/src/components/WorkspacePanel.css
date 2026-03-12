@@ -52,9 +52,13 @@
     padding: 8px 8px;
     position: relative;
     z-index: 1; /* Establish stacking context so scrollbar stays on top of children */
-    display: flex;
-    flex-direction: column;
+    /* CSS Grid with auto-fill columns for multi-column workspace layout.
+       At narrow widths this behaves as a single column.
+       As the sidebar is widened, additional columns appear automatically. */
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
     gap: 8px;
+    align-content: start; /* Pack rows to the top instead of stretching */
 }
 
 /* Empty State */
@@ -67,6 +71,7 @@
     padding: 32px 16px;
     text-align: center;
     color: var(--text-muted);
+    grid-column: 1 / -1; /* Span all grid columns */
 }
 
 .create-first-workspace-btn {
@@ -95,6 +100,7 @@
     border-radius: 10px;
     background: var(--bg-secondary);
     transition: transform 0.15s ease, opacity 0.15s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+    align-self: start; /* Don't stretch to fill grid row height */
 }
 
 .workspace-section:hover {
@@ -1093,6 +1099,7 @@
     background: var(--bg-tertiary);
     position: relative;
     z-index: 2; /* Stay above scrolling content */
+    grid-column: 1 / -1; /* Span all grid columns */
 }
 
 .archived-tasks-header {
@@ -1318,6 +1325,8 @@
     .workspace-panel-content {
         padding: 6px 6px;
         gap: 6px;
+        /* Force single column on mobile */
+        grid-template-columns: 1fr;
     }
 
     .workspace-section {
