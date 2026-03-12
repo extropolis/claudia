@@ -94,6 +94,7 @@ interface TaskItemProps {
     onSelectTask: (taskId: string) => void;
     onRenameTask?: (taskId: string, displayName: string) => void;
     isSelected: boolean;
+    isLastSelected: boolean; // Was last selected in this workspace (but not globally active)
     hasActiveQuestion: boolean;
     // Drag and drop
     isDragging: boolean;
@@ -120,7 +121,7 @@ function formatTimeAgo(date: Date | string): string {
     return `${days}d`;
 }
 
-function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, isSelected, hasActiveQuestion, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
+function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, isSelected, isLastSelected, hasActiveQuestion, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
     const [stopClicked, setStopClicked] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
     const [editValue, setEditValue] = useState('');
@@ -199,7 +200,7 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
     return (
         <div
             ref={taskItemRef}
-            className={`task-item ${isSelected ? 'selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
+            className={`task-item ${isSelected ? 'selected' : ''} ${isLastSelected && !isSelected ? 'last-selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
             draggable={!isEditing}
             onClick={() => !isEditing && onSelectTask(task.id)}
             onDragStart={(e) => {
@@ -312,6 +313,7 @@ interface WorkspaceSectionProps {
     tasks: Task[];
     waitingInputTaskIds: Set<string>;
     selectedTaskId: string | null;
+    lastSelectedTaskId: string | null; // Last selected task in this workspace
     isExpanded: boolean;
     index: number;
     // Workspace drag state
@@ -353,6 +355,7 @@ function WorkspaceSection({
     tasks,
     waitingInputTaskIds,
     selectedTaskId,
+    lastSelectedTaskId,
     isExpanded,
     index,
     isDragging,
@@ -1114,6 +1117,7 @@ function WorkspaceSection({
                                         task={task}
                                         index={idx}
                                         isSelected={selectedTaskId === task.id}
+                                        isLastSelected={lastSelectedTaskId === task.id}
                                         hasActiveQuestion={waitingInputTaskIds.has(task.id)}
                                         onDeleteTask={onDeleteTask}
                                         onInterruptTask={onInterruptTask}
@@ -1263,7 +1267,8 @@ export function WorkspacePanel({
         setShowArchivedTasks,
         reorderTasks,
         workspaceColumns,
-        setWorkspaceColumns
+        setWorkspaceColumns,
+        lastSelectedTaskByWorkspace
     } = useTaskStore();
 
     // Drag and drop state
@@ -1445,6 +1450,7 @@ export function WorkspacePanel({
                             tasks={getTasksForWorkspace(workspace.id)}
                             waitingInputTaskIds={waitingInputTaskIds}
                             selectedTaskId={selectedTaskId}
+                            lastSelectedTaskId={lastSelectedTaskByWorkspace.get(workspace.id) || null}
                             isExpanded={expandedWorkspaces.has(workspace.id)}
                             index={index}
                             isDragging={dragIndex !== null}

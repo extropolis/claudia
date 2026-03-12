@@ -24,6 +24,7 @@ interface TaskStore {
     archivedTasks: Task[];
     showArchivedTasks: boolean;
     selectedTaskId: string | null;
+    lastSelectedTaskByWorkspace: Map<string, string>; // workspaceId → last selected taskId
     isConnected: boolean;
     isServerReloading: boolean;  // True when server is restarting (hot reload)
     isOffline: boolean;  // True when browser has no internet connection
@@ -188,6 +189,7 @@ export const useTaskStore = create<TaskStore>()(
             archivedTasks: [],
             showArchivedTasks: false,
             selectedTaskId: null,
+            lastSelectedTaskByWorkspace: new Map(),
             isConnected: false,
             isServerReloading: false,
             isOffline: typeof navigator !== 'undefined' ? !navigator.onLine : false,
@@ -253,7 +255,19 @@ export const useTaskStore = create<TaskStore>()(
             setErrorNotification: (message, code) => set({ errorNotification: { message, code, timestamp: new Date() } }),
             clearErrorNotification: () => set({ errorNotification: null }),
 
-            selectTask: (id) => set({ selectedTaskId: id }),
+            selectTask: (id) => {
+                const { tasks, lastSelectedTaskByWorkspace } = get();
+                if (id) {
+                    const task = tasks.get(id);
+                    if (task) {
+                        const newMap = new Map(lastSelectedTaskByWorkspace);
+                        newMap.set(task.workspaceId, id);
+                        set({ selectedTaskId: id, lastSelectedTaskByWorkspace: newMap });
+                        return;
+                    }
+                }
+                set({ selectedTaskId: id });
+            },
 
             setTasks: (tasks) => {
                 const { tasks: existingTasks, selectedTaskId } = get();

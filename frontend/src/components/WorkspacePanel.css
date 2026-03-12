@@ -618,6 +618,17 @@
     color: var(--text-primary);
 }
 
+/* Subtle highlight for the last-selected task in each workspace (when not globally active) */
+.workspace-panel .task-item.last-selected {
+    border-left-color: rgba(139, 148, 158, 0.35);
+    background: rgba(139, 148, 158, 0.04);
+}
+
+.workspace-panel .task-item.last-selected .task-prompt {
+    color: var(--text-primary);
+    opacity: 0.85;
+}
+
 .workspace-panel .task-name {
     flex: 1;
     overflow: hidden;
