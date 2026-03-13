@@ -43,11 +43,11 @@ Write-Host "Cleaning up existing processes..."
 foreach ($port in @($BACKEND_PORT, $FRONTEND_PORT, $OPENCODE_PORT)) {
     $connections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
     if ($connections) {
-        $pids = $connections | Select-Object -ExpandProperty OwningProcess -Unique
-        foreach ($pid in $pids) {
-            if ($pid -ne 0) {
-                Write-Host "   Killing process on port ${port}: PID $pid"
-                Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+        $procIds = $connections | Select-Object -ExpandProperty OwningProcess -Unique
+        foreach ($procId in $procIds) {
+            if ($procId -ne 0) {
+                Write-Host "   Killing process on port ${port}: PID $procId"
+                Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
             }
         }
     }
