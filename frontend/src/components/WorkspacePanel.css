@@ -319,6 +319,14 @@
     background: var(--bg-tertiary);
 }
 
+.workspace-dropdown-item.reset {
+    color: var(--accent-orange, #e3b341);
+}
+
+.workspace-dropdown-item.reset:hover {
+    background: rgba(227, 179, 65, 0.15);
+}
+
 .workspace-dropdown-item.delete {
     color: var(--accent-red);
 }

@@ -346,6 +346,8 @@ interface WorkspaceSectionProps {
     onToggleReference?: (workspaceId: string, referencePath: string) => void;
     onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
+    // Reset workspace handler
+    onResetWorkspace?: () => void;
 }
 
 function WorkspaceSection({
@@ -381,7 +383,8 @@ function WorkspaceSection({
     allWorkspaces,
     onToggleReference,
     onAddCustomReference,
-    onRemoveReference
+    onRemoveReference,
+    onResetWorkspace
 }: WorkspaceSectionProps) {
     const [inputValue, setInputValue] = useState('');
     const [isEditingWorkspaceName, setIsEditingWorkspaceName] = useState(false);
@@ -992,6 +995,27 @@ function WorkspaceSection({
                             </button>
                             <div className="workspace-dropdown-divider" />
                             <button
+                                className="workspace-dropdown-item reset"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    const taskCount = tasks.length;
+                                    const confirmMessage = [
+                                        `Reset workspace "${workspace.displayName || workspace.name}"?\n`,
+                                        `This will:`,
+                                        `• Archive all ${taskCount} task${taskCount !== 1 ? 's' : ''} in this workspace`,
+                                        `• Switch to the default branch (main/master)`,
+                                        `\nThis action cannot be undone. Archived tasks can be found in the archive.`
+                                    ].join('\n');
+                                    if (window.confirm(confirmMessage)) {
+                                        onResetWorkspace?.();
+                                    }
+                                    onToggleMenu();
+                                }}
+                            >
+                                <RotateCcw size={14} />
+                                <span>Reset Workspace</span>
+                            </button>
+                            <button
                                 className="workspace-dropdown-item delete"
                                 onClick={(e) => {
                                     e.stopPropagation();
@@ -1223,6 +1247,7 @@ interface WorkspacePanelProps {
     onToggleReference?: (workspaceId: string, referencePath: string) => void;
     onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
+    onResetWorkspace?: (workspaceId: string) => void;
 }
 
 export function WorkspacePanel({
@@ -1248,7 +1273,8 @@ export function WorkspacePanel({
     onRenameWorkspace,
     onToggleReference,
     onAddCustomReference,
-    onRemoveReference
+    onRemoveReference,
+    onResetWorkspace
 }: WorkspacePanelProps) {
     const {
         tasks,
@@ -1465,6 +1491,7 @@ export function WorkspacePanel({
                             onToggleReference={onToggleReference}
                             onAddCustomReference={onAddCustomReference}
                             onRemoveReference={onRemoveReference}
+                            onResetWorkspace={() => onResetWorkspace?.(workspace.id)}
                         />
                     ))
                 )}
