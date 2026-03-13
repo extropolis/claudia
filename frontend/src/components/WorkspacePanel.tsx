@@ -396,6 +396,24 @@ function WorkspaceSection({
     const referencesMenuItemRef = useRef<HTMLDivElement>(null);
 
     const [showResetConfirm, setShowResetConfirm] = useState(false);
+    const [branchName, setBranchName] = useState<string | null>(null);
+
+    // Fetch current git branch for this workspace
+    useEffect(() => {
+        const fetchBranch = async () => {
+            try {
+                const params = new URLSearchParams({ workspace: workspace.id });
+                const res = await fetch(`${getApiBaseUrl()}/api/workspaces/git-status?${params}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setBranchName(data.branch || null);
+                }
+            } catch {
+                // silently ignore - not a git repo or network error
+            }
+        };
+        fetchBranch();
+    }, [workspace.id]);
 
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
@@ -783,6 +801,12 @@ function WorkspaceSection({
                             )}
                         </>
                     )}
+                    {branchName && (
+                        <span className="workspace-branch-label" title={`Branch: ${branchName}`}>
+                            <GitBranch size={11} />
+                            <span className="branch-name">{branchName}</span>
+                        </span>
+                    )}
                     {tasks.length > 0 && (
                         <span className="workspace-task-count">{tasks.length}</span>
                     )}
@@ -1168,6 +1192,17 @@ function WorkspaceSection({
                     onConfirm={() => {
                         onResetWorkspace?.();
                         setShowResetConfirm(false);
+                        // Refresh branch name after reset (slight delay for git checkout to complete)
+                        setTimeout(async () => {
+                            try {
+                                const params = new URLSearchParams({ workspace: workspace.id });
+                                const res = await fetch(`${getApiBaseUrl()}/api/workspaces/git-status?${params}`);
+                                if (res.ok) {
+                                    const data = await res.json();
+                                    setBranchName(data.branch || null);
+                                }
+                            } catch { /* ignore */ }
+                        }, 1500);
                     }}
                     onCancel={() => setShowResetConfirm(false)}
                 >

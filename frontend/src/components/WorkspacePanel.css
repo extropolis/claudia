@@ -234,6 +234,27 @@
     color: var(--accent-secondary);
 }
 
+.workspace-branch-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: rgba(139, 148, 158, 0.1);
+    color: var(--text-muted);
+    font-size: 0.625rem;
+    font-weight: 400;
+    flex-shrink: 0;
+    max-width: 140px;
+    overflow: hidden;
+}
+
+.workspace-branch-label .branch-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .workspace-action-button {
     display: flex;
     align-items: center;
