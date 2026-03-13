@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
+import { ConfirmModal } from './ConfirmModal';
 import './WorkspacePanel.css';
 
 // Simple notification sound using Web Audio API
@@ -393,6 +394,8 @@ function WorkspaceSection({
     const [workspaceEditValue, setWorkspaceEditValue] = useState('');
     const workspaceEditRef = useRef<HTMLInputElement>(null);
     const referencesMenuItemRef = useRef<HTMLDivElement>(null);
+
+    const [showResetConfirm, setShowResetConfirm] = useState(false);
 
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
@@ -998,17 +1001,7 @@ function WorkspaceSection({
                                 className="workspace-dropdown-item reset"
                                 onClick={(e) => {
                                     e.stopPropagation();
-                                    const taskCount = tasks.length;
-                                    const confirmMessage = [
-                                        `Reset workspace "${workspace.displayName || workspace.name}"?\n`,
-                                        `This will:`,
-                                        `• Archive all ${taskCount} task${taskCount !== 1 ? 's' : ''} in this workspace`,
-                                        `• Switch to the default branch (main/master)`,
-                                        `\nThis action cannot be undone. Archived tasks can be found in the archive.`
-                                    ].join('\n');
-                                    if (window.confirm(confirmMessage)) {
-                                        onResetWorkspace?.();
-                                    }
+                                    setShowResetConfirm(true);
                                     onToggleMenu();
                                 }}
                             >
@@ -1164,6 +1157,31 @@ function WorkspaceSection({
                         </div>
                     )}
                 </div>
+            )}
+
+            {showResetConfirm && (
+                <ConfirmModal
+                    title="Reset Workspace"
+                    variant="warning"
+                    confirmLabel="Reset"
+                    cancelLabel="Cancel"
+                    onConfirm={() => {
+                        onResetWorkspace?.();
+                        setShowResetConfirm(false);
+                    }}
+                    onCancel={() => setShowResetConfirm(false)}
+                >
+                    <p>
+                        This will reset <strong>{workspace.displayName || workspace.name}</strong> to a clean state:
+                    </p>
+                    <ul>
+                        <li>Archive all {tasks.length} task{tasks.length !== 1 ? 's' : ''} in this workspace</li>
+                        <li>Switch to the default branch (main/master)</li>
+                    </ul>
+                    <div className="confirm-note">
+                        Archived tasks can be recovered from the archive section at any time.
+                    </div>
+                </ConfirmModal>
             )}
         </div>
     );
