@@ -374,10 +374,6 @@ export async function createApp(basePath?: string) {
     const clientMissedPongs = new WeakMap<WebSocket, number>();
 
     const heartbeatInterval = setInterval(() => {
-        // Only log heartbeat when clients are connected
-        if (clients.size > 0) {
-            console.log(`[Server] Heartbeat check - ${clients.size} client(s) connected`);
-        }
         for (const client of clients) {
             if (clientAliveMap.get(client) === false) {
                 // Client didn't respond to last ping
@@ -399,7 +395,6 @@ export async function createApp(basePath?: string) {
             // Mark as not alive, will be set to true when pong received
             clientAliveMap.set(client, false);
             client.ping();
-            console.log('[Server] Sent ping to client');
         }
     }, HEARTBEAT_INTERVAL_MS);
 
@@ -660,8 +655,6 @@ export async function createApp(basePath?: string) {
         // Handle pong responses to keep connection alive
         ws.on('pong', () => {
             clientAliveMap.set(ws, true);
-            // Debug: log pong received
-            console.log('[Server] Pong received from client');
         });
 
         // If reconnection is in progress, send a status message and wait
