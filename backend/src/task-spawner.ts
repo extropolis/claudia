@@ -163,6 +163,7 @@ interface InternalTask extends Task {
     inactiveOutputLogged?: boolean; // True if we've already logged the "dropping output" message for this inactive state
     lastRefKey?: string; // Tracks which workspace references were last injected (sorted ref IDs)
     processStartedAt?: Date; // When the current busy/starting state began (for elapsed timer)
+    readyFallbackTimer?: ReturnType<typeof setTimeout>; // Fallback timer to send prompt if ready signal is never detected
 }
 
 /**
@@ -1163,6 +1164,29 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Start a fallback timer that sends the prompt if the ready signal is never detected.
+     * This prevents tasks from hanging forever when:
+     * - Claude Code changes its startup text and our patterns don't match
+     * - PTY data chunks split the ready signal in a way accumulated output check can't reassemble
+     * - Any other unexpected startup behavior
+     */
+    private startReadyFallbackTimer(task: InternalTask): void {
+        const READY_FALLBACK_MS = 15000;
+        task.readyFallbackTimer = setTimeout(() => {
+            if (!task.initialPromptSent && task.pendingPrompt) {
+                console.log(`[TaskSpawner] FALLBACK: Ready signal not detected after ${READY_FALLBACK_MS}ms for task ${task.id}, sending prompt anyway`);
+                console.log(`[TaskSpawner] FALLBACK: Recent output: ${JSON.stringify(this.getRecentOutput(task, 512))}`);
+                task.initialPromptSent = true;
+                const prompt = task.pendingPrompt;
+                task.pendingPrompt = null;
+                task.promptSubmitAttempts = 0;
+                setTimeout(() => this.sendPromptWithRetry(task, prompt), 500);
+            }
+            task.readyFallbackTimer = undefined;
+        }, READY_FALLBACK_MS);
+    }
+
+    /**
      * Get environment variables for spawning tasks based on API mode
      * - default: Use Claude's default settings from ~/.claude.json
      * - custom-anthropic: Use custom API key with Anthropic's API directly
@@ -1781,6 +1805,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         this.emit('taskCreated', this.toPublicTask(task));
         this.startSessionCapture(id, workspaceId);
 
+        // Fallback: if the ready signal is never detected (e.g., Claude Code changed its
+        // startup text, or PTY chunks split the signal in a way we can't reassemble),
+        // send the prompt anyway after 15 seconds to prevent the task from hanging forever.
+        this.startReadyFallbackTimer(task);
+
         return this.toPublicTask(task);
     }
 
@@ -1820,12 +1849,21 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             }
 
             // Send initial prompt when Claude is ready
-            if (!task.initialPromptSent && task.pendingPrompt && this.isReadyForInitialInput(cleanData)) {
-                console.log(`[TaskSpawner] Claude ready, sending prompt`);
+            // Check BOTH the current chunk AND the accumulated output to handle
+            // the race condition where the ready signal is split across PTY data chunks
+            if (!task.initialPromptSent && task.pendingPrompt &&
+                (this.isReadyForInitialInput(cleanData) || this.isReadyForInitialInput(this.getRecentOutput(task, 4096)))) {
+                console.log(`[TaskSpawner] Claude ready, sending prompt (detected in ${this.isReadyForInitialInput(cleanData) ? 'current chunk' : 'accumulated output'})`);
                 task.initialPromptSent = true;
                 const prompt = task.pendingPrompt;
                 task.pendingPrompt = null;
                 task.promptSubmitAttempts = 0;
+
+                // Clear fallback timer since we detected the ready signal normally
+                if (task.readyFallbackTimer) {
+                    clearTimeout(task.readyFallbackTimer);
+                    task.readyFallbackTimer = undefined;
+                }
 
                 setTimeout(() => this.sendPromptWithRetry(task, prompt), 1200);
             }
@@ -1848,6 +1886,12 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
         task.process.onExit(({ exitCode }) => {
             console.log(`[TaskSpawner] Task ${task.id} exited with code ${exitCode}`);
+
+            // Clean up ready fallback timer to prevent writing to dead PTY
+            if (task.readyFallbackTimer) {
+                clearTimeout(task.readyFallbackTimer);
+                task.readyFallbackTimer = undefined;
+            }
 
             // Clean up session capture interval to prevent memory leak
             this.clearSessionCapture(task.id);
@@ -2996,6 +3040,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         this.tasks.set(task.id, task);
         this.taskBackends.set(task.id, taskBackendType);
         console.log(`[TaskSpawner] reconnectTask: Task ${task.id} added to tasks map (backend: ${taskBackendType})`);
+
+        // Start fallback timer for shouldContinue tasks (same race condition as new tasks)
+        if (shouldContinue && taskBackendType === 'claude-code') {
+            this.startReadyFallbackTimer(task);
+        }
 
         this.disconnectedTasks.delete(taskId);
         this.scheduleSave();
