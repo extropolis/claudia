@@ -149,7 +149,8 @@ function App() {
             if (isResizing) {
                 const newWidth = e.clientX;
                 const minWidth = 250;
-                const maxWidth = 800;
+                // Allow sidebar to expand up to 70% of viewport for multi-column workspace layout
+                const maxWidth = Math.max(800, Math.floor(window.innerWidth * 0.7));
                 if (newWidth >= minWidth && newWidth <= maxWidth) {
                     setSidebarWidth(newWidth);
                 }

@@ -2,8 +2,8 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
-    Loader2, Square, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, FolderPlus, Clipboard
+    Loader2, Circle, ChevronRight, ChevronDown,
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
@@ -74,7 +74,7 @@ function StateIcon({ task, hasActiveQuestion, onArchive }: StateIconProps) {
                 }}
                 title="Archive task"
             >
-                <Square
+                <CheckCircle
                     className="status-icon idle archive-checkbox"
                     size={14}
                 />
@@ -95,6 +95,7 @@ interface TaskItemProps {
     onSelectTask: (taskId: string) => void;
     onRenameTask?: (taskId: string, displayName: string) => void;
     isSelected: boolean;
+    isLastSelected: boolean; // Was last selected in this workspace (but not globally active)
     hasActiveQuestion: boolean;
     // Drag and drop
     isDragging: boolean;
@@ -121,7 +122,7 @@ function formatTimeAgo(date: Date | string): string {
     return `${days}d`;
 }
 
-function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, isSelected, hasActiveQuestion, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
+function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, isSelected, isLastSelected, hasActiveQuestion, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
     const [stopClicked, setStopClicked] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
     const [editValue, setEditValue] = useState('');
@@ -200,7 +201,7 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
     return (
         <div
             ref={taskItemRef}
-            className={`task-item ${isSelected ? 'selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
+            className={`task-item ${isSelected ? 'selected' : ''} ${isLastSelected && !isSelected ? 'last-selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
             draggable={!isEditing}
             onClick={() => !isEditing && onSelectTask(task.id)}
             onDragStart={(e) => {
@@ -313,6 +314,7 @@ interface WorkspaceSectionProps {
     tasks: Task[];
     waitingInputTaskIds: Set<string>;
     selectedTaskId: string | null;
+    lastSelectedTaskId: string | null; // Last selected task in this workspace
     isExpanded: boolean;
     index: number;
     // Workspace drag state
@@ -356,6 +358,7 @@ function WorkspaceSection({
     tasks,
     waitingInputTaskIds,
     selectedTaskId,
+    lastSelectedTaskId,
     isExpanded,
     index,
     isDragging,
@@ -1165,6 +1168,7 @@ function WorkspaceSection({
                                         task={task}
                                         index={idx}
                                         isSelected={selectedTaskId === task.id}
+                                        isLastSelected={lastSelectedTaskId === task.id}
                                         hasActiveQuestion={waitingInputTaskIds.has(task.id)}
                                         onDeleteTask={onDeleteTask}
                                         onInterruptTask={onInterruptTask}
@@ -1350,7 +1354,10 @@ export function WorkspacePanel({
         archivedTasks,
         showArchivedTasks,
         setShowArchivedTasks,
-        reorderTasks
+        reorderTasks,
+        workspaceColumns,
+        setWorkspaceColumns,
+        lastSelectedTaskByWorkspace
     } = useTaskStore();
 
     // Drag and drop state
@@ -1461,6 +1468,20 @@ export function WorkspacePanel({
                     >
                         <Archive size={16} />
                     </button>
+                    <div className="column-selector" title="Workspace columns">
+                        <Columns2 size={14} className="column-selector-icon" />
+                        <select
+                            className="column-selector-select"
+                            value={workspaceColumns}
+                            onChange={(e) => setWorkspaceColumns(Number(e.target.value))}
+                        >
+                            <option value={0}>Auto</option>
+                            <option value={1}>1 col</option>
+                            <option value={2}>2 col</option>
+                            <option value={3}>3 col</option>
+                            <option value={4}>4 col</option>
+                        </select>
+                    </div>
                     <button
                         className="add-workspace-button"
                         onClick={handleAddWorkspace}
@@ -1496,7 +1517,10 @@ export function WorkspacePanel({
                 </div>
             )}
 
-            <div className="workspace-panel-content">
+            <div
+                className="workspace-panel-content"
+                style={workspaceColumns > 0 ? { gridTemplateColumns: `repeat(${workspaceColumns}, 1fr)` } : undefined}
+            >
                 {workspaces.length === 0 ? (
                     <div className="empty-state">
                         <p>No workspaces yet.</p>
@@ -1515,6 +1539,7 @@ export function WorkspacePanel({
                             tasks={getTasksForWorkspace(workspace.id)}
                             waitingInputTaskIds={waitingInputTaskIds}
                             selectedTaskId={selectedTaskId}
+                            lastSelectedTaskId={lastSelectedTaskByWorkspace.get(workspace.id) || null}
                             isExpanded={expandedWorkspaces.has(workspace.id)}
                             index={index}
                             isDragging={dragIndex !== null}
