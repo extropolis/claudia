@@ -247,6 +247,18 @@
     flex-shrink: 0;
     max-width: 140px;
     overflow: hidden;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.workspace-branch-label:hover {
+    background: rgba(139, 148, 158, 0.2);
+    color: var(--text-secondary);
+}
+
+.workspace-branch-label.copied {
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--accent-green);
 }
 
 .workspace-branch-label .branch-name {

@@ -581,7 +581,6 @@ describe('taskStore', () => {
         });
 
         it('should not reorder tasks with out of bounds index', () => {
-            const before = new Map(useTaskStore.getState().tasks);
             useTaskStore.getState().reorderTasks('/ws1', -1, 0);
             // Should not throw, just return
             expect(useTaskStore.getState().tasks.size).toBe(4);

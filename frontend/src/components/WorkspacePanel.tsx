@@ -802,7 +802,17 @@ function WorkspaceSection({
                         </>
                     )}
                     {branchName && (
-                        <span className="workspace-branch-label" title={`Branch: ${branchName}`}>
+                        <span
+                            className="workspace-branch-label"
+                            title={`Click to copy: ${branchName}`}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                navigator.clipboard.writeText(branchName);
+                                const el = e.currentTarget;
+                                el.classList.add('copied');
+                                setTimeout(() => el.classList.remove('copied'), 1000);
+                            }}
+                        >
                             <GitBranch size={11} />
                             <span className="branch-name">{branchName}</span>
                         </span>
