@@ -18,6 +18,7 @@ import { getConversationHistory, getWorkspaceSessions } from './conversation-par
 import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, PORTS } from '@claudia/shared';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
+import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch } from './git-utils.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
@@ -67,6 +68,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:references:toggle',
     'workspace:recent:list',
     'workspace:recent:clear',
+    'workspace:reset',
     'shell:create',
     'shell:input',
     'shell:resize',
@@ -372,10 +374,6 @@ export async function createApp(basePath?: string) {
     const clientMissedPongs = new WeakMap<WebSocket, number>();
 
     const heartbeatInterval = setInterval(() => {
-        // Only log heartbeat when clients are connected
-        if (clients.size > 0) {
-            console.log(`[Server] Heartbeat check - ${clients.size} client(s) connected`);
-        }
         for (const client of clients) {
             if (clientAliveMap.get(client) === false) {
                 // Client didn't respond to last ping
@@ -397,7 +395,6 @@ export async function createApp(basePath?: string) {
             // Mark as not alive, will be set to true when pong received
             clientAliveMap.set(client, false);
             client.ping();
-            console.log('[Server] Sent ping to client');
         }
     }, HEARTBEAT_INTERVAL_MS);
 
@@ -658,8 +655,6 @@ export async function createApp(basePath?: string) {
         // Handle pong responses to keep connection alive
         ws.on('pong', () => {
             clientAliveMap.set(ws, true);
-            // Debug: log pong received
-            console.log('[Server] Pong received from client');
         });
 
         // If reconnection is in progress, send a status message and wait
@@ -1278,6 +1273,91 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                             type: 'workspace:recent:list',
                             payload: { recentWorkspaces: updatedRecent }
                         }));
+                        break;
+                    }
+
+                    case 'workspace:reset': {
+                        // Reset workspace: archive all tasks and checkout main branch
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) {
+                            logger.error('workspace:reset requires workspaceId');
+                            sendWSError(ws, 'workspace:reset requires workspaceId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+
+                        logger.info('Resetting workspace', { workspaceId });
+
+                        // Step 1: Archive all tasks for this workspace
+                        const allTasks = taskSpawner.getAllTasks();
+                        const workspaceTasks = allTasks.filter(t => t.workspaceId === workspaceId);
+                        let archivedCount = 0;
+                        for (const task of workspaceTasks) {
+                            try {
+                                taskSpawner.archiveTask(task.id);
+                                archivedCount++;
+                                logger.info('Archived task during workspace reset', { taskId: task.id });
+                            } catch (e) {
+                                logger.error('Failed to archive task during reset', { taskId: task.id, error: e });
+                            }
+                        }
+
+                        // Step 2: Checkout the main/default branch
+                        let branchResult: { success: boolean; error?: string } = { success: false, error: 'Not a git repository' };
+                        let checkedOutBranch: string | null = null;
+                        const isRepo = await isGitRepo(workspaceId);
+                        if (isRepo) {
+                            const currentBranch = await getCurrentBranch(workspaceId);
+                            const defaultBranch = await getDefaultBranch(workspaceId);
+                            logger.info('Git branch info for reset', { currentBranch, defaultBranch, workspaceId });
+
+                            if (defaultBranch) {
+                                if (currentBranch === defaultBranch) {
+                                    branchResult = { success: true };
+                                    checkedOutBranch = defaultBranch;
+                                    logger.info('Already on default branch', { branch: defaultBranch });
+                                } else {
+                                    branchResult = await checkoutBranch(workspaceId, defaultBranch);
+                                    if (branchResult.success) {
+                                        checkedOutBranch = defaultBranch;
+                                        logger.info('Checked out default branch', { branch: defaultBranch });
+                                    } else {
+                                        logger.error('Failed to checkout default branch', { branch: defaultBranch, error: branchResult.error });
+                                    }
+                                }
+                            } else {
+                                branchResult = { success: false, error: 'Could not determine default branch (main/master)' };
+                                logger.warn('Could not determine default branch for workspace', { workspaceId });
+                            }
+                        } else {
+                            // Not a git repo - that's OK, just report it
+                            branchResult = { success: true };
+                            logger.info('Workspace is not a git repo, skipping branch checkout', { workspaceId });
+                        }
+
+                        // Broadcast updated tasks to all clients
+                        broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+
+                        // Send result back to requesting client
+                        ws.send(JSON.stringify({
+                            type: 'workspace:resetResult',
+                            payload: {
+                                workspaceId,
+                                archivedCount,
+                                totalTasks: workspaceTasks.length,
+                                branchCheckout: branchResult.success,
+                                checkedOutBranch,
+                                branchError: branchResult.error || null,
+                                isGitRepo: isRepo,
+                            }
+                        }));
+
+                        logger.info('Workspace reset complete', {
+                            workspaceId,
+                            archivedCount,
+                            totalTasks: workspaceTasks.length,
+                            branchCheckout: branchResult.success,
+                            checkedOutBranch,
+                        });
                         break;
                     }
 

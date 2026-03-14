@@ -54,6 +54,7 @@ function App() {
         deleteArchivedTask,
         continueArchivedTask,
         pushToGithub,
+        resetWorkspace,
         renameTask,
         renameWorkspace,
         toggleReference,
@@ -512,6 +513,7 @@ function App() {
                                 onToggleReference={toggleReference}
                                 onAddCustomReference={addCustomReference}
                                 onRemoveReference={removeReference}
+                                onResetWorkspace={resetWorkspace}
                             />
                         </aside>
                     )
@@ -548,6 +550,7 @@ function App() {
                                 onToggleReference={toggleReference}
                                 onAddCustomReference={addCustomReference}
                                 onRemoveReference={removeReference}
+                                onResetWorkspace={resetWorkspace}
                             />
                         </aside>
 

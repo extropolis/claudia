@@ -131,6 +131,7 @@ export type WSMessageType =
     | 'workspace:updated'
     | 'workspace:renamed'
     | 'workspace:recent:list'
+    | 'workspace:resetResult'
     // Task reordering
     | 'tasks:reordered'
     // Embedded shell terminals

@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
+import { ConfirmModal } from './ConfirmModal';
 import './WorkspacePanel.css';
 
 // Simple notification sound using Web Audio API
@@ -348,6 +349,8 @@ interface WorkspaceSectionProps {
     onToggleReference?: (workspaceId: string, referencePath: string) => void;
     onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
+    // Reset workspace handler
+    onResetWorkspace?: () => void;
 }
 
 function WorkspaceSection({
@@ -384,7 +387,8 @@ function WorkspaceSection({
     allWorkspaces,
     onToggleReference,
     onAddCustomReference,
-    onRemoveReference
+    onRemoveReference,
+    onResetWorkspace
 }: WorkspaceSectionProps) {
     const [inputValue, setInputValue] = useState('');
     const [isEditingWorkspaceName, setIsEditingWorkspaceName] = useState(false);
@@ -393,6 +397,26 @@ function WorkspaceSection({
     const [workspaceEditValue, setWorkspaceEditValue] = useState('');
     const workspaceEditRef = useRef<HTMLInputElement>(null);
     const referencesMenuItemRef = useRef<HTMLDivElement>(null);
+
+    const [showResetConfirm, setShowResetConfirm] = useState(false);
+    const [branchName, setBranchName] = useState<string | null>(null);
+
+    // Fetch current git branch for this workspace
+    useEffect(() => {
+        const fetchBranch = async () => {
+            try {
+                const params = new URLSearchParams({ workspace: workspace.id });
+                const res = await fetch(`${getApiBaseUrl()}/api/workspaces/git-status?${params}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setBranchName(data.branch || null);
+                }
+            } catch {
+                // silently ignore - not a git repo or network error
+            }
+        };
+        fetchBranch();
+    }, [workspace.id]);
 
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
@@ -780,6 +804,22 @@ function WorkspaceSection({
                             )}
                         </>
                     )}
+                    {branchName && (
+                        <span
+                            className="workspace-branch-label"
+                            title={`Click to copy: ${branchName}`}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                navigator.clipboard.writeText(branchName);
+                                const el = e.currentTarget;
+                                el.classList.add('copied');
+                                setTimeout(() => el.classList.remove('copied'), 1000);
+                            }}
+                        >
+                            <GitBranch size={11} />
+                            <span className="branch-name">{branchName}</span>
+                        </span>
+                    )}
                     {tasks.length > 0 && (
                         <span className="workspace-task-count">{tasks.length}</span>
                     )}
@@ -995,6 +1035,17 @@ function WorkspaceSection({
                             </button>
                             <div className="workspace-dropdown-divider" />
                             <button
+                                className="workspace-dropdown-item reset"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setShowResetConfirm(true);
+                                    onToggleMenu();
+                                }}
+                            >
+                                <RotateCcw size={14} />
+                                <span>Reset Workspace</span>
+                            </button>
+                            <button
                                 className="workspace-dropdown-item delete"
                                 onClick={(e) => {
                                     e.stopPropagation();
@@ -1145,6 +1196,42 @@ function WorkspaceSection({
                     )}
                 </div>
             )}
+
+            {showResetConfirm && (
+                <ConfirmModal
+                    title="Reset Workspace"
+                    variant="warning"
+                    confirmLabel="Reset"
+                    cancelLabel="Cancel"
+                    onConfirm={() => {
+                        onResetWorkspace?.();
+                        setShowResetConfirm(false);
+                        // Refresh branch name after reset (slight delay for git checkout to complete)
+                        setTimeout(async () => {
+                            try {
+                                const params = new URLSearchParams({ workspace: workspace.id });
+                                const res = await fetch(`${getApiBaseUrl()}/api/workspaces/git-status?${params}`);
+                                if (res.ok) {
+                                    const data = await res.json();
+                                    setBranchName(data.branch || null);
+                                }
+                            } catch { /* ignore */ }
+                        }, 1500);
+                    }}
+                    onCancel={() => setShowResetConfirm(false)}
+                >
+                    <p>
+                        This will reset <strong>{workspace.displayName || workspace.name}</strong> to a clean state:
+                    </p>
+                    <ul>
+                        <li>Archive all {tasks.length} task{tasks.length !== 1 ? 's' : ''} in this workspace</li>
+                        <li>Switch to the default branch (main/master)</li>
+                    </ul>
+                    <div className="confirm-note">
+                        Archived tasks can be recovered from the archive section at any time.
+                    </div>
+                </ConfirmModal>
+            )}
         </div>
     );
 }
@@ -1227,6 +1314,7 @@ interface WorkspacePanelProps {
     onToggleReference?: (workspaceId: string, referencePath: string) => void;
     onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
+    onResetWorkspace?: (workspaceId: string) => void;
 }
 
 export function WorkspacePanel({
@@ -1252,7 +1340,8 @@ export function WorkspacePanel({
     onRenameWorkspace,
     onToggleReference,
     onAddCustomReference,
-    onRemoveReference
+    onRemoveReference,
+    onResetWorkspace
 }: WorkspacePanelProps) {
     const {
         tasks,
@@ -1490,6 +1579,7 @@ export function WorkspacePanel({
                             onToggleReference={onToggleReference}
                             onAddCustomReference={onAddCustomReference}
                             onRemoveReference={onRemoveReference}
+                            onResetWorkspace={() => onResetWorkspace?.(workspace.id)}
                         />
                     ))
                 )}

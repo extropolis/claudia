@@ -9,6 +9,65 @@ const execAsync = promisify(exec);
  */
 
 /**
+ * Get the default branch name for a repository (main, master, etc.)
+ * Checks the remote default, then falls back to local branch detection.
+ */
+export async function getDefaultBranch(cwd: string): Promise<string | null> {
+    try {
+        // Try to get the remote HEAD reference (most reliable)
+        const { stdout } = await execAsync('git symbolic-ref refs/remotes/origin/HEAD', { cwd });
+        const ref = stdout.trim(); // e.g., "refs/remotes/origin/main"
+        const branch = ref.replace('refs/remotes/origin/', '');
+        if (branch) return branch;
+    } catch {
+        // Remote HEAD not set, try common defaults
+    }
+
+    // Check if 'main' branch exists
+    try {
+        await execAsync('git rev-parse --verify main', { cwd });
+        return 'main';
+    } catch {
+        // 'main' doesn't exist
+    }
+
+    // Check if 'master' branch exists
+    try {
+        await execAsync('git rev-parse --verify master', { cwd });
+        return 'master';
+    } catch {
+        // 'master' doesn't exist either
+    }
+
+    return null;
+}
+
+/**
+ * Get the current branch name
+ */
+export async function getCurrentBranch(cwd: string): Promise<string | null> {
+    try {
+        const { stdout } = await execAsync('git branch --show-current', { cwd });
+        return stdout.trim() || null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Checkout a branch in a git repository
+ */
+export async function checkoutBranch(cwd: string, branch: string): Promise<{ success: boolean; error?: string }> {
+    try {
+        await execAsync(`git checkout ${branch}`, { cwd });
+        return { success: true };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { success: false, error: message };
+    }
+}
+
+/**
  * Check if a directory is a git repository
  */
 export async function isGitRepo(cwd: string): Promise<boolean> {

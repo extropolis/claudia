@@ -240,6 +240,39 @@
     color: var(--accent-secondary);
 }
 
+.workspace-branch-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: rgba(139, 148, 158, 0.1);
+    color: var(--text-muted);
+    font-size: 0.625rem;
+    font-weight: 400;
+    flex-shrink: 0;
+    max-width: 140px;
+    overflow: hidden;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.workspace-branch-label:hover {
+    background: rgba(139, 148, 158, 0.2);
+    color: var(--text-secondary);
+}
+
+.workspace-branch-label.copied {
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--accent-green);
+}
+
+.workspace-branch-label .branch-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .workspace-action-button {
     display: flex;
     align-items: center;
@@ -323,6 +356,14 @@
 
 .workspace-dropdown-item:hover {
     background: var(--bg-tertiary);
+}
+
+.workspace-dropdown-item.reset {
+    color: var(--accent-orange, #e3b341);
+}
+
+.workspace-dropdown-item.reset:hover {
+    background: rgba(227, 179, 65, 0.15);
 }
 
 .workspace-dropdown-item.delete {
