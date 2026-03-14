@@ -52,9 +52,13 @@
     padding: 8px 8px;
     position: relative;
     z-index: 1; /* Establish stacking context so scrollbar stays on top of children */
-    display: flex;
-    flex-direction: column;
+    /* CSS Grid with auto-fit columns for multi-column workspace layout.
+       auto-fit collapses empty tracks so workspace cards expand to fill width.
+       A second column only appears once the sidebar exceeds ~960px. */
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
     gap: 8px;
+    align-content: start; /* Pack rows to the top instead of stretching */
 }
 
 /* Empty State */
@@ -67,6 +71,7 @@
     padding: 32px 16px;
     text-align: center;
     color: var(--text-muted);
+    grid-column: 1 / -1; /* Span all grid columns */
 }
 
 .create-first-workspace-btn {
@@ -95,6 +100,7 @@
     border-radius: 10px;
     background: var(--bg-secondary);
     transition: transform 0.15s ease, opacity 0.15s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+    align-self: start; /* Don't stretch to fill grid row height */
 }
 
 .workspace-section:hover {
@@ -612,6 +618,17 @@
     color: var(--text-primary);
 }
 
+/* Subtle highlight for the last-selected task in each workspace (when not globally active) */
+.workspace-panel .task-item.last-selected {
+    border-left-color: rgba(139, 148, 158, 0.35);
+    background: rgba(139, 148, 158, 0.04);
+}
+
+.workspace-panel .task-item.last-selected .task-prompt {
+    color: var(--text-primary);
+    opacity: 0.85;
+}
+
 .workspace-panel .task-name {
     flex: 1;
     overflow: hidden;
@@ -1087,12 +1104,63 @@
     color: var(--accent-secondary);
 }
 
+/* Column Selector */
+.column-selector {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 26px;
+    padding: 0 4px 0 6px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    transition: all 0.2s ease;
+    cursor: pointer;
+}
+
+.column-selector:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--text-muted);
+    color: var(--text-primary);
+}
+
+.column-selector-icon {
+    flex-shrink: 0;
+    opacity: 0.7;
+}
+
+.column-selector-select {
+    background: transparent;
+    border: none;
+    color: inherit;
+    font-size: 0.6875rem;
+    font-family: inherit;
+    cursor: pointer;
+    outline: none;
+    padding: 0;
+    /* Hide default arrow and use a compact appearance */
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    padding-right: 12px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0 center;
+}
+
+.column-selector-select option {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
 /* Archived Tasks Section */
 .archived-tasks-section {
     border-bottom: 1px solid var(--border-color);
     background: var(--bg-tertiary);
     position: relative;
     z-index: 2; /* Stay above scrolling content */
+    grid-column: 1 / -1; /* Span all grid columns */
 }
 
 .archived-tasks-header {
@@ -1318,6 +1386,8 @@
     .workspace-panel-content {
         padding: 6px 6px;
         gap: 6px;
+        /* Force single column on mobile */
+        grid-template-columns: 1fr;
     }
 
     .workspace-section {
