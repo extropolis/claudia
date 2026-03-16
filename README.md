@@ -2,7 +2,7 @@
 
 # Claudia
 
-A web-based UI for managing multiple Claude Code CLI instances simultaneously. Claudia provides a visual interface for spawning, monitoring, and interacting with Claude Code tasks across different workspaces. Available as a web app or Electron desktop application.
+A multi-instance Claude Code orchestrator — a web UI (and Electron desktop app) that lets you run, monitor, and manage multiple Claude Code CLI sessions simultaneously across different projects.
 
 ## Features
 
@@ -21,6 +21,72 @@ A web-based UI for managing multiple Claude Code CLI instances simultaneously. C
 - **Conversation History** - View parsed conversation history from Claude Code sessions
 - **Cross-Platform** - Runs on Windows, macOS, and Linux
 - **Electron Desktop App** - Standalone desktop application wrapper
+
+## Architecture
+
+```
+┌──────────────────────────────────┐
+│  Frontend (React + Vite)         │  :5173
+│  3-panel layout:                 │
+│  [Workspaces] [Terminal] [Chat]  │
+└──────────┬───────────────────────┘
+           │ WebSocket + REST API
+           ▼
+┌──────────────────────────────────┐
+│  Backend (Express + Node.js)     │  :4001
+│  TaskSpawner, SupervisorChat,    │
+│  WorkspaceStore, GitUtils, etc.  │
+└──────────┬───────────────────────┘
+           │ Spawns PTY processes
+           ▼
+┌──────────────────────────────────┐
+│  Claude Code CLI instances       │
+│  (one process per task)          │
+└──────────────────────────────────┘
+```
+
+- **Frontend** — React SPA with a resizable 3-panel layout: workspace sidebar, terminal/content area, and supervisor chat. State is managed with Zustand and terminals are rendered with xterm.js.
+- **Backend** — Express server that manages task lifecycles, spawns Claude Code processes via node-pty, streams output over WebSocket, and provides REST APIs for workspaces, config, and more.
+- **Claude Code instances** — Each task is an independent Claude Code CLI process running in its own PTY. Tasks are fully isolated from each other.
+
+## Core Concepts
+
+### Workspaces
+
+A **workspace** is a project directory (e.g., `/home/you/myproject`). You add workspaces to the sidebar and create tasks within them. Each workspace can have:
+
+- **System prompts** — Custom instructions injected into every task in that workspace (e.g., "Use TypeScript, prefer functional patterns")
+- **References** — Links to related directories that provide read-only context to Claude tasks
+- **Task ordering** — Drag-and-drop reordering of tasks within a workspace
+
+### Tasks
+
+A **task** is a single Claude Code session. Each task maps 1:1 to a Claude Code CLI process. Tasks flow through these states:
+
+```
+starting → busy → idle ⇄ waiting_input → exited
+```
+
+| State | Meaning |
+|-------|---------|
+| `starting` | Process spawned, Claude initializing |
+| `busy` | Claude is actively working (output is changing) |
+| `idle` | Claude is paused/thinking (output is stable) |
+| `waiting_input` | Claude is asking a question or requesting permission |
+| `exited` | Process has terminated |
+
+The backend polls task state every 3 seconds by comparing output buffer sizes. Git state is captured before and after each task, enabling one-click revert of changes.
+
+### Supervisor Chat
+
+The **Supervisor Chat** (right panel) is an AI assistant with tool-calling capabilities that can:
+
+- Create and delete tasks across any workspace
+- Send messages/input to running tasks
+- Read task conversation history and analyze results
+- Monitor all tasks and auto-analyze when they change state
+
+Think of it as a manager that can coordinate multiple Claude Code agents working in parallel.
 
 ## Prerequisites
 
@@ -142,13 +208,29 @@ On first launch, the Settings panel will open automatically:
 
 ## Usage
 
-1. **Add a Workspace** - Click the **+** button in the top right corner and enter the path to your project directory
-2. **Create a Task** - Use the text box at the bottom of the workspace panel to enter your prompt and start a new task
-3. **Monitor Progress** - Watch the real-time terminal output as Claude works
-4. **Interact** - Send follow-up messages or interrupt tasks as needed
-5. **Use Supervisor Chat** - Switch to Chat view for AI-assisted task management with tool-calling
-6. **Review Learnings** - After tasks complete, extract and save learnings from conversations
-7. **Mobile Access** - Open Settings to enable mobile tunnel and scan the QR code on your phone
+### Getting Started
+
+1. **Add a Workspace** — Click the **+** button in the top right corner and enter the path to your project directory
+2. **Create a Task** — Use the text box at the bottom of the workspace panel to enter your prompt and start a new task
+3. **Monitor Progress** — Watch the real-time terminal output as Claude works
+4. **Interact** — Send follow-up messages or interrupt tasks as needed
+5. **Use Supervisor Chat** — Toggle the right panel for AI-assisted task management with tool-calling
+6. **Review Learnings** — After tasks complete, extract and save learnings from conversations
+7. **Mobile Access** — Open Settings to enable mobile tunnel and scan the QR code on your phone
+
+### Best Practices
+
+**Run parallel workstreams across projects** — Add multiple workspaces and fire off tasks in each. They all run concurrently, and you can monitor everything from one screen.
+
+**Divide and conquer within one project** — Spawn multiple tasks in the same workspace for independent work (e.g., "build the API endpoint" + "write the tests" + "update the docs"). The supervisor can coordinate between them.
+
+**Use the Supervisor Chat for orchestration** — The right-panel AI can create tasks, send messages to running tasks, read their output, and analyze results. Great for high-level coordination like "Create a task to fix the login bug, and another to add unit tests for auth."
+
+**Set system prompts per workspace** — Right-click a workspace to set a system prompt. Every task in that workspace inherits those instructions, keeping your Claude instances consistent.
+
+**Use workspace references for cross-project context** — If a task needs to understand code in another directory, add it as a reference. Claude gets read-only access to that context without switching workspaces.
+
+**Archive completed tasks** — Keep your workspace clean by archiving finished tasks. Their full output history is preserved and can be restored later.
 
 ## Ports
 
