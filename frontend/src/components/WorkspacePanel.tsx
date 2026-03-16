@@ -397,9 +397,26 @@ function WorkspaceSection({
     const [workspaceEditValue, setWorkspaceEditValue] = useState('');
     const workspaceEditRef = useRef<HTMLInputElement>(null);
     const referencesMenuItemRef = useRef<HTMLDivElement>(null);
+    const submenuCloseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const [showResetConfirm, setShowResetConfirm] = useState(false);
     const [branchName, setBranchName] = useState<string | null>(null);
+
+    // Reset submenu state when parent menu closes, and cleanup timeout on unmount
+    useEffect(() => {
+        if (!isMenuOpen) {
+            setShowReferencesSubmenu(false);
+            if (submenuCloseTimeoutRef.current) {
+                clearTimeout(submenuCloseTimeoutRef.current);
+                submenuCloseTimeoutRef.current = null;
+            }
+        }
+        return () => {
+            if (submenuCloseTimeoutRef.current) {
+                clearTimeout(submenuCloseTimeoutRef.current);
+            }
+        };
+    }, [isMenuOpen]);
 
     // Fetch current git branch for this workspace
     useEffect(() => {
@@ -851,7 +868,17 @@ function WorkspaceSection({
                         <MoreVertical size={14} />
                     </button>
                     {isMenuOpen && (
-                        <div className="workspace-dropdown-menu">
+                        <div className="workspace-dropdown-menu" ref={(el) => {
+                            if (el) {
+                                const rect = el.getBoundingClientRect();
+                                if (rect.bottom > window.innerHeight - 8) {
+                                    el.style.top = 'auto';
+                                    el.style.bottom = '100%';
+                                    el.style.marginTop = '0';
+                                    el.style.marginBottom = '4px';
+                                }
+                            }
+                        }}>
                             <button
                                 className="workspace-dropdown-item"
                                 onClick={(e) => {
@@ -934,13 +961,22 @@ function WorkspaceSection({
                                 ref={referencesMenuItemRef}
                                 className="workspace-dropdown-item has-submenu"
                                 onMouseEnter={() => {
+                                    if (submenuCloseTimeoutRef.current) {
+                                        clearTimeout(submenuCloseTimeoutRef.current);
+                                        submenuCloseTimeoutRef.current = null;
+                                    }
                                     setShowReferencesSubmenu(true);
                                     if (referencesMenuItemRef.current) {
                                         const rect = referencesMenuItemRef.current.getBoundingClientRect();
                                         setSubmenuPosition({ top: rect.top - 4, left: rect.right - 4 });
                                     }
                                 }}
-                                onMouseLeave={() => setShowReferencesSubmenu(false)}
+                                onMouseLeave={() => {
+                                    submenuCloseTimeoutRef.current = setTimeout(() => {
+                                        setShowReferencesSubmenu(false);
+                                        submenuCloseTimeoutRef.current = null;
+                                    }, 150);
+                                }}
                                 onClick={(e) => e.stopPropagation()}
                             >
                                 <Link2 size={14} />
@@ -950,7 +986,30 @@ function WorkspaceSection({
                                     <div
                                         className="workspace-submenu"
                                         style={{ position: 'fixed', top: submenuPosition.top, left: submenuPosition.left }}
+                                        ref={(el) => {
+                                            if (el) {
+                                                const rect = el.getBoundingClientRect();
+                                                if (rect.bottom > window.innerHeight - 8) {
+                                                    el.style.top = `${submenuPosition.top - (rect.bottom - window.innerHeight) - 8}px`;
+                                                }
+                                                if (rect.right > window.innerWidth - 8) {
+                                                    el.style.left = `${submenuPosition.left - rect.width - (referencesMenuItemRef.current?.getBoundingClientRect().width || 0) + 8}px`;
+                                                }
+                                            }
+                                        }}
                                         onClick={(e) => e.stopPropagation()}
+                                        onMouseEnter={() => {
+                                            if (submenuCloseTimeoutRef.current) {
+                                                clearTimeout(submenuCloseTimeoutRef.current);
+                                                submenuCloseTimeoutRef.current = null;
+                                            }
+                                        }}
+                                        onMouseLeave={() => {
+                                            submenuCloseTimeoutRef.current = setTimeout(() => {
+                                                setShowReferencesSubmenu(false);
+                                                submenuCloseTimeoutRef.current = null;
+                                            }, 150);
+                                        }}
                                     >
                                         {allWorkspaces.filter(w => w.id !== workspace.id).length > 0 && (
                                             <>
@@ -1370,7 +1429,7 @@ export function WorkspacePanel({
     // System prompt modal state
     const [systemPromptWorkspace, setSystemPromptWorkspace] = useState<Workspace | null>(null);
 
-    // Close menu when clicking outside
+    // Close menu when clicking outside (capture phase so stopPropagation on child elements doesn't block it)
     useEffect(() => {
         if (!openMenuId) return;
 
@@ -1381,8 +1440,8 @@ export function WorkspacePanel({
             }
         };
 
-        document.addEventListener('click', handleClickOutside);
-        return () => document.removeEventListener('click', handleClickOutside);
+        document.addEventListener('mousedown', handleClickOutside, true);
+        return () => document.removeEventListener('mousedown', handleClickOutside, true);
     }, [openMenuId]);
 
     const handleDragStart = useCallback((index: number) => {
