@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, Menu, clipboard } from 'electron';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
-import { appendFileSync, mkdirSync } from 'fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { startServer, stopServer, ServerInfo } from './server-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -231,18 +231,41 @@ ipcMain.on('clipboard-write', (_event, text: string) => {
     clipboard.writeText(text);
 });
 
+// Helper to persist last browsed directory path across sessions
+const lastBrowsedFile = join(app.getPath('userData'), 'last-browsed-path.txt');
+
+function getLastBrowsedPath(): string | undefined {
+    try {
+        if (existsSync(lastBrowsedFile)) {
+            const p = readFileSync(lastBrowsedFile, 'utf-8').trim();
+            if (p && existsSync(p)) return p;
+        }
+    } catch {}
+    return undefined;
+}
+
+function setLastBrowsedPath(p: string): void {
+    try { writeFileSync(lastBrowsedFile, p, 'utf-8'); } catch {}
+}
+
 ipcMain.handle('select-directory', async () => {
     if (!mainWindow) return null;
 
+    const defaultPath = getLastBrowsedPath();
     const result = await dialog.showOpenDialog(mainWindow, {
-        properties: ['openDirectory', 'createDirectory']
+        properties: ['openDirectory', 'createDirectory'],
+        ...(defaultPath ? { defaultPath } : {})
     });
 
     if (result.canceled) {
         return null;
     }
 
-    return result.filePaths[0] || null;
+    const selected = result.filePaths[0] || null;
+    if (selected) {
+        setLastBrowsedPath(selected);
+    }
+    return selected;
 });
 
 // Handle errors
