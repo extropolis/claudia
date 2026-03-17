@@ -244,6 +244,11 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
             payload: { taskId: task.id, input: messageWithEnter }
         }));
 
+        // Scroll terminal to bottom so user sees latest output
+        window.dispatchEvent(new CustomEvent('terminal:scrollToBottom', {
+            detail: { taskId: task.id }
+        }));
+
         clearTaskDraftInput(task.id);
         // Clear images after sending (don't delete from server - Claude may need them)
         images.forEach(img => URL.revokeObjectURL(img.previewUrl));
