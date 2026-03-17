@@ -162,6 +162,7 @@ interface InternalTask extends Task {
     consecutiveOutputChanges?: number; // Count of consecutive polls with output changes (for idle→busy debouncing)
     inactiveOutputLogged?: boolean; // True if we've already logged the "dropping output" message for this inactive state
     lastRefKey?: string; // Tracks which workspace references were last injected (sorted ref IDs)
+    pendingRefNotification?: boolean; // True if workspace references changed while task was busy
     processStartedAt?: Date; // When the current busy/starting state began (for elapsed timer)
     readyFallbackTimer?: ReturnType<typeof setTimeout>; // Fallback timer to send prompt if ready signal is never detected
 }
@@ -1984,6 +1985,19 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
     getTask(taskId: string): InternalTask | undefined {
         return this.tasks.get(taskId);
+    }
+
+    /**
+     * Get all active (live) internal tasks for a given workspace.
+     */
+    getActiveTasksForWorkspace(workspaceId: string): InternalTask[] {
+        const results: InternalTask[] = [];
+        for (const task of this.tasks.values()) {
+            if (task.workspaceId === workspaceId) {
+                results.push(task);
+            }
+        }
+        return results;
     }
 
     /**
