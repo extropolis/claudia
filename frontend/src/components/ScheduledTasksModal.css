@@ -1,0 +1,315 @@
+/* Scheduled Tasks Modal */
+.scheduled-tasks-overlay {
+    z-index: 1000;
+}
+
+.scheduled-tasks-modal {
+    max-width: 540px;
+    width: 90%;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    animation: confirmModalSlideIn 0.2s ease;
+}
+
+.scheduled-tasks-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.scheduled-tasks-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.scheduled-tasks-title h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.scheduled-tasks-title svg {
+    color: var(--accent-secondary);
+}
+
+.scheduled-tasks-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    transition: all 0.15s ease;
+}
+
+.scheduled-tasks-close:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.scheduled-tasks-description {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin: 0 0 16px 0;
+    line-height: 1.4;
+}
+
+.scheduled-tasks-description strong {
+    color: var(--text-primary);
+}
+
+/* Task list */
+.scheduled-tasks-list {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+    margin-bottom: 16px;
+}
+
+.scheduled-tasks-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 32px 16px;
+    color: var(--text-muted);
+}
+
+.scheduled-tasks-empty svg {
+    opacity: 0.4;
+}
+
+.scheduled-tasks-empty p {
+    margin: 0;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.scheduled-tasks-empty span {
+    font-size: 0.8rem;
+}
+
+/* Individual scheduled task */
+.scheduled-task-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    transition: border-color 0.2s ease;
+}
+
+.scheduled-task-item:hover {
+    border-color: rgba(139, 148, 158, 0.35);
+}
+
+.scheduled-task-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.scheduled-task-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    flex-wrap: wrap;
+}
+
+.scheduled-task-badge {
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+.scheduled-task-badge.recurring {
+    background: rgba(0, 212, 255, 0.12);
+    color: var(--accent-secondary);
+}
+
+.scheduled-task-badge.one-shot {
+    background: rgba(210, 153, 34, 0.12);
+    color: var(--accent-yellow);
+}
+
+.scheduled-task-cron {
+    font-size: 0.75rem;
+    background: rgba(255, 255, 255, 0.06);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--text-primary);
+}
+
+.scheduled-task-id {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    margin-left: auto;
+}
+
+.scheduled-task-prompt {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    margin-bottom: 6px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.scheduled-task-meta {
+    display: flex;
+    gap: 12px;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.scheduled-task-delete {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+}
+
+.scheduled-task-delete:hover {
+    background: rgba(248, 81, 73, 0.12);
+    color: var(--accent-red);
+}
+
+/* Create form */
+.scheduled-task-form {
+    border-top: 1px solid var(--border-color);
+    padding-top: 16px;
+}
+
+.scheduled-task-form .form-group {
+    margin-bottom: 12px;
+}
+
+.scheduled-task-form .form-group label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.scheduled-task-form input[type="text"],
+.scheduled-task-form textarea {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.8rem;
+    box-sizing: border-box;
+}
+
+.scheduled-task-form input[type="text"]:focus,
+.scheduled-task-form textarea:focus {
+    outline: none;
+    border-color: var(--accent-secondary);
+}
+
+.scheduled-task-form textarea {
+    resize: vertical;
+    min-height: 60px;
+    font-family: inherit;
+}
+
+.cron-presets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+}
+
+.cron-preset-btn {
+    font-size: 0.7rem;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.cron-preset-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.cron-preset-btn.active {
+    background: rgba(0, 212, 255, 0.12);
+    border-color: var(--accent-secondary);
+    color: var(--accent-secondary);
+}
+
+.form-group-inline {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.checkbox-label {
+    display: flex !important;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.checkbox-label input[type="checkbox"] {
+    width: auto;
+    accent-color: var(--accent-secondary);
+}
+
+.scheduled-task-form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+/* Footer */
+.scheduled-tasks-footer {
+    display: flex;
+    gap: 8px;
+    border-top: 1px solid var(--border-color);
+    padding-top: 16px;
+}
+
+.scheduled-tasks-add {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    justify-content: center;
+}
+
+.scheduled-tasks-refresh {
+    display: flex;
+    align-items: center;
+    padding: 8px 10px !important;
+}
