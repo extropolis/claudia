@@ -19,7 +19,7 @@ import type { Task, ChatMessage } from '@claudia/shared';
 export class VoiceSupervisor extends EventEmitter {
     private supervisorChat: SupervisorChat;
     private taskSpawner: TaskSpawner;
-    private anthropic: Anthropic;
+    private anthropic: Anthropic | null = null;
     private customSystemPrompt: string;
 
     constructor(
@@ -30,12 +30,13 @@ export class VoiceSupervisor extends EventEmitter {
         this.supervisorChat = supervisorChat;
         this.taskSpawner = taskSpawner;
 
-        // Initialize Anthropic SDK for streaming
+        // Initialize Anthropic SDK for streaming (optional - voice features disabled without API key)
         const apiKey = process.env.ANTHROPIC_API_KEY;
         if (!apiKey) {
-            throw new Error('ANTHROPIC_API_KEY environment variable is required');
+            console.warn('[VoiceSupervisor] ANTHROPIC_API_KEY not set - voice features will be unavailable');
+        } else {
+            this.anthropic = new Anthropic({ apiKey });
         }
-        this.anthropic = new Anthropic({ apiKey });
 
         // Default system prompt
         this.customSystemPrompt = `You are a voice assistant for a coding environment. Keep responses ULTRA SHORT - 1-2 sentences max, under 20 words if possible. Be conversational, natural, and friendly. No markdown, no bullet points, no formatting. Just speak naturally.
@@ -84,6 +85,11 @@ Answer questions directly. If the user wants to create a task or control tasks, 
 ${taskContext ? `\n## Current Task Status\n${taskContext}\n` : ''}`;
 
         try {
+            if (!this.anthropic) {
+                const err = new Error('Voice features unavailable: ANTHROPIC_API_KEY not configured');
+                if (callbacks?.onError) callbacks.onError(err);
+                return;
+            }
             // Stream the response from Claude
             const stream = await this.anthropic.messages.stream({
                 model: 'claude-sonnet-4-6',
