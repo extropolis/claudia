@@ -482,9 +482,14 @@ export class CronScheduler extends EventEmitter {
 
             // Check if the parent task still exists
             const taskState = this.taskStateChecker(scheduled.taskId);
-            if (taskState === 'exited' || taskState === 'unknown') {
-                logger.info('Removing scheduled task (parent task gone)', { id, taskId: scheduled.taskId, taskState });
+            if (taskState === 'exited') {
+                logger.info('Removing scheduled task (parent task exited)', { id, taskId: scheduled.taskId });
                 toDelete.push(id);
+                continue;
+            }
+            // Skip this cycle if task state is unknown (may be reconnecting)
+            if (taskState === 'unknown') {
+                logger.debug('Skipping scheduled task check (task state unknown, may be reconnecting)', { id, taskId: scheduled.taskId });
                 continue;
             }
 
