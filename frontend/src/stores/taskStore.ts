@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType } from '@claudia/shared';
+import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
 
 // Info about a task that is waiting for user input
@@ -70,6 +70,9 @@ interface TaskStore {
 
     // Draft input per task (preserved when switching tasks)
     taskDraftInputs: Map<string, string>;
+
+    // Scheduled tasks (cron) - keyed by scheduled task ID
+    scheduledTasks: Map<string, ScheduledTask>;
 
     // Settings
     autoFocusOnInput: boolean;
@@ -142,6 +145,12 @@ interface TaskStore {
     setTaskDraftInput: (taskId: string, input: string) => void;
     getTaskDraftInput: (taskId: string) => string;
     clearTaskDraftInput: (taskId: string) => void;
+
+    // Scheduled tasks actions
+    setScheduledTasks: (tasks: ScheduledTask[]) => void;
+    addScheduledTask: (task: ScheduledTask) => void;
+    removeScheduledTask: (cronId: string) => void;
+    getScheduledTasksForTask: (taskId: string) => ScheduledTask[];
 
     // Layout actions
     setWorkspaceColumns: (columns: number) => void;
@@ -240,6 +249,9 @@ export const useTaskStore = create<TaskStore>()(
 
             // Draft input initial state
             taskDraftInputs: new Map(),
+
+            // Scheduled tasks initial state
+            scheduledTasks: new Map(),
 
             // Settings initial state
             autoFocusOnInput: false,
@@ -483,6 +495,29 @@ export const useTaskStore = create<TaskStore>()(
             setShowProjectPicker: (show) => set({ showProjectPicker: show }),
 
             setWorkspaceColumns: (columns) => set({ workspaceColumns: columns }),
+
+            // Scheduled tasks actions
+            setScheduledTasks: (tasks) => {
+                const map = new Map<string, ScheduledTask>();
+                for (const t of tasks) map.set(t.id, t);
+                set({ scheduledTasks: map });
+            },
+            addScheduledTask: (task) => {
+                const { scheduledTasks } = get();
+                const next = new Map(scheduledTasks);
+                next.set(task.id, task);
+                set({ scheduledTasks: next });
+            },
+            removeScheduledTask: (cronId) => {
+                const { scheduledTasks } = get();
+                const next = new Map(scheduledTasks);
+                next.delete(cronId);
+                set({ scheduledTasks: next });
+            },
+            getScheduledTasksForTask: (taskId) => {
+                const { scheduledTasks } = get();
+                return Array.from(scheduledTasks.values()).filter(s => s.taskId === taskId);
+            },
 
             // Task reordering within a workspace
             reorderTasks: (workspaceId, fromIndex, toIndex) => {

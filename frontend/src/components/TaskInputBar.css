@@ -165,6 +165,56 @@
     cursor: not-allowed;
 }
 
+/* Schedule button */
+.task-input-schedule {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    width: 36px;
+    height: 36px;
+    background: transparent;
+    border: 1px solid #444;
+    border-radius: 6px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+}
+
+.task-input-schedule:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    border-color: var(--accent-secondary);
+    color: var(--accent-secondary);
+}
+
+.task-input-schedule.has-schedules {
+    border-color: rgba(0, 212, 255, 0.4);
+    color: var(--accent-secondary);
+}
+
+.task-input-schedule:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.task-input-schedule-count {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    min-width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    background: var(--accent-secondary);
+    color: var(--bg-primary);
+    font-size: 0.6rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+}
+
 /* Image previews */
 .task-input-images {
     display: flex;

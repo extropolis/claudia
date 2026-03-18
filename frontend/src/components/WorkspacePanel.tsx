@@ -3,11 +3,12 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
     Loader2, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
 import { ConfirmModal } from './ConfirmModal';
+import { ScheduledTasksModal } from './ScheduledTasksModal';
 import './WorkspacePanel.css';
 
 // Simple notification sound using Web Audio API
@@ -94,6 +95,7 @@ interface TaskItemProps {
     onRevertTask: (taskId: string) => void;
     onSelectTask: (taskId: string) => void;
     onRenameTask?: (taskId: string, displayName: string) => void;
+    onOpenScheduledTasks?: (taskId: string) => void;
     isSelected: boolean;
     isLastSelected: boolean; // Was last selected in this workspace (but not globally active)
     hasActiveQuestion: boolean;
@@ -122,12 +124,15 @@ function formatTimeAgo(date: Date | string): string {
     return `${days}d`;
 }
 
-function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, isSelected, isLastSelected, hasActiveQuestion, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
+function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, onOpenScheduledTasks, isSelected, isLastSelected, hasActiveQuestion, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
     const [stopClicked, setStopClicked] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
     const [editValue, setEditValue] = useState('');
     const editInputRef = useRef<HTMLInputElement>(null);
     const [, setTick] = useState(0);
+    const scheduledTaskCount = useTaskStore(state =>
+        Array.from(state.scheduledTasks.values()).filter(s => s.taskId === task.id).length
+    );
 
     // Reset stopClicked when task state changes from busy
     useEffect(() => {
@@ -238,6 +243,16 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                     {displayPrompt}
                 </span>
             )}
+            {scheduledTaskCount > 0 && (
+                <button
+                    className="task-cron-badge"
+                    title={`${scheduledTaskCount} scheduled task${scheduledTaskCount > 1 ? 's' : ''} - click to manage`}
+                    onClick={(e) => { e.stopPropagation(); onOpenScheduledTasks?.(task.id); }}
+                >
+                    <Clock size={10} />
+                    <span className="task-cron-count">{scheduledTaskCount}</span>
+                </button>
+            )}
             <div className="task-actions">
                 {task.lastActivity && (
                     <span
@@ -288,6 +303,15 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                         title="Rename task"
                     >
                         <Pencil size={12} />
+                    </button>
+                )}
+                {onOpenScheduledTasks && (
+                    <button
+                        className="task-action-button schedule"
+                        onClick={(e) => { e.stopPropagation(); onOpenScheduledTasks(task.id); }}
+                        title="Scheduled tasks"
+                    >
+                        <Clock size={12} />
                     </button>
                 )}
                 <button
@@ -351,6 +375,8 @@ interface WorkspaceSectionProps {
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
     // Reset workspace handler
     onResetWorkspace?: () => void;
+    // Scheduled tasks
+    onOpenScheduledTasks?: (taskId: string) => void;
 }
 
 function WorkspaceSection({
@@ -388,7 +414,8 @@ function WorkspaceSection({
     onToggleReference,
     onAddCustomReference,
     onRemoveReference,
-    onResetWorkspace
+    onResetWorkspace,
+    onOpenScheduledTasks
 }: WorkspaceSectionProps) {
     const [inputValue, setInputValue] = useState('');
     const [isEditingWorkspaceName, setIsEditingWorkspaceName] = useState(false);
@@ -1245,6 +1272,7 @@ function WorkspaceSection({
                                         onRevertTask={onRevertTask}
                                         onSelectTask={onSelectTask}
                                         onRenameTask={onRenameTask}
+                                        onOpenScheduledTasks={onOpenScheduledTasks}
                                         isDragging={taskDragIndex !== null}
                                         dragIndex={taskDragIndex}
                                         dragOverIndex={taskDragOverIndex}
@@ -1307,12 +1335,13 @@ function WorkspaceSection({
 
 interface ArchivedTaskItemProps {
     task: Task;
+    workspaceName?: string;
     onContinue: (taskId: string) => void;
     onRestore: (taskId: string) => void;
     onDelete: (taskId: string) => void;
 }
 
-function ArchivedTaskItem({ task, onContinue, onRestore, onDelete }: ArchivedTaskItemProps) {
+function ArchivedTaskItem({ task, workspaceName, onContinue, onRestore, onDelete }: ArchivedTaskItemProps) {
     // Split prompt by ⏺ dots and get the last segment for display
     const segments = task.prompt.split('⏺').map(s => s.trim()).filter(Boolean);
     const lastSegment = segments.length > 0 ? segments[segments.length - 1] : task.prompt;
@@ -1332,7 +1361,11 @@ function ArchivedTaskItem({ task, onContinue, onRestore, onDelete }: ArchivedTas
         <div className="archived-task-item" onClick={handleClick}>
             <div className="archived-task-info">
                 <span className="archived-task-prompt" title={task.prompt}>{lastSegment}</span>
-                <span className="archived-task-date">{archivedDate}</span>
+                <div className="archived-task-meta">
+                    {workspaceName && <span className="archived-task-workspace" title={task.workspaceId}>{workspaceName}</span>}
+                    {workspaceName && <span className="archived-task-meta-separator">·</span>}
+                    <span className="archived-task-date">{archivedDate}</span>
+                </div>
             </div>
             <div className="archived-task-actions">
                 <button
@@ -1438,6 +1471,10 @@ export function WorkspacePanel({
 
     // System prompt modal state
     const [systemPromptWorkspace, setSystemPromptWorkspace] = useState<Workspace | null>(null);
+
+    // Scheduled tasks modal state
+    const [scheduledTasksForTaskId, setScheduledTasksForTaskId] = useState<string | null>(null);
+    const scheduledTasksTask = scheduledTasksForTaskId ? tasks.get(scheduledTasksForTaskId) : null;
 
     // Close menu when clicking outside (capture phase so stopPropagation on child elements doesn't block it)
     useEffect(() => {
@@ -1572,15 +1609,21 @@ export function WorkspacePanel({
                         <div className="empty-archived">No archived tasks</div>
                     ) : (
                         <div className="archived-task-list">
-                            {archivedTasks.map(task => (
-                                <ArchivedTaskItem
-                                    key={task.id}
-                                    task={task}
-                                    onContinue={onContinueArchivedTask || (() => { })}
-                                    onRestore={onRestoreArchivedTask || (() => { })}
-                                    onDelete={onDeleteArchivedTask || (() => { })}
-                                />
-                            ))}
+                            {archivedTasks.map(task => {
+                                const ws = workspaces.find(w => w.id === task.workspaceId);
+                                // Use display name, workspace name, or fall back to last path segment
+                                const wsName = ws?.displayName || ws?.name || (task.workspaceId ? task.workspaceId.replace(/[\\/]+$/, '').split(/[\\/]/).pop() : undefined);
+                                return (
+                                    <ArchivedTaskItem
+                                        key={task.id}
+                                        task={task}
+                                        workspaceName={wsName}
+                                        onContinue={onContinueArchivedTask || (() => { })}
+                                        onRestore={onRestoreArchivedTask || (() => { })}
+                                        onDelete={onDeleteArchivedTask || (() => { })}
+                                    />
+                                );
+                            })}
                         </div>
                     )}
                 </div>
@@ -1649,6 +1692,7 @@ export function WorkspacePanel({
                             onAddCustomReference={onAddCustomReference}
                             onRemoveReference={onRemoveReference}
                             onResetWorkspace={() => onResetWorkspace?.(workspace.id)}
+                            onOpenScheduledTasks={(taskId) => setScheduledTasksForTaskId(taskId)}
                         />
                     ))
                 )}
@@ -1661,6 +1705,14 @@ export function WorkspacePanel({
                     initialPrompt={systemPromptWorkspace.systemPrompt || ''}
                     onSave={(prompt) => onSetSystemPrompt(systemPromptWorkspace.id, prompt)}
                     onClose={() => setSystemPromptWorkspace(null)}
+                />
+            )}
+
+            {scheduledTasksForTaskId && scheduledTasksTask && (
+                <ScheduledTasksModal
+                    taskId={scheduledTasksForTaskId}
+                    taskName={scheduledTasksTask.displayName || scheduledTasksTask.prompt?.substring(0, 60) || scheduledTasksForTaskId}
+                    onClose={() => setScheduledTasksForTaskId(null)}
                 />
             )}
         </div>
