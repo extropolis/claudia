@@ -17,6 +17,7 @@ interface ScheduledTasksModalProps {
 /** Common cron presets for quick selection */
 const CRON_PRESETS = [
     { label: 'Every 5 min', expression: '*/5 * * * *' },
+    { label: 'Every 1 min', expression: '* * * * *' },
     { label: 'Every 10 min', expression: '*/10 * * * *' },
     { label: 'Every 30 min', expression: '*/30 * * * *' },
     { label: 'Every hour', expression: '0 * * * *' },
