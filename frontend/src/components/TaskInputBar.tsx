@@ -1,8 +1,9 @@
 import { useRef, useEffect, useCallback, useState } from 'react';
-import { Send, MessageSquare, ImagePlus, X, Clipboard } from 'lucide-react';
+import { Send, MessageSquare, ImagePlus, X, Clipboard, Clock } from 'lucide-react';
 import { Task } from '@claudia/shared';
 import { useTaskStore } from '../stores/taskStore';
 import { getApiBaseUrl } from '../config/api-config';
+import { ScheduledTasksModal } from './ScheduledTasksModal';
 import './TaskInputBar.css';
 
 interface UploadedImage {
@@ -24,6 +25,10 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
     const [isDragging, setIsDragging] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
+    const [showScheduleModal, setShowScheduleModal] = useState(false);
+    const scheduledTaskCount = useTaskStore(state =>
+        Array.from(state.scheduledTasks.values()).filter(s => s.taskId === task.id).length
+    );
 
     const {
         globalVoiceEnabled,
@@ -392,6 +397,19 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
                     style={{ display: 'none' }}
                 />
 
+                {/* Schedule button */}
+                <button
+                    onClick={() => setShowScheduleModal(true)}
+                    disabled={isDisabled}
+                    className={`task-input-schedule ${scheduledTaskCount > 0 ? 'has-schedules' : ''}`}
+                    title={scheduledTaskCount > 0 ? `${scheduledTaskCount} scheduled task${scheduledTaskCount > 1 ? 's' : ''} - click to manage` : 'Schedule recurring prompts'}
+                >
+                    <Clock size={18} />
+                    {scheduledTaskCount > 0 && (
+                        <span className="task-input-schedule-count">{scheduledTaskCount}</span>
+                    )}
+                </button>
+
                 <button
                     onClick={() => sendMessage()}
                     disabled={isDisabled || (!message.trim() && images.length === 0)}
@@ -405,6 +423,14 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
                 Enter to send, Shift+Enter for new line, Ctrl+V to paste screenshots
                 {globalVoiceEnabled && isFocused && <span className="voice-hint"> | Voice active</span>}
             </div>
+
+            {showScheduleModal && (
+                <ScheduledTasksModal
+                    taskId={task.id}
+                    taskName={task.displayName || task.prompt?.substring(0, 60) || task.id}
+                    onClose={() => setShowScheduleModal(false)}
+                />
+            )}
         </div>
     );
 }
