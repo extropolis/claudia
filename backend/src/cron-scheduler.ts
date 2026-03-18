@@ -350,6 +350,52 @@ export class CronScheduler extends EventEmitter {
     }
 
     /**
+     * Update an existing scheduled task. Supports changing cronExpression, prompt, and isRecurring.
+     */
+    update(id: string, updates: { cronExpression?: string; prompt?: string; isRecurring?: boolean }): ScheduledTask | null {
+        const task = this.scheduledTasks.get(id);
+        if (!task) return null;
+
+        // Validate new cron expression if provided
+        if (updates.cronExpression) {
+            const error = validateCronExpression(updates.cronExpression);
+            if (error) {
+                throw new Error(`Invalid cron expression: ${error}`);
+            }
+        }
+
+        const now = new Date();
+
+        if (updates.cronExpression) {
+            task.cronExpression = updates.cronExpression;
+            this.parsedCrons.set(id, parseCronExpression(updates.cronExpression));
+            const nextFire = getNextFireTime(updates.cronExpression, now);
+            task.nextFireAt = nextFire?.toISOString();
+        }
+        if (updates.prompt !== undefined) {
+            task.prompt = updates.prompt;
+        }
+        if (updates.isRecurring !== undefined) {
+            task.isRecurring = updates.isRecurring;
+            // Recalculate expiry based on new recurring status
+            task.expiresAt = updates.isRecurring
+                ? new Date(new Date(task.createdAt).getTime() + THREE_DAYS_MS).toISOString()
+                : new Date(new Date(task.createdAt).getTime() + 24 * 60 * 60 * 1000).toISOString();
+        }
+
+        // Clear any pending fire if prompt changed
+        if (updates.prompt !== undefined) {
+            this.pendingFires.delete(id);
+        }
+
+        this.debouncedSave();
+
+        logger.info('Scheduled task updated', { id, updates: Object.keys(updates) });
+        this.emit('updated', task);
+        return task;
+    }
+
+    /**
      * List all scheduled tasks, optionally filtered by Claudia task ID.
      */
     list(taskId?: string): ScheduledTask[] {

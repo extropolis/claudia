@@ -88,6 +88,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'tunnel:status',
     'cron:create',
     'cron:delete',
+    'cron:update',
     'cron:list',
 ]);
 
@@ -1876,6 +1877,31 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                         }
                         break;
                     }
+
+                    case 'cron:update': {
+                        const { cronId, cronExpression, prompt, isRecurring } = payload as {
+                            cronId?: string; cronExpression?: string; prompt?: string; isRecurring?: boolean;
+                        };
+                        if (!cronId) {
+                            sendWSError(ws, 'cron:update requires cronId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        try {
+                            const updated = cronScheduler.update(cronId, { cronExpression, prompt, isRecurring });
+                            if (updated) {
+                                ws.send(JSON.stringify({
+                                    type: 'cron:updated',
+                                    payload: { scheduledTask: { ...updated, description: describeCronExpression(updated.cronExpression) } }
+                                }));
+                                broadcast({ type: 'cron:updated' as WSMessageType, payload: { cronId, taskId: updated.taskId } });
+                            } else {
+                                sendWSError(ws, `Scheduled task '${cronId}' not found`, message.type, 'CRON_NOT_FOUND');
+                            }
+                        } catch (err) {
+                            sendWSError(ws, err instanceof Error ? err.message : String(err), message.type, 'CRON_UPDATE_FAILED');
+                        }
+                        break;
+                    }
                 }
             } catch (err) {
                 logger.error('Error handling message', {
@@ -2907,6 +2933,26 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             res.json({ success: true, cronId });
         } else {
             res.status(404).json({ error: 'Scheduled task not found' });
+        }
+    });
+
+    // Update a scheduled task
+    app.put('/api/cron/:cronId', (req, res) => {
+        const { cronId } = req.params;
+        const { cronExpression, prompt, isRecurring } = req.body;
+
+        try {
+            const updated = cronScheduler.update(cronId, { cronExpression, prompt, isRecurring });
+            if (updated) {
+                res.json({
+                    ...updated,
+                    description: describeCronExpression(updated.cronExpression),
+                });
+            } else {
+                res.status(404).json({ error: 'Scheduled task not found' });
+            }
+        } catch (error) {
+            res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
         }
     });
 

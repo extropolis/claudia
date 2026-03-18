@@ -719,6 +719,10 @@ export function useWebSocket() {
         sendMessage('cron:delete', { cronId });
     }, [sendMessage]);
 
+    const updateScheduledTask = useCallback((cronId: string, updates: { cronExpression?: string; prompt?: string; isRecurring?: boolean }) => {
+        sendMessage('cron:update', { cronId, ...updates });
+    }, [sendMessage]);
+
     return {
         createTask,
         selectTaskOnServer,
@@ -757,6 +761,7 @@ export function useWebSocket() {
         removeReference,
         createScheduledTask,
         deleteScheduledTask,
+        updateScheduledTask,
         wsRef
     };
 }

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Clock, Plus, Trash2, X, RefreshCw } from 'lucide-react';
+import { Clock, Plus, Trash2, X, RefreshCw, Pencil } from 'lucide-react';
 import { useTaskStore } from '../stores/taskStore';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { ScheduledTask } from '@claudia/shared';
@@ -16,8 +16,8 @@ interface ScheduledTasksModalProps {
 
 /** Common cron presets for quick selection */
 const CRON_PRESETS = [
-    { label: 'Every 5 min', expression: '*/5 * * * *' },
     { label: 'Every 1 min', expression: '* * * * *' },
+    { label: 'Every 5 min', expression: '*/5 * * * *' },
     { label: 'Every 10 min', expression: '*/10 * * * *' },
     { label: 'Every 30 min', expression: '*/30 * * * *' },
     { label: 'Every hour', expression: '0 * * * *' },
@@ -50,17 +50,18 @@ function formatExpiry(iso: string): string {
 }
 
 export function ScheduledTasksModal({ taskId, taskName, onClose }: ScheduledTasksModalProps) {
-    const { createScheduledTask, deleteScheduledTask } = useWebSocket();
+    const { createScheduledTask, deleteScheduledTask, updateScheduledTask } = useWebSocket();
     const scheduledTasks = useTaskStore(state =>
         Array.from(state.scheduledTasks.values()).filter(s => s.taskId === taskId)
     );
 
-    // Create form state
-    const [showCreateForm, setShowCreateForm] = useState(false);
+    // Form state (shared between create and edit modes)
+    const [formMode, setFormMode] = useState<'hidden' | 'create' | 'edit'>('hidden');
+    const [editingId, setEditingId] = useState<string | null>(null);
     const [cronExpression, setCronExpression] = useState('*/10 * * * *');
     const [prompt, setPrompt] = useState('');
     const [isRecurring, setIsRecurring] = useState(true);
-    const [creating, setCreating] = useState(false);
+    const [submitting, setSubmitting] = useState(false);
 
     // Refresh scheduled tasks from backend
     const refreshTasks = useCallback(() => {
@@ -76,37 +77,67 @@ export function ScheduledTasksModal({ taskId, taskName, onClose }: ScheduledTask
     }, [refreshTasks]);
 
     const handleKeyDown = useCallback((e: KeyboardEvent) => {
-        if (e.key === 'Escape') onClose();
-    }, [onClose]);
+        if (e.key === 'Escape') {
+            if (formMode !== 'hidden') {
+                resetForm();
+            } else {
+                onClose();
+            }
+        }
+    }, [onClose, formMode]);
 
     useEffect(() => {
         document.addEventListener('keydown', handleKeyDown);
         return () => document.removeEventListener('keydown', handleKeyDown);
     }, [handleKeyDown]);
 
-    const handleCreate = async (e: React.FormEvent) => {
+    const resetForm = () => {
+        setFormMode('hidden');
+        setEditingId(null);
+        setPrompt('');
+        setCronExpression('*/10 * * * *');
+        setIsRecurring(true);
+    };
+
+    const handleStartCreate = () => {
+        resetForm();
+        setFormMode('create');
+    };
+
+    const handleStartEdit = (st: ScheduledTask) => {
+        setCronExpression(st.cronExpression);
+        setPrompt(st.prompt);
+        setIsRecurring(st.isRecurring);
+        setEditingId(st.id);
+        setFormMode('edit');
+    };
+
+    const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!cronExpression.trim() || !prompt.trim()) return;
-        setCreating(true);
-        createScheduledTask(taskId, cronExpression.trim(), prompt.trim(), isRecurring);
-        // Small delay then refresh and reset form
+        setSubmitting(true);
+
+        if (formMode === 'edit' && editingId) {
+            updateScheduledTask(editingId, {
+                cronExpression: cronExpression.trim(),
+                prompt: prompt.trim(),
+                isRecurring,
+            });
+        } else {
+            createScheduledTask(taskId, cronExpression.trim(), prompt.trim(), isRecurring);
+        }
+
         setTimeout(() => {
             refreshTasks();
-            setCreating(false);
-            setShowCreateForm(false);
-            setPrompt('');
-            setCronExpression('*/10 * * * *');
-            setIsRecurring(true);
+            setSubmitting(false);
+            resetForm();
         }, 500);
     };
 
     const handleDelete = (cronId: string) => {
         deleteScheduledTask(cronId);
+        if (editingId === cronId) resetForm();
         setTimeout(refreshTasks, 300);
-    };
-
-    const handlePresetClick = (expression: string) => {
-        setCronExpression(expression);
     };
 
     return (
@@ -128,7 +159,7 @@ export function ScheduledTasksModal({ taskId, taskName, onClose }: ScheduledTask
 
                 {/* Scheduled tasks list */}
                 <div className="scheduled-tasks-list">
-                    {scheduledTasks.length === 0 && !showCreateForm && (
+                    {scheduledTasks.length === 0 && formMode === 'hidden' && (
                         <div className="scheduled-tasks-empty">
                             <Clock size={24} />
                             <p>No scheduled tasks</p>
@@ -137,7 +168,7 @@ export function ScheduledTasksModal({ taskId, taskName, onClose }: ScheduledTask
                     )}
 
                     {scheduledTasks.map((st: ScheduledTask) => (
-                        <div key={st.id} className="scheduled-task-item">
+                        <div key={st.id} className={`scheduled-task-item ${editingId === st.id ? 'editing' : ''}`}>
                             <div className="scheduled-task-info">
                                 <div className="scheduled-task-top">
                                     <span className={`scheduled-task-badge ${st.isRecurring ? 'recurring' : 'one-shot'}`}>
@@ -153,20 +184,32 @@ export function ScheduledTasksModal({ taskId, taskName, onClose }: ScheduledTask
                                     <span title={st.expiresAt}>{formatExpiry(st.expiresAt)}</span>
                                 </div>
                             </div>
-                            <button
-                                className="scheduled-task-delete"
-                                onClick={() => handleDelete(st.id)}
-                                title="Delete scheduled task"
-                            >
-                                <Trash2 size={14} />
-                            </button>
+                            <div className="scheduled-task-actions">
+                                <button
+                                    className="scheduled-task-edit"
+                                    onClick={() => handleStartEdit(st)}
+                                    title="Edit scheduled task"
+                                >
+                                    <Pencil size={14} />
+                                </button>
+                                <button
+                                    className="scheduled-task-delete"
+                                    onClick={() => handleDelete(st.id)}
+                                    title="Delete scheduled task"
+                                >
+                                    <Trash2 size={14} />
+                                </button>
+                            </div>
                         </div>
                     ))}
                 </div>
 
-                {/* Create form */}
-                {showCreateForm ? (
-                    <form className="scheduled-task-form" onSubmit={handleCreate}>
+                {/* Create/Edit form */}
+                {formMode !== 'hidden' ? (
+                    <form className="scheduled-task-form" onSubmit={handleSubmit}>
+                        <div className="scheduled-task-form-title">
+                            {formMode === 'edit' ? `Edit #${editingId}` : 'New Schedule'}
+                        </div>
                         <div className="form-group">
                             <label>Cron Expression</label>
                             <div className="cron-input-row">
@@ -184,7 +227,7 @@ export function ScheduledTasksModal({ taskId, taskName, onClose }: ScheduledTask
                                         key={p.expression}
                                         type="button"
                                         className={`cron-preset-btn ${cronExpression === p.expression ? 'active' : ''}`}
-                                        onClick={() => handlePresetClick(p.expression)}
+                                        onClick={() => setCronExpression(p.expression)}
                                     >
                                         {p.label}
                                     </button>
@@ -214,21 +257,21 @@ export function ScheduledTasksModal({ taskId, taskName, onClose }: ScheduledTask
                             </span>
                         </div>
                         <div className="scheduled-task-form-actions">
-                            <button type="button" className="btn-secondary" onClick={() => setShowCreateForm(false)}>
+                            <button type="button" className="btn-secondary" onClick={resetForm}>
                                 Cancel
                             </button>
                             <button
                                 type="submit"
                                 className="btn-primary"
-                                disabled={!cronExpression.trim() || !prompt.trim() || creating}
+                                disabled={!cronExpression.trim() || !prompt.trim() || submitting}
                             >
-                                {creating ? 'Creating...' : 'Create'}
+                                {submitting ? (formMode === 'edit' ? 'Saving...' : 'Creating...') : (formMode === 'edit' ? 'Save' : 'Create')}
                             </button>
                         </div>
                     </form>
                 ) : (
                     <div className="scheduled-tasks-footer">
-                        <button className="btn-primary scheduled-tasks-add" onClick={() => setShowCreateForm(true)}>
+                        <button className="btn-primary scheduled-tasks-add" onClick={handleStartCreate}>
                             <Plus size={14} />
                             Add Schedule
                         </button>

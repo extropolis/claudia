@@ -176,6 +176,14 @@
     color: var(--text-muted);
 }
 
+.scheduled-task-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex-shrink: 0;
+}
+
+.scheduled-task-edit,
 .scheduled-task-delete {
     background: none;
     border: none;
@@ -186,7 +194,11 @@
     display: flex;
     align-items: center;
     transition: all 0.15s ease;
-    flex-shrink: 0;
+}
+
+.scheduled-task-edit:hover {
+    background: rgba(0, 212, 255, 0.12);
+    color: var(--accent-secondary);
 }
 
 .scheduled-task-delete:hover {
@@ -194,7 +206,21 @@
     color: var(--accent-red);
 }
 
-/* Create form */
+.scheduled-task-item.editing {
+    border-color: var(--accent-secondary);
+    background: rgba(0, 212, 255, 0.04);
+}
+
+/* Create/Edit form */
+.scheduled-task-form-title {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 12px;
+}
+
 .scheduled-task-form {
     border-top: 1px solid var(--border-color);
     padding-top: 16px;
