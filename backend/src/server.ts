@@ -16,7 +16,8 @@ import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, PORTS } from '@claudia/shared';
+import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS } from '@claudia/shared';
+import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch } from './git-utils.js';
 import { LearningsStore } from './learnings-store.js';
@@ -84,7 +85,11 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'supervisor:chat:clear',
     'task:disconnect',
     'task:clear',
-    'tunnel:status'
+    'tunnel:status',
+    'cron:create',
+    'cron:delete',
+    'cron:update',
+    'cron:list',
 ]);
 
 // WebSocket message validation
@@ -379,6 +384,78 @@ export async function createApp(basePath?: string) {
     // LearningsStore for RAG-based learnings
     const learningsStore = new LearningsStore(basePath, configStore);
 
+    // CronScheduler for scheduled/recurring prompts
+    const cronScheduler = new CronScheduler(
+        // Fire callback: send prompt to task PTY
+        (taskId: string, prompt: string, scheduledTaskId: string) => {
+            logger.info('Cron firing prompt to task', { taskId, scheduledTaskId, prompt: prompt.substring(0, 80) });
+            taskSpawner.writeToTask(taskId, prompt + '\r');
+            broadcast({ type: 'cron:fired' as WSMessageType, payload: { scheduledTaskId, taskId, prompt } });
+        },
+        // Task state checker - must check both live and disconnected tasks
+        (taskId: string) => {
+            const internal = taskSpawner.getTask(taskId);
+            if (internal) {
+                if (internal.state === 'exited' || internal.state === 'archived') return 'exited';
+                if (internal.state === 'idle') return 'idle';
+                return 'busy';
+            }
+            // Check disconnected tasks - they're still valid targets for scheduling
+            const found = taskSpawner.getAllTasks().find(t => t.id === taskId);
+            if (!found) return 'unknown';
+            if (found.state === 'exited' || found.state === 'archived') return 'exited';
+            // Disconnected/interrupted tasks should be treated as idle for scheduling
+            // so the cron fires immediately, which triggers auto-reconnect via writeToTask
+            if (found.state === 'disconnected' || found.state === 'interrupted') return 'idle';
+            return 'busy';
+        }
+    );
+    cronScheduler.start();
+
+    // Backfill workspaces from existing tasks
+    // This ensures tasks created before workspace tracking still show up in UI
+    // BUT: never re-add workspaces that the user explicitly deleted (in recentWorkspaces)
+    try {
+        const tasks = taskSpawner.getAllTasks();
+        logger.info(`Backfill: Found ${tasks.length} tasks`);
+        const workspacePathsToAdd = new Set<string>();
+
+        // Get recently deleted workspaces so we don't re-add them
+        const recentWorkspaces = workspaceStore.getRecentWorkspaces();
+        const recentlyDeletedIds = new Set(recentWorkspaces.map(r => r.id));
+        logger.info(`Backfill: ${recentlyDeletedIds.size} recently deleted workspace(s) will be excluded`);
+
+        for (const task of tasks) {
+            if (task.workspaceId) {
+                const exists = existsSync(task.workspaceId);
+                const alreadyInStore = workspaceStore.getWorkspace(task.workspaceId);
+                const wasDeleted = recentlyDeletedIds.has(task.workspaceId);
+
+                if (process.env.DEBUG_TASKS) {
+                    logger.info(`Backfill: Task ${task.id} workspace ${task.workspaceId} exists=${exists} inStore=${!!alreadyInStore} wasDeleted=${wasDeleted}`);
+                }
+
+                if (!alreadyInStore && exists && !wasDeleted) {
+                    workspacePathsToAdd.add(task.workspaceId);
+                }
+            }
+        }
+
+        logger.info(`Backfill: Will add ${workspacePathsToAdd.size} unique workspace(s)`);
+        if (workspacePathsToAdd.size > 0) {
+            for (const workspacePath of workspacePathsToAdd) {
+                try {
+                    const workspace = workspaceStore.addWorkspace(workspacePath);
+                    logger.info(`Added workspace: ${workspacePath}`, { workspace });
+                } catch (error) {
+                    logger.error(`Failed to add workspace ${workspacePath}:`, { error });
+                }
+            }
+        }
+    } catch (error) {
+        logger.error('Failed to backfill workspaces from tasks', { error });
+    }
+
     // Wire up tunnel events for broadcasting
     tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
         logger.info('Tunnel ready, broadcasting status', { url: data.url });
@@ -670,6 +747,9 @@ export async function createApp(basePath?: string) {
                     logger.info('Delivered pending reference update to now-idle task', { taskId: task.id, refCount: validRefs.length });
                 }
             }
+
+            // Fire any pending scheduled prompts for this task
+            cronScheduler.onTaskIdle(task.id);
         }
     });
 
@@ -767,6 +847,11 @@ export async function createApp(basePath?: string) {
 
     taskSpawner.on('taskDestroyed', (taskId: string) => {
         broadcast({ type: 'task:destroyed', payload: { taskId } });
+        // Clean up any scheduled tasks for this task
+        const removed = cronScheduler.removeAllForTask(taskId);
+        if (removed > 0) {
+            broadcast({ type: 'cron:updated' as WSMessageType, payload: { taskId, removed } });
+        }
         queueTasksUpdated(); // Batched
     });
 
@@ -1731,6 +1816,101 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                         }));
                         break;
                     }
+
+                    // ===== Scheduled Tasks (Cron) =====
+
+                    case 'cron:create': {
+                        const { taskId, cronExpression, prompt, isRecurring } = payload as {
+                            taskId?: string;
+                            cronExpression?: string;
+                            prompt?: string;
+                            isRecurring?: boolean;
+                        };
+                        if (!taskId || !cronExpression || !prompt) {
+                            sendWSError(ws, 'cron:create requires taskId, cronExpression, and prompt', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const task = taskSpawner.getTask(taskId) || taskSpawner.getAllTasks().find(t => t.id === taskId);
+                        if (!task) {
+                            sendWSError(ws, `Task '${taskId}' not found`, message.type, 'TASK_NOT_FOUND');
+                            break;
+                        }
+                        try {
+                            const scheduled = cronScheduler.create(
+                                taskId,
+                                task.workspaceId,
+                                cronExpression,
+                                prompt,
+                                isRecurring !== false // default to recurring
+                            );
+                            ws.send(JSON.stringify({
+                                type: 'cron:created',
+                                payload: {
+                                    scheduledTask: scheduled,
+                                    description: describeCronExpression(cronExpression),
+                                }
+                            }));
+                            broadcast({ type: 'cron:updated' as WSMessageType, payload: { taskId } });
+                        } catch (error) {
+                            sendWSError(ws, error instanceof Error ? error.message : String(error), message.type, 'CRON_CREATE_FAILED');
+                        }
+                        break;
+                    }
+
+                    case 'cron:list': {
+                        const { taskId } = payload as { taskId?: string };
+                        const scheduled = cronScheduler.list(taskId || undefined);
+                        ws.send(JSON.stringify({
+                            type: 'cron:list',
+                            payload: { scheduledTasks: scheduled }
+                        }));
+                        break;
+                    }
+
+                    case 'cron:delete': {
+                        const { cronId } = payload as { cronId?: string };
+                        if (!cronId) {
+                            sendWSError(ws, 'cron:delete requires cronId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const scheduledTask = cronScheduler.get(cronId);
+                        const deleted = cronScheduler.delete(cronId);
+                        if (deleted) {
+                            ws.send(JSON.stringify({
+                                type: 'cron:deleted',
+                                payload: { cronId, taskId: scheduledTask?.taskId }
+                            }));
+                            broadcast({ type: 'cron:updated' as WSMessageType, payload: { cronId, taskId: scheduledTask?.taskId } });
+                        } else {
+                            sendWSError(ws, `Scheduled task '${cronId}' not found`, message.type, 'CRON_NOT_FOUND');
+                        }
+                        break;
+                    }
+
+                    case 'cron:update': {
+                        const { cronId, cronExpression, prompt, isRecurring } = payload as {
+                            cronId?: string; cronExpression?: string; prompt?: string; isRecurring?: boolean;
+                        };
+                        if (!cronId) {
+                            sendWSError(ws, 'cron:update requires cronId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        try {
+                            const updated = cronScheduler.update(cronId, { cronExpression, prompt, isRecurring });
+                            if (updated) {
+                                ws.send(JSON.stringify({
+                                    type: 'cron:updated',
+                                    payload: { scheduledTask: { ...updated, description: describeCronExpression(updated.cronExpression) } }
+                                }));
+                                broadcast({ type: 'cron:updated' as WSMessageType, payload: { cronId, taskId: updated.taskId } });
+                            } else {
+                                sendWSError(ws, `Scheduled task '${cronId}' not found`, message.type, 'CRON_NOT_FOUND');
+                            }
+                        } catch (err) {
+                            sendWSError(ws, err instanceof Error ? err.message : String(err), message.type, 'CRON_UPDATE_FAILED');
+                        }
+                        break;
+                    }
                 }
             } catch (err) {
                 logger.error('Error handling message', {
@@ -2641,8 +2821,25 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         });
     });
 
-    app.get('/api/tasks', (_req, res) => {
-        res.json(taskSpawner.getAllTasks());
+    app.get('/api/tasks', (req, res) => {
+        const includeArchived = req.query.includeArchived === 'true';
+        const workspaceId = req.query.workspaceId as string | undefined;
+
+        if (includeArchived && workspaceId) {
+            // Get all tasks (active + disconnected) for this workspace
+            const allTasks = taskSpawner.getAllTasks().filter(t => t.workspaceId === workspaceId);
+            // Get archived tasks for this workspace
+            const archivedTasks = taskSpawner.getArchivedTasks().filter(t => t.workspaceId === workspaceId);
+            res.json([...allTasks, ...archivedTasks]);
+        } else if (includeArchived) {
+            // Get all tasks including archived
+            const allTasks = taskSpawner.getAllTasks();
+            const archivedTasks = taskSpawner.getArchivedTasks();
+            res.json([...allTasks, ...archivedTasks]);
+        } else {
+            // Original behavior - only active + disconnected tasks
+            res.json(taskSpawner.getAllTasks());
+        }
     });
 
     // Poll endpoint for task status - returns stored state (Stop hook manages transitions)
@@ -2706,6 +2903,83 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             output,
             lastActivity: task.lastActivity
         });
+    });
+
+    // ===== Scheduled Tasks (Cron) REST API =====
+
+    // List scheduled tasks for a specific task (or all if no taskId)
+    app.get('/api/tasks/:taskId/cron', (req, res) => {
+        const { taskId } = req.params;
+        const scheduled = cronScheduler.list(taskId);
+        res.json(scheduled.map(s => ({
+            ...s,
+            description: describeCronExpression(s.cronExpression),
+        })));
+    });
+
+    // List all scheduled tasks
+    app.get('/api/cron', (_req, res) => {
+        const scheduled = cronScheduler.list();
+        res.json(scheduled.map(s => ({
+            ...s,
+            description: describeCronExpression(s.cronExpression),
+        })));
+    });
+
+    // Create a scheduled task
+    app.post('/api/tasks/:taskId/cron', (req, res) => {
+        const { taskId } = req.params;
+        const { cronExpression, prompt, isRecurring } = req.body;
+
+        if (!cronExpression || !prompt) {
+            return res.status(400).json({ error: 'cronExpression and prompt are required' });
+        }
+
+        const task = taskSpawner.getTask(taskId) || taskSpawner.getAllTasks().find(t => t.id === taskId);
+        if (!task) {
+            return res.status(404).json({ error: 'Task not found' });
+        }
+
+        try {
+            const scheduled = cronScheduler.create(taskId, task.workspaceId, cronExpression, prompt, isRecurring !== false);
+            res.json({
+                ...scheduled,
+                description: describeCronExpression(cronExpression),
+            });
+        } catch (error) {
+            res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+
+    // Delete a scheduled task
+    app.delete('/api/cron/:cronId', (req, res) => {
+        const { cronId } = req.params;
+        const deleted = cronScheduler.delete(cronId);
+        if (deleted) {
+            res.json({ success: true, cronId });
+        } else {
+            res.status(404).json({ error: 'Scheduled task not found' });
+        }
+    });
+
+    // Update a scheduled task
+    app.put('/api/cron/:cronId', (req, res) => {
+        const { cronId } = req.params;
+        const { cronExpression, prompt, isRecurring } = req.body;
+
+        try {
+            const updated = cronScheduler.update(cronId, { cronExpression, prompt, isRecurring });
+            if (updated) {
+                res.json({
+                    ...updated,
+                    description: describeCronExpression(updated.cronExpression),
+                });
+            } else {
+                res.status(404).json({ error: 'Scheduled task not found' });
+            }
+        } catch (error) {
+            res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+        }
     });
 
     app.get('/api/workspaces', (_req, res) => {
@@ -2816,6 +3090,164 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         } catch (err) {
             logger.error('Failed to list files', { error: err instanceof Error ? err.message : String(err) });
             res.status(500).json({ error: 'Failed to list directory contents' });
+        }
+    });
+
+    // File operations endpoints
+    app.post('/api/workspaces/files/copy', async (req, res) => {
+        const { workspace, sourcePath, destinationPath } = req.body;
+
+        if (!workspace || !sourcePath || !destinationPath) {
+            return res.status(400).json({ error: 'workspace, sourcePath, and destinationPath are required' });
+        }
+
+        const resolvedWorkspace = resolve(workspace);
+        const resolvedSource = resolve(workspace, sourcePath);
+        const resolvedDest = resolve(workspace, destinationPath);
+
+        // Security: ensure paths are within workspace
+        if (!resolvedSource.startsWith(resolvedWorkspace) || !resolvedDest.startsWith(resolvedWorkspace)) {
+            return res.status(403).json({ error: 'Path traversal not allowed' });
+        }
+
+        if (!existsSync(resolvedSource)) {
+            return res.status(404).json({ error: 'Source file not found' });
+        }
+
+        try {
+            const fs = await import('fs/promises');
+            const stat = await fs.stat(resolvedSource);
+
+            if (stat.isDirectory()) {
+                // Copy directory recursively
+                await fs.cp(resolvedSource, resolvedDest, { recursive: true });
+            } else {
+                // Copy file
+                await fs.copyFile(resolvedSource, resolvedDest);
+            }
+
+            logger.info('File/directory copied', { source: sourcePath, destination: destinationPath });
+            res.json({ success: true, message: 'File/directory copied successfully' });
+        } catch (err) {
+            logger.error('Failed to copy file/directory', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to copy file/directory' });
+        }
+    });
+
+    app.post('/api/workspaces/files/move', async (req, res) => {
+        const { workspace, sourcePath, destinationPath } = req.body;
+
+        if (!workspace || !sourcePath || !destinationPath) {
+            return res.status(400).json({ error: 'workspace, sourcePath, and destinationPath are required' });
+        }
+
+        const resolvedWorkspace = resolve(workspace);
+        const resolvedSource = resolve(workspace, sourcePath);
+        const resolvedDest = resolve(workspace, destinationPath);
+
+        // Security: ensure paths are within workspace
+        if (!resolvedSource.startsWith(resolvedWorkspace) || !resolvedDest.startsWith(resolvedWorkspace)) {
+            return res.status(403).json({ error: 'Path traversal not allowed' });
+        }
+
+        if (!existsSync(resolvedSource)) {
+            return res.status(404).json({ error: 'Source file not found' });
+        }
+
+        try {
+            const fs = await import('fs/promises');
+            await fs.rename(resolvedSource, resolvedDest);
+
+            logger.info('File/directory moved', { source: sourcePath, destination: destinationPath });
+            res.json({ success: true, message: 'File/directory moved successfully' });
+        } catch (err) {
+            logger.error('Failed to move file/directory', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to move file/directory' });
+        }
+    });
+
+    app.delete('/api/workspaces/files', async (req, res) => {
+        const { workspace, path } = req.body;
+
+        if (!workspace || !path) {
+            return res.status(400).json({ error: 'workspace and path are required' });
+        }
+
+        const resolvedWorkspace = resolve(workspace);
+        const resolvedPath = resolve(workspace, path);
+
+        // Security: ensure path is within workspace
+        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+            return res.status(403).json({ error: 'Path traversal not allowed' });
+        }
+
+        if (!existsSync(resolvedPath)) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+
+        try {
+            const fs = await import('fs/promises');
+            const stat = await fs.stat(resolvedPath);
+
+            if (stat.isDirectory()) {
+                // Delete directory recursively
+                await fs.rm(resolvedPath, { recursive: true, force: true });
+            } else {
+                // Delete file
+                await fs.unlink(resolvedPath);
+            }
+
+            logger.info('File/directory deleted', { path });
+            res.json({ success: true, message: 'File/directory deleted successfully' });
+        } catch (err) {
+            logger.error('Failed to delete file/directory', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to delete file/directory' });
+        }
+    });
+
+    app.post('/api/workspaces/files/reveal', async (req, res) => {
+        const { workspace, path } = req.body;
+
+        if (!workspace || !path) {
+            return res.status(400).json({ error: 'workspace and path are required' });
+        }
+
+        const resolvedWorkspace = resolve(workspace);
+        const resolvedPath = resolve(workspace, path);
+
+        // Security: ensure path is within workspace
+        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+            return res.status(403).json({ error: 'Path traversal not allowed' });
+        }
+
+        if (!existsSync(resolvedPath)) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+
+        try {
+            const { exec } = await import('child_process');
+            const { promisify } = await import('util');
+            const execAsync = promisify(exec);
+
+            const platform = process.platform;
+
+            if (platform === 'darwin') {
+                // macOS: reveal in Finder
+                await execAsync(`open -R "${resolvedPath}"`);
+            } else if (platform === 'win32') {
+                // Windows: reveal in Explorer
+                await execAsync(`explorer /select,"${resolvedPath.replace(/\//g, '\\')}"`);
+            } else {
+                // Linux: open parent directory in file manager
+                const parentDir = dirname(resolvedPath);
+                await execAsync(`xdg-open "${parentDir}"`);
+            }
+
+            logger.info('File revealed in file manager', { path });
+            res.json({ success: true, message: 'File revealed successfully' });
+        } catch (err) {
+            logger.error('Failed to reveal file', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to reveal file' });
         }
     });
 
@@ -4657,3 +5089,4 @@ Guidelines:
 
     return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, tunnelManager };
 }
+

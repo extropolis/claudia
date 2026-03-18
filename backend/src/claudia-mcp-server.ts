@@ -533,6 +533,140 @@ server.tool(
 );
 
 // ============================================================================
+// Tool: claudia_cron_create
+// ============================================================================
+server.tool(
+    'claudia_cron_create',
+    `Schedule a recurring or one-shot prompt for a task. The prompt will be sent to the task's terminal at the scheduled time. Uses standard 5-field cron expressions (minute hour day-of-month month day-of-week). Examples: "*/5 * * * *" = every 5 minutes, "0 * * * *" = every hour, "0 9 * * 1-5" = weekdays at 9am. Recurring tasks auto-expire after 3 days. Max 50 scheduled tasks per task.`,
+    {
+        taskId: z.string().describe(`The task ID to schedule a prompt for.${SELF_TASK_ID ? ` Use "${SELF_TASK_ID}" for yourself.` : ''}`),
+        cronExpression: z.string().describe('5-field cron expression: "minute hour day-of-month month day-of-week". Examples: "*/5 * * * *" (every 5 min), "0 9 * * *" (daily 9am), "30 14 * * 1-5" (weekdays 2:30pm)'),
+        prompt: z.string().describe('The prompt to send when the schedule fires'),
+        isRecurring: z.boolean().optional().describe('true (default) for recurring, false for one-shot (fires once then deletes itself)'),
+    },
+    async ({ taskId, cronExpression, prompt, isRecurring }) => {
+        try {
+            log.info(`Creating scheduled task for: ${taskId}, cron: ${cronExpression}`);
+
+            const response = await backendFetch(`/api/tasks/${taskId}/cron`, {
+                method: 'POST',
+                body: JSON.stringify({ cronExpression, prompt, isRecurring: isRecurring ?? true }),
+            });
+
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                return { content: [{ type: 'text', text: `Error: ${error.error || response.statusText}` }] };
+            }
+
+            const scheduled = await response.json();
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        scheduledTaskId: scheduled.id,
+                        cronExpression: scheduled.cronExpression,
+                        description: scheduled.description,
+                        isRecurring: scheduled.isRecurring,
+                        nextFireAt: scheduled.nextFireAt,
+                        expiresAt: scheduled.expiresAt,
+                        message: `Scheduled task '${scheduled.id}' created. ${scheduled.description}. Next fire: ${scheduled.nextFireAt || 'calculating...'}`
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to create scheduled task:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_cron_list
+// ============================================================================
+server.tool(
+    'claudia_cron_list',
+    'List all scheduled tasks for a specific task, or all scheduled tasks if no taskId is provided. Shows schedule, next fire time, and fire count.',
+    {
+        taskId: z.string().optional().describe('Optional task ID to filter by. Omit to list all scheduled tasks.'),
+    },
+    async ({ taskId }) => {
+        try {
+            const url = taskId ? `/api/tasks/${taskId}/cron` : '/api/cron';
+            const response = await backendFetch(url);
+
+            if (!response.ok) {
+                return { content: [{ type: 'text', text: `Error: Failed to list scheduled tasks (HTTP ${response.status})` }] };
+            }
+
+            const scheduled = await response.json();
+
+            if (!scheduled || scheduled.length === 0) {
+                return { content: [{ type: 'text', text: taskId ? `No scheduled tasks for task '${taskId}'.` : 'No scheduled tasks.' }] };
+            }
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify(scheduled.map((s: any) => ({
+                        id: s.id,
+                        taskId: s.taskId,
+                        cronExpression: s.cronExpression,
+                        description: s.description,
+                        prompt: s.prompt.substring(0, 100) + (s.prompt.length > 100 ? '...' : ''),
+                        isRecurring: s.isRecurring,
+                        nextFireAt: s.nextFireAt,
+                        lastFiredAt: s.lastFiredAt || null,
+                        fireCount: s.fireCount,
+                        expiresAt: s.expiresAt,
+                    })), null, 2)
+                }]
+            };
+        } catch (error) {
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_cron_delete
+// ============================================================================
+server.tool(
+    'claudia_cron_delete',
+    'Delete/cancel a scheduled task by its ID. Use claudia_cron_list to find scheduled task IDs.',
+    {
+        cronId: z.string().describe('The 8-character scheduled task ID to delete'),
+    },
+    async ({ cronId }) => {
+        try {
+            log.info(`Deleting scheduled task: ${cronId}`);
+
+            const response = await backendFetch(`/api/cron/${cronId}`, { method: 'DELETE' });
+
+            if (!response.ok) {
+                if (response.status === 404) {
+                    return { content: [{ type: 'text', text: `Error: Scheduled task '${cronId}' not found.` }] };
+                }
+                return { content: [{ type: 'text', text: `Error: Failed to delete scheduled task (HTTP ${response.status})` }] };
+            }
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        message: `Scheduled task '${cronId}' deleted successfully.`,
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to delete scheduled task:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
 // Start the server
 // ============================================================================
 async function main() {

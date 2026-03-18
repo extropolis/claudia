@@ -180,6 +180,12 @@ export function useWebSocket() {
                                 }
                             })
                             .catch(err => console.error('Failed to fetch config:', err));
+
+                        // Fetch scheduled tasks
+                        fetch(`${API_URL}/api/cron`)
+                            .then(r => r.json())
+                            .then(tasks => useTaskStore.getState().setScheduledTasks(tasks))
+                            .catch(err => console.error('Failed to fetch scheduled tasks:', err));
                         break;
                     }
                     case 'task:created': {
@@ -450,6 +456,34 @@ export function useWebSocket() {
                         }
                         break;
                     }
+                    // Scheduled tasks (cron) messages
+                    case 'cron:created': {
+                        const payload = message.payload as { scheduledTask: any };
+                        if (payload.scheduledTask) {
+                            useTaskStore.getState().addScheduledTask(payload.scheduledTask);
+                        }
+                        break;
+                    }
+                    case 'cron:deleted': {
+                        const payload = message.payload as { cronId: string };
+                        if (payload.cronId) {
+                            useTaskStore.getState().removeScheduledTask(payload.cronId);
+                        }
+                        break;
+                    }
+                    case 'cron:updated': {
+                        // Refresh all scheduled tasks from backend
+                        fetch(`${API_URL}/api/cron`)
+                            .then(r => r.json())
+                            .then(tasks => useTaskStore.getState().setScheduledTasks(tasks))
+                            .catch(err => console.error('[WebSocket] Failed to refresh cron tasks:', err));
+                        break;
+                    }
+                    case 'cron:fired': {
+                        const payload = message.payload as { scheduledTaskId: string; taskId: string; prompt: string };
+                        console.log(`[WebSocket] Scheduled task fired: ${payload.scheduledTaskId} → task ${payload.taskId}`);
+                        break;
+                    }
                     case 'error': {
                         const payload = message.payload as WSErrorPayload;
                         console.error('[WebSocket] Server error:', payload.message, {
@@ -677,6 +711,18 @@ export function useWebSocket() {
         sendMessage('workspace:references:remove', { workspaceId, referenceId });
     }, [sendMessage]);
 
+    const createScheduledTask = useCallback((taskId: string, cronExpression: string, prompt: string, isRecurring: boolean = true) => {
+        sendMessage('cron:create', { taskId, cronExpression, prompt, isRecurring });
+    }, [sendMessage]);
+
+    const deleteScheduledTask = useCallback((cronId: string) => {
+        sendMessage('cron:delete', { cronId });
+    }, [sendMessage]);
+
+    const updateScheduledTask = useCallback((cronId: string, updates: { cronExpression?: string; prompt?: string; isRecurring?: boolean }) => {
+        sendMessage('cron:update', { cronId, ...updates });
+    }, [sendMessage]);
+
     return {
         createTask,
         selectTaskOnServer,
@@ -713,6 +759,9 @@ export function useWebSocket() {
         toggleReference,
         addCustomReference,
         removeReference,
+        createScheduledTask,
+        deleteScheduledTask,
+        updateScheduledTask,
         wsRef
     };
 }
