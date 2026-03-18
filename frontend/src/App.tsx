@@ -513,8 +513,6 @@ function App() {
                                 wsRef={wsRef}
                                 workspace={selectedWorkspace}
                                 isMobile={true}
-                                onInterruptTask={interruptTask}
-                                isConnected={isConnected}
                             />
                         </section>
                     ) : (
@@ -624,8 +622,6 @@ function App() {
                                             task={selectedTask}
                                             wsRef={wsRef}
                                             workspace={selectedWorkspace}
-                                            onInterruptTask={interruptTask}
-                                            isConnected={isConnected}
                                         />
                                     </>
                                 ) : (
