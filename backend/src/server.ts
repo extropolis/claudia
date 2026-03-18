@@ -22,6 +22,9 @@ import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch } from '.
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
+import { getVoiceAgentPageHtml } from './voice-agent-page.js';
+import { VoiceSupervisor } from './voice-supervisor.js';
+// import { ElevenLabsTTS } from './elevenlabs-tts.js'; // TODO: Implement ElevenLabs TTS
 import { createLogger } from './logger.js';
 import { PluginManager, PluginContext } from './plugin-system/index.js';
 
@@ -371,52 +374,10 @@ export async function createApp(basePath?: string) {
     const workspaceStore = new WorkspaceStore(basePath);
     // SupervisorChat now handles both auto-analysis (formerly TaskSupervisor) and chat
     const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore);
+    // VoiceSupervisor for hands-free voice control
+    const voiceSupervisor = new VoiceSupervisor(supervisorChat, taskSpawner);
     // LearningsStore for RAG-based learnings
     const learningsStore = new LearningsStore(basePath, configStore);
-
-    // Backfill workspaces from existing tasks
-    // This ensures tasks created before workspace tracking still show up in UI
-    // BUT: never re-add workspaces that the user explicitly deleted (in recentWorkspaces)
-    try {
-        const tasks = taskSpawner.getAllTasks();
-        logger.info(`Backfill: Found ${tasks.length} tasks`);
-        const workspacePathsToAdd = new Set<string>();
-
-        // Get recently deleted workspaces so we don't re-add them
-        const recentWorkspaces = workspaceStore.getRecentWorkspaces();
-        const recentlyDeletedIds = new Set(recentWorkspaces.map(r => r.id));
-        logger.info(`Backfill: ${recentlyDeletedIds.size} recently deleted workspace(s) will be excluded`);
-
-        for (const task of tasks) {
-            if (task.workspaceId) {
-                const exists = existsSync(task.workspaceId);
-                const alreadyInStore = workspaceStore.getWorkspace(task.workspaceId);
-                const wasDeleted = recentlyDeletedIds.has(task.workspaceId);
-
-                if (process.env.DEBUG_TASKS) {
-                    logger.info(`Backfill: Task ${task.id} workspace ${task.workspaceId} exists=${exists} inStore=${!!alreadyInStore} wasDeleted=${wasDeleted}`);
-                }
-
-                if (!alreadyInStore && exists && !wasDeleted) {
-                    workspacePathsToAdd.add(task.workspaceId);
-                }
-            }
-        }
-
-        logger.info(`Backfill: Will add ${workspacePathsToAdd.size} unique workspace(s)`);
-        if (workspacePathsToAdd.size > 0) {
-            for (const workspacePath of workspacePathsToAdd) {
-                try {
-                    const workspace = workspaceStore.addWorkspace(workspacePath);
-                    logger.info(`Added workspace: ${workspacePath}`, { workspace });
-                } catch (error) {
-                    logger.error(`Failed to add workspace ${workspacePath}:`, { error });
-                }
-            }
-        }
-    } catch (error) {
-        logger.error('Failed to backfill workspaces from tasks', { error });
-    }
 
     // Wire up tunnel events for broadcasting
     tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
@@ -1522,7 +1483,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     }
 
                     case 'workspace:recent:list': {
-                        // Get recent (removed) workspaces
+                        // Get list of recent workspaces (removed but still exist on disk)
                         const recentWorkspaces = workspaceStore.getRecentWorkspaces();
                         ws.send(JSON.stringify({
                             type: 'workspace:recent:list',
@@ -1532,18 +1493,18 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     }
 
                     case 'workspace:recent:clear': {
-                        // Clear a specific recent workspace or all
+                        // Clear a specific recent workspace or all recent workspaces
                         const { workspaceId } = payload as { workspaceId?: string };
                         if (workspaceId) {
                             workspaceStore.clearRecentWorkspace(workspaceId);
                         } else {
                             workspaceStore.clearAllRecentWorkspaces();
                         }
-                        // Send back updated list
-                        const updatedRecent = workspaceStore.getRecentWorkspaces();
+                        // Send updated list back
+                        const recentWorkspaces = workspaceStore.getRecentWorkspaces();
                         ws.send(JSON.stringify({
                             type: 'workspace:recent:list',
-                            payload: { recentWorkspaces: updatedRecent }
+                            payload: { recentWorkspaces }
                         }));
                         break;
                     }
@@ -2015,6 +1976,238 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         res.json(tunnelManager.getStatus());
     });
 
+    // ===== Voice Agent API =====
+
+    // Streaming voice message endpoint - streams text chunks and audio in real-time
+    app.get('/api/voice/message/stream', async (req, res) => {
+        try {
+            const transcript = typeof req.query.transcript === 'string' ? req.query.transcript : undefined;
+            const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
+            const userId = typeof req.query.userId === 'string' ? req.query.userId : undefined;
+            const clientId = typeof req.query.clientId === 'string' ? req.query.clientId : undefined;
+
+            if (!transcript || typeof transcript !== 'string') {
+                return res.status(400).json({ error: 'Missing or invalid transcript' });
+            }
+
+            logger.info('[Voice API] Processing transcript (streaming)', { transcript, workspaceId, clientId });
+
+            // Set up Server-Sent Events
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
+
+            // Initialize ElevenLabs TTS streaming session
+            const elevenlabsKey = process.env.ELEVENLABS_API_KEY;
+            let ttsSession: any = null;
+
+            logger.info('[Voice API] ElevenLabs API key present:', { hasKey: !!elevenlabsKey });
+
+            if (elevenlabsKey) {
+                try {
+                    logger.info('[Voice API] Creating ElevenLabs streaming session...');
+                    // @ts-ignore - ElevenLabs TTS module is optional
+                    const { ElevenLabsTTS } = await import('./elevenlabs-tts.js').catch(() => {
+                        throw new Error('ElevenLabs TTS module not available');
+                    });
+                    const tts = new ElevenLabsTTS(elevenlabsKey);
+                    ttsSession = tts.createStreamingSession();
+
+                    // Forward audio chunks to client
+                    ttsSession.on('audio', (audioChunk: Buffer) => {
+                        logger.info('[Voice API] Received audio chunk', { length: audioChunk.length });
+                        const base64Audio = audioChunk.toString('base64');
+                        res.write(`event: audio\ndata: ${JSON.stringify({ audio: base64Audio })}\n\n`);
+                    });
+
+                    ttsSession.on('error', (error: Error) => {
+                        logger.error('[Voice API] TTS error', { error });
+                    });
+
+                    ttsSession.on('ready', () => {
+                        logger.info('[Voice API] ElevenLabs TTS session ready');
+                    });
+
+                    // Wait for TTS to be ready
+                    logger.info('[Voice API] Waiting for TTS session to be ready...');
+                    await new Promise((resolve) => {
+                        ttsSession.once('ready', resolve);
+                    });
+                    logger.info('[Voice API] TTS session is ready!');
+                } catch (error) {
+                    logger.warn('[Voice API] ElevenLabs TTS module not available, voice output disabled', { error: error instanceof Error ? error.message : String(error) });
+                }
+            }
+
+            // Start processing with callbacks
+            await voiceSupervisor.processVoiceMessageStreaming(
+                transcript,
+                workspaceId,
+                userId,
+                {
+                    onTextChunk: (text: string) => {
+                        logger.info('[Voice API] Text chunk:', { text });
+                        // Send text chunk to client
+                        res.write(`event: text\ndata: ${JSON.stringify({ text })}\n\n`);
+
+                        // Send to TTS for streaming audio generation
+                        if (ttsSession) {
+                            logger.info('[Voice API] Sending text to TTS:', { text });
+                            ttsSession.sendText(text);
+                        }
+                    },
+                    onComplete: (response: any) => {
+                        // Flush TTS and close session
+                        if (ttsSession) {
+                            ttsSession.flush();
+                            setTimeout(() => {
+                                ttsSession.close();
+                            }, 1000); // Give time for final audio chunks
+                        }
+
+                        // Send completion event
+                        res.write(`event: complete\ndata: ${JSON.stringify(response)}\n\n`);
+                        res.end();
+                    },
+                    onError: (error: Error) => {
+                        logger.error('[Voice API] Processing error', { error });
+                        if (ttsSession) {
+                            ttsSession.close();
+                        }
+                        res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`);
+                        res.end();
+                    }
+                }
+            );
+
+        } catch (error) {
+            logger.error('[Voice API] Error in streaming', { error });
+            res.write(`event: error\ndata: ${JSON.stringify({ error: 'Processing error' })}\n\n`);
+            res.end();
+        }
+    });
+
+    // Voice message endpoint - processes voice input with voice-optimized responses (non-streaming fallback)
+    app.post('/api/voice/message', async (req, res) => {
+        try {
+            const { transcript, workspaceId, userId, clientId } = req.body;
+
+            if (!transcript || typeof transcript !== 'string') {
+                return res.status(400).json({ error: 'Missing or invalid transcript' });
+            }
+
+            logger.info('[Voice API] Processing transcript', { transcript, workspaceId, clientId });
+
+            const response = await voiceSupervisor.processVoiceMessage(
+                transcript,
+                workspaceId,
+                userId
+            );
+
+            logger.info('[Voice API] Response generated', { action: response.action });
+            res.json(response);
+        } catch (error) {
+            logger.error('[Voice API] Error processing message', { error });
+            res.status(500).json({
+                error: 'Failed to process voice message',
+                text: "Sorry, something went wrong. Try again?",
+                action: 'error'
+            });
+        }
+    });
+
+    // Get voice agent system prompt
+    app.get('/api/voice-agent/system-prompt', async (req, res) => {
+        try {
+            const systemPrompt = voiceSupervisor.getSystemPrompt();
+            res.json({ systemPrompt });
+        } catch (error) {
+            logger.error('[Voice API] Error getting system prompt', { error });
+            res.status(500).json({ error: 'Failed to get system prompt' });
+        }
+    });
+
+    // Update voice agent system prompt
+    app.post('/api/voice-agent/system-prompt', async (req, res) => {
+        try {
+            const { systemPrompt } = req.body;
+
+            if (!systemPrompt || typeof systemPrompt !== 'string') {
+                return res.status(400).json({ error: 'Missing or invalid systemPrompt' });
+            }
+
+            voiceSupervisor.setSystemPrompt(systemPrompt);
+            logger.info('[Voice API] System prompt updated');
+            res.json({ success: true });
+        } catch (error) {
+            logger.error('[Voice API] Error updating system prompt', { error });
+            res.status(500).json({ error: 'Failed to update system prompt' });
+        }
+    });
+
+    // Get available tools for voice agent
+    app.get('/api/voice-agent/tools', async (req, res) => {
+        try {
+            const tools = voiceSupervisor.getAvailableTools();
+            res.json({ tools });
+        } catch (error) {
+            logger.error('[Voice API] Error getting tools', { error });
+            res.status(500).json({ error: 'Failed to get tools' });
+        }
+    });
+
+    // Voice agent page route
+    app.get('/voice', (req, res) => {
+        let token = req.query.token as string;
+
+        if (!token) {
+            const host = req.headers.host || '';
+            const tunnelStatus = tunnelManager.getStatus();
+
+            if (isTunnelHost(host) && tunnelStatus.active && tunnelStatus.token) {
+                token = tunnelStatus.token;
+            } else {
+                res.status(401).send('Access denied: Missing token');
+                return;
+            }
+        }
+
+        // Allow local tokens (starting with 'local-') or validate tunnel tokens
+        const isLocalToken = token.startsWith('local-');
+        if (!isLocalToken && !tunnelManager.validateToken(token)) {
+            res.status(401).send('Access denied: Invalid or expired token');
+            return;
+        }
+
+        // Use WebSocket URL from request
+        const protocol = req.protocol === 'https' ? 'wss' : 'ws';
+        const host = req.get('host');
+        const wsUrl = `${protocol}://${host}`;
+
+        // Get Deepgram API key from config
+        const deepgramApiKey = configStore.getConfig().deepgramApiKey || '';
+
+        const html = getVoiceAgentPageHtml(wsUrl, token, deepgramApiKey);
+        logger.info('[Voice Agent] Page served', { hasToken: !!token, hasDeepgramKey: !!deepgramApiKey });
+        res.send(html);
+    });
+
+    // Send voice announcements via WebSocket
+    voiceSupervisor.on('voice:announce', (announcement) => {
+        logger.info('[Voice Supervisor] Broadcasting announcement', {
+            text: announcement.text,
+            taskId: announcement.taskId
+        });
+        wss.clients.forEach((client) => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify({
+                    type: 'voice_announcement',
+                    ...announcement
+                }));
+            }
+        });
+    });
+
     // ===== Mobile Route (legacy redirect) =====
     // Old /mobile route now redirects to the React app root with the token.
     // The responsive React frontend handles mobile layout automatically.
@@ -2140,6 +2333,69 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             const errorMsg = err instanceof Error ? err.message : String(err);
             logger.error('TTS fetch failed', { error: errorMsg });
             res.status(500).json({ error: 'TTS request failed', detail: errorMsg });
+        }
+    });
+
+    // Get available ElevenLabs voices
+    app.get('/api/elevenlabs/voices', async (req, res) => {
+        const apiKey = process.env.ELEVENLABS_API_KEY;
+        if (!apiKey) {
+            logger.error('ElevenLabs API key not configured');
+            res.status(500).json({ error: 'TTS not configured: missing ELEVENLABS_API_KEY' });
+            return;
+        }
+
+        try {
+            // @ts-ignore - ElevenLabs TTS module is optional
+            const { ElevenLabsTTS } = await import('./elevenlabs-tts.js').catch(() => {
+                throw new Error('ElevenLabs TTS module not available');
+            });
+            const tts = new ElevenLabsTTS(apiKey);
+            const voices = await tts.getVoices();
+
+            logger.info('Fetched ElevenLabs voices', { count: voices.length });
+            res.json({ voices });
+        } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            logger.error('Failed to fetch voices', { error: errorMsg });
+            res.status(500).json({ error: 'Failed to fetch voices', detail: errorMsg });
+        }
+    });
+
+    // Get preview audio for a specific voice
+    app.get('/api/elevenlabs/voices/:voiceId/preview', async (req, res) => {
+        const apiKey = process.env.ELEVENLABS_API_KEY;
+        if (!apiKey) {
+            logger.error('ElevenLabs API key not configured');
+            res.status(500).json({ error: 'TTS not configured: missing ELEVENLABS_API_KEY' });
+            return;
+        }
+
+        const { voiceId } = req.params;
+        const { sampleId } = req.query;
+
+        if (!voiceId) {
+            res.status(400).json({ error: 'Missing voiceId parameter' });
+            return;
+        }
+
+        try {
+            // @ts-ignore - ElevenLabs TTS module is optional
+            const { ElevenLabsTTS } = await import('./elevenlabs-tts.js').catch(() => {
+                throw new Error('ElevenLabs TTS module not available');
+            });
+            const tts = new ElevenLabsTTS(apiKey);
+            const audioBuffer = await tts.getVoicePreview(voiceId, sampleId as string | undefined);
+
+            logger.info('Voice preview generated', { voiceId, audioBytes: audioBuffer.length });
+
+            res.setHeader('Content-Type', 'audio/mpeg');
+            res.setHeader('Content-Length', audioBuffer.length);
+            res.send(audioBuffer);
+        } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            logger.error('Failed to generate voice preview', { voiceId, error: errorMsg });
+            res.status(500).json({ error: 'Failed to generate voice preview', detail: errorMsg });
         }
     });
 
@@ -2453,7 +2709,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     });
 
     app.get('/api/workspaces', (_req, res) => {
-        res.json(workspaceStore.getWorkspaces());
+        res.json({ workspaces: workspaceStore.getWorkspaces() });
     });
 
     // File explorer endpoint - list files and directories for a workspace
@@ -4324,13 +4580,24 @@ Guidelines:
     });
 
     // Restart server endpoint - triggers graceful shutdown, tsx watch will restart
-    app.post('/api/server/restart', (_req, res) => {
+    app.post('/api/server/restart', async (_req, res) => {
         console.log('[Server] Restart requested via API');
         res.json({ status: 'restarting' });
 
-        // Give time for response to be sent, then trigger graceful shutdown
-        setTimeout(() => {
-            gracefulShutdown('RESTART');
+        // Give time for response to be sent
+        setTimeout(async () => {
+            // Touch a watched file to trigger tsx watch restart
+            // This is more reliable than process.exit(0) which tsx may not restart
+            try {
+                const { utimes } = await import('fs/promises');
+                const restartTriggerFile = join(__dirname, 'index.ts');
+                const now = new Date();
+                await utimes(restartTriggerFile, now, now);
+                console.log('[Server] Touched index.ts to trigger tsx watch restart');
+            } catch (error) {
+                console.error('[Server] Failed to touch restart trigger file, falling back to graceful shutdown:', error);
+                gracefulShutdown('RESTART');
+            }
         }, 100);
     });
 

@@ -301,6 +301,32 @@
     background: rgba(13, 188, 121, 1);
 }
 
+/* Floating interrupt button for mobile - positioned above scroll button */
+.mobile-interrupt-btn {
+    position: absolute;
+    bottom: 72px; /* 16px (scroll button bottom) + 44px (button height) + 12px (gap) */
+    right: 16px;
+    z-index: 6;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(248, 81, 73, 0.9);
+    color: #fff;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    touch-action: manipulation;
+    animation: fadeIn 0.2s ease-in;
+}
+
+.mobile-interrupt-btn:active {
+    transform: scale(0.9);
+    background: rgba(248, 81, 73, 1);
+}
+
 /* ===== MOBILE RESPONSIVE ===== */
 @media (max-width: 768px) {
     /* Fix iOS touch scrolling: text spans capture touch events and kill

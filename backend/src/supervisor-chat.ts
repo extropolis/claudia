@@ -514,6 +514,19 @@ Be witty — dry humor, light sarcasm, maybe a pun. Think "funny coworker" not "
      * Send a message to the supervisor and get a response
      */
     async sendMessage(content: string, taskId?: string, workspaceId?: string): Promise<ChatMessage | null> {
+        return this.sendMessageWithContext(content, '', taskId, workspaceId);
+    }
+
+    /**
+     * Send a message with additional context injected into the system prompt
+     * Used by VoiceSupervisor to provide dynamic task status updates
+     */
+    async sendMessageWithContext(
+        content: string,
+        additionalContext: string,
+        taskId?: string,
+        workspaceId?: string
+    ): Promise<ChatMessage | null> {
         if (this.isProcessing) {
             console.log('[SupervisorChat] Already processing a message, please wait');
             return null;
@@ -535,7 +548,12 @@ Be witty — dry humor, light sarcasm, maybe a pun. Think "funny coworker" not "
             this.addMessage(userMessage);
 
             // Get context about tasks (workspace-scoped if provided)
-            const context = await this.buildContext(taskId, workspaceId);
+            const baseContext = await this.buildContext(taskId, workspaceId);
+
+            // Merge additional context (from voice supervisor) with base context
+            const context = additionalContext
+                ? `${additionalContext}\n\n${baseContext}`
+                : baseContext;
 
             // Call Claude Code with tool support
             const result = await this.callClaudeWithTools(content, context, workspaceId);

@@ -1337,6 +1337,7 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
     );
 }
 
+
 // ============== MAIN PANEL ==============
 
 const PANEL_WIDTH_KEY = 'claudia-file-explorer-width';
@@ -1432,6 +1433,11 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
                         <button className={`fe-tab ${activeTab === 'issues' ? 'active' : ''}`}
                             onClick={() => setActiveTab('issues')} title="GitHub Issues">
                             <CircleDot size={13} />
+                            <span>Issues</span>
+                        </button>
+                        <button className={`fe-tab ${activeTab === 'issues' ? 'active' : ''}`}
+                            onClick={() => setActiveTab('issues')} title="GitHub Issues">
+                            <GitPullRequest size={13} />
                             <span>Issues</span>
                         </button>
                     </div>

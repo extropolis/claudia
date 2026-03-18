@@ -3,14 +3,27 @@
     "playwright": {
       "command": "npx",
       "args": [
-        "@playwright/mcp"
+        "@playwright/mcp@latest",
+        "--isolated"
       ]
+    },
+    "duckduckgo": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "ddg-mcp-search"
+      ]
+    },
+    "jira_mcp": {
+      "type": "http",
+      "url": "https://litellm.concur.click/mcp/jira_mcp",
+      "timeout": 30
     },
     "claudia": {
       "command": "npx",
       "args": [
         "tsx",
-        "C:\\Users\\14255\\Work\\claudia\\backend\\src\\claudia-mcp-server.ts"
+        "src/claudia-mcp-server.ts"
       ]
     }
   }

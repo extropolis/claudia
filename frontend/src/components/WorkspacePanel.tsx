@@ -739,6 +739,15 @@ function WorkspaceSection({
         }
     }, [isEditingWorkspaceName]);
 
+    // Cleanup submenu close timeout on unmount
+    useEffect(() => {
+        return () => {
+            if (submenuCloseTimeoutRef.current) {
+                clearTimeout(submenuCloseTimeoutRef.current);
+            }
+        };
+    }, []);
+
     const handleStartWorkspaceEdit = (e?: React.MouseEvent) => {
         if (e) e.stopPropagation();
         setWorkspaceEditValue(workspace.displayName || workspace.name);
@@ -968,7 +977,8 @@ function WorkspaceSection({
                                     setShowReferencesSubmenu(true);
                                     if (referencesMenuItemRef.current) {
                                         const rect = referencesMenuItemRef.current.getBoundingClientRect();
-                                        setSubmenuPosition({ top: rect.top - 4, left: rect.right - 4 });
+                                        // Position submenu to overlap slightly with parent to avoid gaps
+                                        setSubmenuPosition({ top: rect.top, left: rect.right - 8 });
                                     }
                                 }}
                                 onMouseLeave={() => {
