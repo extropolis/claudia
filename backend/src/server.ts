@@ -1821,7 +1821,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                             sendWSError(ws, 'cron:create requires taskId, cronExpression, and prompt', message.type, 'MISSING_PARAMS');
                             break;
                         }
-                        const task = taskSpawner.getTask(taskId);
+                        const task = taskSpawner.getTask(taskId) || taskSpawner.getAllTasks().find(t => t.id === taskId);
                         if (!task) {
                             sendWSError(ws, `Task '${taskId}' not found`, message.type, 'TASK_NOT_FOUND');
                             break;
@@ -2909,7 +2909,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             return res.status(400).json({ error: 'cronExpression and prompt are required' });
         }
 
-        const task = taskSpawner.getTask(taskId);
+        const task = taskSpawner.getTask(taskId) || taskSpawner.getAllTasks().find(t => t.id === taskId);
         if (!task) {
             return res.status(404).json({ error: 'Task not found' });
         }
