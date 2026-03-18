@@ -33,9 +33,9 @@ export class VoiceSupervisor extends EventEmitter {
         // Initialize Anthropic SDK for streaming
         const apiKey = process.env.ANTHROPIC_API_KEY;
         if (!apiKey) {
-            throw new Error('ANTHROPIC_API_KEY environment variable is required');
+            console.warn('[VoiceSupervisor] ANTHROPIC_API_KEY not set - voice features will be disabled');
         }
-        this.anthropic = new Anthropic({ apiKey });
+        this.anthropic = new Anthropic({ apiKey: apiKey || '' });
 
         // Default system prompt
         this.customSystemPrompt = `You are a voice assistant for a coding environment. Keep responses ULTRA SHORT - 1-2 sentences max, under 20 words if possible. Be conversational, natural, and friendly. No markdown, no bullet points, no formatting. Just speak naturally.
