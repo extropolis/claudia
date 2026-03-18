@@ -16,7 +16,8 @@ import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, PORTS } from '@claudia/shared';
+import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS } from '@claudia/shared';
+import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch } from './git-utils.js';
 import { LearningsStore } from './learnings-store.js';
@@ -84,7 +85,10 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'supervisor:chat:clear',
     'task:disconnect',
     'task:clear',
-    'tunnel:status'
+    'tunnel:status',
+    'cron:create',
+    'cron:delete',
+    'cron:list',
 ]);
 
 // WebSocket message validation
@@ -379,6 +383,69 @@ export async function createApp(basePath?: string) {
     // LearningsStore for RAG-based learnings
     const learningsStore = new LearningsStore(basePath, configStore);
 
+    // CronScheduler for scheduled/recurring prompts
+    const cronScheduler = new CronScheduler(
+        // Fire callback: send prompt to task PTY
+        (taskId: string, prompt: string, scheduledTaskId: string) => {
+            logger.info('Cron firing prompt to task', { taskId, scheduledTaskId, prompt: prompt.substring(0, 80) });
+            taskSpawner.writeToTask(taskId, prompt + '\r');
+            broadcast({ type: 'cron:fired' as WSMessageType, payload: { scheduledTaskId, taskId, prompt } });
+        },
+        // Task state checker
+        (taskId: string) => {
+            const task = taskSpawner.getTask(taskId);
+            if (!task) return 'unknown';
+            if (task.state === 'exited' || task.state === 'archived') return 'exited';
+            if (task.state === 'idle') return 'idle';
+            return 'busy';
+        }
+    );
+    cronScheduler.start();
+
+    // Backfill workspaces from existing tasks
+    // This ensures tasks created before workspace tracking still show up in UI
+    // BUT: never re-add workspaces that the user explicitly deleted (in recentWorkspaces)
+    try {
+        const tasks = taskSpawner.getAllTasks();
+        logger.info(`Backfill: Found ${tasks.length} tasks`);
+        const workspacePathsToAdd = new Set<string>();
+
+        // Get recently deleted workspaces so we don't re-add them
+        const recentWorkspaces = workspaceStore.getRecentWorkspaces();
+        const recentlyDeletedIds = new Set(recentWorkspaces.map(r => r.id));
+        logger.info(`Backfill: ${recentlyDeletedIds.size} recently deleted workspace(s) will be excluded`);
+
+        for (const task of tasks) {
+            if (task.workspaceId) {
+                const exists = existsSync(task.workspaceId);
+                const alreadyInStore = workspaceStore.getWorkspace(task.workspaceId);
+                const wasDeleted = recentlyDeletedIds.has(task.workspaceId);
+
+                if (process.env.DEBUG_TASKS) {
+                    logger.info(`Backfill: Task ${task.id} workspace ${task.workspaceId} exists=${exists} inStore=${!!alreadyInStore} wasDeleted=${wasDeleted}`);
+                }
+
+                if (!alreadyInStore && exists && !wasDeleted) {
+                    workspacePathsToAdd.add(task.workspaceId);
+                }
+            }
+        }
+
+        logger.info(`Backfill: Will add ${workspacePathsToAdd.size} unique workspace(s)`);
+        if (workspacePathsToAdd.size > 0) {
+            for (const workspacePath of workspacePathsToAdd) {
+                try {
+                    const workspace = workspaceStore.addWorkspace(workspacePath);
+                    logger.info(`Added workspace: ${workspacePath}`, { workspace });
+                } catch (error) {
+                    logger.error(`Failed to add workspace ${workspacePath}:`, { error });
+                }
+            }
+        }
+    } catch (error) {
+        logger.error('Failed to backfill workspaces from tasks', { error });
+    }
+
     // Wire up tunnel events for broadcasting
     tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
         logger.info('Tunnel ready, broadcasting status', { url: data.url });
@@ -670,6 +737,9 @@ export async function createApp(basePath?: string) {
                     logger.info('Delivered pending reference update to now-idle task', { taskId: task.id, refCount: validRefs.length });
                 }
             }
+
+            // Fire any pending scheduled prompts for this task
+            cronScheduler.onTaskIdle(task.id);
         }
     });
 
@@ -767,6 +837,11 @@ export async function createApp(basePath?: string) {
 
     taskSpawner.on('taskDestroyed', (taskId: string) => {
         broadcast({ type: 'task:destroyed', payload: { taskId } });
+        // Clean up any scheduled tasks for this task
+        const removed = cronScheduler.removeAllForTask(taskId);
+        if (removed > 0) {
+            broadcast({ type: 'cron:updated' as WSMessageType, payload: { taskId, removed } });
+        }
         queueTasksUpdated(); // Batched
     });
 
@@ -1729,6 +1804,76 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                             type: 'tunnel:status',
                             payload: tunnelManager.getStatus()
                         }));
+                        break;
+                    }
+
+                    // ===== Scheduled Tasks (Cron) =====
+
+                    case 'cron:create': {
+                        const { taskId, cronExpression, prompt, isRecurring } = payload as {
+                            taskId?: string;
+                            cronExpression?: string;
+                            prompt?: string;
+                            isRecurring?: boolean;
+                        };
+                        if (!taskId || !cronExpression || !prompt) {
+                            sendWSError(ws, 'cron:create requires taskId, cronExpression, and prompt', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const task = taskSpawner.getTask(taskId);
+                        if (!task) {
+                            sendWSError(ws, `Task '${taskId}' not found`, message.type, 'TASK_NOT_FOUND');
+                            break;
+                        }
+                        try {
+                            const scheduled = cronScheduler.create(
+                                taskId,
+                                task.workspaceId,
+                                cronExpression,
+                                prompt,
+                                isRecurring !== false // default to recurring
+                            );
+                            ws.send(JSON.stringify({
+                                type: 'cron:created',
+                                payload: {
+                                    scheduledTask: scheduled,
+                                    description: describeCronExpression(cronExpression),
+                                }
+                            }));
+                            broadcast({ type: 'cron:updated' as WSMessageType, payload: { taskId } });
+                        } catch (error) {
+                            sendWSError(ws, error instanceof Error ? error.message : String(error), message.type, 'CRON_CREATE_FAILED');
+                        }
+                        break;
+                    }
+
+                    case 'cron:list': {
+                        const { taskId } = payload as { taskId?: string };
+                        const scheduled = cronScheduler.list(taskId || undefined);
+                        ws.send(JSON.stringify({
+                            type: 'cron:list',
+                            payload: { scheduledTasks: scheduled }
+                        }));
+                        break;
+                    }
+
+                    case 'cron:delete': {
+                        const { cronId } = payload as { cronId?: string };
+                        if (!cronId) {
+                            sendWSError(ws, 'cron:delete requires cronId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const scheduledTask = cronScheduler.get(cronId);
+                        const deleted = cronScheduler.delete(cronId);
+                        if (deleted) {
+                            ws.send(JSON.stringify({
+                                type: 'cron:deleted',
+                                payload: { cronId, taskId: scheduledTask?.taskId }
+                            }));
+                            broadcast({ type: 'cron:updated' as WSMessageType, payload: { cronId, taskId: scheduledTask?.taskId } });
+                        } else {
+                            sendWSError(ws, `Scheduled task '${cronId}' not found`, message.type, 'CRON_NOT_FOUND');
+                        }
                         break;
                     }
                 }
@@ -2706,6 +2851,63 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             output,
             lastActivity: task.lastActivity
         });
+    });
+
+    // ===== Scheduled Tasks (Cron) REST API =====
+
+    // List scheduled tasks for a specific task (or all if no taskId)
+    app.get('/api/tasks/:taskId/cron', (req, res) => {
+        const { taskId } = req.params;
+        const scheduled = cronScheduler.list(taskId);
+        res.json(scheduled.map(s => ({
+            ...s,
+            description: describeCronExpression(s.cronExpression),
+        })));
+    });
+
+    // List all scheduled tasks
+    app.get('/api/cron', (_req, res) => {
+        const scheduled = cronScheduler.list();
+        res.json(scheduled.map(s => ({
+            ...s,
+            description: describeCronExpression(s.cronExpression),
+        })));
+    });
+
+    // Create a scheduled task
+    app.post('/api/tasks/:taskId/cron', (req, res) => {
+        const { taskId } = req.params;
+        const { cronExpression, prompt, isRecurring } = req.body;
+
+        if (!cronExpression || !prompt) {
+            return res.status(400).json({ error: 'cronExpression and prompt are required' });
+        }
+
+        const task = taskSpawner.getTask(taskId);
+        if (!task) {
+            return res.status(404).json({ error: 'Task not found' });
+        }
+
+        try {
+            const scheduled = cronScheduler.create(taskId, task.workspaceId, cronExpression, prompt, isRecurring !== false);
+            res.json({
+                ...scheduled,
+                description: describeCronExpression(cronExpression),
+            });
+        } catch (error) {
+            res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+
+    // Delete a scheduled task
+    app.delete('/api/cron/:cronId', (req, res) => {
+        const { cronId } = req.params;
+        const deleted = cronScheduler.delete(cronId);
+        if (deleted) {
+            res.json({ success: true, cronId });
+        } else {
+            res.status(404).json({ error: 'Scheduled task not found' });
+        }
     });
 
     app.get('/api/workspaces', (_req, res) => {
