@@ -67,6 +67,13 @@ interface TestConfig {
     referencePath: string | null; // Path for reference operations
     referenceId: string | null;   // Reference ID for removal
     referenceDescription: string | null; // Description for reference
+    // Cron/scheduled task operations
+    cronCreate: boolean;              // Create a scheduled task
+    cronList: boolean;                // List scheduled tasks
+    cronDelete: boolean;              // Delete a scheduled task
+    cronExpression: string | null;    // Cron expression for --cron-create
+    cronId: string | null;            // Cron ID for --cron-delete
+    cronRecurring: boolean;           // Whether the cron is recurring (default true)
 }
 
 class TestCLI {
@@ -1331,6 +1338,12 @@ function parseArgs(): TestConfig {
     let referencePath: string | null = null;
     let referenceId: string | null = null;
     let referenceDescription: string | null = null;
+    let cronCreate = false;
+    let cronList = false;
+    let cronDelete = false;
+    let cronExpression: string | null = null;
+    let cronId: string | null = null;
+    let cronRecurring = true;
 
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
@@ -1510,6 +1523,24 @@ function parseArgs(): TestConfig {
             case '--reference-description':
                 referenceDescription = args[++i];
                 break;
+            case '--cron-create':
+                cronCreate = true;
+                break;
+            case '--cron-list':
+                cronList = true;
+                break;
+            case '--cron-delete':
+                cronDelete = true;
+                break;
+            case '--cron-expression':
+                cronExpression = args[++i];
+                break;
+            case '--cron-id':
+                cronId = args[++i];
+                break;
+            case '--cron-recurring':
+                cronRecurring = args[++i] !== 'false';
+                break;
             case '--help':
             case '-h':
                 console.log(`
@@ -1584,6 +1615,14 @@ BACKEND OPERATIONS:
 MCP SERVER OPERATIONS:
   --list-mcp-servers       List all available MCP servers (global and project-specific)
   --test-mcp-server <name> Test a specific MCP server by calling its tools
+
+SCHEDULED TASK (CRON) OPERATIONS:
+  --cron-create            Create a scheduled task (requires --task-id, --cron-expression, and --message)
+  --cron-list              List scheduled tasks (optionally filter by --task-id)
+  --cron-delete            Delete a scheduled task (requires --cron-id)
+  --cron-expression <expr> Cron expression for scheduling (e.g., "*/5 * * * *")
+  --cron-id <id>           Scheduled task ID for deletion
+  --cron-recurring <bool>  Whether the task recurs (default: true, set to false for one-shot)
 
 Examples:
   # Basic chat message
@@ -1675,6 +1714,21 @@ Examples:
 
   # List references
   npx tsx test-cli.ts --list-references -w /path/to/workspace -v
+
+  # Create a scheduled task (every 5 minutes)
+  npx tsx test-cli.ts --cron-create --task-id task-123456 --cron-expression "*/5 * * * *" -m "check build status"
+
+  # Create a one-shot scheduled task
+  npx tsx test-cli.ts --cron-create --task-id task-123456 --cron-expression "30 14 * * *" -m "push release" --cron-recurring false
+
+  # List all scheduled tasks
+  npx tsx test-cli.ts --cron-list
+
+  # List scheduled tasks for a specific task
+  npx tsx test-cli.ts --cron-list --task-id task-123456
+
+  # Delete a scheduled task
+  npx tsx test-cli.ts --cron-delete --cron-id abc12345
                 `);
                 process.exit(0);
         }
@@ -1743,7 +1797,116 @@ Examples:
         referencePath,
         referenceId,
         referenceDescription,
+        cronCreate,
+        cronList,
+        cronDelete,
+        cronExpression,
+        cronId,
+        cronRecurring,
     };
+}
+
+// ============================================================================
+// Cron/Scheduled task operations (HTTP-based, no WebSocket needed)
+// ============================================================================
+
+async function cronCreateTask(baseHttpUrl: string, taskId: string, cronExpression: string, prompt: string, isRecurring: boolean): Promise<void> {
+    console.log('📅 Creating scheduled task...');
+    console.log(`   Task: ${taskId}`);
+    console.log(`   Cron: ${cronExpression}`);
+    console.log(`   Prompt: ${prompt}`);
+    console.log(`   Recurring: ${isRecurring}`);
+    console.log('');
+
+    try {
+        const response = await fetch(`${baseHttpUrl}/api/tasks/${taskId}/cron`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cronExpression, prompt, isRecurring }),
+        });
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({ error: response.statusText }));
+            console.error(`❌ Failed to create scheduled task: ${err.error || response.statusText}`);
+            return;
+        }
+
+        const scheduled = await response.json();
+        console.log('✅ Scheduled task created:');
+        console.log(`   ID: ${scheduled.id}`);
+        console.log(`   Schedule: ${scheduled.description || scheduled.cronExpression}`);
+        console.log(`   Recurring: ${scheduled.isRecurring}`);
+        console.log(`   Next fire: ${scheduled.nextFireAt || 'calculating...'}`);
+        console.log(`   Expires: ${scheduled.expiresAt}`);
+        console.log('');
+    } catch (error) {
+        console.error('❌ Failed to create scheduled task:', error);
+    }
+}
+
+async function cronListTasks(baseHttpUrl: string, taskId?: string): Promise<void> {
+    console.log('📅 Listing scheduled tasks...');
+    console.log('');
+
+    try {
+        const url = taskId ? `${baseHttpUrl}/api/tasks/${taskId}/cron` : `${baseHttpUrl}/api/cron`;
+        const response = await fetch(url);
+
+        if (!response.ok) {
+            console.error(`❌ Failed to list scheduled tasks: ${response.statusText}`);
+            return;
+        }
+
+        const scheduled = await response.json();
+
+        if (!scheduled || scheduled.length === 0) {
+            console.log('  No scheduled tasks found.');
+            console.log('');
+            return;
+        }
+
+        console.log('📅 SCHEDULED TASKS');
+        console.log('='.repeat(80));
+        for (const s of scheduled) {
+            console.log(`  🔹 ${s.id} (${s.isRecurring ? 'recurring' : 'one-shot'})`);
+            console.log(`     Task: ${s.taskId}`);
+            console.log(`     Schedule: ${s.description || s.cronExpression} (${s.cronExpression})`);
+            console.log(`     Prompt: ${s.prompt.substring(0, 80)}${s.prompt.length > 80 ? '...' : ''}`);
+            console.log(`     Next fire: ${s.nextFireAt || 'N/A'}`);
+            console.log(`     Last fired: ${s.lastFiredAt || 'never'}`);
+            console.log(`     Fire count: ${s.fireCount}`);
+            console.log(`     Expires: ${s.expiresAt}`);
+            console.log('');
+        }
+        console.log('='.repeat(80));
+        console.log(`Total: ${scheduled.length} scheduled task(s)`);
+        console.log('');
+    } catch (error) {
+        console.error('❌ Failed to list scheduled tasks:', error);
+    }
+}
+
+async function cronDeleteTask(baseHttpUrl: string, cronId: string): Promise<void> {
+    console.log(`📅 Deleting scheduled task: ${cronId}`);
+    console.log('');
+
+    try {
+        const response = await fetch(`${baseHttpUrl}/api/cron/${cronId}`, { method: 'DELETE' });
+
+        if (!response.ok) {
+            if (response.status === 404) {
+                console.error(`❌ Scheduled task '${cronId}' not found.`);
+            } else {
+                console.error(`❌ Failed to delete scheduled task: ${response.statusText}`);
+            }
+            return;
+        }
+
+        console.log(`✅ Scheduled task '${cronId}' deleted.`);
+        console.log('');
+    } catch (error) {
+        console.error('❌ Failed to delete scheduled task:', error);
+    }
 }
 
 // Backend status and configuration functions (no WebSocket needed)
@@ -1946,6 +2109,34 @@ async function main() {
 
     if (config.testMcpServer) {
         await testMcpServer(config.testMcpServer);
+        process.exit(0);
+    }
+
+    // Handle cron commands (HTTP-based, no WebSocket needed)
+    if (config.cronCreate) {
+        if (!config.taskId) {
+            console.error('❌ --cron-create requires --task-id');
+            process.exit(1);
+        }
+        if (!config.cronExpression) {
+            console.error('❌ --cron-create requires --cron-expression');
+            process.exit(1);
+        }
+        await cronCreateTask(baseHttpUrl, config.taskId, config.cronExpression, config.testMessage, config.cronRecurring);
+        process.exit(0);
+    }
+
+    if (config.cronList) {
+        await cronListTasks(baseHttpUrl, config.taskId || undefined);
+        process.exit(0);
+    }
+
+    if (config.cronDelete) {
+        if (!config.cronId) {
+            console.error('❌ --cron-delete requires --cron-id');
+            process.exit(1);
+        }
+        await cronDeleteTask(baseHttpUrl, config.cronId);
         process.exit(0);
     }
 

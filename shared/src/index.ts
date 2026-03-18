@@ -103,6 +103,21 @@ export interface TaskSummary {
     timestamp: Date;
 }
 
+// Scheduled task (cron) for recurring/one-shot prompts
+export interface ScheduledTask {
+    id: string;                    // 8-char unique ID
+    taskId: string;                // Claudia task this scheduled job belongs to
+    workspaceId: string;           // Workspace context
+    cronExpression: string;        // 5-field cron expression (minute hour day-of-month month day-of-week)
+    prompt: string;                // The prompt to run when fired
+    isRecurring: boolean;          // true = recurring, false = one-shot
+    createdAt: string;             // ISO timestamp
+    expiresAt: string;             // ISO timestamp (createdAt + 3 days for recurring)
+    lastFiredAt?: string;          // ISO timestamp of last fire
+    nextFireAt?: string;           // ISO timestamp of next computed fire time
+    fireCount: number;             // How many times it has fired
+}
+
 // WebSocket message types
 export type WSMessageType =
     // Task lifecycle
@@ -144,6 +159,12 @@ export type WSMessageType =
     | 'supervisor:chat:response'
     | 'supervisor:chat:history'
     | 'supervisor:chat:typing'
+    // Scheduled tasks (cron)
+    | 'cron:created'
+    | 'cron:deleted'
+    | 'cron:list'
+    | 'cron:fired'
+    | 'cron:updated'
     // Server status
     | 'server:reloading'
     | 'server:reconnecting'

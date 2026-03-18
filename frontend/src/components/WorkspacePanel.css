@@ -617,6 +617,34 @@
     overflow: hidden;
 }
 
+/* Scheduled task (cron) badge */
+.workspace-panel .task-item .task-cron-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 1px 4px;
+    border-radius: 8px;
+    border: none;
+    background: rgba(0, 212, 255, 0.1);
+    color: var(--accent-secondary);
+    font-size: 0.625rem;
+    flex-shrink: 0;
+    margin-left: 4px;
+    opacity: 0.8;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.workspace-panel .task-item .task-cron-badge:hover {
+    opacity: 1;
+    background: rgba(0, 212, 255, 0.18);
+}
+
+.workspace-panel .task-item .task-cron-badge .task-cron-count {
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+}
+
 .workspace-panel .task-item .task-actions {
     display: flex;
     align-items: center;
@@ -1272,9 +1300,33 @@
     white-space: nowrap;
 }
 
+.archived-task-meta {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+}
+
+.archived-task-workspace {
+    font-size: 0.6875rem;
+    color: var(--accent-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-shrink: 1;
+    min-width: 0;
+}
+
+.archived-task-meta-separator {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
 .archived-task-date {
     font-size: 0.6875rem;
     color: var(--text-muted);
+    flex-shrink: 0;
 }
 
 .archived-task-actions {

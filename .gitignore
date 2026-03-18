@@ -53,6 +53,7 @@ start.ps1
 
 # Runtime data (persisted state)
 backend/tasks.json
+backend/scheduled-tasks.json
 backend/config.json
 backend/workspace-config.json
 backend/chat-history.json
