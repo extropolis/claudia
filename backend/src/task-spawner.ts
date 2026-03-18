@@ -117,6 +117,7 @@ interface PersistedTask {
     shouldContinue?: boolean;  // True if task should auto-continue on reconnect
     backendType?: BackendType; // Which backend created this task (for reconnection)
     displayName?: string;      // User-editable display name
+    displayNameEditedByUser?: boolean; // True if the user manually edited the display name
     processStartedAt?: string; // When the current processing run started (preserved across reconnect)
     order?: number;            // Display order within workspace (lower = higher in list)
 }
@@ -134,6 +135,7 @@ interface ArchivedTaskMetadata {
     // Size of output history in bytes (for display purposes)
     historySize?: number;
     displayName?: string;      // User-editable display name
+    displayNameEditedByUser?: boolean; // True if the user manually edited the display name
 }
 
 interface TaskPersistence {
@@ -163,8 +165,10 @@ interface InternalTask extends Task {
     inactiveOutputLogged?: boolean; // True if we've already logged the "dropping output" message for this inactive state
     lastRefKey?: string; // Tracks which workspace references were last injected (sorted ref IDs)
     pendingRefNotification?: boolean; // True if workspace references changed while task was busy
+    pendingMcpNotification?: boolean; // True if MCP server config changed while task was busy
     processStartedAt?: Date; // When the current busy/starting state began (for elapsed timer)
     readyFallbackTimer?: ReturnType<typeof setTimeout>; // Fallback timer to send prompt if ready signal is never detected
+    titleInstructionInjected?: boolean; // True if auto-title instruction has been injected into this session
 }
 
 /**
@@ -956,6 +960,7 @@ export class TaskSpawner extends EventEmitter {
                     systemPrompt: task.systemPrompt,
                     backendType: taskBackendType,
                     displayName: task.displayName,
+                    displayNameEditedByUser: task.displayNameEditedByUser,
                     processStartedAt: task.processStartedAt?.toISOString(),
                     order: task.order,
                 });
@@ -1694,6 +1699,12 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - When creating tasks, always provide a short \`displayName\` (e.g., "Build API endpoint", "Write unit tests") so tasks are easy to identify in the sidebar
 - Use \`claudia_rename_task\` to update your own task name if your work evolves beyond the original prompt
 
+**Auto-title your task:**
+- Early in your work (after understanding the task), use \`claudia_rename_task\` to give YOUR OWN task a short, descriptive title (3-6 words) that reflects what you're actually doing
+- Your task ID is provided in the \`claudia_rename_task\` tool description — use it to rename yourself
+- If the user has manually edited your task title, the rename will be rejected — do NOT retry
+- If your work evolves significantly, update your title to reflect the new focus (unless user-edited)
+
 **Guidelines:**
 - Prefer 2-4 parallel tasks — don't over-decompose simple work
 - Only spawn tasks when parallelization provides real value; do simple work yourself
@@ -1930,6 +1941,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             sessionId: task.sessionId || undefined,
             backendType,
             displayName: task.displayName,
+            displayNameEditedByUser: task.displayNameEditedByUser,
             order: task.order,
         };
     }
@@ -1988,6 +2000,13 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     }
 
     /**
+     * Get all active (live) internal tasks across all workspaces.
+     */
+    getAllActiveTasks(): InternalTask[] {
+        return Array.from(this.tasks.values());
+    }
+
+    /**
      * Get all active (live) internal tasks for a given workspace.
      */
     getActiveTasksForWorkspace(workspaceId: string): InternalTask[] {
@@ -2003,16 +2022,26 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     /**
      * Rename a task by setting its displayName
      * Works for both active and disconnected tasks
+     * @param source - 'user' if renamed by user in UI (locks title from agent edits), 'agent' if renamed by MCP agent
      */
-    renameTask(taskId: string, displayName: string): boolean {
+    renameTask(taskId: string, displayName: string, source: 'user' | 'agent' = 'user'): boolean {
         const trimmed = displayName.trim();
 
         // Try active tasks first
         const task = this.tasks.get(taskId);
         if (task) {
+            // If user edited, block agent renames
+            if (source === 'agent' && task.displayNameEditedByUser) {
+                console.log(`[TaskSpawner] Agent rename blocked for task ${taskId} — title was edited by user`);
+                return false;
+            }
             task.displayName = trimmed || undefined; // Clear if empty
+            // Track whether user explicitly edited the name
+            if (source === 'user') {
+                task.displayNameEditedByUser = trimmed ? true : false; // Clearing resets the flag
+            }
             this.scheduleSave();
-            console.log(`[TaskSpawner] Renamed task ${taskId} to "${trimmed}"`);
+            console.log(`[TaskSpawner] Renamed task ${taskId} to "${trimmed}" (source: ${source})`);
             this.emit('taskStateChanged', this.toPublicTask(task));
             return true;
         }
@@ -2020,18 +2049,32 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // Try disconnected tasks
         const persisted = this.disconnectedTasks.get(taskId);
         if (persisted) {
+            if (source === 'agent' && persisted.displayNameEditedByUser) {
+                console.log(`[TaskSpawner] Agent rename blocked for disconnected task ${taskId} — title was edited by user`);
+                return false;
+            }
             persisted.displayName = trimmed || undefined;
+            if (source === 'user') {
+                persisted.displayNameEditedByUser = trimmed ? true : false;
+            }
             this.scheduleSave();
-            console.log(`[TaskSpawner] Renamed disconnected task ${taskId} to "${trimmed}"`);
+            console.log(`[TaskSpawner] Renamed disconnected task ${taskId} to "${trimmed}" (source: ${source})`);
             return true;
         }
 
         // Try archived tasks
         const archived = this.archivedTasks.get(taskId);
         if (archived) {
+            if (source === 'agent' && archived.displayNameEditedByUser) {
+                console.log(`[TaskSpawner] Agent rename blocked for archived task ${taskId} — title was edited by user`);
+                return false;
+            }
             archived.displayName = trimmed || undefined;
+            if (source === 'user') {
+                archived.displayNameEditedByUser = trimmed ? true : false;
+            }
             this.scheduleSave();
-            console.log(`[TaskSpawner] Renamed archived task ${taskId} to "${trimmed}"`);
+            console.log(`[TaskSpawner] Renamed archived task ${taskId} to "${trimmed}" (source: ${source})`);
             return true;
         }
 
@@ -2658,6 +2701,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 systemPrompt: task.systemPrompt,
                 historySize,
                 displayName: task.displayName,
+                displayNameEditedByUser: task.displayNameEditedByUser,
             };
             this.archivedTasks.set(taskId, archivedMetadata);
 
@@ -2712,6 +2756,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 systemPrompt: disconnected.systemPrompt,
                 historySize: disconnected.outputHistory ? Math.floor(disconnected.outputHistory.length * 0.75) : 0,
                 displayName: disconnected.displayName,
+                displayNameEditedByUser: disconnected.displayNameEditedByUser,
             };
             this.archivedTasks.set(taskId, archivedMetadata);
             this.disconnectedTasks.delete(taskId);
@@ -2875,6 +2920,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             createdAt: new Date(persisted.createdAt),
             lastActivity: new Date(persisted.lastActivity),
             displayName: persisted.displayName,
+            displayNameEditedByUser: persisted.displayNameEditedByUser,
             sessionId: persisted.sessionId || undefined,
             gitState: persisted.gitState,
             systemPrompt: persisted.systemPrompt,
@@ -3045,6 +3091,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             shouldContinue,
             continuationSent: false,
             displayName: persisted.displayName,  // Preserve user-set display name across reconnection
+            displayNameEditedByUser: persisted.displayNameEditedByUser,  // Preserve user-edit flag
             systemPrompt: persisted.systemPrompt,  // Preserve custom system prompt
             gitStateBefore: persisted.gitState ? persisted.gitState : undefined,  // Preserve git state
         };

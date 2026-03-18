@@ -276,6 +276,40 @@ function notifyTasksOfReferenceChange(
     }
 }
 
+/**
+ * Notify all running tasks that MCP server configuration has changed.
+ * - Idle tasks: immediately receive a context update message
+ * - Busy/other tasks: flagged for notification when they next become idle
+ */
+function notifyTasksOfMcpChange(
+    taskSpawner: InstanceType<typeof import('./task-spawner.js').TaskSpawner>
+): void {
+    const tasks = taskSpawner.getAllActiveTasks();
+    if (tasks.length === 0) return;
+
+    const mcpServers = taskSpawner.configStore?.getMCPServers() || [];
+    const enabledServers = mcpServers.filter(s => s.enabled);
+    const serverNames = enabledServers.map(s => s.name);
+
+    for (const task of tasks) {
+        if (task.state === 'idle') {
+            let msg: string;
+            if (serverNames.length > 0) {
+                msg = `[CONTEXT UPDATE: MCP server configuration has changed. Currently enabled MCP servers: ${serverNames.join(', ')}. New MCP tools are available via the updated .mcp.json in your workspace. You may need to use /mcp to reload MCP servers to pick up the changes.] acknowledge this update briefly\r`;
+            } else {
+                msg = `[CONTEXT UPDATE: All MCP servers have been disabled or removed. The .mcp.json in your workspace has been updated.] acknowledge this update briefly\r`;
+            }
+            ctxUpdateInFlight.add(task.id);
+            taskSpawner.writeToTask(task.id, msg);
+            task.pendingMcpNotification = false;
+            logger.info('Sent immediate MCP config update to idle task', { taskId: task.id, servers: serverNames });
+        } else {
+            task.pendingMcpNotification = true;
+            logger.info('Queued MCP config update for busy task', { taskId: task.id, state: task.state });
+        }
+    }
+}
+
 export async function createApp(basePath?: string) {
     const app = express();
     const server = createServer(app);
@@ -1080,6 +1114,43 @@ export async function createApp(basePath?: string) {
                         if (taskId) {
                             try {
                                 taskSpawner.setTaskActive(taskId, true);
+
+                                // Auto-inject pending context updates when selecting an idle task
+                                // This ensures Claude gets updated references/instructions without
+                                // the user having to send a message first
+                                const selectedTask = taskSpawner.getTask(taskId);
+                                if (selectedTask && selectedTask.state === 'idle') {
+                                    const parts: string[] = [];
+
+                                    // Check for workspace reference changes
+                                    const currentRefs = workspaceStore.getReferences(selectedTask.workspaceId);
+                                    const currentValidRefs = currentRefs.filter(r => existsSync(r.path));
+                                    const currentRefKey = currentValidRefs.map(r => r.id).sort().join(',');
+
+                                    if (currentRefKey !== (selectedTask.lastRefKey ?? '') && currentValidRefs.length > 0) {
+                                        const refList = currentValidRefs.map(r => {
+                                            let s = `"${r.name}" (${r.path})`;
+                                            if (r.description) s += ` - ${r.description}`;
+                                            return s;
+                                        }).join('; ');
+                                        parts.push(`[CONTEXT UPDATE: Workspace references updated. Available reference directories (read files using absolute paths): ${refList}]`);
+                                        selectedTask.lastRefKey = currentRefKey;
+                                    }
+
+                                    // Check for auto-title instruction injection
+                                    const claudiaMcpEnabled = configStore.getClaudioMcpServerEnabled();
+                                    if (claudiaMcpEnabled && !selectedTask.titleInstructionInjected) {
+                                        selectedTask.titleInstructionInjected = true;
+                                        parts.push(`[CONTEXT UPDATE: You can update your task title using claudia_rename_task with your own task ID. Give your task a short, descriptive title (3-6 words) based on what you're working on. Do NOT rename if the user has manually edited the title (the tool will reject it).]`);
+                                    }
+
+                                    if (parts.length > 0) {
+                                        const contextMsg = parts.join(' ') + '\r';
+                                        taskSpawner.writeToTask(taskId, contextMsg);
+                                        ctxUpdateInFlight.add(taskId);
+                                        logger.info('Auto-injected context update on task select', { taskId, parts: parts.length });
+                                    }
+                                }
                             } catch (error) {
                                 const errorMessage = error instanceof Error ? error.message : String(error);
                                 logger.error('Failed to activate task', { taskId, error: errorMessage });
@@ -1127,6 +1198,23 @@ export async function createApp(basePath?: string) {
                                             logger.info('References cleared for task', { taskId });
                                         }
                                         inputTask.lastRefKey = currentRefKey;
+                                    }
+
+                                    // One-time auto-title instruction injection for existing sessions
+                                    // (new sessions get this in the orchestration guidance system prompt)
+                                    const claudiaMcpEnabled = configStore.getClaudioMcpServerEnabled();
+                                    if (claudiaMcpEnabled && !inputTask.titleInstructionInjected) {
+                                        inputTask.titleInstructionInjected = true;
+                                        const titleInstruction = `[CONTEXT UPDATE: You can update your task title using claudia_rename_task with your own task ID. Give your task a short, descriptive title (3-6 words) based on what you're working on. Do NOT rename if the user has manually edited the title (the tool will reject it).] `;
+                                        const msgContent = filteredInput.endsWith('\r') || filteredInput.endsWith('\n')
+                                            ? filteredInput.slice(0, -1)
+                                            : filteredInput;
+                                        const enterKey = filteredInput.endsWith('\r') || filteredInput.endsWith('\n')
+                                            ? filteredInput.slice(-1)
+                                            : '';
+                                        filteredInput = titleInstruction + msgContent + enterKey;
+                                        ctxUpdateInFlight.add(taskId);
+                                        logger.info('Injected auto-title instruction into existing session', { taskId });
                                     }
                                 }
                             }
@@ -1186,9 +1274,10 @@ export async function createApp(basePath?: string) {
 
                     case 'task:rename': {
                         // Rename a task (set displayName)
-                        const { taskId, displayName } = payload as { taskId?: string; displayName?: string };
+                        // source: 'user' (UI edit) locks title from agent auto-rename; 'agent' (MCP) is blocked if user-edited
+                        const { taskId, displayName, source } = payload as { taskId?: string; displayName?: string; source?: 'user' | 'agent' };
                         if (!taskId || displayName === undefined) break;
-                        const renamed = taskSpawner.renameTask(taskId, displayName);
+                        const renamed = taskSpawner.renameTask(taskId, displayName, source || 'user');
                         if (renamed) {
                             broadcast({ type: 'task:stateChanged' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
                         }

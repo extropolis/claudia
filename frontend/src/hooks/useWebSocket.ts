@@ -691,7 +691,7 @@ export function useWebSocket() {
 
     // Rename actions
     const renameTask = useCallback((taskId: string, displayName: string) => {
-        sendMessage('task:rename', { taskId, displayName });
+        sendMessage('task:rename', { taskId, displayName, source: 'user' });
     }, [sendMessage]);
 
     const renameWorkspace = useCallback((workspaceId: string, displayName: string) => {

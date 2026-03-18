@@ -367,7 +367,7 @@ server.tool(
                 // Rename the task if displayName was provided
                 if (displayName) {
                     try {
-                        await sendWSMessage('task:rename', { taskId: task.id, displayName });
+                        await sendWSMessage('task:rename', { taskId: task.id, displayName, source: 'agent' });
                         log.info(`Task renamed to: ${displayName}`);
                     } catch (renameErr) {
                         log.error('Failed to rename task after creation:', renameErr);
@@ -497,18 +497,39 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_rename_task',
-    `Rename a task's display name in the Claudia UI sidebar. Use this to give tasks descriptive names that reflect what they're working on. ${SELF_TASK_ID ? `Your own task ID is: ${SELF_TASK_ID} — you can rename yourself too.` : ''}`,
+    `Rename a task's display name in the Claudia UI sidebar. Use this to give tasks descriptive names that reflect what they're working on. Will be rejected if the user has manually edited the task title. ${SELF_TASK_ID ? `Your own task ID is: ${SELF_TASK_ID} — you should auto-title yourself early in your work with a short descriptive name (3-6 words).` : ''}`,
     {
         taskId: z.string().describe(`The task ID to rename.${SELF_TASK_ID ? ` Use "${SELF_TASK_ID}" to rename yourself.` : ''}`),
         displayName: z.string().describe('The new display name for the task (short, descriptive)'),
     },
     async ({ taskId, displayName }) => {
         try {
+            // Check if the task title was user-edited before attempting rename
+            const tasksResponse = await backendFetch('/api/tasks');
+            if (tasksResponse.ok) {
+                const tasks = await tasksResponse.json();
+                const task = tasks.find((t: any) => t.id === taskId);
+                if (task?.displayNameEditedByUser) {
+                    log.info(`Rename blocked for task ${taskId} — title was edited by user`);
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify({
+                                success: false,
+                                message: `Cannot rename task '${taskId}' — the title was manually edited by the user. Do not retry.`,
+                                displayNameEditedByUser: true,
+                            }, null, 2)
+                        }]
+                    };
+                }
+            }
+
             log.info(`Renaming task ${taskId} to: ${displayName}`);
 
             const result = await sendWSMessage('task:rename', {
                 taskId,
                 displayName,
+                source: 'agent',
             });
 
             return {

@@ -43,6 +43,7 @@ export interface Task {
     sessionId?: string | null;      // Session ID for conversation history (null if not captured yet)
     backendType?: BackendType; // Which backend created this task (for conversation lookup)
     displayName?: string;    // User-editable display name (shown instead of prompt when set)
+    displayNameEditedByUser?: boolean; // True if the user manually edited the display name (prevents agent auto-title)
 }
 
 export interface WorkspaceReference {
