@@ -18,6 +18,13 @@
       "type": "http",
       "url": "https://litellm.concur.click/mcp/jira_mcp",
       "timeout": 30
+    },
+    "claudia": {
+      "command": "npx",
+      "args": [
+        "tsx",
+        "backend/src/claudia-mcp-server.ts"
+      ]
     }
   }
 }

@@ -43,6 +43,7 @@ function App() {
         createWorkspace,
         deleteWorkspace,
         reorderWorkspaces,
+        reorderTasks: reorderTasksOnServer,
         openFolder,
         openTerminal,
         setSystemPrompt,
@@ -53,6 +54,7 @@ function App() {
         deleteArchivedTask,
         continueArchivedTask,
         pushToGithub,
+        resetWorkspace,
         renameTask,
         renameWorkspace,
         toggleReference,
@@ -147,7 +149,8 @@ function App() {
             if (isResizing) {
                 const newWidth = e.clientX;
                 const minWidth = 250;
-                const maxWidth = 800;
+                // Allow sidebar to expand up to 70% of viewport for multi-column workspace layout
+                const maxWidth = Math.max(800, Math.floor(window.innerWidth * 0.7));
                 if (newWidth >= minWidth && newWidth <= maxWidth) {
                     setSidebarWidth(newWidth);
                 }
@@ -525,6 +528,7 @@ function App() {
                                 onCreateWorkspace={createWorkspace}
                                 onDeleteWorkspace={deleteWorkspace}
                                 onReorderWorkspaces={reorderWorkspaces}
+                                onReorderTasksOnServer={reorderTasksOnServer}
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
                                 onOpenShell={handleOpenShell}
@@ -541,6 +545,7 @@ function App() {
                                 onToggleReference={toggleReference}
                                 onAddCustomReference={addCustomReference}
                                 onRemoveReference={removeReference}
+                                onResetWorkspace={resetWorkspace}
                             />
                         </aside>
                     )
@@ -560,6 +565,7 @@ function App() {
                                 onCreateWorkspace={createWorkspace}
                                 onDeleteWorkspace={deleteWorkspace}
                                 onReorderWorkspaces={reorderWorkspaces}
+                                onReorderTasksOnServer={reorderTasksOnServer}
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
                                 onOpenShell={handleOpenShell}
@@ -576,6 +582,7 @@ function App() {
                                 onToggleReference={toggleReference}
                                 onAddCustomReference={addCustomReference}
                                 onRemoveReference={removeReference}
+                                onResetWorkspace={resetWorkspace}
                             />
                         </aside>
 

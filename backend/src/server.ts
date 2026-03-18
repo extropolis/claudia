@@ -5,7 +5,7 @@ import cors from 'cors';
 import os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { spawn as ptySpawn, IPty } from 'node-pty';
-import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, statSync } from 'fs';
+import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, statSync, rmdirSync } from 'fs';
 import { readFile, readdir } from 'fs/promises';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -18,6 +18,7 @@ import { getConversationHistory, getWorkspaceSessions } from './conversation-par
 import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, PORTS } from '@claudia/shared';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
+import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch } from './git-utils.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
@@ -51,6 +52,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'task:revert',
     'task:restore',
     'task:rename',
+    'task:reorder',
     'task:archived:list',
     'task:archived:restore',
     'task:archived:continue',
@@ -69,6 +71,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:references:toggle',
     'workspace:recent:list',
     'workspace:recent:clear',
+    'workspace:reset',
     'shell:create',
     'shell:input',
     'shell:resize',
@@ -127,6 +130,145 @@ function buildReferenceContext(references: WorkspaceReference[]): string {
         lines.push('');
     }
     return lines.join('\n').trim();
+}
+
+/**
+ * Strip ANSI escape sequences from a string (for pattern detection in PTY output).
+ */
+function stripAnsi(str: string): string {
+    return str
+        .replace(/\x1b\[[0-9;]*m/g, '')
+        .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+        .replace(/\x1b\][^\x07]*\x07/g, '')
+        .replace(/\x1b[PX^_].*?\x1b\\/g, '')
+        .replace(/\x1b\[\?[0-9;]*[hl]/g, '')
+        .replace(/\x1b[>=]/g, '');
+}
+
+/**
+ * Filter context update injections from terminal output data.
+ * Handles ANSI escape sequences by stripping them for detection,
+ * then removing the matched region from the raw data.
+ */
+function filterContextUpdateFromOutput(data: string): string {
+    const clean = stripAnsi(data);
+    // Quick check: does the stripped text contain the pattern at all?
+    if (!clean.includes('CONTEXT UPDATE:') && !clean.includes('acknowledge this update briefly')) {
+        return data;
+    }
+
+    // Try direct regex on raw data first (works when ANSI codes aren't interspersed within the text)
+    let filtered = data
+        .replace(/\[CONTEXT UPDATE:[^\]]*\]/g, '')
+        .replace(/ ?acknowledge this update briefly\r?/g, '');
+    if (filtered !== data) {
+        return filtered;
+    }
+
+    // Fallback: ANSI codes are interspersed within the context update text.
+    // Build a mapping from clean-text positions to raw-data positions,
+    // find the pattern in clean text, and remove the corresponding raw region.
+    const mapping: number[] = []; // mapping[cleanIdx] = rawIdx
+    let ci = 0;
+    const ansiPattern = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[PX^_].*?\x1b\\|\x1b\[\?[0-9;]*[hl]|\x1b[>=]/g;
+    let lastRaw = 0;
+    let match: RegExpExecArray | null;
+    // Identify which raw positions correspond to visible characters
+    const rawToClean = new Array(data.length).fill(-1);
+    let rawIdx = 0;
+    let cleanIdx = 0;
+    while (rawIdx < data.length) {
+        // Check if current position starts an ANSI sequence
+        ansiPattern.lastIndex = rawIdx;
+        match = ansiPattern.exec(data);
+        if (match && match.index === rawIdx) {
+            // Skip ANSI sequence
+            rawIdx += match[0].length;
+        } else {
+            rawToClean[rawIdx] = cleanIdx;
+            mapping.push(rawIdx);
+            cleanIdx++;
+            rawIdx++;
+        }
+    }
+
+    // Find context update pattern in clean text
+    const ctxMatch = clean.match(/\[CONTEXT UPDATE:[^\]]*\]/);
+    if (ctxMatch && ctxMatch.index !== undefined) {
+        const startClean = ctxMatch.index;
+        const endClean = startClean + ctxMatch[0].length;
+        const startRaw = mapping[startClean];
+        // endRaw: the raw position AFTER the last matched clean char
+        const endRaw = endClean < mapping.length ? mapping[endClean] : data.length;
+        filtered = data.slice(0, startRaw) + data.slice(endRaw);
+        // Also strip "acknowledge this update briefly" from the result
+        filtered = filtered.replace(/ ?acknowledge this update briefly\r?/g, '');
+        return filtered;
+    }
+
+    // Also handle just the acknowledge portion
+    filtered = data;
+    const ackClean = clean.match(/ ?acknowledge this update briefly\r?/);
+    if (ackClean && ackClean.index !== undefined) {
+        const startClean = ackClean.index;
+        const endClean = startClean + ackClean[0].length;
+        const startRaw = mapping[startClean];
+        const endRaw = endClean < mapping.length ? mapping[endClean] : data.length;
+        filtered = data.slice(0, startRaw) + data.slice(endRaw);
+    }
+    return filtered;
+}
+
+// Tracks tasks with a context-update write in-flight, so the output handler
+// can start buffering BEFORE the echo arrives (handles arbitrary chunk splits).
+const ctxUpdateInFlight = new Set<string>();
+
+/**
+ * Notify running tasks in a workspace that references have changed.
+ * - Idle tasks: immediately receive a context update message
+ * - Busy/other tasks: flagged for notification when they next become idle
+ */
+function notifyTasksOfReferenceChange(
+    workspaceId: string,
+    taskSpawner: InstanceType<typeof import('./task-spawner.js').TaskSpawner>,
+    workspaceStore: InstanceType<typeof import('./workspace-store.js').WorkspaceStore>
+): void {
+    const tasks = taskSpawner.getActiveTasksForWorkspace(workspaceId);
+    if (tasks.length === 0) return;
+
+    const currentRefs = workspaceStore.getReferences(workspaceId);
+    const validRefs = currentRefs.filter(r => existsSync(r.path));
+    const currentRefKey = validRefs.map(r => r.id).sort().join(',');
+
+    for (const task of tasks) {
+        // Skip tasks that already have the current ref key (no change for them)
+        if (currentRefKey === (task.lastRefKey ?? '')) continue;
+
+        if (task.state === 'idle') {
+            // Idle tasks: send context update immediately
+            if (validRefs.length > 0) {
+                const refList = validRefs.map(r => {
+                    let s = `"${r.name}" (${r.path})`;
+                    if (r.description) s += ` - ${r.description}`;
+                    return s;
+                }).join('; ');
+                const msg = `[CONTEXT UPDATE: Workspace references updated. Available reference directories (read files using absolute paths): ${refList}] acknowledge this update briefly\r`;
+                ctxUpdateInFlight.add(task.id);
+                taskSpawner.writeToTask(task.id, msg);
+            } else {
+                const msg = `[CONTEXT UPDATE: All workspace references have been removed.] acknowledge this update briefly\r`;
+                ctxUpdateInFlight.add(task.id);
+                taskSpawner.writeToTask(task.id, msg);
+            }
+            task.lastRefKey = currentRefKey;
+            task.pendingRefNotification = false;
+            logger.info('Sent immediate reference update to idle task', { taskId: task.id, refCount: validRefs.length });
+        } else {
+            // Busy/starting/waiting_input tasks: flag for delivery when idle
+            task.pendingRefNotification = true;
+            logger.info('Queued reference update for busy task', { taskId: task.id, state: task.state });
+        }
+    }
 }
 
 export async function createApp(basePath?: string) {
@@ -332,10 +474,6 @@ export async function createApp(basePath?: string) {
     const clientMissedPongs = new WeakMap<WebSocket, number>();
 
     const heartbeatInterval = setInterval(() => {
-        // Only log heartbeat when clients are connected
-        if (clients.size > 0) {
-            console.log(`[Server] Heartbeat check - ${clients.size} client(s) connected`);
-        }
         for (const client of clients) {
             if (clientAliveMap.get(client) === false) {
                 // Client didn't respond to last ping
@@ -357,7 +495,6 @@ export async function createApp(basePath?: string) {
             // Mark as not alive, will be set to true when pong received
             clientAliveMap.set(client, false);
             client.ping();
-            console.log('[Server] Sent ping to client');
         }
     }, HEARTBEAT_INTERVAL_MS);
 
@@ -504,10 +641,124 @@ export async function createApp(basePath?: string) {
     taskSpawner.on('taskStateChanged', (task: Task) => {
         console.log(`[Server] taskStateChanged event: task=${task.id} state=${task.state}`);
         queueTaskStateChange(task); // Batched - deduplicates rapid state changes
+
+        // Deliver pending reference notifications when a task becomes idle
+        if (task.state === 'idle') {
+            const internalTask = taskSpawner.getTask(task.id);
+            if (internalTask?.pendingRefNotification) {
+                internalTask.pendingRefNotification = false;
+                const currentRefs = workspaceStore.getReferences(task.workspaceId);
+                const validRefs = currentRefs.filter(r => existsSync(r.path));
+                const currentRefKey = validRefs.map(r => r.id).sort().join(',');
+
+                if (currentRefKey !== (internalTask.lastRefKey ?? '')) {
+                    if (validRefs.length > 0) {
+                        const refList = validRefs.map(r => {
+                            let s = `"${r.name}" (${r.path})`;
+                            if (r.description) s += ` - ${r.description}`;
+                            return s;
+                        }).join('; ');
+                        const msg = `[CONTEXT UPDATE: Workspace references updated. Available reference directories (read files using absolute paths): ${refList}] acknowledge this update briefly\r`;
+                        ctxUpdateInFlight.add(task.id);
+                        taskSpawner.writeToTask(task.id, msg);
+                    } else {
+                        const msg = `[CONTEXT UPDATE: All workspace references have been removed.] acknowledge this update briefly\r`;
+                        ctxUpdateInFlight.add(task.id);
+                        taskSpawner.writeToTask(task.id, msg);
+                    }
+                    internalTask.lastRefKey = currentRefKey;
+                    logger.info('Delivered pending reference update to now-idle task', { taskId: task.id, refCount: validRefs.length });
+                }
+            }
+        }
     });
 
+    // Per-task buffer for filtering context update echoes that may span multiple PTY output chunks
+    const ctxUpdateBuffers = new Map<string, { data: string; timer: ReturnType<typeof setTimeout> }>();
+
+    const stripAnsiForDetection = (s: string) => s
+        .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+        .replace(/\x1b\][^\x07]*\x07/g, '')
+        .replace(/\x1b[PX^_].*?\x1b\\/g, '')
+        .replace(/\x1b\[\?[0-9;]*[hl]/g, '')
+        .replace(/\x1b[>=]/g, '');
+
+    const contextUpdateRegex = /\[CONTEXT UPDATE:[^\]]*\]/g;
+    const ackRegex = / ?acknowledge this update briefly\r?/g;
+
+    function emitFilteredOutput(taskId: string, raw: string) {
+        // Use the robust ANSI-aware filter (handles escape sequences interspersed in text)
+        const filtered = filterContextUpdateFromOutput(raw);
+        if (filtered) {
+            broadcast({ type: 'task:output', payload: { taskId, data: filtered } });
+        }
+    }
+
+    function flushCtxBuffer(taskId: string) {
+        const entry = ctxUpdateBuffers.get(taskId);
+        if (entry) {
+            clearTimeout(entry.timer);
+            ctxUpdateBuffers.delete(taskId);
+            // Try filtering the accumulated buffer
+            emitFilteredOutput(taskId, entry.data);
+        }
+    }
+
     taskSpawner.on('taskOutput', (taskId: string, data: string) => {
-        broadcast({ type: 'task:output', payload: { taskId, data } });
+        const existing = ctxUpdateBuffers.get(taskId);
+        const inFlight = ctxUpdateInFlight.has(taskId);
+
+        if (existing || inFlight) {
+            // Accumulating chunks for a context update (either already buffering or flag-triggered)
+            if (existing) {
+                clearTimeout(existing.timer);
+                existing.data += data;
+            } else {
+                // First chunk after in-flight flag was set - start buffer
+                ctxUpdateBuffers.set(taskId, {
+                    data,
+                    timer: setTimeout(() => { ctxUpdateInFlight.delete(taskId); flushCtxBuffer(taskId); }, 3000)
+                });
+            }
+
+            const buf = ctxUpdateBuffers.get(taskId)!;
+            const cleanBuf = stripAnsiForDetection(buf.data);
+
+            // Check if we now have the complete context update pattern
+            const openIdx = cleanBuf.indexOf('[CONTEXT UPDATE:');
+            if (openIdx !== -1) {
+                const closeIdx = cleanBuf.indexOf(']', openIdx + 16);
+                if (closeIdx !== -1) {
+                    // Full pattern received - filter and emit
+                    ctxUpdateInFlight.delete(taskId);
+                    flushCtxBuffer(taskId);
+                    return;
+                }
+            }
+
+            // Still waiting - reset timeout
+            clearTimeout(buf.timer);
+            buf.timer = setTimeout(() => { ctxUpdateInFlight.delete(taskId); flushCtxBuffer(taskId); }, 3000);
+            return;
+        }
+
+        // Not in-flight: still check for unexpected context update echoes (safety net)
+        const clean = stripAnsiForDetection(data);
+        if (clean.includes('[CONTEXT UPDATE:')) {
+            const openIdx = clean.indexOf('[CONTEXT UPDATE:');
+            const closeIdx = clean.indexOf(']', openIdx + 16);
+            if (closeIdx !== -1) {
+                // Complete pattern in a single chunk - filter immediately
+                emitFilteredOutput(taskId, data);
+            } else {
+                // Partial pattern - start buffering
+                const timer = setTimeout(() => flushCtxBuffer(taskId), 3000);
+                ctxUpdateBuffers.set(taskId, { data, timer });
+            }
+        } else {
+            // No context update, pass through
+            broadcast({ type: 'task:output', payload: { taskId, data } });
+        }
     });
 
     taskSpawner.on('taskRestore', (taskId: string, history: string) => {
@@ -618,8 +869,6 @@ export async function createApp(basePath?: string) {
         // Handle pong responses to keep connection alive
         ws.on('pong', () => {
             clientAliveMap.set(ws, true);
-            // Debug: log pong received
-            console.log('[Server] Pong received from client');
         });
 
         // If reconnection is in progress, send a status message and wait
@@ -787,6 +1036,7 @@ export async function createApp(basePath?: string) {
                                             const msgContent = filteredInput.slice(0, -1);
                                             const enterKey = filteredInput.slice(-1);
                                             filteredInput = refPrefix + msgContent + enterKey;
+                                            ctxUpdateInFlight.add(taskId);
                                             logger.info('Injected updated references into follow-up message', { taskId, refCount: currentValidRefs.length });
                                         } else {
                                             logger.info('References cleared for task', { taskId });
@@ -856,6 +1106,18 @@ export async function createApp(basePath?: string) {
                         const renamed = taskSpawner.renameTask(taskId, displayName);
                         if (renamed) {
                             broadcast({ type: 'task:stateChanged' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
+                        }
+                        break;
+                    }
+
+                    case 'task:reorder': {
+                        // Reorder tasks within a workspace
+                        const { taskOrders } = payload as { taskOrders?: { taskId: string; order: number }[] };
+                        if (!taskOrders || !Array.isArray(taskOrders)) break;
+                        const reordered = taskSpawner.reorderTasks(taskOrders);
+                        if (reordered) {
+                            // Broadcast updated task list to all clients (including sender)
+                            broadcast({ type: 'tasks:reordered' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
                         }
                         break;
                     }
@@ -1026,20 +1288,28 @@ export async function createApp(basePath?: string) {
                         const { execSync } = await import('child_process');
                         const platform = process.platform;
                         let selectedPath: string | null = null;
+                        const lastBrowsed = workspaceStore.getLastBrowsedPath();
 
                         try {
                             if (platform === 'darwin') {
+                                let osascriptCmd = `osascript -e 'POSIX path of (choose folder with prompt "Select a workspace folder"`;
+                                if (lastBrowsed) {
+                                    osascriptCmd += ` default location POSIX file "${lastBrowsed}"`;
+                                }
+                                osascriptCmd += `)'`;
                                 const result = execSync(
-                                    `osascript -e 'POSIX path of (choose folder with prompt "Select a workspace folder")'`,
+                                    osascriptCmd,
                                     { encoding: 'utf-8', timeout: 120000 }
                                 ).trim();
                                 if (result) selectedPath = result.replace(/\/$/, ''); // remove trailing slash
                             } else if (platform === 'win32') {
+                                const initialDirLine = lastBrowsed ? `$dialog.SelectedPath = "${lastBrowsed}"` : '';
                                 const psScript = `
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
 $dialog.Description = "Select a workspace folder"
 $dialog.ShowNewFolderButton = $true
+${initialDirLine}
 if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     Write-Output $dialog.SelectedPath
 }`;
@@ -1050,16 +1320,18 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                                 if (result) selectedPath = result;
                             } else {
                                 // Linux - try zenity first, then kdialog
+                                const zenityFilename = lastBrowsed ? ` --filename="${lastBrowsed}/"` : '';
                                 try {
                                     const result = execSync(
-                                        `zenity --file-selection --directory --title="Select a workspace folder" 2>/dev/null`,
+                                        `zenity --file-selection --directory --title="Select a workspace folder"${zenityFilename} 2>/dev/null`,
                                         { encoding: 'utf-8', timeout: 120000 }
                                     ).trim();
                                     if (result) selectedPath = result;
                                 } catch {
+                                    const kdialogStart = lastBrowsed || '~';
                                     try {
                                         const result = execSync(
-                                            `kdialog --getexistingdirectory ~ --title "Select a workspace folder" 2>/dev/null`,
+                                            `kdialog --getexistingdirectory "${kdialogStart}" --title "Select a workspace folder" 2>/dev/null`,
                                             { encoding: 'utf-8', timeout: 120000 }
                                         ).trim();
                                         if (result) selectedPath = result;
@@ -1073,6 +1345,11 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                             if (err.status !== 0) {
                                 logger.debug('Folder browse dialog cancelled or failed', { error: err.message });
                             }
+                        }
+
+                        // Remember the selected path for next time
+                        if (selectedPath) {
+                            workspaceStore.setLastBrowsedPath(selectedPath);
                         }
 
                         ws.send(JSON.stringify({
@@ -1164,6 +1441,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                             workspaceStore.addReference(workspaceId, path, description);
                             const workspaces = workspaceStore.getWorkspaces();
                             broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
+                            notifyTasksOfReferenceChange(workspaceId, taskSpawner, workspaceStore);
                         } catch (error) {
                             const errorMessage = error instanceof Error ? error.message : String(error);
                             logger.error('Failed to add reference', { workspaceId, path, error: errorMessage });
@@ -1177,6 +1455,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                         if (workspaceStore.removeReference(workspaceId, referenceId)) {
                             const workspaces = workspaceStore.getWorkspaces();
                             broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
+                            notifyTasksOfReferenceChange(workspaceId, taskSpawner, workspaceStore);
                         }
                         break;
                     }
@@ -1195,6 +1474,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                             }
                             const workspaces = workspaceStore.getWorkspaces();
                             broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
+                            notifyTasksOfReferenceChange(workspaceId, taskSpawner, workspaceStore);
                         } catch (error) {
                             const errorMessage = error instanceof Error ? error.message : String(error);
                             logger.error('Failed to toggle reference', { workspaceId, referencePath, error: errorMessage });
@@ -1226,6 +1506,91 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                             type: 'workspace:recent:list',
                             payload: { recentWorkspaces }
                         }));
+                        break;
+                    }
+
+                    case 'workspace:reset': {
+                        // Reset workspace: archive all tasks and checkout main branch
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) {
+                            logger.error('workspace:reset requires workspaceId');
+                            sendWSError(ws, 'workspace:reset requires workspaceId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+
+                        logger.info('Resetting workspace', { workspaceId });
+
+                        // Step 1: Archive all tasks for this workspace
+                        const allTasks = taskSpawner.getAllTasks();
+                        const workspaceTasks = allTasks.filter(t => t.workspaceId === workspaceId);
+                        let archivedCount = 0;
+                        for (const task of workspaceTasks) {
+                            try {
+                                taskSpawner.archiveTask(task.id);
+                                archivedCount++;
+                                logger.info('Archived task during workspace reset', { taskId: task.id });
+                            } catch (e) {
+                                logger.error('Failed to archive task during reset', { taskId: task.id, error: e });
+                            }
+                        }
+
+                        // Step 2: Checkout the main/default branch
+                        let branchResult: { success: boolean; error?: string } = { success: false, error: 'Not a git repository' };
+                        let checkedOutBranch: string | null = null;
+                        const isRepo = await isGitRepo(workspaceId);
+                        if (isRepo) {
+                            const currentBranch = await getCurrentBranch(workspaceId);
+                            const defaultBranch = await getDefaultBranch(workspaceId);
+                            logger.info('Git branch info for reset', { currentBranch, defaultBranch, workspaceId });
+
+                            if (defaultBranch) {
+                                if (currentBranch === defaultBranch) {
+                                    branchResult = { success: true };
+                                    checkedOutBranch = defaultBranch;
+                                    logger.info('Already on default branch', { branch: defaultBranch });
+                                } else {
+                                    branchResult = await checkoutBranch(workspaceId, defaultBranch);
+                                    if (branchResult.success) {
+                                        checkedOutBranch = defaultBranch;
+                                        logger.info('Checked out default branch', { branch: defaultBranch });
+                                    } else {
+                                        logger.error('Failed to checkout default branch', { branch: defaultBranch, error: branchResult.error });
+                                    }
+                                }
+                            } else {
+                                branchResult = { success: false, error: 'Could not determine default branch (main/master)' };
+                                logger.warn('Could not determine default branch for workspace', { workspaceId });
+                            }
+                        } else {
+                            // Not a git repo - that's OK, just report it
+                            branchResult = { success: true };
+                            logger.info('Workspace is not a git repo, skipping branch checkout', { workspaceId });
+                        }
+
+                        // Broadcast updated tasks to all clients
+                        broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+
+                        // Send result back to requesting client
+                        ws.send(JSON.stringify({
+                            type: 'workspace:resetResult',
+                            payload: {
+                                workspaceId,
+                                archivedCount,
+                                totalTasks: workspaceTasks.length,
+                                branchCheckout: branchResult.success,
+                                checkedOutBranch,
+                                branchError: branchResult.error || null,
+                                isGitRepo: isRepo,
+                            }
+                        }));
+
+                        logger.info('Workspace reset complete', {
+                            workspaceId,
+                            archivedCount,
+                            totalTasks: workspaceTasks.length,
+                            branchCheckout: branchResult.success,
+                            checkedOutBranch,
+                        });
                         break;
                     }
 
@@ -2043,11 +2408,14 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         res.json({ ok: true });
     });
 
-    // Image upload configuration
-    const uploadsDir = join(basePath || process.cwd(), 'uploads');
+    // Image upload configuration - store in ~/.claudia/cache/images/
+    const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
+    const claudiaCacheDir = join(homeDir, '.claudia', 'cache', 'images');
+    const uploadsDir = claudiaCacheDir;
     if (!existsSync(uploadsDir)) {
         mkdirSync(uploadsDir, { recursive: true });
     }
+    logger.info(`Image cache directory: ${uploadsDir}`);
 
     const storage = multer.diskStorage({
         destination: (_req, _file, cb) => {
@@ -2096,7 +2464,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     app.delete('/api/upload/image/:filename', (req, res) => {
         const { filename } = req.params;
         // Validate filename to prevent directory traversal
-        if (filename.includes('/') || filename.includes('..')) {
+        if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
             return res.status(400).json({ error: 'Invalid filename' });
         }
         const filePath = join(uploadsDir, filename);
@@ -2139,6 +2507,41 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     // Run cleanup on startup and every hour
     cleanupOldUploads();
     setInterval(cleanupOldUploads, 60 * 60 * 1000);
+
+    // One-time migration: clean up old uploads from previous {basePath}/uploads/ location
+    const oldUploadsDir = join(basePath || process.cwd(), 'uploads');
+    if (oldUploadsDir !== uploadsDir && existsSync(oldUploadsDir)) {
+        try {
+            const oldFiles = readdirSync(oldUploadsDir);
+            for (const file of oldFiles) {
+                try {
+                    unlinkSync(join(oldUploadsDir, file));
+                } catch { /* ignore */ }
+            }
+            // Try to remove the directory if empty
+            try {
+                rmdirSync(oldUploadsDir);
+                logger.info(`Migrated: removed old uploads directory ${oldUploadsDir}`);
+            } catch { /* directory may not be empty */ }
+        } catch (error) {
+            logger.warn(`Could not clean up old uploads dir: ${error}`);
+        }
+    }
+
+    // Serve cached images for frontend preview
+    app.get('/api/cache/images/:filename', (req, res) => {
+        const { filename } = req.params;
+        // Validate filename to prevent directory traversal
+        if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+            return res.status(400).json({ error: 'Invalid filename' });
+        }
+        const filePath = join(uploadsDir, filename);
+        if (existsSync(filePath)) {
+            res.sendFile(filePath);
+        } else {
+            res.status(404).json({ error: 'Image not found' });
+        }
+    });
 
     // Backend status endpoint - check which backend is configured and its status
     app.get('/api/backend/status', async (_req, res) => {

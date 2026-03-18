@@ -244,6 +244,11 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
             payload: { taskId: task.id, input: messageWithEnter }
         }));
 
+        // Scroll terminal to bottom so user sees latest output
+        window.dispatchEvent(new CustomEvent('terminal:scrollToBottom', {
+            detail: { taskId: task.id }
+        }));
+
         clearTaskDraftInput(task.id);
         // Clear images after sending (don't delete from server - Claude may need them)
         images.forEach(img => URL.revokeObjectURL(img.previewUrl));
@@ -287,10 +292,14 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
         }, 100);
     };
 
+    // Track images in a ref so cleanup always has the latest list
+    const imagesRef = useRef<UploadedImage[]>([]);
+    imagesRef.current = images;
+
     // Cleanup preview URLs on unmount
     useEffect(() => {
         return () => {
-            images.forEach(img => URL.revokeObjectURL(img.previewUrl));
+            imagesRef.current.forEach(img => URL.revokeObjectURL(img.previewUrl));
         };
     }, []);
 

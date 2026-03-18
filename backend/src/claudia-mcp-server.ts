@@ -29,6 +29,21 @@ const BACKEND_URL = process.env.CLAUDIA_BACKEND_URL || 'http://localhost:4001';
 // Workspace this MCP server is scoped to (set by task-spawner)
 const WORKSPACE_ID = process.env.CLAUDIA_WORKSPACE_ID || '';
 
+// This agent's own task ID (set by task-spawner, used for self-rename)
+const SELF_TASK_ID = process.env.CLAUDIA_TASK_ID || '';
+
+/**
+ * Format a duration in milliseconds to a human-readable string
+ */
+function formatDuration(ms: number): string {
+    const seconds = Math.floor(ms / 1000);
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m`;
+}
+
 // Logger that writes to stderr (stdout is reserved for MCP stdio transport)
 const log = {
     info: (...args: unknown[]) => console.error('[Claudia MCP]', ...args),
@@ -114,6 +129,13 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
                     resolve(msg.payload);
                 }
 
+                // For task:rename, wait for task:stateChanged (broadcast after rename)
+                if (type === 'task:rename' && msg.type === 'task:stateChanged') {
+                    clearTimeout(timeout);
+                    ws.close();
+                    resolve(msg.payload);
+                }
+
                 // Handle errors
                 if (msg.type === 'error') {
                     clearTimeout(timeout);
@@ -170,15 +192,23 @@ server.tool(
                 return { content: [{ type: 'text', text: `No active tasks in this workspace.` }] };
             }
 
-            const formatted = tasks.map((t: any) => ({
-                id: t.id,
-                state: t.state,
-                prompt: t.displayName || (t.prompt?.substring(0, 100) + (t.prompt?.length > 100 ? '...' : '')),
-                workspace: t.workspaceId,
-                createdAt: t.createdAt,
-                lastActivity: t.lastActivity,
-                waitingInputType: t.waitingInputType || null
-            }));
+            const now = Date.now();
+            const formatted = tasks.map((t: any) => {
+                const isRunning = t.state === 'busy' || t.state === 'starting';
+                const startTime = t.processStartedAt || t.createdAt;
+                const runningForMs = isRunning && startTime ? now - new Date(startTime).getTime() : null;
+
+                return {
+                    id: t.id,
+                    state: t.state,
+                    prompt: t.displayName || (t.prompt?.substring(0, 100) + (t.prompt?.length > 100 ? '...' : '')),
+                    createdAt: t.createdAt,
+                    lastActivity: t.lastActivity,
+                    processStartedAt: t.processStartedAt || null,
+                    runningFor: runningForMs ? formatDuration(runningForMs) : null,
+                    waitingInputType: t.waitingInputType || null,
+                };
+            });
 
             return {
                 content: [{
@@ -197,20 +227,56 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_get_task_status',
-    'Get detailed status information about a specific task in this workspace, including its state, last activity, and whether it is waiting for input.',
+    'Get detailed status of a specific task including state, runtime duration, and a snippet of recent output. Use this to check progress of spawned tasks without fetching full output.',
     {
         taskId: z.string().describe('The task ID to get status for'),
     },
     async ({ taskId }) => {
         try {
-            const response = await backendFetch(`/api/tasks/${taskId}/status`);
-            if (!response.ok) {
-                if (response.status === 404) {
-                    return { content: [{ type: 'text', text: `Error: Task '${taskId}' not found.` }] };
-                }
-                return { content: [{ type: 'text', text: `Error: Failed to get task status (HTTP ${response.status})` }] };
+            // Fetch both task list (for full metadata) and recent output in parallel
+            const [tasksResponse, outputResponse] = await Promise.all([
+                backendFetch('/api/tasks'),
+                backendFetch(`/api/tasks/${taskId}/output?maxBytes=2048`),
+            ]);
+
+            if (!tasksResponse.ok) {
+                return { content: [{ type: 'text', text: `Error: Failed to fetch tasks (HTTP ${tasksResponse.status})` }] };
             }
-            const status = await response.json();
+
+            const tasks = await tasksResponse.json();
+            const task = tasks.find((t: any) => t.id === taskId);
+
+            if (!task) {
+                return { content: [{ type: 'text', text: `Error: Task '${taskId}' not found.` }] };
+            }
+
+            const now = Date.now();
+            const isRunning = task.state === 'busy' || task.state === 'starting';
+            const startTime = task.processStartedAt || task.createdAt;
+            const runningForMs = isRunning && startTime ? now - new Date(startTime).getTime() : null;
+
+            // Get a short snippet of recent output
+            let outputSnippet: string | null = null;
+            if (outputResponse.ok) {
+                const outputData = await outputResponse.json();
+                if (outputData.output) {
+                    // Take last 500 chars as a progress snippet
+                    const raw = outputData.output;
+                    outputSnippet = raw.length > 500 ? '...' + raw.slice(-500) : raw;
+                }
+            }
+
+            const status = {
+                id: task.id,
+                state: task.state,
+                prompt: task.displayName || (task.prompt?.substring(0, 200) + (task.prompt?.length > 200 ? '...' : '')),
+                createdAt: task.createdAt,
+                lastActivity: task.lastActivity,
+                processStartedAt: task.processStartedAt || null,
+                runningFor: runningForMs ? formatDuration(runningForMs) : null,
+                waitingInputType: task.waitingInputType || null,
+                recentOutput: outputSnippet,
+            };
 
             return {
                 content: [{
@@ -273,8 +339,9 @@ server.tool(
     `Create a new task in Claudia. The task will be assigned to a Claude Code agent in the current workspace (${WORKSPACE_ID || 'unknown'}). Use this to delegate work to other agents running in parallel.`,
     {
         prompt: z.string().describe('The prompt/instructions for the new task'),
+        displayName: z.string().optional().describe('Optional short display name for the task in the Claudia sidebar (e.g., "Build API endpoint", "Write tests")'),
     },
-    async ({ prompt }) => {
+    async ({ prompt, displayName }) => {
         if (!WORKSPACE_ID) {
             return {
                 content: [{
@@ -296,16 +363,28 @@ server.tool(
             const task = (result as any)?.task;
             if (task) {
                 log.info(`Task created: ${task.id}`);
+
+                // Rename the task if displayName was provided
+                if (displayName) {
+                    try {
+                        await sendWSMessage('task:rename', { taskId: task.id, displayName });
+                        log.info(`Task renamed to: ${displayName}`);
+                    } catch (renameErr) {
+                        log.error('Failed to rename task after creation:', renameErr);
+                    }
+                }
+
                 return {
                     content: [{
                         type: 'text',
                         text: JSON.stringify({
                             success: true,
                             taskId: task.id,
+                            displayName: displayName || null,
                             state: task.state,
                             workspace: task.workspaceId,
                             prompt: task.prompt?.substring(0, 200),
-                            message: `Task '${task.id}' created successfully. It is now running in workspace '${WORKSPACE_ID}'.`
+                            message: `Task '${task.id}'${displayName ? ` (${displayName})` : ''} created successfully. It is now running in workspace '${WORKSPACE_ID}'.`
                         }, null, 2)
                     }]
                 };
@@ -349,7 +428,7 @@ server.tool(
 
             const result = await sendWSMessage('task:input', {
                 taskId,
-                data: input + '\n',
+                input: input + '\n',
             });
 
             return {
@@ -407,6 +486,46 @@ server.tool(
                 content: [{
                     type: 'text',
                     text: `Error archiving task: ${error instanceof Error ? error.message : String(error)}`
+                }]
+            };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_rename_task
+// ============================================================================
+server.tool(
+    'claudia_rename_task',
+    `Rename a task's display name in the Claudia UI sidebar. Use this to give tasks descriptive names that reflect what they're working on. ${SELF_TASK_ID ? `Your own task ID is: ${SELF_TASK_ID} — you can rename yourself too.` : ''}`,
+    {
+        taskId: z.string().describe(`The task ID to rename.${SELF_TASK_ID ? ` Use "${SELF_TASK_ID}" to rename yourself.` : ''}`),
+        displayName: z.string().describe('The new display name for the task (short, descriptive)'),
+    },
+    async ({ taskId, displayName }) => {
+        try {
+            log.info(`Renaming task ${taskId} to: ${displayName}`);
+
+            const result = await sendWSMessage('task:rename', {
+                taskId,
+                displayName,
+            });
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        message: `Task '${taskId}' renamed to '${displayName}'.`,
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to rename task:', error);
+            return {
+                content: [{
+                    type: 'text',
+                    text: `Error renaming task: ${error instanceof Error ? error.message : String(error)}`
                 }]
             };
         }

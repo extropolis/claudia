@@ -82,24 +82,55 @@ export function ShellTerminalView({ workspaceId, workspaceName, wsRef, onClose, 
         term.loadAddon(fitAddon);
         term.loadAddon(webLinksAddon);
 
-        // Electron clipboard integration
-        if (window.electronAPI?.readClipboard) {
-            term.attachCustomKeyEventHandler((event) => {
-                if (event.type === 'keydown' && event.ctrlKey && event.key === 'v') {
-                    const text = window.electronAPI!.readClipboard();
+        // Clipboard integration: Ctrl+V / Cmd+V paste and Ctrl+C / Cmd+C copy
+        // Works in both Electron and browser environments
+        const isMac = /Mac|iPhone|iPod|iPad/.test(navigator.userAgent);
+        term.attachCustomKeyEventHandler((event) => {
+            if (event.type !== 'keydown') return true;
+
+            const modKey = isMac ? event.metaKey : event.ctrlKey;
+
+            // Paste: Ctrl+V (Win/Linux), Cmd+V (Mac), or Ctrl+Shift+V (Linux terminal style)
+            const isPaste = (modKey && event.key === 'v') ||
+                (!isMac && event.ctrlKey && event.shiftKey && event.key === 'V');
+            if (isPaste) {
+                // Prevent the browser's native paste event from also firing
+                // (which would cause xterm to paste a second time)
+                event.preventDefault();
+                if (window.electronAPI?.readClipboard) {
+                    const text = window.electronAPI.readClipboard();
                     if (text) term.paste(text);
+                } else if (navigator.clipboard?.readText) {
+                    navigator.clipboard.readText().then((text) => {
+                        if (text) term.paste(text);
+                    }).catch((err) => {
+                        console.warn('[ShellTerminalView] Clipboard paste failed:', err);
+                    });
+                }
+                return false; // Prevent xterm from also handling the key
+            }
+
+            // Copy: Ctrl+C (Win/Linux), Cmd+C (Mac), or Ctrl+Shift+C (Linux terminal style)
+            const isCopy = (modKey && event.key === 'c') ||
+                (!isMac && event.ctrlKey && event.shiftKey && event.key === 'C');
+            if (isCopy) {
+                const selection = term.getSelection();
+                if (selection) {
+                    if (window.electronAPI?.writeClipboard) {
+                        window.electronAPI.writeClipboard(selection);
+                    } else if (navigator.clipboard?.writeText) {
+                        navigator.clipboard.writeText(selection).catch((err) => {
+                            console.warn('[ShellTerminalView] Clipboard copy failed:', err);
+                        });
+                    }
                     return false;
                 }
-                if (event.type === 'keydown' && event.ctrlKey && event.key === 'c') {
-                    const selection = term.getSelection();
-                    if (selection) {
-                        window.electronAPI!.writeClipboard(selection);
-                        return false;
-                    }
-                }
-                return true;
-            });
-        }
+                // No selection: let Ctrl+C pass through as SIGINT (but not Cmd+C on Mac)
+                if (isMac) return false;
+            }
+
+            return true;
+        });
 
         // Send input to backend shell
         term.onData((data) => {
@@ -125,20 +156,32 @@ export function ShellTerminalView({ workspaceId, workspaceName, wsRef, onClose, 
         xtermRef.current = term;
         fitAddonRef.current = fitAddon;
 
-        // Windows right-click copy/paste
-        if (window.electronAPI?.writeClipboard) {
-            term.element?.addEventListener('contextmenu', (e) => {
-                e.preventDefault();
-                const selection = term.getSelection();
-                if (selection) {
-                    window.electronAPI!.writeClipboard(selection);
-                    term.clearSelection();
-                } else {
-                    const text = window.electronAPI!.readClipboard();
-                    if (text) term.paste(text);
+        // Right-click: copy selection or paste (works in both Electron and browser)
+        term.element?.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            const selection = term.getSelection();
+            if (selection) {
+                if (window.electronAPI?.writeClipboard) {
+                    window.electronAPI.writeClipboard(selection);
+                } else if (navigator.clipboard?.writeText) {
+                    navigator.clipboard.writeText(selection).catch((err) => {
+                        console.warn('[ShellTerminalView] Right-click copy failed:', err);
+                    });
                 }
-            });
-        }
+                term.clearSelection();
+            } else {
+                if (window.electronAPI?.readClipboard) {
+                    const text = window.electronAPI.readClipboard();
+                    if (text) term.paste(text);
+                } else if (navigator.clipboard?.readText) {
+                    navigator.clipboard.readText().then((text) => {
+                        if (text) term.paste(text);
+                    }).catch((err) => {
+                        console.warn('[ShellTerminalView] Right-click paste failed:', err);
+                    });
+                }
+            }
+        });
 
         // Initial fit
         requestAnimationFrame(() => {

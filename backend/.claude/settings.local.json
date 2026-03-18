@@ -9,6 +9,7 @@
   "enabledMcpjsonServers": [
     "playwright",
     "duckduckgo",
-    "jira_mcp"
+    "jira_mcp",
+    "claudia"
   ]
 }

@@ -18,12 +18,14 @@ export interface WorkspaceConfig {
     workspaces: Workspace[];
     activeWorkspaceId: string | null;
     recentWorkspaces: RecentWorkspace[];  // Workspaces that have been removed (history)
+    lastBrowsedPath?: string;  // Remember last directory used in folder browser
 }
 
 const DEFAULT_CONFIG: WorkspaceConfig = {
     workspaces: [],
     activeWorkspaceId: null,
-    recentWorkspaces: []
+    recentWorkspaces: [],
+    lastBrowsedPath: undefined
 };
 
 const MAX_RECENT_WORKSPACES = 10;  // Keep only the last 10 recent workspaces
@@ -318,5 +320,16 @@ export class WorkspaceStore {
         this.saveConfig();
         console.log(`[WorkspaceStore] Removed reference ${removed.name} from workspace ${workspaceId}`);
         return true;
+    }
+
+    // --- Last Browsed Path ---
+
+    getLastBrowsedPath(): string | undefined {
+        return this.config.lastBrowsedPath;
+    }
+
+    setLastBrowsedPath(path: string): void {
+        this.config.lastBrowsedPath = path;
+        this.saveConfig();
     }
 }

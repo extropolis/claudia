@@ -224,6 +224,12 @@ export function useWebSocket() {
                         setWorkspaces(payload.workspaces);
                         break;
                     }
+                    case 'tasks:reordered': {
+                        const payload = message.payload as { tasks: Task[] };
+                        console.log('[WebSocket] Tasks reordered');
+                        setTasks(payload.tasks);
+                        break;
+                    }
                     case 'workspace:updated': {
                         const payload = message.payload as { workspaces: Workspace[] };
                         console.log('[WebSocket] Workspaces updated');
@@ -416,6 +422,34 @@ export function useWebSocket() {
                         selectTask(payload.task.id);
                         break;
                     }
+                    case 'workspace:resetResult' as string: {
+                        const payload = message.payload as {
+                            workspaceId: string;
+                            archivedCount: number;
+                            totalTasks: number;
+                            branchCheckout: boolean;
+                            checkedOutBranch: string | null;
+                            branchError: string | null;
+                            isGitRepo: boolean;
+                        };
+                        console.log('[WebSocket] Workspace reset result:', payload);
+
+                        // Build a user-friendly notification
+                        let message_text = `Reset complete: ${payload.archivedCount} task(s) archived.`;
+                        if (payload.isGitRepo) {
+                            if (payload.branchCheckout && payload.checkedOutBranch) {
+                                message_text += ` Switched to branch "${payload.checkedOutBranch}".`;
+                            } else if (payload.branchError) {
+                                message_text += ` Branch checkout failed: ${payload.branchError}`;
+                            }
+                        }
+
+                        // Show as error notification if branch checkout failed
+                        if (payload.isGitRepo && !payload.branchCheckout) {
+                            useTaskStore.getState().setErrorNotification(message_text, 'WORKSPACE_RESET_PARTIAL');
+                        }
+                        break;
+                    }
                     case 'error': {
                         const payload = message.payload as WSErrorPayload;
                         console.error('[WebSocket] Server error:', payload.message, {
@@ -548,6 +582,10 @@ export function useWebSocket() {
         sendMessage('workspace:reorder', { fromIndex, toIndex });
     }, [sendMessage]);
 
+    const reorderTasks = useCallback((taskOrders: { taskId: string; order: number }[]) => {
+        sendMessage('task:reorder', { taskOrders });
+    }, [sendMessage]);
+
     const openFolder = useCallback((workspaceId: string) => {
         sendMessage('workspace:openFolder', { workspaceId });
     }, [sendMessage]);
@@ -612,6 +650,11 @@ export function useWebSocket() {
         sendMessage('git:push', { workspaceId });
     }, [sendMessage]);
 
+    // Workspace reset action
+    const resetWorkspace = useCallback((workspaceId: string) => {
+        sendMessage('workspace:reset', { workspaceId });
+    }, [sendMessage]);
+
     // Rename actions
     const renameTask = useCallback((taskId: string, displayName: string) => {
         sendMessage('task:rename', { taskId, displayName });
@@ -648,6 +691,7 @@ export function useWebSocket() {
         createWorkspace,
         deleteWorkspace,
         reorderWorkspaces,
+        reorderTasks,
         openFolder,
         openTerminal,
         setSystemPrompt,
@@ -663,6 +707,7 @@ export function useWebSocket() {
         deleteArchivedTask,
         continueArchivedTask,
         pushToGithub,
+        resetWorkspace,
         renameTask,
         renameWorkspace,
         toggleReference,

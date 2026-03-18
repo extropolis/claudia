@@ -24,6 +24,7 @@ interface TaskStore {
     archivedTasks: Task[];
     showArchivedTasks: boolean;
     selectedTaskId: string | null;
+    lastSelectedTaskByWorkspace: Map<string, string>; // workspaceId → last selected taskId
     isConnected: boolean;
     isServerReloading: boolean;  // True when server is restarting (hot reload)
     isOffline: boolean;  // True when browser has no internet connection
@@ -34,6 +35,7 @@ interface TaskStore {
     expandedWorkspaces: Set<string>;
     expandedWorkspacesInitialized: boolean;  // True once persisted state is loaded or first workspaces set
     showProjectPicker: boolean;
+    workspaceColumns: number; // 0 = auto, 1-4 = fixed column count
 
     // Voice state
     voiceEnabled: boolean;
@@ -141,6 +143,9 @@ interface TaskStore {
     getTaskDraftInput: (taskId: string) => string;
     clearTaskDraftInput: (taskId: string) => void;
 
+    // Layout actions
+    setWorkspaceColumns: (columns: number) => void;
+
     // Settings actions
     setAutoFocusOnInput: (enabled: boolean) => void;
     setSupervisorEnabled: (enabled: boolean) => void;
@@ -160,6 +165,7 @@ interface PersistedState {
     showArchivedTasks: boolean;
     expandedWorkspaces: string[];  // Stored as array, converted to Set
     expandedWorkspacesInitialized: boolean;  // Track if user has interacted with workspaces
+    workspaceColumns: number; // 0 = auto, 1-4 = fixed
     voiceEnabled: boolean;
     autoSpeakResponses: boolean;
     selectedVoiceName: string | null;
@@ -190,6 +196,7 @@ export const useTaskStore = create<TaskStore>()(
             archivedTasks: [],
             showArchivedTasks: false,
             selectedTaskId: null,
+            lastSelectedTaskByWorkspace: new Map(),
             isConnected: false,
             isServerReloading: false,
             isOffline: typeof navigator !== 'undefined' ? !navigator.onLine : false,
@@ -198,6 +205,7 @@ export const useTaskStore = create<TaskStore>()(
             expandedWorkspaces: new Set<string>(),
             expandedWorkspacesInitialized: false,
             showProjectPicker: false,
+            workspaceColumns: 0, // 0 = auto
 
             // Voice initial state
             voiceEnabled: false,
@@ -258,7 +266,19 @@ export const useTaskStore = create<TaskStore>()(
             setErrorNotification: (message, code) => set({ errorNotification: { message, code, timestamp: new Date() } }),
             clearErrorNotification: () => set({ errorNotification: null }),
 
-            selectTask: (id) => set({ selectedTaskId: id }),
+            selectTask: (id) => {
+                const { tasks, lastSelectedTaskByWorkspace } = get();
+                if (id) {
+                    const task = tasks.get(id);
+                    if (task) {
+                        const newMap = new Map(lastSelectedTaskByWorkspace);
+                        newMap.set(task.workspaceId, id);
+                        set({ selectedTaskId: id, lastSelectedTaskByWorkspace: newMap });
+                        return;
+                    }
+                }
+                set({ selectedTaskId: id });
+            },
 
             setTasks: (tasks) => {
                 const { tasks: existingTasks, selectedTaskId } = get();
@@ -282,7 +302,11 @@ export const useTaskStore = create<TaskStore>()(
                             console.log(`[TaskStore] Keeping existing task ${task.id} (local: ${existingTime}, incoming: ${incomingTime})`);
                             taskMap.set(task.id, existing);
                         } else {
-                            taskMap.set(task.id, task);
+                            // Preserve existing order if incoming task doesn't have one
+                            const mergedTask = task.order === undefined && existing.order !== undefined
+                                ? { ...task, order: existing.order }
+                                : task;
+                            taskMap.set(task.id, mergedTask);
                         }
                     } else {
                         taskMap.set(task.id, task);
@@ -328,8 +352,13 @@ export const useTaskStore = create<TaskStore>()(
                     }
                 }
 
+                // Preserve existing order if incoming task doesn't have one
+                const mergedTask = existing && task.order === undefined && existing.order !== undefined
+                    ? { ...task, order: existing.order }
+                    : task;
+
                 const newTasks = new Map(tasks);
-                newTasks.set(task.id, task);
+                newTasks.set(task.id, mergedTask);
                 set({ tasks: newTasks });
             },
 
@@ -452,6 +481,8 @@ export const useTaskStore = create<TaskStore>()(
             },
 
             setShowProjectPicker: (show) => set({ showProjectPicker: show }),
+
+            setWorkspaceColumns: (columns) => set({ workspaceColumns: columns }),
 
             // Task reordering within a workspace
             reorderTasks: (workspaceId, fromIndex, toIndex) => {
@@ -616,6 +647,7 @@ export const useTaskStore = create<TaskStore>()(
                 showArchivedTasks: state.showArchivedTasks,
                 expandedWorkspaces: Array.from(state.expandedWorkspaces),
                 expandedWorkspacesInitialized: state.expandedWorkspacesInitialized,
+                workspaceColumns: state.workspaceColumns,
                 voiceEnabled: state.voiceEnabled,
                 autoSpeakResponses: state.autoSpeakResponses,
                 selectedVoiceName: state.selectedVoiceName,
@@ -660,6 +692,7 @@ export const useTaskStore = create<TaskStore>()(
                     // Use persisted initialized flag, or mark as initialized if we have any persisted expanded state
                     expandedWorkspacesInitialized: persisted.expandedWorkspacesInitialized ??
                         (persisted.expandedWorkspaces !== undefined),
+                    workspaceColumns: persisted.workspaceColumns ?? currentState.workspaceColumns,
                     voiceEnabled: persisted.voiceEnabled ?? currentState.voiceEnabled,
                     autoSpeakResponses: persisted.autoSpeakResponses ?? currentState.autoSpeakResponses,
                     selectedVoiceName: persisted.selectedVoiceName ?? currentState.selectedVoiceName,

@@ -2,11 +2,12 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
-    Loader2, Square, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, FolderPlus, Clipboard
+    Loader2, Circle, ChevronRight, ChevronDown,
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
+import { ConfirmModal } from './ConfirmModal';
 import './WorkspacePanel.css';
 
 // Simple notification sound using Web Audio API
@@ -73,7 +74,7 @@ function StateIcon({ task, hasActiveQuestion, onArchive }: StateIconProps) {
                 }}
                 title="Archive task"
             >
-                <Square
+                <CheckCircle
                     className="status-icon idle archive-checkbox"
                     size={14}
                 />
@@ -94,6 +95,7 @@ interface TaskItemProps {
     onSelectTask: (taskId: string) => void;
     onRenameTask?: (taskId: string, displayName: string) => void;
     isSelected: boolean;
+    isLastSelected: boolean; // Was last selected in this workspace (but not globally active)
     hasActiveQuestion: boolean;
     // Drag and drop
     isDragging: boolean;
@@ -120,7 +122,7 @@ function formatTimeAgo(date: Date | string): string {
     return `${days}d`;
 }
 
-function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, isSelected, hasActiveQuestion, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
+function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, isSelected, isLastSelected, hasActiveQuestion, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
     const [stopClicked, setStopClicked] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
     const [editValue, setEditValue] = useState('');
@@ -135,12 +137,13 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
     }, [task.state]);
 
     // Tick to keep the time indicator up to date
-    // Every 1s when busy (live elapsed timer), every 30s otherwise
+    // Every 1s for live elapsed timer (both processing and idle)
     const isBusy = task.state === 'busy' || task.state === 'starting';
+    const isActiveState = isBusy || task.state === 'idle' || task.state === 'waiting_input';
     useEffect(() => {
-        const interval = setInterval(() => setTick(t => t + 1), isBusy ? 1000 : 30000);
+        const interval = setInterval(() => setTick(t => t + 1), isActiveState ? 1000 : 30000);
         return () => clearInterval(interval);
-    }, [isBusy]);
+    }, [isActiveState]);
 
     // Split prompt by ⏺ dots and get the last segment for display
     const segments = task.prompt.split('⏺').map(s => s.trim()).filter(Boolean);
@@ -198,7 +201,7 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
     return (
         <div
             ref={taskItemRef}
-            className={`task-item ${isSelected ? 'selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
+            className={`task-item ${isSelected ? 'selected' : ''} ${isLastSelected && !isSelected ? 'last-selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
             draggable={!isEditing}
             onClick={() => !isEditing && onSelectTask(task.id)}
             onDragStart={(e) => {
@@ -240,11 +243,14 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                     <span
                         className={`task-time-ago ${isBusy ? 'busy' : ''}`}
                         title={isBusy
-                            ? `Started ${new Date(task.processStartedAt || task.createdAt).toLocaleString()}`
-                            : new Date(task.lastActivity).toLocaleString()
+                            ? `Processing since ${new Date(task.processStartedAt || task.createdAt).toLocaleString()}`
+                            : `Idle since ${new Date(task.lastActivity).toLocaleString()}`
                         }
                     >
-                        {formatTimeAgo(isBusy ? (task.processStartedAt || task.createdAt) : task.lastActivity)}
+                        {isBusy
+                            ? formatTimeAgo(task.processStartedAt || task.createdAt)
+                            : formatTimeAgo(task.lastActivity)
+                        }
                     </span>
                 )}
                 {canInterrupt && (
@@ -308,6 +314,7 @@ interface WorkspaceSectionProps {
     tasks: Task[];
     waitingInputTaskIds: Set<string>;
     selectedTaskId: string | null;
+    lastSelectedTaskId: string | null; // Last selected task in this workspace
     isExpanded: boolean;
     index: number;
     // Workspace drag state
@@ -342,6 +349,8 @@ interface WorkspaceSectionProps {
     onToggleReference?: (workspaceId: string, referencePath: string) => void;
     onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
+    // Reset workspace handler
+    onResetWorkspace?: () => void;
 }
 
 function WorkspaceSection({
@@ -349,6 +358,7 @@ function WorkspaceSection({
     tasks,
     waitingInputTaskIds,
     selectedTaskId,
+    lastSelectedTaskId,
     isExpanded,
     index,
     isDragging,
@@ -377,7 +387,8 @@ function WorkspaceSection({
     allWorkspaces,
     onToggleReference,
     onAddCustomReference,
-    onRemoveReference
+    onRemoveReference,
+    onResetWorkspace
 }: WorkspaceSectionProps) {
     const [inputValue, setInputValue] = useState('');
     const [isEditingWorkspaceName, setIsEditingWorkspaceName] = useState(false);
@@ -386,7 +397,43 @@ function WorkspaceSection({
     const [workspaceEditValue, setWorkspaceEditValue] = useState('');
     const workspaceEditRef = useRef<HTMLInputElement>(null);
     const referencesMenuItemRef = useRef<HTMLDivElement>(null);
-    const submenuCloseTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const submenuCloseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const [showResetConfirm, setShowResetConfirm] = useState(false);
+    const [branchName, setBranchName] = useState<string | null>(null);
+
+    // Reset submenu state when parent menu closes, and cleanup timeout on unmount
+    useEffect(() => {
+        if (!isMenuOpen) {
+            setShowReferencesSubmenu(false);
+            if (submenuCloseTimeoutRef.current) {
+                clearTimeout(submenuCloseTimeoutRef.current);
+                submenuCloseTimeoutRef.current = null;
+            }
+        }
+        return () => {
+            if (submenuCloseTimeoutRef.current) {
+                clearTimeout(submenuCloseTimeoutRef.current);
+            }
+        };
+    }, [isMenuOpen]);
+
+    // Fetch current git branch for this workspace
+    useEffect(() => {
+        const fetchBranch = async () => {
+            try {
+                const params = new URLSearchParams({ workspace: workspace.id });
+                const res = await fetch(`${getApiBaseUrl()}/api/workspaces/git-status?${params}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setBranchName(data.branch || null);
+                }
+            } catch {
+                // silently ignore - not a git repo or network error
+            }
+        };
+        fetchBranch();
+    }, [workspace.id]);
 
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
@@ -783,6 +830,22 @@ function WorkspaceSection({
                             )}
                         </>
                     )}
+                    {branchName && (
+                        <span
+                            className="workspace-branch-label"
+                            title={`Click to copy: ${branchName}`}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                navigator.clipboard.writeText(branchName);
+                                const el = e.currentTarget;
+                                el.classList.add('copied');
+                                setTimeout(() => el.classList.remove('copied'), 1000);
+                            }}
+                        >
+                            <GitBranch size={11} />
+                            <span className="branch-name">{branchName}</span>
+                        </span>
+                    )}
                     {tasks.length > 0 && (
                         <span className="workspace-task-count">{tasks.length}</span>
                     )}
@@ -814,7 +877,17 @@ function WorkspaceSection({
                         <MoreVertical size={14} />
                     </button>
                     {isMenuOpen && (
-                        <div className="workspace-dropdown-menu">
+                        <div className="workspace-dropdown-menu" ref={(el) => {
+                            if (el) {
+                                const rect = el.getBoundingClientRect();
+                                if (rect.bottom > window.innerHeight - 8) {
+                                    el.style.top = 'auto';
+                                    el.style.bottom = '100%';
+                                    el.style.marginTop = '0';
+                                    el.style.marginBottom = '4px';
+                                }
+                            }
+                        }}>
                             <button
                                 className="workspace-dropdown-item"
                                 onClick={(e) => {
@@ -897,7 +970,6 @@ function WorkspaceSection({
                                 ref={referencesMenuItemRef}
                                 className="workspace-dropdown-item has-submenu"
                                 onMouseEnter={() => {
-                                    // Clear any pending close timeout
                                     if (submenuCloseTimeoutRef.current) {
                                         clearTimeout(submenuCloseTimeoutRef.current);
                                         submenuCloseTimeoutRef.current = null;
@@ -909,21 +981,11 @@ function WorkspaceSection({
                                         setSubmenuPosition({ top: rect.top, left: rect.right - 8 });
                                     }
                                 }}
-                                onMouseLeave={(e) => {
-                                    // Only close if mouse is NOT moving towards the submenu area
-                                    const rect = referencesMenuItemRef.current?.getBoundingClientRect();
-                                    if (rect) {
-                                        const mouseX = e.clientX;
-                                        const mouseY = e.clientY;
-                                        // If mouse is to the right of the parent item, it's likely moving to submenu
-                                        if (mouseX > rect.right - 10 && mouseY >= rect.top && mouseY <= rect.bottom) {
-                                            return; // Don't close, user is moving to submenu
-                                        }
-                                    }
-                                    // Delay closing to allow mouse to move to submenu
+                                onMouseLeave={() => {
                                     submenuCloseTimeoutRef.current = setTimeout(() => {
                                         setShowReferencesSubmenu(false);
-                                    }, 200);
+                                        submenuCloseTimeoutRef.current = null;
+                                    }, 150);
                                 }}
                                 onClick={(e) => e.stopPropagation()}
                             >
@@ -934,30 +996,29 @@ function WorkspaceSection({
                                     <div
                                         className="workspace-submenu"
                                         style={{ position: 'fixed', top: submenuPosition.top, left: submenuPosition.left }}
+                                        ref={(el) => {
+                                            if (el) {
+                                                const rect = el.getBoundingClientRect();
+                                                if (rect.bottom > window.innerHeight - 8) {
+                                                    el.style.top = `${submenuPosition.top - (rect.bottom - window.innerHeight) - 8}px`;
+                                                }
+                                                if (rect.right > window.innerWidth - 8) {
+                                                    el.style.left = `${submenuPosition.left - rect.width - (referencesMenuItemRef.current?.getBoundingClientRect().width || 0) + 8}px`;
+                                                }
+                                            }
+                                        }}
                                         onClick={(e) => e.stopPropagation()}
                                         onMouseEnter={() => {
-                                            // Cancel close when mouse enters submenu
                                             if (submenuCloseTimeoutRef.current) {
                                                 clearTimeout(submenuCloseTimeoutRef.current);
                                                 submenuCloseTimeoutRef.current = null;
                                             }
                                         }}
-                                        onMouseLeave={(e) => {
-                                            // Check if mouse is leaving towards the parent item
-                                            const rect = referencesMenuItemRef.current?.getBoundingClientRect();
-                                            if (rect) {
-                                                const mouseX = e.clientX;
-                                                const mouseY = e.clientY;
-                                                // If mouse is back in the parent item area, keep open
-                                                if (mouseX >= rect.left && mouseX <= rect.right &&
-                                                    mouseY >= rect.top && mouseY <= rect.bottom) {
-                                                    return;
-                                                }
-                                            }
-                                            // Close when mouse leaves submenu (with small delay for edge cases)
+                                        onMouseLeave={() => {
                                             submenuCloseTimeoutRef.current = setTimeout(() => {
                                                 setShowReferencesSubmenu(false);
-                                            }, 100);
+                                                submenuCloseTimeoutRef.current = null;
+                                            }, 150);
                                         }}
                                     >
                                         {allWorkspaces.filter(w => w.id !== workspace.id).length > 0 && (
@@ -1042,6 +1103,17 @@ function WorkspaceSection({
                                 <span>Code Review</span>
                             </button>
                             <div className="workspace-dropdown-divider" />
+                            <button
+                                className="workspace-dropdown-item reset"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setShowResetConfirm(true);
+                                    onToggleMenu();
+                                }}
+                            >
+                                <RotateCcw size={14} />
+                                <span>Reset Workspace</span>
+                            </button>
                             <button
                                 className="workspace-dropdown-item delete"
                                 onClick={(e) => {
@@ -1165,6 +1237,7 @@ function WorkspaceSection({
                                         task={task}
                                         index={idx}
                                         isSelected={selectedTaskId === task.id}
+                                        isLastSelected={lastSelectedTaskId === task.id}
                                         hasActiveQuestion={waitingInputTaskIds.has(task.id)}
                                         onDeleteTask={onDeleteTask}
                                         onInterruptTask={onInterruptTask}
@@ -1191,6 +1264,42 @@ function WorkspaceSection({
                         </div>
                     )}
                 </div>
+            )}
+
+            {showResetConfirm && (
+                <ConfirmModal
+                    title="Reset Workspace"
+                    variant="warning"
+                    confirmLabel="Reset"
+                    cancelLabel="Cancel"
+                    onConfirm={() => {
+                        onResetWorkspace?.();
+                        setShowResetConfirm(false);
+                        // Refresh branch name after reset (slight delay for git checkout to complete)
+                        setTimeout(async () => {
+                            try {
+                                const params = new URLSearchParams({ workspace: workspace.id });
+                                const res = await fetch(`${getApiBaseUrl()}/api/workspaces/git-status?${params}`);
+                                if (res.ok) {
+                                    const data = await res.json();
+                                    setBranchName(data.branch || null);
+                                }
+                            } catch { /* ignore */ }
+                        }, 1500);
+                    }}
+                    onCancel={() => setShowResetConfirm(false)}
+                >
+                    <p>
+                        This will reset <strong>{workspace.displayName || workspace.name}</strong> to a clean state:
+                    </p>
+                    <ul>
+                        <li>Archive all {tasks.length} task{tasks.length !== 1 ? 's' : ''} in this workspace</li>
+                        <li>Switch to the default branch (main/master)</li>
+                    </ul>
+                    <div className="confirm-note">
+                        Archived tasks can be recovered from the archive section at any time.
+                    </div>
+                </ConfirmModal>
             )}
         </div>
     );
@@ -1257,6 +1366,7 @@ interface WorkspacePanelProps {
     onCreateWorkspace: (path: string) => void;
     onDeleteWorkspace: (workspaceId: string) => void;
     onReorderWorkspaces: (fromIndex: number, toIndex: number) => void;
+    onReorderTasksOnServer: (taskOrders: { taskId: string; order: number }[]) => void;
     onOpenFolder: (workspaceId: string) => void;
     onOpenTerminal: (workspaceId: string) => void;
     onOpenShell: (workspaceId: string) => void;
@@ -1273,6 +1383,7 @@ interface WorkspacePanelProps {
     onToggleReference?: (workspaceId: string, referencePath: string) => void;
     onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
+    onResetWorkspace?: (workspaceId: string) => void;
 }
 
 export function WorkspacePanel({
@@ -1282,6 +1393,7 @@ export function WorkspacePanel({
     onRevertTask,
     onDeleteWorkspace,
     onReorderWorkspaces,
+    onReorderTasksOnServer,
     onOpenFolder,
     onOpenTerminal,
     onOpenShell,
@@ -1297,7 +1409,8 @@ export function WorkspacePanel({
     onRenameWorkspace,
     onToggleReference,
     onAddCustomReference,
-    onRemoveReference
+    onRemoveReference,
+    onResetWorkspace
 }: WorkspacePanelProps) {
     const {
         tasks,
@@ -1310,7 +1423,10 @@ export function WorkspacePanel({
         archivedTasks,
         showArchivedTasks,
         setShowArchivedTasks,
-        reorderTasks
+        reorderTasks,
+        workspaceColumns,
+        setWorkspaceColumns,
+        lastSelectedTaskByWorkspace
     } = useTaskStore();
 
     // Drag and drop state
@@ -1323,7 +1439,7 @@ export function WorkspacePanel({
     // System prompt modal state
     const [systemPromptWorkspace, setSystemPromptWorkspace] = useState<Workspace | null>(null);
 
-    // Close menu when clicking outside
+    // Close menu when clicking outside (capture phase so stopPropagation on child elements doesn't block it)
     useEffect(() => {
         if (!openMenuId) return;
 
@@ -1334,8 +1450,8 @@ export function WorkspacePanel({
             }
         };
 
-        document.addEventListener('click', handleClickOutside);
-        return () => document.removeEventListener('click', handleClickOutside);
+        document.addEventListener('mousedown', handleClickOutside, true);
+        return () => document.removeEventListener('mousedown', handleClickOutside, true);
     }, [openMenuId]);
 
     const handleDragStart = useCallback((index: number) => {
@@ -1421,6 +1537,20 @@ export function WorkspacePanel({
                     >
                         <Archive size={16} />
                     </button>
+                    <div className="column-selector" title="Workspace columns">
+                        <Columns2 size={14} className="column-selector-icon" />
+                        <select
+                            className="column-selector-select"
+                            value={workspaceColumns}
+                            onChange={(e) => setWorkspaceColumns(Number(e.target.value))}
+                        >
+                            <option value={0}>Auto</option>
+                            <option value={1}>1 col</option>
+                            <option value={2}>2 col</option>
+                            <option value={3}>3 col</option>
+                            <option value={4}>4 col</option>
+                        </select>
+                    </div>
                     <button
                         className="add-workspace-button"
                         onClick={handleAddWorkspace}
@@ -1456,7 +1586,10 @@ export function WorkspacePanel({
                 </div>
             )}
 
-            <div className="workspace-panel-content">
+            <div
+                className="workspace-panel-content"
+                style={workspaceColumns > 0 ? { gridTemplateColumns: `repeat(${workspaceColumns}, 1fr)` } : undefined}
+            >
                 {workspaces.length === 0 ? (
                     <div className="empty-state">
                         <p>No workspaces yet.</p>
@@ -1475,6 +1608,7 @@ export function WorkspacePanel({
                             tasks={getTasksForWorkspace(workspace.id)}
                             waitingInputTaskIds={waitingInputTaskIds}
                             selectedTaskId={selectedTaskId}
+                            lastSelectedTaskId={lastSelectedTaskByWorkspace.get(workspace.id) || null}
                             isExpanded={expandedWorkspaces.has(workspace.id)}
                             index={index}
                             isDragging={dragIndex !== null}
@@ -1497,13 +1631,24 @@ export function WorkspacePanel({
                             onDragStart={handleDragStart}
                             onDragEnter={handleDragEnter}
                             onDragEnd={handleDragEnd}
-                            onReorderTasks={(fromIndex, toIndex) => reorderTasks(workspace.id, fromIndex, toIndex)}
+                            onReorderTasks={(fromIndex, toIndex) => {
+                                reorderTasks(workspace.id, fromIndex, toIndex);
+                                // After local reorder, get updated tasks and send order to backend
+                                const updatedTasks = useTaskStore.getState().tasks;
+                                const taskOrders = Array.from(updatedTasks.values())
+                                    .filter(t => t.workspaceId === workspace.id && t.order !== undefined)
+                                    .map(t => ({ taskId: t.id, order: t.order! }));
+                                if (taskOrders.length > 0) {
+                                    onReorderTasksOnServer(taskOrders);
+                                }
+                            }}
                             onRenameTask={onRenameTask}
                             onRenameWorkspace={onRenameWorkspace}
                             allWorkspaces={workspaces}
                             onToggleReference={onToggleReference}
                             onAddCustomReference={onAddCustomReference}
                             onRemoveReference={onRemoveReference}
+                            onResetWorkspace={() => onResetWorkspace?.(workspace.id)}
                         />
                     ))
                 )}

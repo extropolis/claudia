@@ -192,28 +192,55 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         term.loadAddon(fitAddon);
         term.loadAddon(webLinksAddon);
 
-        // Electron clipboard integration: Ctrl+V paste and right-click copy
-        if (window.electronAPI?.readClipboard) {
-            term.attachCustomKeyEventHandler((event) => {
-                // Ctrl+V: paste from clipboard
-                if (event.type === 'keydown' && event.ctrlKey && event.key === 'v') {
-                    const text = window.electronAPI!.readClipboard();
-                    if (text) {
-                        term.paste(text);
-                    }
-                    return false; // Prevent default handling
+        // Clipboard integration: Ctrl+V / Cmd+V paste and Ctrl+C / Cmd+C copy
+        // Works in both Electron and browser environments
+        const isMac = /Mac|iPhone|iPod|iPad/.test(navigator.userAgent);
+        term.attachCustomKeyEventHandler((event) => {
+            if (event.type !== 'keydown') return true;
+
+            const modKey = isMac ? event.metaKey : event.ctrlKey;
+
+            // Paste: Ctrl+V (Win/Linux), Cmd+V (Mac), or Ctrl+Shift+V (Linux terminal style)
+            const isPaste = (modKey && event.key === 'v') ||
+                (!isMac && event.ctrlKey && event.shiftKey && event.key === 'V');
+            if (isPaste) {
+                // Prevent the browser's native paste event from also firing
+                // (which would cause xterm to paste a second time)
+                event.preventDefault();
+                if (window.electronAPI?.readClipboard) {
+                    const text = window.electronAPI.readClipboard();
+                    if (text) term.paste(text);
+                } else if (navigator.clipboard?.readText) {
+                    navigator.clipboard.readText().then((text) => {
+                        if (text) term.paste(text);
+                    }).catch((err) => {
+                        console.warn('[TerminalView] Clipboard paste failed:', err);
+                    });
                 }
-                // Ctrl+C: copy selection to clipboard (if text is selected)
-                if (event.type === 'keydown' && event.ctrlKey && event.key === 'c') {
-                    const selection = term.getSelection();
-                    if (selection) {
-                        window.electronAPI!.writeClipboard(selection);
-                        return false;
+                return false; // Prevent xterm from also handling the key
+            }
+
+            // Copy: Ctrl+C (Win/Linux), Cmd+C (Mac), or Ctrl+Shift+C (Linux terminal style)
+            const isCopy = (modKey && event.key === 'c') ||
+                (!isMac && event.ctrlKey && event.shiftKey && event.key === 'C');
+            if (isCopy) {
+                const selection = term.getSelection();
+                if (selection) {
+                    if (window.electronAPI?.writeClipboard) {
+                        window.electronAPI.writeClipboard(selection);
+                    } else if (navigator.clipboard?.writeText) {
+                        navigator.clipboard.writeText(selection).catch((err) => {
+                            console.warn('[TerminalView] Clipboard copy failed:', err);
+                        });
                     }
+                    return false;
                 }
-                return true;
-            });
-        }
+                // No selection: let Ctrl+C pass through as SIGINT (but not Cmd+C on Mac)
+                if (isMac) return false;
+            }
+
+            return true;
+        });
 
         // Handle input BEFORE open
         term.onData((data) => {
@@ -240,24 +267,34 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         xtermRef.current = term;
         fitAddonRef.current = fitAddon;
 
-        // Windows Terminal behavior: right-click copies selection or pastes
-        if (window.electronAPI?.writeClipboard) {
-            term.element?.addEventListener('contextmenu', (e) => {
-                e.preventDefault();
-                const selection = term.getSelection();
-                if (selection) {
-                    // Text selected: copy to clipboard
-                    window.electronAPI!.writeClipboard(selection);
-                    term.clearSelection();
-                } else {
-                    // No selection: paste from clipboard
-                    const text = window.electronAPI!.readClipboard();
-                    if (text) {
-                        term.paste(text);
-                    }
+        // Right-click: copy selection or paste (works in both Electron and browser)
+        term.element?.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            const selection = term.getSelection();
+            if (selection) {
+                // Text selected: copy to clipboard
+                if (window.electronAPI?.writeClipboard) {
+                    window.electronAPI.writeClipboard(selection);
+                } else if (navigator.clipboard?.writeText) {
+                    navigator.clipboard.writeText(selection).catch((err) => {
+                        console.warn('[TerminalView] Right-click copy failed:', err);
+                    });
                 }
-            });
-        }
+                term.clearSelection();
+            } else {
+                // No selection: paste from clipboard
+                if (window.electronAPI?.readClipboard) {
+                    const text = window.electronAPI.readClipboard();
+                    if (text) term.paste(text);
+                } else if (navigator.clipboard?.readText) {
+                    navigator.clipboard.readText().then((text) => {
+                        if (text) term.paste(text);
+                    }).catch((err) => {
+                        console.warn('[TerminalView] Right-click paste failed:', err);
+                    });
+                }
+            }
+        });
 
         // Initial fit - Delayed to ensure DOM is ready
         requestAnimationFrame(() => {

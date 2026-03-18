@@ -117,6 +117,8 @@ interface PersistedTask {
     shouldContinue?: boolean;  // True if task should auto-continue on reconnect
     backendType?: BackendType; // Which backend created this task (for reconnection)
     displayName?: string;      // User-editable display name
+    processStartedAt?: string; // When the current processing run started (preserved across reconnect)
+    order?: number;            // Display order within workspace (lower = higher in list)
 }
 
 // Lightweight metadata for archived tasks (no outputHistory - loaded lazily from disk)
@@ -160,7 +162,9 @@ interface InternalTask extends Task {
     consecutiveOutputChanges?: number; // Count of consecutive polls with output changes (for idle→busy debouncing)
     inactiveOutputLogged?: boolean; // True if we've already logged the "dropping output" message for this inactive state
     lastRefKey?: string; // Tracks which workspace references were last injected (sorted ref IDs)
+    pendingRefNotification?: boolean; // True if workspace references changed while task was busy
     processStartedAt?: Date; // When the current busy/starting state began (for elapsed timer)
+    readyFallbackTimer?: ReturnType<typeof setTimeout>; // Fallback timer to send prompt if ready signal is never detected
 }
 
 /**
@@ -262,6 +266,9 @@ export class TaskSpawner extends EventEmitter {
     private initializeBackend(): void {
         // Shutdown existing backend if any
         if (this.backend) {
+            // Remove all event listeners before shutting down to prevent
+            // stale handlers from firing on the old backend instance
+            this.backend.removeAllListeners();
             this.backend.shutdown().catch(err => {
                 logger.error('Failed to shutdown previous backend', { error: err });
             });
@@ -351,7 +358,7 @@ export class TaskSpawner extends EventEmitter {
      * Build the MCP config object from the current config store settings.
      * Returns null if no enabled MCP servers are found.
      */
-    private buildMcpConfig(workspaceId?: string): { mcpConfig: Record<string, Record<string, unknown>>; enabledMcpServers: { name: string }[] } | null {
+    private buildMcpConfig(workspaceId?: string, taskId?: string): { mcpConfig: Record<string, Record<string, unknown>>; enabledMcpServers: { name: string }[] } | null {
         const mcpServers = this.configStore?.getMCPServers() || [];
         const enabledMcpServers = mcpServers.filter(s => s.enabled);
 
@@ -390,12 +397,15 @@ export class TaskSpawner extends EventEmitter {
         if (claudiaMcpEnabled) {
             const mcpServerPath = join(__dirname, 'claudia-mcp-server.ts');
             const claudiaConfig: Record<string, unknown> = {
-                command: exe('npx'),
+                command: 'npx',
                 args: ['tsx', mcpServerPath]
             };
-            // Pass workspace ID so the MCP server is scoped to this workspace
-            if (workspaceId) {
-                claudiaConfig.env = { CLAUDIA_WORKSPACE_ID: workspaceId };
+            // Pass workspace ID and task ID so the MCP server is scoped appropriately
+            const mcpEnv: Record<string, string> = {};
+            if (workspaceId) mcpEnv.CLAUDIA_WORKSPACE_ID = workspaceId;
+            if (taskId) mcpEnv.CLAUDIA_TASK_ID = taskId;
+            if (Object.keys(mcpEnv).length > 0) {
+                claudiaConfig.env = mcpEnv;
             }
             mcpConfig['claudia'] = claudiaConfig;
             enabledMcpServers.push({ name: 'claudia', enabled: true });
@@ -615,7 +625,9 @@ export class TaskSpawner extends EventEmitter {
                         this.emit('taskWaitingInput', task.id, inputType, recentOutput);
                     } else {
                         this.transitionTaskState(task, 'idle', undefined, 'polling: output stable');
-                        this.captureGitStateAfterTask(task.id);
+                        this.captureGitStateAfterTask(task.id).catch(err => {
+                            logger.error('Unhandled error in captureGitStateAfterTask', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+                        });
                     }
                 }
                 // Don't transition 'starting' → 'idle' - leave it in starting until Enter is accepted
@@ -651,6 +663,13 @@ export class TaskSpawner extends EventEmitter {
             }
 
             console.log(`[TaskSpawner] Polling: task ${task.id} → ${newState} (${reason})`);
+
+            // Reset processStartedAt when transitioning into busy/starting from a non-active state
+            if ((newState === 'busy' || newState === 'starting') && oldState !== 'busy' && oldState !== 'starting') {
+                task.processStartedAt = new Date();
+                console.log(`[TaskSpawner] Reset processStartedAt for task ${task.id} to ${task.processStartedAt.toISOString()} (transition: ${oldState} → ${newState})`);
+            }
+
             task.state = newState;
             task.waitingInputType = waitingInputType;
             this.emit('taskStateChanged', this.toPublicTask(task));
@@ -937,6 +956,8 @@ export class TaskSpawner extends EventEmitter {
                     systemPrompt: task.systemPrompt,
                     backendType: taskBackendType,
                     displayName: task.displayName,
+                    processStartedAt: task.processStartedAt?.toISOString(),
+                    order: task.order,
                 });
             }
 
@@ -1014,6 +1035,8 @@ export class TaskSpawner extends EventEmitter {
             startTime: Date.now()
         });
 
+        // Store the interval IMMEDIATELY to prevent leaks if code between
+        // setInterval and set() were to throw (defensive programming)
         const checkInterval = setInterval(() => {
             try {
                 if (!existsSync(claudeDir)) return;
@@ -1051,8 +1074,6 @@ export class TaskSpawner extends EventEmitter {
                 // Ignore errors during session capture
             }
         }, 500);
-
-        // Store the interval so we can clear it later
         this.sessionCaptureIntervals.set(taskId, checkInterval);
     }
 
@@ -1067,6 +1088,27 @@ export class TaskSpawner extends EventEmitter {
             this.sessionCaptureIntervals.delete(taskId);
         }
         this.pendingSessionCapture.delete(taskId);
+    }
+
+    /**
+     * Clean up MCP temporary config files for a task.
+     * These are written to tmpdir() on task creation and reconnection.
+     */
+    private cleanupMcpTempFiles(taskId: string): void {
+        const filesToClean = [
+            join(tmpdir(), `claudia-mcp-${taskId}.json`),
+            join(tmpdir(), `claudia-mcp-${taskId}-reconnect.json`),
+        ];
+        for (const filePath of filesToClean) {
+            try {
+                if (existsSync(filePath)) {
+                    unlinkSync(filePath);
+                    logger.debug('Cleaned up MCP temp file', { filePath });
+                }
+            } catch (e) {
+                logger.warn('Failed to clean up MCP temp file', { filePath, error: e instanceof Error ? e.message : String(e) });
+            }
+        }
     }
 
     /**
@@ -1120,6 +1162,29 @@ export class TaskSpawner extends EventEmitter {
         return str.includes('Try "') ||
             str.includes('? for shortcuts') ||
             (str.includes('───') && str.includes('❯'));
+    }
+
+    /**
+     * Start a fallback timer that sends the prompt if the ready signal is never detected.
+     * This prevents tasks from hanging forever when:
+     * - Claude Code changes its startup text and our patterns don't match
+     * - PTY data chunks split the ready signal in a way accumulated output check can't reassemble
+     * - Any other unexpected startup behavior
+     */
+    private startReadyFallbackTimer(task: InternalTask): void {
+        const READY_FALLBACK_MS = 15000;
+        task.readyFallbackTimer = setTimeout(() => {
+            if (!task.initialPromptSent && task.pendingPrompt) {
+                console.log(`[TaskSpawner] FALLBACK: Ready signal not detected after ${READY_FALLBACK_MS}ms for task ${task.id}, sending prompt anyway`);
+                console.log(`[TaskSpawner] FALLBACK: Recent output: ${JSON.stringify(this.getRecentOutput(task, 512))}`);
+                task.initialPromptSent = true;
+                const prompt = task.pendingPrompt;
+                task.pendingPrompt = null;
+                task.promptSubmitAttempts = 0;
+                setTimeout(() => this.sendPromptWithRetry(task, prompt), 500);
+            }
+            task.readyFallbackTimer = undefined;
+        }, READY_FALLBACK_MS);
     }
 
     /**
@@ -1390,6 +1455,7 @@ export class TaskSpawner extends EventEmitter {
 
         // For follow-up input, transition to busy state before sending Enter
         if (!isInitialPrompt && (task.state === 'idle' || task.state === 'waiting_input')) {
+            task.processStartedAt = new Date();
             task.state = 'busy';
             task.waitingInputType = undefined;
             this.emit('taskStateChanged', this.toPublicTask(task));
@@ -1435,12 +1501,17 @@ export class TaskSpawner extends EventEmitter {
         let injectedLearnings: LearningSearchResult[] = [];
         if (this.configStore?.getUseLearnings() && this.learningsStore) {
             try {
-                injectedLearnings = await this.learningsStore.searchLearnings({
+                // Add a timeout to prevent learnings search from blocking task creation
+                const learningsPromise = this.learningsStore.searchLearnings({
                     query: sanitizedPrompt,
                     workspaceId,
                     topK: 5,
                     minScore: 0.3
                 });
+                const timeoutPromise = new Promise<LearningSearchResult[]>((_, reject) =>
+                    setTimeout(() => reject(new Error('Learnings search timed out')), 5000)
+                );
+                injectedLearnings = await Promise.race([learningsPromise, timeoutPromise]);
 
                 if (injectedLearnings.length > 0) {
                     const learningsContext = this.learningsStore.formatForContext(injectedLearnings);
@@ -1593,6 +1664,48 @@ export class TaskSpawner extends EventEmitter {
             logger.info(`Skip permissions enabled`);
         }
 
+        // Inject Claudia MCP orchestration guidance into system prompt when enabled
+        const claudiaMcpEnabled = this.configStore?.getClaudioMcpServerEnabled() ?? false;
+        if (claudiaMcpEnabled) {
+            const orchestrationGuidance = `
+## Claudia Multi-Agent Orchestration
+
+You are running as an agent inside Claudia, a multi-agent orchestrator. You have access to Claudia MCP tools (claudia_*) that let you collaborate with other agents.
+
+**IMPORTANT — Avoid duplicate work:**
+- Before starting any implementation, ALWAYS call \`claudia_list_tasks\` to see what other agents are already working on in this workspace
+- If another task is already handling a piece of work, do NOT implement it yourself — wait for that task to finish and read its output instead
+- After spawning tasks, your role shifts to **coordinator**: monitor, unblock, and integrate — do NOT start implementing the same work in parallel
+
+**When to spawn parallel tasks:**
+- When your work can be naturally decomposed into independent pieces (e.g., backend + frontend + tests)
+- When you need to research multiple topics simultaneously
+- When building a feature that has separable components
+
+**How to orchestrate:**
+1. Check existing tasks first — call \`claudia_list_tasks\` to see what's already running
+2. Plan — break remaining work into independent, parallelizable pieces
+3. Spawn — use \`claudia_create_task\` for each piece with a clear, self-contained prompt that includes all necessary context
+4. Wait and monitor — poll \`claudia_get_task_status\` periodically (every 30-60s) until tasks complete. Handle any that need input via \`claudia_send_input\`
+5. Review — use \`claudia_get_task_output\` to read results from completed tasks
+6. Integrate — review the combined changes for conflicts or integration issues, then fix any problems yourself
+
+**Task naming:**
+- When creating tasks, always provide a short \`displayName\` (e.g., "Build API endpoint", "Write unit tests") so tasks are easy to identify in the sidebar
+- Use \`claudia_rename_task\` to update your own task name if your work evolves beyond the original prompt
+
+**Guidelines:**
+- Prefer 2-4 parallel tasks — don't over-decompose simple work
+- Only spawn tasks when parallelization provides real value; do simple work yourself
+- Each spawned task prompt should be fully self-contained — include file paths, context, and constraints so it can work independently
+- While waiting for spawned tasks, do NOT start implementing features that overlap with what they're doing
+`;
+            systemPrompt = systemPrompt
+                ? `${systemPrompt}\n\n${orchestrationGuidance}`
+                : orchestrationGuidance;
+            logger.info('Injected Claudia MCP orchestration guidance into system prompt');
+        }
+
         // Add custom system prompt if provided
         if (systemPrompt && systemPrompt.trim()) {
             claudeArgs.push('--system-prompt', systemPrompt.trim());
@@ -1602,7 +1715,7 @@ export class TaskSpawner extends EventEmitter {
         // Add MCP server configurations
         // IMPORTANT: Claude doesn't automatically load MCP servers from ~/.claude.json in non-interactive mode
         // We must explicitly pass --mcp-config to load MCP servers
-        const mcpResult = this.buildMcpConfig(workspaceId);
+        const mcpResult = this.buildMcpConfig(workspaceId, id);
         if (mcpResult) {
             const { mcpConfig, enabledMcpServers } = mcpResult;
             const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
@@ -1693,6 +1806,11 @@ export class TaskSpawner extends EventEmitter {
         this.emit('taskCreated', this.toPublicTask(task));
         this.startSessionCapture(id, workspaceId);
 
+        // Fallback: if the ready signal is never detected (e.g., Claude Code changed its
+        // startup text, or PTY chunks split the signal in a way we can't reassemble),
+        // send the prompt anyway after 15 seconds to prevent the task from hanging forever.
+        this.startReadyFallbackTimer(task);
+
         return this.toPublicTask(task);
     }
 
@@ -1732,12 +1850,21 @@ export class TaskSpawner extends EventEmitter {
             }
 
             // Send initial prompt when Claude is ready
-            if (!task.initialPromptSent && task.pendingPrompt && this.isReadyForInitialInput(cleanData)) {
-                console.log(`[TaskSpawner] Claude ready, sending prompt`);
+            // Check BOTH the current chunk AND the accumulated output to handle
+            // the race condition where the ready signal is split across PTY data chunks
+            if (!task.initialPromptSent && task.pendingPrompt &&
+                (this.isReadyForInitialInput(cleanData) || this.isReadyForInitialInput(this.getRecentOutput(task, 4096)))) {
+                console.log(`[TaskSpawner] Claude ready, sending prompt (detected in ${this.isReadyForInitialInput(cleanData) ? 'current chunk' : 'accumulated output'})`);
                 task.initialPromptSent = true;
                 const prompt = task.pendingPrompt;
                 task.pendingPrompt = null;
                 task.promptSubmitAttempts = 0;
+
+                // Clear fallback timer since we detected the ready signal normally
+                if (task.readyFallbackTimer) {
+                    clearTimeout(task.readyFallbackTimer);
+                    task.readyFallbackTimer = undefined;
+                }
 
                 setTimeout(() => this.sendPromptWithRetry(task, prompt), 1200);
             }
@@ -1761,8 +1888,17 @@ export class TaskSpawner extends EventEmitter {
         task.process.onExit(({ exitCode }) => {
             console.log(`[TaskSpawner] Task ${task.id} exited with code ${exitCode}`);
 
+            // Clean up ready fallback timer to prevent writing to dead PTY
+            if (task.readyFallbackTimer) {
+                clearTimeout(task.readyFallbackTimer);
+                task.readyFallbackTimer = undefined;
+            }
+
             // Clean up session capture interval to prevent memory leak
             this.clearSessionCapture(task.id);
+
+            // Clean up MCP temp config files to prevent disk space leak
+            this.cleanupMcpTempFiles(task.id);
 
             // Only emit events if task still exists in map (not being destroyed)
             if (!this.tasks.has(task.id)) {
@@ -1794,6 +1930,7 @@ export class TaskSpawner extends EventEmitter {
             sessionId: task.sessionId || undefined,
             backendType,
             displayName: task.displayName,
+            order: task.order,
         };
     }
 
@@ -1851,6 +1988,19 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Get all active (live) internal tasks for a given workspace.
+     */
+    getActiveTasksForWorkspace(workspaceId: string): InternalTask[] {
+        const results: InternalTask[] = [];
+        for (const task of this.tasks.values()) {
+            if (task.workspaceId === workspaceId) {
+                results.push(task);
+            }
+        }
+        return results;
+    }
+
+    /**
      * Rename a task by setting its displayName
      * Works for both active and disconnected tasks
      */
@@ -1887,6 +2037,34 @@ export class TaskSpawner extends EventEmitter {
 
         console.log(`[TaskSpawner] Cannot rename: task ${taskId} not found`);
         return false;
+    }
+
+    /**
+     * Reorder tasks within a workspace by updating their order values.
+     * Takes a map of taskId -> order value.
+     */
+    reorderTasks(taskOrders: { taskId: string; order: number }[]): boolean {
+        let changed = false;
+        for (const { taskId, order } of taskOrders) {
+            // Try active tasks
+            const task = this.tasks.get(taskId);
+            if (task) {
+                task.order = order;
+                changed = true;
+                continue;
+            }
+            // Try disconnected tasks
+            const persisted = this.disconnectedTasks.get(taskId);
+            if (persisted) {
+                persisted.order = order;
+                changed = true;
+            }
+        }
+        if (changed) {
+            this.scheduleSave();
+            console.log(`[TaskSpawner] Reordered ${taskOrders.length} tasks`);
+        }
+        return changed;
     }
 
     getDisconnectedTask(taskId: string): { id: string; workspaceId: string; sessionId: string | null; prompt: string; backendType?: BackendType } | undefined {
@@ -2363,6 +2541,9 @@ export class TaskSpawner extends EventEmitter {
         // Clean up any pending session capture for this task
         this.clearSessionCapture(taskId);
 
+        // Clean up MCP temp config files
+        this.cleanupMcpTempFiles(taskId);
+
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
 
@@ -2698,6 +2879,7 @@ export class TaskSpawner extends EventEmitter {
             gitState: persisted.gitState,
             systemPrompt: persisted.systemPrompt,
             backendType: this.taskBackends.get(persisted.id) || 'claude-code' as const,
+            order: persisted.order,
         }));
 
         return [...liveTasks, ...disconnectedTasks];
@@ -2783,7 +2965,7 @@ export class TaskSpawner extends EventEmitter {
             }
 
             // Add MCP server configurations for reconnection
-            const mcpResult = this.buildMcpConfig(persisted.workspaceId);
+            const mcpResult = this.buildMcpConfig(persisted.workspaceId, taskId);
             if (mcpResult) {
                 const mcpConfigJson = JSON.stringify({ mcpServers: mcpResult.mcpConfig }, null, 2);
                 const mcpConfigFile = join(tmpdir(), `claudia-mcp-${taskId}-reconnect.json`);
@@ -2847,6 +3029,9 @@ export class TaskSpawner extends EventEmitter {
             workspaceId: persisted.workspaceId,
             process: ptyProcess,
             state: shouldContinue ? 'starting' : 'idle',  // 'starting' if we need to send continuation
+            processStartedAt: shouldContinue
+                ? (persisted.processStartedAt ? new Date(persisted.processStartedAt) : now)
+                : undefined,  // Preserve original start time across reconnect, or use now as fallback
             outputHistory: [Buffer.from(resumeMessage)], // Start fresh, only resume message
             lazyHistoryBase64, // Store base64 for lazy loading instead of decoding now
             lastActivity: now,
@@ -2870,6 +3055,11 @@ export class TaskSpawner extends EventEmitter {
         this.taskBackends.set(task.id, taskBackendType);
         console.log(`[TaskSpawner] reconnectTask: Task ${task.id} added to tasks map (backend: ${taskBackendType})`);
 
+        // Start fallback timer for shouldContinue tasks (same race condition as new tasks)
+        if (shouldContinue && taskBackendType === 'claude-code') {
+            this.startReadyFallbackTimer(task);
+        }
+
         this.disconnectedTasks.delete(taskId);
         this.scheduleSave();
 
@@ -2885,6 +3075,12 @@ export class TaskSpawner extends EventEmitter {
     }
 
     destroy(): void {
+        // Cancel any pending debounced save FIRST to prevent it from firing
+        // after tasks.clear() — which would overwrite valid data with an empty list
+        if (this.saveDebounceTimer) {
+            clearTimeout(this.saveDebounceTimer);
+            this.saveDebounceTimer = null;
+        }
         this.saveTasks();
 
         // Stop state polling
@@ -2899,6 +3095,8 @@ export class TaskSpawner extends EventEmitter {
         }
 
         for (const task of this.tasks.values()) {
+            // Clean up MCP temp files
+            this.cleanupMcpTempFiles(task.id);
             try {
                 task.process.kill();
             } catch (_e) {

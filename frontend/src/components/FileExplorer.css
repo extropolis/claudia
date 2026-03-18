@@ -778,6 +778,54 @@
     border-bottom: none;
 }
 
+/* Check group headers */
+.ci-check-group {
+    border-bottom: 1px solid rgba(48, 54, 61, 0.3);
+}
+
+.ci-check-group:last-child {
+    border-bottom: none;
+}
+
+.ci-check-group-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: rgba(255, 255, 255, 0.02);
+    border-bottom: 1px solid rgba(48, 54, 61, 0.2);
+}
+
+.ci-check-group-header.ci-check-group-failed {
+    color: #f85149;
+}
+
+.ci-check-group-header.ci-check-group-running {
+    color: #d29922;
+}
+
+.ci-check-group-header.ci-check-group-passed {
+    color: #3fb950;
+}
+
+.ci-check-group-header.ci-check-group-skipped {
+    color: #6e7681;
+}
+
+.ci-check-group-count {
+    font-size: 9px;
+    padding: 0 4px;
+    border-radius: 6px;
+    background: rgba(139, 148, 158, 0.12);
+    color: inherit;
+    line-height: 14px;
+    margin-left: auto;
+}
+
 .ci-pr-title {
     font-size: 13px;
     font-weight: 600;

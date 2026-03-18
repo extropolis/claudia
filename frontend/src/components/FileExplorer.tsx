@@ -748,6 +748,29 @@ function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: b
         return 'pending';
     };
 
+    const renderCheckItem = (check: CICheck, i: number) => {
+        const content = (
+            <>
+                {checkIcon(check)}
+                <span className="ci-check-name">{check.name}</span>
+                <span className={`ci-check-status ${check.conclusion || check.status}`}>
+                    {checkLabel(check)}
+                </span>
+                {check.url && <ExternalLink size={11} className="ci-check-link-icon" />}
+            </>
+        );
+        return check.url ? (
+            <a key={`${check.name}-${i}`} href={check.url} target="_blank" rel="noopener noreferrer"
+                className={`ci-check-item clickable ${check.conclusion || check.status}`}>
+                {content}
+            </a>
+        ) : (
+            <div key={`${check.name}-${i}`} className={`ci-check-item ${check.conclusion || check.status}`}>
+                {content}
+            </div>
+        );
+    };
+
     if (!ciStatus) {
         return (
             <div className="fe-tab-content">
@@ -778,9 +801,15 @@ function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: b
         );
     }
 
-    const successCount = ciStatus.checks.filter(c => c.conclusion === 'success').length;
-    const failCount = ciStatus.checks.filter(c => c.conclusion === 'failure').length;
-    const runningCount = ciStatus.checks.filter(c => c.status === 'in_progress').length;
+    // Group checks by status category
+    const failedChecks = ciStatus.checks.filter(c => c.conclusion === 'failure' || c.conclusion === 'cancelled');
+    const runningChecks = ciStatus.checks.filter(c => c.status === 'in_progress' || c.status === 'queued' || c.status === 'waiting' || c.status === 'pending' || c.status === 'neutral');
+    const passedChecks = ciStatus.checks.filter(c => c.status === 'completed' && c.conclusion !== 'failure' && c.conclusion !== 'cancelled' && c.conclusion !== 'skipped');
+    const skippedChecks = ciStatus.checks.filter(c => c.conclusion === 'skipped');
+
+    const successCount = passedChecks.length;
+    const failCount = failedChecks.length;
+    const runningCount = runningChecks.length;
     const comments = ciStatus.prComments || [];
 
     return (
@@ -910,27 +939,50 @@ function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: b
                                     {ciStatus.checks.length === 0 && (
                                         <div className="ci-pr-body ci-pr-body-empty">No CI checks configured</div>
                                     )}
-                                    {ciStatus.checks.map((check, i) => (
-                                        check.url ? (
-                                            <a key={`${check.name}-${i}`} href={check.url} target="_blank" rel="noopener noreferrer"
-                                                className={`ci-check-item clickable ${check.conclusion || check.status}`}>
-                                                {checkIcon(check)}
-                                                <span className="ci-check-name">{check.name}</span>
-                                                <span className={`ci-check-status ${check.conclusion || check.status}`}>
-                                                    {checkLabel(check)}
-                                                </span>
-                                                <ExternalLink size={11} className="ci-check-link-icon" />
-                                            </a>
-                                        ) : (
-                                            <div key={`${check.name}-${i}`} className={`ci-check-item ${check.conclusion || check.status}`}>
-                                                {checkIcon(check)}
-                                                <span className="ci-check-name">{check.name}</span>
-                                                <span className={`ci-check-status ${check.conclusion || check.status}`}>
-                                                    {checkLabel(check)}
-                                                </span>
+
+                                    {failedChecks.length > 0 && (
+                                        <div className="ci-check-group">
+                                            <div className="ci-check-group-header ci-check-group-failed">
+                                                <XCircle size={12} />
+                                                <span>Failed</span>
+                                                <span className="ci-check-group-count">{failedChecks.length}</span>
                                             </div>
-                                        )
-                                    ))}
+                                            {failedChecks.map((check, i) => renderCheckItem(check, i))}
+                                        </div>
+                                    )}
+
+                                    {runningChecks.length > 0 && (
+                                        <div className="ci-check-group">
+                                            <div className="ci-check-group-header ci-check-group-running">
+                                                <Loader2 size={12} className="spinning" />
+                                                <span>In Progress</span>
+                                                <span className="ci-check-group-count">{runningChecks.length}</span>
+                                            </div>
+                                            {runningChecks.map((check, i) => renderCheckItem(check, i))}
+                                        </div>
+                                    )}
+
+                                    {passedChecks.length > 0 && (
+                                        <div className="ci-check-group">
+                                            <div className="ci-check-group-header ci-check-group-passed">
+                                                <CheckCircle2 size={12} />
+                                                <span>Passed</span>
+                                                <span className="ci-check-group-count">{passedChecks.length}</span>
+                                            </div>
+                                            {passedChecks.map((check, i) => renderCheckItem(check, i))}
+                                        </div>
+                                    )}
+
+                                    {skippedChecks.length > 0 && (
+                                        <div className="ci-check-group">
+                                            <div className="ci-check-group-header ci-check-group-skipped">
+                                                <SkipForward size={12} />
+                                                <span>Skipped</span>
+                                                <span className="ci-check-group-count">{skippedChecks.length}</span>
+                                            </div>
+                                            {skippedChecks.map((check, i) => renderCheckItem(check, i))}
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
