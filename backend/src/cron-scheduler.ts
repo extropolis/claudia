@@ -421,6 +421,42 @@ export class CronScheduler extends EventEmitter {
     }
 
     /**
+     * Force-fire a scheduled task immediately, regardless of cron schedule.
+     * Returns true if fired, false if not found.
+     */
+    fireNow(id: string): boolean {
+        const scheduled = this.scheduledTasks.get(id);
+        if (!scheduled) return false;
+
+        const now = new Date();
+        scheduled.lastFiredAt = now.toISOString();
+        scheduled.fireCount++;
+        const nextFire = getNextFireTime(scheduled.cronExpression, now);
+        scheduled.nextFireAt = nextFire?.toISOString();
+
+        const taskState = this.taskStateChecker(scheduled.taskId);
+        if (taskState === 'idle') {
+            this.fireCallback(scheduled.taskId, scheduled.prompt, id);
+        } else {
+            this.pendingFires.set(id, scheduled.prompt);
+        }
+
+        this.emit('fired', scheduled);
+        this.debouncedSave();
+
+        // Delete one-shot tasks after firing
+        if (!scheduled.isRecurring) {
+            this.scheduledTasks.delete(id);
+            this.parsedCrons.delete(id);
+            this.pendingFires.delete(id);
+            this.emit('deleted', scheduled);
+        }
+
+        logger.info('Force-fired scheduled task', { id, taskId: scheduled.taskId });
+        return true;
+    }
+
+    /**
      * Remove all scheduled tasks for a given Claudia task (e.g., when task is destroyed).
      */
     removeAllForTask(taskId: string): number {

@@ -392,12 +392,21 @@ export async function createApp(basePath?: string) {
             taskSpawner.writeToTask(taskId, prompt + '\r');
             broadcast({ type: 'cron:fired' as WSMessageType, payload: { scheduledTaskId, taskId, prompt } });
         },
-        // Task state checker
+        // Task state checker - must check both live and disconnected tasks
         (taskId: string) => {
-            const task = taskSpawner.getTask(taskId);
-            if (!task) return 'unknown';
-            if (task.state === 'exited' || task.state === 'archived') return 'exited';
-            if (task.state === 'idle') return 'idle';
+            const internal = taskSpawner.getTask(taskId);
+            if (internal) {
+                if (internal.state === 'exited' || internal.state === 'archived') return 'exited';
+                if (internal.state === 'idle') return 'idle';
+                return 'busy';
+            }
+            // Check disconnected tasks - they're still valid targets for scheduling
+            const found = taskSpawner.getAllTasks().find(t => t.id === taskId);
+            if (!found) return 'unknown';
+            if (found.state === 'exited' || found.state === 'archived') return 'exited';
+            // Disconnected/interrupted tasks should be treated as idle for scheduling
+            // so the cron fires immediately, which triggers auto-reconnect via writeToTask
+            if (found.state === 'disconnected' || found.state === 'interrupted') return 'idle';
             return 'busy';
         }
     );

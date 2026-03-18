@@ -11,6 +11,7 @@ const API_URL = getApiBaseUrl();
 interface ScheduledTasksModalProps {
     taskId: string;
     taskName: string;
+    initialPrompt?: string;
     onClose: () => void;
 }
 
@@ -49,17 +50,20 @@ function formatExpiry(iso: string): string {
     return `${hours}h remaining`;
 }
 
-export function ScheduledTasksModal({ taskId, taskName, onClose }: ScheduledTasksModalProps) {
+export function ScheduledTasksModal({ taskId, taskName, initialPrompt, onClose }: ScheduledTasksModalProps) {
     const { createScheduledTask, deleteScheduledTask, updateScheduledTask } = useWebSocket();
     const scheduledTasks = useTaskStore(state =>
         Array.from(state.scheduledTasks.values()).filter(s => s.taskId === taskId)
     );
 
+    // Auto-open create form with initial prompt if provided
+    const hasInitialPrompt = !!initialPrompt;
+
     // Form state (shared between create and edit modes)
-    const [formMode, setFormMode] = useState<'hidden' | 'create' | 'edit'>('hidden');
+    const [formMode, setFormMode] = useState<'hidden' | 'create' | 'edit'>(hasInitialPrompt ? 'create' : 'hidden');
     const [editingId, setEditingId] = useState<string | null>(null);
     const [cronExpression, setCronExpression] = useState('*/10 * * * *');
-    const [prompt, setPrompt] = useState('');
+    const [prompt, setPrompt] = useState(initialPrompt || '');
     const [isRecurring, setIsRecurring] = useState(true);
     const [submitting, setSubmitting] = useState(false);
 

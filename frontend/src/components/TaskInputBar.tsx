@@ -428,6 +428,7 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
                 <ScheduledTasksModal
                     taskId={task.id}
                     taskName={task.displayName || task.prompt?.substring(0, 60) || task.id}
+                    initialPrompt={message.trim()}
                     onClose={() => setShowScheduleModal(false)}
                 />
             )}
