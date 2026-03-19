@@ -14,6 +14,7 @@
  *   - claudia_get_task_output: Fetch recent terminal output from a task
  *   - claudia_create_task: Create a new task in the current workspace
  *   - claudia_send_input: Send input to a task waiting for input
+ *   - claudia_continue_task: Send a follow-up prompt to resume an idle task
  *   - claudia_archive_task: Archive a completed task
  *   - claudia_stop_task: Gracefully stop a running task
  *   - claudia_stop_all_tasks: Stop all running tasks in the workspace
@@ -471,6 +472,75 @@ server.tool(
                 content: [{
                     type: 'text',
                     text: `Error sending input: ${error instanceof Error ? error.message : String(error)}`
+                }]
+            };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_continue_task
+// ============================================================================
+server.tool(
+    'claudia_continue_task',
+    'Send a follow-up prompt to an idle or exited Claude Code task, resuming its session with a new instruction. Works on tasks in idle, exited, or disconnected states. The task will reconnect if needed and start processing the new prompt.',
+    {
+        taskId: z.string().describe('The task ID to continue'),
+        prompt: z.string().describe('The follow-up prompt/instructions to send to the task'),
+    },
+    async ({ taskId, prompt }) => {
+        try {
+            // Verify task exists and check its state
+            const tasksResponse = await backendFetch('/api/tasks');
+            if (tasksResponse.ok) {
+                const tasks = await tasksResponse.json();
+                const task = tasks.find((t: any) => t.id === taskId);
+                if (!task) {
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify({
+                                success: false,
+                                message: `Task '${taskId}' not found.`,
+                            }, null, 2)
+                        }]
+                    };
+                }
+                if (task.state === 'busy' || task.state === 'starting') {
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify({
+                                success: false,
+                                message: `Task '${taskId}' is currently ${task.state}. Wait for it to finish or stop it first before sending a follow-up prompt.`,
+                            }, null, 2)
+                        }]
+                    };
+                }
+            }
+
+            log.info(`Continuing task: ${taskId}`);
+
+            const result = await sendWSMessage('task:input', {
+                taskId,
+                input: prompt + '\n',
+            });
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        message: `Follow-up prompt sent to task '${taskId}'. The task is now processing.`,
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to continue task:', error);
+            return {
+                content: [{
+                    type: 'text',
+                    text: `Error continuing task: ${error instanceof Error ? error.message : String(error)}`
                 }]
             };
         }
