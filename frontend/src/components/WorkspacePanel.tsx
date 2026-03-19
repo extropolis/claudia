@@ -445,7 +445,7 @@ function WorkspaceSection({
         };
     }, [isMenuOpen]);
 
-    // Fetch current git branch for this workspace
+    // Fetch current git branch for this workspace (and poll every 30s to stay fresh)
     useEffect(() => {
         const fetchBranch = async () => {
             try {
@@ -460,6 +460,8 @@ function WorkspaceSection({
             }
         };
         fetchBranch();
+        const interval = setInterval(fetchBranch, 30_000);
+        return () => clearInterval(interval);
     }, [workspace.id]);
 
     const [images, setImages] = useState<UploadedImage[]>([]);
