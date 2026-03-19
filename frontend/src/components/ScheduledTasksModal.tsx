@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Clock, Plus, Trash2, X, RefreshCw, Pencil } from 'lucide-react';
+import { Clock, Plus, Trash2, X, RefreshCw, Pencil, Copy, Check } from 'lucide-react';
 import { useTaskStore } from '../stores/taskStore';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { ScheduledTask } from '@claudia/shared';
@@ -66,6 +66,7 @@ export function ScheduledTasksModal({ taskId, taskName, initialPrompt, onClose }
     const [prompt, setPrompt] = useState(initialPrompt || '');
     const [isRecurring, setIsRecurring] = useState(true);
     const [submitting, setSubmitting] = useState(false);
+    const [copiedId, setCopiedId] = useState<string | null>(null);
 
     // Refresh scheduled tasks from backend
     const refreshTasks = useCallback(() => {
@@ -144,6 +145,16 @@ export function ScheduledTasksModal({ taskId, taskName, initialPrompt, onClose }
         setTimeout(refreshTasks, 300);
     };
 
+    const handleCopyPrompt = async (cronId: string, promptText: string) => {
+        try {
+            await navigator.clipboard.writeText(promptText);
+            setCopiedId(cronId);
+            setTimeout(() => setCopiedId(null), 1500);
+        } catch (err) {
+            console.error('Failed to copy prompt:', err);
+        }
+    };
+
     return (
         <div className="modal-overlay scheduled-tasks-overlay" onClick={onClose}>
             <div className="modal-content scheduled-tasks-modal" onClick={e => e.stopPropagation()}>
@@ -189,6 +200,13 @@ export function ScheduledTasksModal({ taskId, taskName, initialPrompt, onClose }
                                 </div>
                             </div>
                             <div className="scheduled-task-actions">
+                                <button
+                                    className="scheduled-task-copy"
+                                    onClick={() => handleCopyPrompt(st.id, st.prompt)}
+                                    title="Copy prompt"
+                                >
+                                    {copiedId === st.id ? <Check size={14} /> : <Copy size={14} />}
+                                </button>
                                 <button
                                     className="scheduled-task-edit"
                                     onClick={() => handleStartEdit(st)}

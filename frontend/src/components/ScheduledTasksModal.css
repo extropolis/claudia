@@ -183,6 +183,7 @@
     flex-shrink: 0;
 }
 
+.scheduled-task-copy,
 .scheduled-task-edit,
 .scheduled-task-delete {
     background: none;
@@ -194,6 +195,11 @@
     display: flex;
     align-items: center;
     transition: all 0.15s ease;
+}
+
+.scheduled-task-copy:hover {
+    background: rgba(0, 212, 255, 0.12);
+    color: var(--accent-secondary);
 }
 
 .scheduled-task-edit:hover {
