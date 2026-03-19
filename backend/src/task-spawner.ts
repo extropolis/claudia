@@ -876,6 +876,7 @@ export class TaskSpawner extends EventEmitter {
                                 ? Math.floor(archived.outputHistory.length * 0.75)
                                 : archived.historySize || 0,
                             displayName: archived.displayName,
+                            displayNameEditedByUser: archived.displayNameEditedByUser,
                         };
                         this.archivedTasks.set(archived.id, metadata);
                     }

@@ -46,14 +46,6 @@ export interface HyperspaceProxyConfig {
     alwaysThinkingEnabled: boolean;
 }
 
-// Hyperspace AI Proxy configuration
-export interface HyperspaceProxyConfig {
-    proxyUrl: string;
-    apiKey: string;
-    model: string;
-    alwaysThinkingEnabled: boolean;
-}
-
 export const DEFAULT_CLAUDE_CODE_SWITCHES: ClaudeCodeSwitches = {
     verbose: false,
     maxTurns: null,

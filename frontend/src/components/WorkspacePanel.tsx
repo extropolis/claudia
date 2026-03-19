@@ -471,6 +471,7 @@ function WorkspaceSection({
     const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const imagesRef = useRef<UploadedImage[]>(images);
 
     // Task list resize state
     const [taskListHeight, setTaskListHeight] = useState<number | null>(null);
@@ -675,10 +676,13 @@ function WorkspaceSection({
         setIsUploading(false);
     };
 
+    // Keep ref in sync so the unmount cleanup can access the latest images
+    useEffect(() => { imagesRef.current = images; }, [images]);
+
     // Cleanup preview URLs on unmount
     useEffect(() => {
         return () => {
-            images.forEach(img => URL.revokeObjectURL(img.previewUrl));
+            imagesRef.current.forEach(img => URL.revokeObjectURL(img.previewUrl));
         };
     }, []);
 

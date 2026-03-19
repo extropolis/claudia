@@ -1309,7 +1309,7 @@ export async function createApp(basePath?: string) {
                         if (!taskId || displayName === undefined) break;
                         const renamed = taskSpawner.renameTask(taskId, displayName, source || 'user');
                         if (renamed) {
-                            broadcast({ type: 'task:stateChanged' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
+                            broadcast({ type: 'tasks:updated' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
                         }
                         break;
                     }
@@ -1436,6 +1436,9 @@ export async function createApp(basePath?: string) {
                             type: 'task:archived:deleted',
                             payload: { taskId, success: deleted }
                         }));
+                        if (deleted) {
+                            broadcast({ type: 'tasks:updated' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
+                        }
                         break;
                     }
 

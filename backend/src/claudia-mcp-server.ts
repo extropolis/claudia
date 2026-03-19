@@ -120,8 +120,8 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
                     resolve(msg.payload);
                 }
 
-                // For task:archive, wait for task:archived
-                if (type === 'task:archive' && msg.type === 'task:archived') {
+                // For task:archive, wait for task:destroyed (archiving emits taskDestroyed internally)
+                if (type === 'task:archive' && msg.type === 'task:destroyed') {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
@@ -134,8 +134,8 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
                     resolve(msg.payload);
                 }
 
-                // For task:rename, wait for task:stateChanged (broadcast after rename)
-                if (type === 'task:rename' && msg.type === 'task:stateChanged') {
+                // For task:rename, wait for task:stateChanged (active tasks) or tasks:updated (disconnected/archived)
+                if (type === 'task:rename' && (msg.type === 'task:stateChanged' || msg.type === 'tasks:updated')) {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
