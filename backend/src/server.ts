@@ -277,6 +277,21 @@ function notifyTasksOfReferenceChange(
 }
 
 /**
+ * Build the context update message for an MCP server config change.
+ */
+function buildMcpChangeMessage(configStore: InstanceType<typeof import('./config-store.js').ConfigStore>): { msg: string; serverNames: string[] } {
+    const mcpServers = configStore.getMCPServers() || [];
+    const enabledServers = mcpServers.filter(s => s.enabled);
+    const serverNames = enabledServers.map(s => s.name);
+
+    const msg = serverNames.length > 0
+        ? `[CONTEXT UPDATE: MCP server configuration has changed. Currently enabled MCP servers: ${serverNames.join(', ')}. New MCP tools are available via the updated .mcp.json in your workspace. You may need to use /mcp to reload MCP servers to pick up the changes.] acknowledge this update briefly\r`
+        : `[CONTEXT UPDATE: All MCP servers have been disabled or removed. The .mcp.json in your workspace has been updated.] acknowledge this update briefly\r`;
+
+    return { msg, serverNames };
+}
+
+/**
  * Notify all running tasks that MCP server configuration has changed.
  * - Idle tasks: immediately receive a context update message
  * - Busy/other tasks: flagged for notification when they next become idle
@@ -288,18 +303,10 @@ function notifyTasksOfMcpChange(
     const tasks = taskSpawner.getAllActiveTasks();
     if (tasks.length === 0) return;
 
-    const mcpServers = configStore.getMCPServers() || [];
-    const enabledServers = mcpServers.filter(s => s.enabled);
-    const serverNames = enabledServers.map(s => s.name);
+    const { msg, serverNames } = buildMcpChangeMessage(configStore);
 
     for (const task of tasks) {
         if (task.state === 'idle') {
-            let msg: string;
-            if (serverNames.length > 0) {
-                msg = `[CONTEXT UPDATE: MCP server configuration has changed. Currently enabled MCP servers: ${serverNames.join(', ')}. New MCP tools are available via the updated .mcp.json in your workspace. You may need to use /mcp to reload MCP servers to pick up the changes.] acknowledge this update briefly\r`;
-            } else {
-                msg = `[CONTEXT UPDATE: All MCP servers have been disabled or removed. The .mcp.json in your workspace has been updated.] acknowledge this update briefly\r`;
-            }
             ctxUpdateInFlight.add(task.id);
             taskSpawner.writeToTask(task.id, msg);
             task.pendingMcpNotification = false;
@@ -786,15 +793,7 @@ export async function createApp(basePath?: string) {
             // Deliver pending MCP config notifications when a task becomes idle
             if (internalTask?.pendingMcpNotification) {
                 internalTask.pendingMcpNotification = false;
-                const mcpServers = configStore.getMCPServers() || [];
-                const enabledServers = mcpServers.filter(s => s.enabled);
-                const serverNames = enabledServers.map(s => s.name);
-                let msg: string;
-                if (serverNames.length > 0) {
-                    msg = `[CONTEXT UPDATE: MCP server configuration has changed. Currently enabled MCP servers: ${serverNames.join(', ')}. New MCP tools are available via the updated .mcp.json in your workspace. You may need to use /mcp to reload MCP servers to pick up the changes.] acknowledge this update briefly\r`;
-                } else {
-                    msg = `[CONTEXT UPDATE: All MCP servers have been disabled or removed. The .mcp.json in your workspace has been updated.] acknowledge this update briefly\r`;
-                }
+                const { msg, serverNames } = buildMcpChangeMessage(configStore);
                 ctxUpdateInFlight.add(task.id);
                 taskSpawner.writeToTask(task.id, msg);
                 logger.info('Delivered pending MCP config update to now-idle task', { taskId: task.id, servers: serverNames });
@@ -1138,8 +1137,6 @@ export async function createApp(basePath?: string) {
                                 // the user having to send a message first
                                 const selectedTask = taskSpawner.getTask(taskId);
                                 if (selectedTask && selectedTask.state === 'idle') {
-                                    const parts: string[] = [];
-
                                     // Check for workspace reference changes
                                     const currentRefs = workspaceStore.getReferences(selectedTask.workspaceId);
                                     const currentValidRefs = currentRefs.filter(r => existsSync(r.path));
@@ -1151,22 +1148,21 @@ export async function createApp(basePath?: string) {
                                             if (r.description) s += ` - ${r.description}`;
                                             return s;
                                         }).join('; ');
-                                        parts.push(`[CONTEXT UPDATE: Workspace references updated. Available reference directories (read files using absolute paths): ${refList}]`);
+                                        const refMsg = `[CONTEXT UPDATE: Workspace references updated. Available reference directories (read files using absolute paths): ${refList}] acknowledge this update briefly\r`;
+                                        ctxUpdateInFlight.add(taskId);
+                                        taskSpawner.writeToTask(taskId, refMsg);
                                         selectedTask.lastRefKey = currentRefKey;
+                                        logger.info('Auto-injected reference update on task select', { taskId });
                                     }
 
                                     // Check for auto-title instruction injection
                                     const claudiaMcpEnabled = configStore.getClaudioMcpServerEnabled();
                                     if (claudiaMcpEnabled && !selectedTask.titleInstructionInjected) {
                                         selectedTask.titleInstructionInjected = true;
-                                        parts.push(`[CONTEXT UPDATE: You can update your task title using claudia_rename_task with your own task ID. Give your task a short, descriptive title (3-6 words) based on what you're working on. Do NOT rename if the user has manually edited the title (the tool will reject it).]`);
-                                    }
-
-                                    if (parts.length > 0) {
-                                        const contextMsg = parts.join(' ') + '\r';
-                                        taskSpawner.writeToTask(taskId, contextMsg);
+                                        const titleMsg = `[CONTEXT UPDATE: You can update your task title using claudia_rename_task with your own task ID. Give your task a short, descriptive title (3-6 words) based on what you're working on. Do NOT rename if the user has manually edited the title (the tool will reject it).]\r`;
                                         ctxUpdateInFlight.add(taskId);
-                                        logger.info('Auto-injected context update on task select', { taskId, parts: parts.length });
+                                        taskSpawner.writeToTask(taskId, titleMsg);
+                                        logger.info('Auto-injected title instruction on task select', { taskId });
                                     }
                                 }
                             } catch (error) {
