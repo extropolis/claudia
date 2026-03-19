@@ -16,7 +16,7 @@
  *   - claudia_send_input: Send input to a task waiting for input
  *   - claudia_archive_task: Archive a completed task
  *
- * @experimental This feature is experimental and may change in future versions.
+
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';

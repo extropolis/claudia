@@ -5,7 +5,7 @@ import {
     GitBranch, CircleDot, Plus, Trash2, Pencil, FileQuestion,
     CheckCircle2, XCircle, Clock, Loader2, SkipForward, ExternalLink,
     ArrowUp, ArrowDown, GitPullRequest, MessageSquare, Tag, User,
-    FileText, Activity, GitCommit
+    FileText, Activity, GitCommit, Copy, Check
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -658,7 +658,16 @@ function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: b
     const [editingBody, setEditingBody] = useState(false);
     const [editBodyText, setEditBodyText] = useState('');
     const [savingBody, setSavingBody] = useState(false);
+    const [copied, setCopied] = useState(false);
     const prevWorkspaceRef = useRef<string | undefined>(undefined);
+
+    const copyPrUrl = useCallback(() => {
+        if (!ciStatus?.prUrl) return;
+        navigator.clipboard.writeText(ciStatus.prUrl).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        });
+    }, [ciStatus?.prUrl]);
 
     const toggleSection = (section: string) => {
         setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
@@ -834,10 +843,16 @@ function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: b
                                 PR #{ciStatus.prNumber}
                             </span>
                             {ciStatus.prUrl && (
-                                <a href={ciStatus.prUrl} target="_blank" rel="noopener noreferrer" className="ci-pr-link"
-                                    title="Open PR on GitHub">
-                                    <ExternalLink size={12} />
-                                </a>
+                                <div className="ci-pr-actions">
+                                    <a href={ciStatus.prUrl} target="_blank" rel="noopener noreferrer"
+                                        className="ci-pr-action-btn" title="Open PR on GitHub">
+                                        <ExternalLink size={12} />
+                                    </a>
+                                    <button className="ci-pr-action-btn" onClick={copyPrUrl}
+                                        title={copied ? 'Copied!' : 'Copy PR link'}>
+                                        {copied ? <Check size={12} className="ci-copied-icon" /> : <Copy size={12} />}
+                                    </button>
+                                </div>
                             )}
                             {ciStatus.checks.length > 0 && (
                                 <span className="ci-summary">

@@ -593,6 +593,36 @@
 
 .ci-pr-link:hover { color: var(--accent-secondary, #00d4ff); }
 
+.ci-pr-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+
+.ci-pr-action-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary, #8b949e);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    text-decoration: none;
+}
+
+.ci-pr-action-btn:hover {
+    background: rgba(0, 212, 255, 0.1);
+    color: var(--accent-secondary, #00d4ff);
+}
+
+.ci-copied-icon {
+    color: #3fb950;
+}
+
 .ci-summary {
     display: flex;
     gap: 8px;

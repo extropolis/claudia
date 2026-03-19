@@ -396,7 +396,7 @@ export class TaskSpawner extends EventEmitter {
             }
         }
 
-        // Inject the Claudia MCP server if enabled (experimental)
+        // Inject the Claudia MCP server if enabled
         // Scoped to the task's workspace via CLAUDIA_WORKSPACE_ID env var
         if (claudiaMcpEnabled) {
             const mcpServerPath = join(__dirname, 'claudia-mcp-server.ts');
