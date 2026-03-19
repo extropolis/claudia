@@ -883,6 +883,7 @@ server.tool(
                         description: s.description,
                         prompt: s.prompt.substring(0, 100) + (s.prompt.length > 100 ? '...' : ''),
                         isRecurring: s.isRecurring,
+                        isPaused: s.isPaused || false,
                         nextFireAt: s.nextFireAt,
                         lastFiredAt: s.lastFiredAt || null,
                         fireCount: s.fireCount,
@@ -929,6 +930,52 @@ server.tool(
             };
         } catch (error) {
             log.error('Failed to delete scheduled task:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_cron_pause
+// ============================================================================
+server.tool(
+    'claudia_cron_pause',
+    'Pause or resume a scheduled task. Paused tasks will not fire until resumed. Use claudia_cron_list to find scheduled task IDs and their current pause state.',
+    {
+        cronId: z.string().describe('The 8-character scheduled task ID to pause/resume'),
+        paused: z.boolean().describe('true to pause the scheduled task, false to resume it'),
+    },
+    async ({ cronId, paused }) => {
+        try {
+            log.info(`${paused ? 'Pausing' : 'Resuming'} scheduled task: ${cronId}`);
+
+            const response = await backendFetch(`/api/cron/${cronId}`, {
+                method: 'PUT',
+                body: JSON.stringify({ isPaused: paused }),
+            });
+
+            if (!response.ok) {
+                if (response.status === 404) {
+                    return { content: [{ type: 'text', text: `Error: Scheduled task '${cronId}' not found.` }] };
+                }
+                const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                return { content: [{ type: 'text', text: `Error: ${error.error || response.statusText}` }] };
+            }
+
+            const updated = await response.json();
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        message: `Scheduled task '${cronId}' ${paused ? 'paused' : 'resumed'} successfully.`,
+                        isPaused: updated.isPaused,
+                        nextFireAt: updated.nextFireAt || null,
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error(`Failed to ${paused ? 'pause' : 'resume'} scheduled task:`, error);
             return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
         }
     }

@@ -309,6 +309,7 @@ export class CronScheduler extends EventEmitter {
             cronExpression,
             prompt,
             isRecurring,
+            isPaused: false,
             createdAt: now.toISOString(),
             expiresAt,
             nextFireAt: nextFire?.toISOString(),
@@ -352,7 +353,7 @@ export class CronScheduler extends EventEmitter {
     /**
      * Update an existing scheduled task. Supports changing cronExpression, prompt, and isRecurring.
      */
-    update(id: string, updates: { cronExpression?: string; prompt?: string; isRecurring?: boolean }): ScheduledTask | null {
+    update(id: string, updates: { cronExpression?: string; prompt?: string; isRecurring?: boolean; isPaused?: boolean }): ScheduledTask | null {
         const task = this.scheduledTasks.get(id);
         if (!task) return null;
 
@@ -381,6 +382,17 @@ export class CronScheduler extends EventEmitter {
             task.expiresAt = updates.isRecurring
                 ? new Date(new Date(task.createdAt).getTime() + THREE_DAYS_MS).toISOString()
                 : new Date(new Date(task.createdAt).getTime() + 24 * 60 * 60 * 1000).toISOString();
+        }
+        if (updates.isPaused !== undefined) {
+            task.isPaused = updates.isPaused;
+            if (updates.isPaused) {
+                // Clear pending fires when pausing
+                this.pendingFires.delete(id);
+            } else {
+                // Recalculate next fire time when resuming
+                const nextFire = getNextFireTime(task.cronExpression, now);
+                task.nextFireAt = nextFire?.toISOString();
+            }
         }
 
         // Clear any pending fire if prompt changed
@@ -481,6 +493,11 @@ export class CronScheduler extends EventEmitter {
         for (const [scheduledId, prompt] of this.pendingFires.entries()) {
             const scheduled = this.scheduledTasks.get(scheduledId);
             if (scheduled && scheduled.taskId === taskId) {
+                // Don't fire pending prompts for paused tasks
+                if (scheduled.isPaused) {
+                    this.pendingFires.delete(scheduledId);
+                    continue;
+                }
                 logger.info('Firing pending scheduled prompt (task now idle)', { scheduledId, taskId });
                 this.pendingFires.delete(scheduledId);
                 this.fireCallback(taskId, prompt, scheduledId);
@@ -526,6 +543,11 @@ export class CronScheduler extends EventEmitter {
             // Skip this cycle if task state is unknown (may be reconnecting)
             if (taskState === 'unknown') {
                 logger.debug('Skipping scheduled task check (task state unknown, may be reconnecting)', { id, taskId: scheduled.taskId });
+                continue;
+            }
+
+            // Skip paused tasks
+            if (scheduled.isPaused) {
                 continue;
             }
 
@@ -608,6 +630,10 @@ export class CronScheduler extends EventEmitter {
             for (const task of data) {
                 try {
                     const cron = parseCronExpression(task.cronExpression);
+                    // Default isPaused for tasks persisted before this field existed
+                    if (task.isPaused === undefined) {
+                        task.isPaused = false;
+                    }
                     this.scheduledTasks.set(task.id, task);
                     this.parsedCrons.set(task.id, cron);
                 } catch (e) {

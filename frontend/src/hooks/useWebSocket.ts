@@ -719,8 +719,12 @@ export function useWebSocket() {
         sendMessage('cron:delete', { cronId });
     }, [sendMessage]);
 
-    const updateScheduledTask = useCallback((cronId: string, updates: { cronExpression?: string; prompt?: string; isRecurring?: boolean }) => {
+    const updateScheduledTask = useCallback((cronId: string, updates: { cronExpression?: string; prompt?: string; isRecurring?: boolean; isPaused?: boolean }) => {
         sendMessage('cron:update', { cronId, ...updates });
+    }, [sendMessage]);
+
+    const pauseScheduledTask = useCallback((cronId: string, paused: boolean) => {
+        sendMessage('cron:update', { cronId, isPaused: paused });
     }, [sendMessage]);
 
     return {
@@ -762,6 +766,7 @@ export function useWebSocket() {
         createScheduledTask,
         deleteScheduledTask,
         updateScheduledTask,
+        pauseScheduledTask,
         wsRef
     };
 }

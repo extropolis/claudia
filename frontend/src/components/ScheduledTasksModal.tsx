@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Clock, Plus, Trash2, X, RefreshCw, Pencil, Copy, Check } from 'lucide-react';
+import { Clock, Plus, Trash2, X, RefreshCw, Pencil, Copy, Check, Pause, Play } from 'lucide-react';
 import { useTaskStore } from '../stores/taskStore';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { ScheduledTask } from '@claudia/shared';
@@ -51,7 +51,7 @@ function formatExpiry(iso: string): string {
 }
 
 export function ScheduledTasksModal({ taskId, taskName, initialPrompt, onClose }: ScheduledTasksModalProps) {
-    const { createScheduledTask, deleteScheduledTask, updateScheduledTask } = useWebSocket();
+    const { createScheduledTask, deleteScheduledTask, updateScheduledTask, pauseScheduledTask } = useWebSocket();
     const scheduledTasks = useTaskStore(state =>
         Array.from(state.scheduledTasks.values()).filter(s => s.taskId === taskId)
     );
@@ -155,6 +155,11 @@ export function ScheduledTasksModal({ taskId, taskName, initialPrompt, onClose }
         }
     };
 
+    const handleTogglePause = (cronId: string, currentlyPaused: boolean) => {
+        pauseScheduledTask(cronId, !currentlyPaused);
+        setTimeout(refreshTasks, 300);
+    };
+
     return (
         <div className="modal-overlay scheduled-tasks-overlay" onClick={onClose}>
             <div className="modal-content scheduled-tasks-modal" onClick={e => e.stopPropagation()}>
@@ -183,9 +188,12 @@ export function ScheduledTasksModal({ taskId, taskName, initialPrompt, onClose }
                     )}
 
                     {scheduledTasks.map((st: ScheduledTask) => (
-                        <div key={st.id} className={`scheduled-task-item ${editingId === st.id ? 'editing' : ''}`}>
+                        <div key={st.id} className={`scheduled-task-item ${editingId === st.id ? 'editing' : ''} ${st.isPaused ? 'paused' : ''}`}>
                             <div className="scheduled-task-info">
                                 <div className="scheduled-task-top">
+                                    {st.isPaused && (
+                                        <span className="scheduled-task-badge paused">paused</span>
+                                    )}
                                     <span className={`scheduled-task-badge ${st.isRecurring ? 'recurring' : 'one-shot'}`}>
                                         {st.isRecurring ? 'recurring' : 'one-shot'}
                                     </span>
@@ -194,12 +202,19 @@ export function ScheduledTasksModal({ taskId, taskName, initialPrompt, onClose }
                                 </div>
                                 <div className="scheduled-task-prompt">{st.prompt}</div>
                                 <div className="scheduled-task-meta">
-                                    <span title={st.nextFireAt || ''}>Next: {formatNextFire(st.nextFireAt)}</span>
+                                    <span title={st.nextFireAt || ''}>{st.isPaused ? 'Paused' : `Next: ${formatNextFire(st.nextFireAt)}`}</span>
                                     <span>Fired: {st.fireCount}x</span>
                                     <span title={st.expiresAt}>{formatExpiry(st.expiresAt)}</span>
                                 </div>
                             </div>
                             <div className="scheduled-task-actions">
+                                <button
+                                    className={`scheduled-task-pause ${st.isPaused ? 'is-paused' : ''}`}
+                                    onClick={() => handleTogglePause(st.id, !!st.isPaused)}
+                                    title={st.isPaused ? 'Resume scheduled task' : 'Pause scheduled task'}
+                                >
+                                    {st.isPaused ? <Play size={14} /> : <Pause size={14} />}
+                                </button>
                                 <button
                                     className="scheduled-task-copy"
                                     onClick={() => handleCopyPrompt(st.id, st.prompt)}

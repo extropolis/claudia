@@ -2001,15 +2001,15 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     }
 
                     case 'cron:update': {
-                        const { cronId, cronExpression, prompt, isRecurring } = payload as {
-                            cronId?: string; cronExpression?: string; prompt?: string; isRecurring?: boolean;
+                        const { cronId, cronExpression, prompt, isRecurring, isPaused } = payload as {
+                            cronId?: string; cronExpression?: string; prompt?: string; isRecurring?: boolean; isPaused?: boolean;
                         };
                         if (!cronId) {
                             sendWSError(ws, 'cron:update requires cronId', message.type, 'MISSING_PARAMS');
                             break;
                         }
                         try {
-                            const updated = cronScheduler.update(cronId, { cronExpression, prompt, isRecurring });
+                            const updated = cronScheduler.update(cronId, { cronExpression, prompt, isRecurring, isPaused });
                             if (updated) {
                                 ws.send(JSON.stringify({
                                     type: 'cron:updated',
@@ -3061,10 +3061,10 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     // Update a scheduled task
     app.put('/api/cron/:cronId', (req, res) => {
         const { cronId } = req.params;
-        const { cronExpression, prompt, isRecurring } = req.body;
+        const { cronExpression, prompt, isRecurring, isPaused } = req.body;
 
         try {
-            const updated = cronScheduler.update(cronId, { cronExpression, prompt, isRecurring });
+            const updated = cronScheduler.update(cronId, { cronExpression, prompt, isRecurring, isPaused });
             if (updated) {
                 res.json({
                     ...updated,

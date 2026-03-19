@@ -112,6 +112,7 @@ export interface ScheduledTask {
     cronExpression: string;        // 5-field cron expression (minute hour day-of-month month day-of-week)
     prompt: string;                // The prompt to run when fired
     isRecurring: boolean;          // true = recurring, false = one-shot
+    isPaused: boolean;             // true = paused (won't fire until resumed)
     createdAt: string;             // ISO timestamp
     expiresAt: string;             // ISO timestamp (createdAt + 3 days for recurring)
     lastFiredAt?: string;          // ISO timestamp of last fire
