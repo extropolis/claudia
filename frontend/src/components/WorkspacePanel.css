@@ -640,6 +640,15 @@
     background: rgba(0, 212, 255, 0.18);
 }
 
+.workspace-panel .task-item .task-cron-badge.paused {
+    background: rgba(255, 171, 64, 0.12);
+    color: #ffab40;
+}
+
+.workspace-panel .task-item .task-cron-badge.paused:hover {
+    background: rgba(255, 171, 64, 0.22);
+}
+
 .workspace-panel .task-item .task-cron-badge .task-cron-count {
     font-variant-numeric: tabular-nums;
     line-height: 1;

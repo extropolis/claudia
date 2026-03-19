@@ -8,6 +8,26 @@ import { TaskInputBar } from './TaskInputBar';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
 
+/**
+ * Strip screen-clearing escape sequences from restored history.
+ * When Claude Code goes idle, it sends cleanup sequences (clear screen, cursor home, etc.)
+ * that wipe all visible content. When replaying history, we strip these so the actual
+ * task output remains visible instead of showing a blank screen.
+ */
+function stripScreenClears(history: string): string {
+    return history
+        // \x1b[2J\x1b[H - Clear screen + cursor home (common cleanup pattern)
+        // Strip as a pair so standalone \x1b[H used for TUI drawing is preserved
+        .replace(/\x1b\[2J\x1b\[H/g, '')
+        // \x1b[2J - Clear entire screen (standalone)
+        .replace(/\x1b\[2J/g, '')
+        // \x1b[3J - Clear entire screen + scrollback
+        .replace(/\x1b\[3J/g, '')
+        // \x1b[?1049h / \x1b[?1049l - Alt screen buffer enter/exit
+        .replace(/\x1b\[\?1049[hl]/g, '');
+}
+
+
 interface TerminalViewProps {
     task: Task;
     wsRef: React.RefObject<WebSocket | null>;
@@ -346,6 +366,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 const message = JSON.parse(event.data);
                 if (message.type === 'task:output' && message.payload.taskId === task.id) {
                     term.write(message.payload.data);
+                    // xterm auto-follows output when viewport is at the bottom.
+                    // No explicit scrollToBottom needed - it would override manual scrolling.
                     // Clear loading state on first output (task is live)
                     if (!historyLoadedRef.current) {
                         console.log(`[TerminalView] First output received, clearing loading state for ${task.id}`);
@@ -354,13 +376,22 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     }
                 } else if (message.type === 'task:restore' && message.payload.taskId === task.id) {
                     const { history } = message.payload;
-                    console.log(`[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}`);
-                    if (history) {
+                    console.log(`[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}, alreadyLoaded: ${historyLoadedRef.current}`);
+                    if (history && history.length > 0) {
                         term.reset();
-                        term.write(history);
-                        console.log(`[TerminalView] History written to terminal for ${task.id}`);
+                        // Strip screen-clearing sequences and write to terminal.
+                        // xterm.js renders the final frame state, which shows the
+                        // exit screen for completed tasks or idle prompt for active ones.
+                        const cleaned = stripScreenClears(history);
+                        term.write(cleaned, () => {
+                            // Scroll after xterm finishes processing the write
+                            term.scrollToBottom();
+                        });
+                        console.log(`[TerminalView] History written for ${task.id} (original: ${history.length}, cleaned: ${cleaned.length})`);
                     } else {
-                        console.warn(`[TerminalView] task:restore received but history is empty for ${task.id}`);
+                        term.reset();
+                        term.write('\x1b[90m── Session history not available ──\x1b[0m\r\n');
+                        console.log(`[TerminalView] Empty history for ${task.id}`);
                     }
                     // Clear loading state - history has been restored
                     historyLoadedRef.current = true;

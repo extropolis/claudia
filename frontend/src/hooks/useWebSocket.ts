@@ -189,12 +189,14 @@ export function useWebSocket() {
                         break;
                     }
                     case 'task:created': {
-                        const payload = message.payload as { task: Task };
+                        const payload = message.payload as { task: Task; source?: string };
                         addTask(payload.task);
-                        // Auto-select newly created task (both locally and on server)
-                        selectTask(payload.task.id);
-                        // IMPORTANT: Notify server that task is active so it sends the initial prompt
-                        sendMessage('task:select', { taskId: payload.task.id });
+                        // Only auto-select tasks created from the UI (not MCP/agent-spawned)
+                        if (payload.source !== 'mcp') {
+                            selectTask(payload.task.id);
+                            // IMPORTANT: Notify server that task is active so it sends the initial prompt
+                            sendMessage('task:select', { taskId: payload.task.id });
+                        }
                         break;
                     }
                     case 'tasks:updated': {

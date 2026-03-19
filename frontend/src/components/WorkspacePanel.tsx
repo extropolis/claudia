@@ -130,9 +130,11 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
     const [editValue, setEditValue] = useState('');
     const editInputRef = useRef<HTMLInputElement>(null);
     const [, setTick] = useState(0);
-    const scheduledTaskCount = useTaskStore(state =>
-        Array.from(state.scheduledTasks.values()).filter(s => s.taskId === task.id).length
+    const scheduledTasks = useTaskStore(state =>
+        Array.from(state.scheduledTasks.values()).filter(s => s.taskId === task.id)
     );
+    const scheduledTaskCount = scheduledTasks.length;
+    const allScheduledPaused = scheduledTaskCount > 0 && scheduledTasks.every(s => s.isPaused);
 
     // Reset stopClicked when task state changes from busy
     useEffect(() => {
@@ -245,8 +247,8 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
             )}
             {scheduledTaskCount > 0 && (
                 <button
-                    className="task-cron-badge"
-                    title={`${scheduledTaskCount} scheduled task${scheduledTaskCount > 1 ? 's' : ''} - click to manage`}
+                    className={`task-cron-badge${allScheduledPaused ? ' paused' : ''}`}
+                    title={`${scheduledTaskCount} scheduled task${scheduledTaskCount > 1 ? 's' : ''}${allScheduledPaused ? ' (paused)' : ''} - click to manage`}
                     onClick={(e) => { e.stopPropagation(); onOpenScheduledTasks?.(task.id); }}
                 >
                     <Clock size={10} />

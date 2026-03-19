@@ -754,8 +754,10 @@ export async function createApp(basePath?: string) {
     }
 
     // Wire up TaskSpawner events
-    taskSpawner.on('taskCreated', (task: Task) => {
-        broadcast({ type: 'task:created', payload: { task } });
+    // Note: task:created broadcast is handled directly in the task:create WS handler
+    // (not here) so the source field is always correct even with concurrent creates.
+    // The taskCreated event is still emitted for other listeners (e.g., supervisor-chat).
+    taskSpawner.on('taskCreated', () => {
         queueTasksUpdated(); // Batched
     });
 
@@ -1058,7 +1060,7 @@ export async function createApp(basePath?: string) {
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId, initialCols, initialRows } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number };
+                        const { prompt, workspaceId, initialCols, initialRows, source } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string };
                         if (!prompt || !workspaceId) {
                             logger.error('task:create requires prompt and workspaceId');
                             sendWSError(ws, 'task:create requires prompt and workspaceId', message.type, 'MISSING_PARAMS');
@@ -1104,6 +1106,10 @@ export async function createApp(basePath?: string) {
                         // Pass initial dimensions if provided
                         try {
                             const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows);
+                            // Broadcast task:created to all clients (UI sidebar update).
+                            // Done here (not in the taskCreated event handler) so the source
+                            // field is always correct even with concurrent creates.
+                            broadcast({ type: 'task:created', payload: { task: newTask, source } });
                             // Track which references were injected so we can detect changes on follow-ups
                             const internalTask = taskSpawner.getTask(newTask.id);
                             if (internalTask) {

@@ -105,8 +105,9 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
                 const msg = JSON.parse(data.toString());
                 log.debug(`WS received: ${msg.type}`, JSON.stringify(msg.payload).substring(0, 200));
 
-                // For task:create, wait for task:created response
-                if (type === 'task:create' && msg.type === 'task:created') {
+                // For task:create, wait for task:created direct response.
+                // Filter by source='mcp' to ignore broadcasts for other tasks.
+                if (type === 'task:create' && msg.type === 'task:created' && msg.payload?.source === 'mcp') {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
@@ -383,6 +384,7 @@ server.tool(
             const result = await sendWSMessage('task:create', {
                 prompt,
                 workspaceId: WORKSPACE_ID,
+                source: 'mcp',
             });
 
             const task = (result as any)?.task;
@@ -552,7 +554,7 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_archive_task',
-    'Archive a task that has completed or exited. Archived tasks are stored for later reference but removed from the active task list.',
+    'Archive a task that has completed or exited. Archived tasks are stored for later reference but removed from the active task list. NOTE: Only archive a task if explicitly instructed by the user — do NOT archive tasks just because they completed.',
     {
         taskId: z.string().describe('The task ID to archive'),
     },
@@ -690,7 +692,7 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_delete_task',
-    'Permanently delete a task — kills its process and removes it from the task list. This is irreversible. Use claudia_stop_task for a graceful stop that keeps the task around, or this tool when you want to fully clean up a task.',
+    'Permanently delete a task — kills its process and removes it from the task list. This is irreversible. Use claudia_stop_task for a graceful stop that keeps the task around. NOTE: Do NOT use this to clean up completed tasks — users want to keep completed tasks to review their outputs. Only use this when explicitly asked to delete a task.',
     {
         taskId: z.string().describe('The task ID to delete'),
     },

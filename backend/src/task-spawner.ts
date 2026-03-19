@@ -932,8 +932,19 @@ export class TaskSpawner extends EventEmitter {
                             writeFileSync(historyPath, fullHistory.toString('base64'));
                         }
                     }
-                    // Else: File exists but unloaded history. Skip to avoid data loss.
-                    // (History will be saved when task is viewed)
+                    // File exists but previousHistory was freed (memory cleanup).
+                    // Append current session output so it isn't silently lost.
+                    else if (task.outputHistory.length > 0) {
+                        try {
+                            const existingBase64 = readFileSync(historyPath, 'utf-8');
+                            const existingBuf = Buffer.from(existingBase64, 'base64');
+                            const currentBuf = Buffer.concat(task.outputHistory);
+                            const combined = Buffer.concat([existingBuf, currentBuf]);
+                            writeFileSync(historyPath, combined.toString('base64'));
+                        } catch (appendErr) {
+                            console.error(`[TaskSpawner] Failed to append history for task ${task.id}:`, appendErr);
+                        }
+                    }
                 } catch (e) {
                     console.error(`[TaskSpawner] Failed to save history for task ${task.id}:`, e);
                 }
@@ -1710,6 +1721,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - Only spawn tasks when parallelization provides real value; do simple work yourself
 - Each spawned task prompt should be fully self-contained — include file paths, context, and constraints so it can work independently
 - While waiting for spawned tasks, do NOT start implementing features that overlap with what they're doing
+- **NEVER delete or archive completed tasks** — the user wants to review their outputs. After a task completes, just report its status and read its output. Do NOT call \`claudia_delete_task\` or \`claudia_archive_task\` on finished tasks.
 `;
             systemPrompt = systemPrompt
                 ? `${systemPrompt}\n\n${orchestrationGuidance}`
@@ -2181,12 +2193,14 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             console.log(`[TaskSpawner] Showing history for disconnected task ${taskId} (no auto-reconnect)`);
 
             // Try loading history from disk file first (primary storage), then fall back to in-memory
+            let historyRestored = false;
             const historyPath = this.getTaskHistoryPath(taskId);
             if (existsSync(historyPath)) {
                 try {
                     const base64 = readFileSync(historyPath, 'utf-8');
                     const history = Buffer.from(base64, 'base64').toString('utf8');
                     this.emit('taskRestore', taskId, history);
+                    historyRestored = true;
                 } catch (e) {
                     console.error(`[TaskSpawner] Failed to read history file for ${taskId}:`, e);
                 }
@@ -2196,7 +2210,14 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 if (persisted.outputHistory) {
                     const history = Buffer.from(persisted.outputHistory, 'base64').toString('utf8');
                     this.emit('taskRestore', taskId, history);
+                    historyRestored = true;
                 }
+            }
+
+            // Always emit taskRestore so the frontend clears loading state (prevents blank screen)
+            if (!historyRestored) {
+                console.warn(`[TaskSpawner] No history found for disconnected task ${taskId}, sending empty restore`);
+                this.emit('taskRestore', taskId, '');
             }
             return;
         }
@@ -2223,17 +2244,22 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                     this.backend.setTaskActive(taskId, false);
                 }
             }
+        } else if (active) {
+            // Task not found in active or disconnected maps - still notify frontend
+            // so it can clear the loading spinner (prevents blank screen)
+            console.warn(`[TaskSpawner] Task ${taskId} not found in tasks or disconnectedTasks, sending empty restore`);
+            this.emit('taskRestore', taskId, '');
         }
     }
 
     /**
-     * Send task history to the client
+     * Send task history to the client.
+     * Always emits taskRestore (even with empty string) so the frontend
+     * knows history loading is complete and can clear the loading spinner.
      */
     private sendTaskHistory(task: InternalTask): void {
         const history = this.getCombinedHistory(task);
-        if (history) {
-            this.emit('taskRestore', task.id, history);
-        }
+        this.emit('taskRestore', task.id, history || '');
     }
 
     /**
@@ -2385,6 +2411,38 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
      * Render JSONL conversation history as terminal-like output
      * This provides accurate history from Claude's perspective, including plan approvals
      */
+    /**
+     * Convert basic markdown formatting to ANSI terminal escape codes.
+     * Handles bold, italic, inline code, code blocks, and headings.
+     */
+    private markdownToAnsi(text: string): string {
+        // Remove code blocks entirely (they don't render well in this context)
+        let result = text.replace(/```[\s\S]*?```/g, (match) => {
+            const lines = match.split('\n');
+            // Strip the opening/closing ``` lines, dim the content
+            const codeLines = lines.slice(1, -1);
+            return codeLines.map(l => `\x1b[90m  ${l}\x1b[0m`).join('\n');
+        });
+
+        // Bold: **text** or __text__
+        result = result.replace(/\*\*(.+?)\*\*/g, '\x1b[1m$1\x1b[22m');
+        result = result.replace(/__(.+?)__/g, '\x1b[1m$1\x1b[22m');
+
+        // Italic: *text* or _text_ (but not inside words for underscore)
+        result = result.replace(/(?<!\w)\*([^*\n]+?)\*(?!\w)/g, '\x1b[3m$1\x1b[23m');
+        result = result.replace(/(?<!\w)_([^_\n]+?)_(?!\w)/g, '\x1b[3m$1\x1b[23m');
+
+        // Inline code: `text`
+        result = result.replace(/`([^`\n]+?)`/g, '\x1b[36m$1\x1b[0m');
+
+        // Headings: # text (at start of line)
+        result = result.replace(/^(#{1,4})\s+(.+)$/gm, (_match, _hashes: string, heading: string) => {
+            return `\x1b[1;4m${heading}\x1b[0m`;
+        });
+
+        return result;
+    }
+
     private async renderConversationAsTerminal(workspaceId: string, sessionId: string): Promise<string | null> {
         try {
             const conversation = await getConversationHistory(workspaceId, sessionId);
@@ -2403,7 +2461,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                     const content = msg.content.length > 2000
                         ? msg.content.substring(0, 2000) + '... (truncated)'
                         : msg.content;
-                    for (const line of content.split('\n')) {
+                    const formatted = this.markdownToAnsi(content);
+                    for (const line of formatted.split('\n')) {
                         lines.push(`\x1b[36m│\x1b[0m ${line}\r\n`);
                     }
                     lines.push(`\x1b[36m└─\x1b[0m\r\n\r\n`);
@@ -2414,7 +2473,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                     const content = msg.content.length > 3000
                         ? msg.content.substring(0, 3000) + '... (truncated)'
                         : msg.content;
-                    for (const line of content.split('\n')) {
+                    const formatted = this.markdownToAnsi(content);
+                    for (const line of formatted.split('\n')) {
                         lines.push(`\x1b[32m│\x1b[0m ${line}\r\n`);
                     }
                     lines.push(`\x1b[32m└─\x1b[0m\r\n\r\n`);
@@ -3043,21 +3103,38 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
         const now = new Date();
 
-        // Use lazy loading for history to prevent memory exhaustion during startup
-        // History will be loaded from file only when task is selected (setTaskActive)
-        // Check if history file exists
-        // Clear old history file on reconnect to prevent stale error output
-        // (e.g. from previous crashed reconnection attempts) from showing up
+        // Preserve previous history so it can be shown when the task is selected.
+        // Load from disk file (primary) or in-memory persisted data (fallback).
+        let previousHistory: Buffer | undefined;
         try {
             const historyPath = this.getTaskHistoryPath(taskId);
             if (existsSync(historyPath)) {
-                unlinkSync(historyPath);
-                console.log(`[TaskSpawner] Cleared old history file for ${taskId} on reconnect`);
+                const fileContent = readFileSync(historyPath, 'utf-8');
+                // Detect format (base64 vs raw text) using same heuristic as getCombinedHistory
+                const sample = fileContent.substring(0, 100);
+                const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
+                if (isRawText) {
+                    previousHistory = Buffer.from(fileContent, 'utf-8');
+                } else {
+                    previousHistory = Buffer.from(fileContent, 'base64');
+                }
+                // Keep the file on disk until saveTasks() overwrites it.
+                // Deleting here creates a data loss window if the server crashes
+                // before saveTasks() runs.
+                console.log(`[TaskSpawner] Preserved ${previousHistory.length} bytes of history for ${taskId} on reconnect`);
             }
         } catch (e) {
-            console.error(`[TaskSpawner] Failed to clear history file for ${taskId}:`, e);
+            console.error(`[TaskSpawner] Failed to load history file for ${taskId} on reconnect:`, e);
         }
-        const lazyHistoryBase64: string | undefined = undefined;
+        // Fallback: check in-memory persisted outputHistory
+        if (!previousHistory && persisted.outputHistory) {
+            try {
+                previousHistory = Buffer.from(persisted.outputHistory, 'base64');
+                console.log(`[TaskSpawner] Preserved ${previousHistory.length} bytes of in-memory history for ${taskId}`);
+            } catch (e) {
+                console.error(`[TaskSpawner] Failed to decode in-memory history for ${taskId}:`, e);
+            }
+        }
 
         // Create a separator message for the live output stream
         const resumeMessage = persisted.sessionId
@@ -3080,7 +3157,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 ? (persisted.processStartedAt ? new Date(persisted.processStartedAt) : now)
                 : undefined,  // Preserve original start time across reconnect, or use now as fallback
             outputHistory: [Buffer.from(resumeMessage)], // Start fresh, only resume message
-            lazyHistoryBase64, // Store base64 for lazy loading instead of decoding now
+            previousHistory, // Historical output from before reconnect (loaded from file or in-memory)
             lastActivity: now,
             createdAt: new Date(persisted.createdAt),
             isActive: false,
