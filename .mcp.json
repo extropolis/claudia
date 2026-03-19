@@ -3,27 +3,24 @@
     "playwright": {
       "command": "npx",
       "args": [
-        "@playwright/mcp@latest",
-        "--isolated"
+        "@playwright/mcp"
       ]
     },
-    "duckduckgo": {
-      "command": "npx",
+    "gaia-agent-ui": {
+      "command": "uv",
       "args": [
-        "-y",
-        "ddg-mcp-search"
+        "run",
+        "python",
+        "-m",
+        "gaia.mcp.servers.agent_ui_mcp",
+        "--stdio"
       ]
-    },
-    "jira_mcp": {
-      "type": "http",
-      "url": "https://litellm.concur.click/mcp/jira_mcp",
-      "timeout": 30
     },
     "claudia": {
       "command": "npx",
       "args": [
         "tsx",
-        "backend/src/claudia-mcp-server.ts"
+        "C:\\Users\\14255\\Work\\claudia\\backend\\src\\claudia-mcp-server.ts"
       ]
     }
   }
