@@ -15,6 +15,9 @@
  *   - claudia_create_task: Create a new task in the current workspace
  *   - claudia_send_input: Send input to a task waiting for input
  *   - claudia_archive_task: Archive a completed task
+ *   - claudia_stop_task: Gracefully stop a running task
+ *   - claudia_stop_all_tasks: Stop all running tasks in the workspace
+ *   - claudia_delete_task: Kill and remove a task permanently
  *
 
  */
@@ -131,6 +134,27 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
 
                 // For task:rename, wait for task:stateChanged (broadcast after rename)
                 if (type === 'task:rename' && msg.type === 'task:stateChanged') {
+                    clearTimeout(timeout);
+                    ws.close();
+                    resolve(msg.payload);
+                }
+
+                // For task:stop, wait for task:stopped response
+                if (type === 'task:stop' && msg.type === 'task:stopped') {
+                    clearTimeout(timeout);
+                    ws.close();
+                    resolve(msg.payload);
+                }
+
+                // For task:stopAll, wait for task:stopAll:result response
+                if (type === 'task:stopAll' && msg.type === 'task:stopAll:result') {
+                    clearTimeout(timeout);
+                    ws.close();
+                    resolve(msg.payload);
+                }
+
+                // For task:destroy, wait for task:destroyed broadcast
+                if (type === 'task:destroy' && msg.type === 'task:destroyed') {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
@@ -486,6 +510,159 @@ server.tool(
                 content: [{
                     type: 'text',
                     text: `Error archiving task: ${error instanceof Error ? error.message : String(error)}`
+                }]
+            };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_stop_task
+// ============================================================================
+server.tool(
+    'claudia_stop_task',
+    'Gracefully stop a running task by sending an interrupt signal (ESC). This cancels the current Claude Code operation without killing the process — the task transitions to idle and can be resumed later. Works on tasks in busy, starting, or waiting_input states.',
+    {
+        taskId: z.string().describe('The task ID to stop'),
+    },
+    async ({ taskId }) => {
+        try {
+            log.info(`Stopping task: ${taskId}`);
+
+            const result = await sendWSMessage('task:stop', { taskId }) as { taskId: string; stopped: boolean };
+
+            if (result.stopped) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({
+                            success: true,
+                            message: `Task '${taskId}' stopped successfully. The task is now idle and can be resumed.`,
+                        }, null, 2)
+                    }]
+                };
+            } else {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({
+                            success: false,
+                            message: `Task '${taskId}' could not be stopped — it may not be in a running state.`,
+                        }, null, 2)
+                    }]
+                };
+            }
+        } catch (error) {
+            log.error('Failed to stop task:', error);
+            return {
+                content: [{
+                    type: 'text',
+                    text: `Error stopping task: ${error instanceof Error ? error.message : String(error)}`
+                }]
+            };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_stop_all_tasks
+// ============================================================================
+server.tool(
+    'claudia_stop_all_tasks',
+    `Stop all running tasks in the current workspace. Sends an interrupt signal (ESC) to every task that is busy, starting, or waiting for input. Tasks transition to idle and can be resumed later.${WORKSPACE_ID ? ` Scoped to workspace: ${WORKSPACE_ID}` : ''}`,
+    {},
+    async () => {
+        if (!WORKSPACE_ID) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: No workspace ID configured. The CLAUDIA_WORKSPACE_ID environment variable is not set.'
+                }]
+            };
+        }
+
+        try {
+            log.info(`Stopping all tasks in workspace: ${WORKSPACE_ID}`);
+
+            const result = await sendWSMessage('task:stopAll', { workspaceId: WORKSPACE_ID }) as {
+                workspaceId: string;
+                stoppedCount: number;
+                stoppedIds: string[];
+            };
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        stoppedCount: result.stoppedCount,
+                        stoppedIds: result.stoppedIds,
+                        message: result.stoppedCount > 0
+                            ? `Stopped ${result.stoppedCount} task(s): ${result.stoppedIds.join(', ')}`
+                            : 'No running tasks found in this workspace.',
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to stop all tasks:', error);
+            return {
+                content: [{
+                    type: 'text',
+                    text: `Error stopping tasks: ${error instanceof Error ? error.message : String(error)}`
+                }]
+            };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_delete_task
+// ============================================================================
+server.tool(
+    'claudia_delete_task',
+    'Permanently delete a task — kills its process and removes it from the task list. This is irreversible. Use claudia_stop_task for a graceful stop that keeps the task around, or this tool when you want to fully clean up a task.',
+    {
+        taskId: z.string().describe('The task ID to delete'),
+    },
+    async ({ taskId }) => {
+        try {
+            // Verify task exists before attempting destroy (avoids 30s timeout if task not found)
+            const tasksResponse = await backendFetch('/api/tasks');
+            if (tasksResponse.ok) {
+                const tasks = await tasksResponse.json();
+                const task = tasks.find((t: any) => t.id === taskId);
+                if (!task) {
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify({
+                                success: false,
+                                message: `Task '${taskId}' not found.`,
+                            }, null, 2)
+                        }]
+                    };
+                }
+            }
+
+            log.info(`Deleting task: ${taskId}`);
+
+            const result = await sendWSMessage('task:destroy', { taskId });
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        message: `Task '${taskId}' has been deleted.`,
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to delete task:', error);
+            return {
+                content: [{
+                    type: 'text',
+                    text: `Error deleting task: ${error instanceof Error ? error.message : String(error)}`
                 }]
             };
         }

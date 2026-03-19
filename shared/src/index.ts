@@ -127,6 +127,8 @@ export type WSMessageType =
     | 'task:output'
     | 'task:restore'
     | 'task:destroyed'
+    | 'task:stopped'
+    | 'task:stopAll:result'
     | 'task:waitingInput'
     | 'task:revertResult'
     | 'tasks:updated'

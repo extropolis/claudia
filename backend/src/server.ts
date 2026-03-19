@@ -47,6 +47,8 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'task:input',
     'task:resize',
     'task:destroy',
+    'task:stop',
+    'task:stopAll',
     'task:interrupt',
     'task:archive',
     'task:reconnect',
@@ -1254,6 +1256,46 @@ export async function createApp(basePath?: string) {
                             console.error('[Server] task:destroy missing taskId');
                         }
 
+                        break;
+                    }
+
+                    case 'task:stop': {
+                        // Gracefully stop a running task (send ESC to interrupt Claude)
+                        const { taskId } = payload as { taskId?: string };
+                        if (taskId) {
+                            const stopped = taskSpawner.stopTask(taskId);
+                            logger.info('task:stop', { taskId, stopped });
+                            ws.send(JSON.stringify({
+                                type: 'task:stopped' as WSMessageType,
+                                payload: { taskId, stopped }
+                            }));
+                        }
+                        break;
+                    }
+
+                    case 'task:stopAll': {
+                        // Stop all running tasks in a workspace
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (workspaceId) {
+                            const tasks = taskSpawner.getActiveTasksForWorkspace(workspaceId);
+                            let stoppedCount = 0;
+                            const stoppedIds: string[] = [];
+                            for (const task of tasks) {
+                                if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
+                                    const stopped = taskSpawner.stopTask(task.id);
+                                    if (stopped) {
+                                        stoppedCount++;
+                                        stoppedIds.push(task.id);
+                                    }
+                                }
+                            }
+                            logger.info('task:stopAll', { workspaceId, stoppedCount, stoppedIds });
+                            // Send result back to the requesting client
+                            ws.send(JSON.stringify({
+                                type: 'task:stopAll:result' as WSMessageType,
+                                payload: { workspaceId, stoppedCount, stoppedIds }
+                            }));
+                        }
                         break;
                     }
 
