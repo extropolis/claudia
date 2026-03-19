@@ -282,12 +282,13 @@ function notifyTasksOfReferenceChange(
  * - Busy/other tasks: flagged for notification when they next become idle
  */
 function notifyTasksOfMcpChange(
-    taskSpawner: InstanceType<typeof import('./task-spawner.js').TaskSpawner>
+    taskSpawner: InstanceType<typeof import('./task-spawner.js').TaskSpawner>,
+    configStore: InstanceType<typeof import('./config-store.js').ConfigStore>
 ): void {
     const tasks = taskSpawner.getAllActiveTasks();
     if (tasks.length === 0) return;
 
-    const mcpServers = taskSpawner.configStore?.getMCPServers() || [];
+    const mcpServers = configStore.getMCPServers() || [];
     const enabledServers = mcpServers.filter(s => s.enabled);
     const serverNames = enabledServers.map(s => s.name);
 
@@ -780,6 +781,23 @@ export async function createApp(basePath?: string) {
                     internalTask.lastRefKey = currentRefKey;
                     logger.info('Delivered pending reference update to now-idle task', { taskId: task.id, refCount: validRefs.length });
                 }
+            }
+
+            // Deliver pending MCP config notifications when a task becomes idle
+            if (internalTask?.pendingMcpNotification) {
+                internalTask.pendingMcpNotification = false;
+                const mcpServers = configStore.getMCPServers() || [];
+                const enabledServers = mcpServers.filter(s => s.enabled);
+                const serverNames = enabledServers.map(s => s.name);
+                let msg: string;
+                if (serverNames.length > 0) {
+                    msg = `[CONTEXT UPDATE: MCP server configuration has changed. Currently enabled MCP servers: ${serverNames.join(', ')}. New MCP tools are available via the updated .mcp.json in your workspace. You may need to use /mcp to reload MCP servers to pick up the changes.] acknowledge this update briefly\r`;
+                } else {
+                    msg = `[CONTEXT UPDATE: All MCP servers have been disabled or removed. The .mcp.json in your workspace has been updated.] acknowledge this update briefly\r`;
+                }
+                ctxUpdateInFlight.add(task.id);
+                taskSpawner.writeToTask(task.id, msg);
+                logger.info('Delivered pending MCP config update to now-idle task', { taskId: task.id, servers: serverNames });
             }
 
             // Fire any pending scheduled prompts for this task
@@ -4041,6 +4059,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             }
 
             // If MCP servers were updated, sync .mcp.json and settings.local.json to all workspaces
+            // and notify running tasks of the change
             if (validation.data!.mcpServers !== undefined) {
                 const workspaces = workspaceStore.getWorkspaces();
                 if (workspaces.length > 0) {
@@ -4048,6 +4067,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     taskSpawner.syncWorkspaceMcpConfigs(workspaceIds);
                     logger.info('Synced MCP config to all workspaces after config update', { count: workspaceIds.length });
                 }
+                notifyTasksOfMcpChange(taskSpawner, configStore);
             }
 
             res.json(updatedConfig);
