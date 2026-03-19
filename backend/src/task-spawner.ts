@@ -2176,25 +2176,26 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
         console.log(`[TaskSpawner] setTaskActive called: taskId=${taskId}, active=${active}, inTasks=${this.tasks.has(taskId)}, inDisconnected=${this.disconnectedTasks.has(taskId)}`);
         if (active && this.disconnectedTasks.has(taskId)) {
-            console.log(`[TaskSpawner] Auto-reconnecting task ${taskId}`);
-            let reconnectedTask: Task | null = null;
-            try {
-                reconnectedTask = this.reconnectTask(taskId);
-            } catch (error) {
-                logger.error('Failed to reconnect task during activation', {
-                    taskId,
-                    error: error instanceof Error ? error.message : String(error)
-                });
-                return;
-            }
-            if (reconnectedTask) {
-                const task = this.tasks.get(taskId);
-                if (task) {
-                    task.isActive = true;
-                    this.emit('tasksUpdated');
+            // Don't auto-reconnect on click - just show the stored history.
+            // The task will be reconnected when the user actually sends input (via writeToTask).
+            console.log(`[TaskSpawner] Showing history for disconnected task ${taskId} (no auto-reconnect)`);
 
-                    // Send combined history (PTY output) first, then enhance with JSONL if needed
-                    this.sendTaskHistory(task);
+            // Try loading history from disk file first (primary storage), then fall back to in-memory
+            const historyPath = this.getTaskHistoryPath(taskId);
+            if (existsSync(historyPath)) {
+                try {
+                    const base64 = readFileSync(historyPath, 'utf-8');
+                    const history = Buffer.from(base64, 'base64').toString('utf8');
+                    this.emit('taskRestore', taskId, history);
+                } catch (e) {
+                    console.error(`[TaskSpawner] Failed to read history file for ${taskId}:`, e);
+                }
+            } else {
+                // Fallback: check in-memory outputHistory (older tasks or migration edge cases)
+                const persisted = this.disconnectedTasks.get(taskId)!;
+                if (persisted.outputHistory) {
+                    const history = Buffer.from(persisted.outputHistory, 'base64').toString('utf8');
+                    this.emit('taskRestore', taskId, history);
                 }
             }
             return;

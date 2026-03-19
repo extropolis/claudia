@@ -1129,44 +1129,12 @@ export async function createApp(basePath?: string) {
 
                     case 'task:select': {
                         // Switch active task (for terminal viewing)
+                        // Context injections (references, auto-title) are deferred to task:input
+                        // so that merely clicking a task doesn't cause Claude to act
                         const { taskId } = payload as { taskId?: string };
                         if (taskId) {
                             try {
                                 taskSpawner.setTaskActive(taskId, true);
-
-                                // Auto-inject pending context updates when selecting an idle task
-                                // This ensures Claude gets updated references/instructions without
-                                // the user having to send a message first
-                                const selectedTask = taskSpawner.getTask(taskId);
-                                if (selectedTask && selectedTask.state === 'idle') {
-                                    // Check for workspace reference changes
-                                    const currentRefs = workspaceStore.getReferences(selectedTask.workspaceId);
-                                    const currentValidRefs = currentRefs.filter(r => existsSync(r.path));
-                                    const currentRefKey = currentValidRefs.map(r => r.id).sort().join(',');
-
-                                    if (currentRefKey !== (selectedTask.lastRefKey ?? '') && currentValidRefs.length > 0) {
-                                        const refList = currentValidRefs.map(r => {
-                                            let s = `"${r.name}" (${r.path})`;
-                                            if (r.description) s += ` - ${r.description}`;
-                                            return s;
-                                        }).join('; ');
-                                        const refMsg = `[CONTEXT UPDATE: Workspace references updated. Available reference directories (read files using absolute paths): ${refList}] acknowledge this update briefly\r`;
-                                        ctxUpdateInFlight.add(taskId);
-                                        taskSpawner.writeToTask(taskId, refMsg);
-                                        selectedTask.lastRefKey = currentRefKey;
-                                        logger.info('Auto-injected reference update on task select', { taskId });
-                                    }
-
-                                    // Check for auto-title instruction injection
-                                    const claudiaMcpEnabled = configStore.getClaudioMcpServerEnabled();
-                                    if (claudiaMcpEnabled && !selectedTask.titleInstructionInjected) {
-                                        selectedTask.titleInstructionInjected = true;
-                                        const titleMsg = `[CONTEXT UPDATE: You can update your task title using claudia_rename_task with your own task ID. Give your task a short, descriptive title (3-6 words) based on what you're working on. Do NOT rename if the user has manually edited the title (the tool will reject it).]\r`;
-                                        ctxUpdateInFlight.add(taskId);
-                                        taskSpawner.writeToTask(taskId, titleMsg);
-                                        logger.info('Auto-injected title instruction on task select', { taskId });
-                                    }
-                                }
                             } catch (error) {
                                 const errorMessage = error instanceof Error ? error.message : String(error);
                                 logger.error('Failed to activate task', { taskId, error: errorMessage });
