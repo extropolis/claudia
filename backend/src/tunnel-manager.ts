@@ -409,6 +409,25 @@ export class TunnelManager extends EventEmitter {
     }
 
     /**
+     * Check for an orphaned ngrok on startup and auto-adopt it.
+     * Called once after construction so the tunnel survives tsx watch restarts
+     * without requiring the user to manually re-enable it.
+     */
+    async autoRecover(): Promise<void> {
+        if (this.ngrokProcess || this.adoptedMonitor) return;
+
+        const existingUrl = await this.checkNgrokRunning();
+        if (!existingUrl) return;
+
+        logger.info('Auto-recovering orphaned ngrok tunnel on server startup', { url: existingUrl });
+        this.url = existingUrl;
+        this.token = randomUUID();
+        this.startedAt = new Date().toISOString();
+        this.startAdoptedMonitor();
+        this.emit('tunnel:ready', { url: this.url, token: this.token });
+    }
+
+    /**
      * Validate a token against the active tunnel token
      */
     validateToken(token: string): boolean {

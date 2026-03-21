@@ -335,6 +335,11 @@ export async function createApp(basePath?: string) {
     // TunnelManager for mobile remote access (ngrok-based, created early for middleware use)
     const tunnelManager = new TunnelManager(PORTS.BACKEND);
     logger.info('TunnelManager created (ngrok)');
+    // Auto-recover any orphaned ngrok left by a previous server instance (tsx watch restart).
+    // Fire-and-forget: completes quickly (2 s timeout) well before any client connects.
+    tunnelManager.autoRecover().catch(err =>
+        logger.warn('Tunnel auto-recover failed', { error: err instanceof Error ? err.message : String(err) })
+    );
 
     // ===== Tunnel → React Frontend Proxy =====
     // When accessed through the tunnel, proxy non-API requests to the Vite
@@ -1034,6 +1039,12 @@ export async function createApp(basePath?: string) {
             type: 'init',
             payload: { tasks, workspaces }
         }));
+        // Send tunnel status so reconnecting clients (e.g. after tsx watch restart) know
+        // the tunnel is still active without waiting for a user action to trigger it.
+        const tunnelStatus = tunnelManager.getStatus();
+        if (tunnelStatus.active) {
+            ws.send(JSON.stringify({ type: 'tunnel:status' as WSMessageType, payload: tunnelStatus }));
+        }
 
         ws.on('message', async (data: Buffer) => {
             let messageTypeForError: string | undefined;
