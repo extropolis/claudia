@@ -37,6 +37,12 @@ export class TunnelManager extends EventEmitter {
     private stopping = false;
     private port: number;
     private domain: string | null;
+    /**
+     * Non-null when tracking an orphaned ngrok we didn't spawn
+     * (e.g. left behind by a previous server instance after tsx watch reload).
+     * Its presence is the single source of truth for "adopted mode".
+     */
+    private adoptedMonitor: NodeJS.Timeout | null = null;
 
     constructor(port: number, domain?: string) {
         super();
@@ -53,11 +59,13 @@ export class TunnelManager extends EventEmitter {
     }
 
     /**
-     * Start a new ngrok tunnel
+     * Start a new ngrok tunnel.
+     * If an orphaned ngrok process is already running (e.g. after a tsx watch reload),
+     * we adopt it and keep the same public URL so mobile clients don't need to re-scan.
      */
     async start(): Promise<TunnelStatus> {
-        if (this.ngrokProcess) {
-            logger.info('Tunnel already active', { url: this.url });
+        if (this.ngrokProcess || this.adoptedMonitor) {
+            logger.info('Tunnel already active', { url: this.url, adopted: this.adoptedMonitor !== null });
             return this.getStatus();
         }
 
@@ -76,6 +84,18 @@ export class TunnelManager extends EventEmitter {
         } catch (ipErr) {
             logger.warn('Failed to fetch public IP', { error: ipErr instanceof Error ? ipErr.message : String(ipErr) });
             this.publicIp = null;
+        }
+
+        // Check if there's already a running ngrok we can adopt (e.g. orphan from tsx watch reload).
+        // Connection refused returns immediately, so this adds no latency in the normal case.
+        const existingUrl = await this.checkNgrokRunning();
+        if (existingUrl) {
+            logger.info('Found existing ngrok tunnel — adopting it (keeps same URL, no re-scan needed)', { url: existingUrl });
+            this.url = existingUrl;
+            this.startedAt = new Date().toISOString();
+            this.startAdoptedMonitor();
+            this.emit('tunnel:ready', { url: this.url, token: this.token });
+            return this.getStatus();
         }
 
         try {
@@ -103,7 +123,6 @@ export class TunnelManager extends EventEmitter {
      * tunnel URL regardless of ngrok version or log format changes.
      */
     private async startNgrok(): Promise<void> {
-        // Check if ngrok is installed before attempting to start
         // Use 'ngrok' (not 'ngrok.exe') because npm installs it as ngrok.cmd on Windows
         const ngrokExe = 'ngrok';
         try {
@@ -112,7 +131,9 @@ export class TunnelManager extends EventEmitter {
             throw new Error(`ngrok is not installed. Install it from https://ngrok.com/download and ensure it's in your PATH.`);
         }
 
-        // Kill any stale ngrok processes first (free tier allows only 1 session)
+        // Kill any stale ngrok processes first (free tier allows only 1 session).
+        // On Windows, taskkill by name catches orphaned grandchild processes that
+        // survived after their cmd.exe parent was killed.
         try {
             const killCmd = process.platform === 'win32'
                 ? 'taskkill /f /im ngrok.exe 2>nul || exit /b 0'
@@ -168,7 +189,6 @@ export class TunnelManager extends EventEmitter {
                 this.url = null;
 
                 if (!this.stopping) {
-                    // During startup, reject immediately with the real error
                     const errorDetail = startupOutput.length > 0
                         ? startupOutput.join(' | ')
                         : `exit code ${code}`;
@@ -185,7 +205,6 @@ export class TunnelManager extends EventEmitter {
                 earlyExitPromise,
             ]);
         } catch (err) {
-            // Process exited early — throw the captured error
             ngrok.kill();
             throw err;
         }
@@ -198,7 +217,7 @@ export class TunnelManager extends EventEmitter {
             throw new Error(`ngrok startup timeout: ${errorDetail}`);
         }
 
-        // Success — now install the long-running close handler for reconnection
+        // Success — install the long-running close handler for reconnection
         ngrok.removeAllListeners('close');
         ngrok.on('close', (code) => {
             logger.info('Ngrok process exited', { code });
@@ -223,24 +242,81 @@ export class TunnelManager extends EventEmitter {
     }
 
     /**
+     * Single HTTP call to the ngrok local API.
+     * Shared by checkNgrokRunning() and pollNgrokApi() to avoid duplicate parse logic.
+     */
+    private async fetchNgrokUrl(signal?: AbortSignal): Promise<string | null> {
+        const res = await fetch('http://127.0.0.1:4040/api/tunnels', signal ? { signal } : undefined);
+        const data = await res.json() as { tunnels: Array<{ public_url: string; proto: string }> };
+        return data.tunnels?.find(t => t.proto === 'https')?.public_url ?? null;
+    }
+
+    /**
+     * One-shot check: is there already a running ngrok at 127.0.0.1:4040?
+     * Times out quickly so it doesn't block tunnel startup in the normal (no orphan) case.
+     */
+    private async checkNgrokRunning(): Promise<string | null> {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 2000);
+        try {
+            return await this.fetchNgrokUrl(controller.signal);
+        } catch {
+            return null;
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    /**
      * Poll ngrok's local API at 127.0.0.1:4040 until a tunnel URL is available.
      */
     private async pollNgrokApi(timeoutMs: number): Promise<string | null> {
         const start = Date.now();
         while (Date.now() - start < timeoutMs) {
             try {
-                const res = await fetch('http://127.0.0.1:4040/api/tunnels');
-                const data = await res.json() as { tunnels: Array<{ public_url: string; proto: string }> };
-                const httpsTunnel = data.tunnels?.find(t => t.proto === 'https');
-                if (httpsTunnel?.public_url) {
-                    return httpsTunnel.public_url;
-                }
+                const url = await this.fetchNgrokUrl();
+                if (url) return url;
             } catch {
                 // ngrok API not ready yet
             }
             await new Promise(r => setTimeout(r, 500));
         }
         return null;
+    }
+
+    /**
+     * While in adopted mode, poll the ngrok API every 5 s to detect if the
+     * orphaned process has died so we can mark the tunnel as closed.
+     *
+     * Uses a captured handle for identity and a `checking` flag to prevent
+     * overlapping async executions if checkNgrokRunning() ever takes >5 s.
+     */
+    private startAdoptedMonitor(): void {
+        let checking = false;
+        const handle = setInterval(async () => {
+            // Stop if this interval has been superseded (stop() or cleanup() ran)
+            if (this.adoptedMonitor !== handle || this.stopping) {
+                clearInterval(handle);
+                return;
+            }
+            if (checking) return;
+            checking = true;
+            try {
+                const url = await this.checkNgrokRunning();
+                if (this.adoptedMonitor !== handle) return; // cleared while we were awaiting
+                if (!url) {
+                    logger.info('Adopted ngrok tunnel has disconnected');
+                    clearInterval(handle);
+                    this.adoptedMonitor = null;
+                    this.url = null;
+                    this.token = null;
+                    this.emit('tunnel:closed');
+                }
+            } finally {
+                checking = false;
+            }
+        }, 5000);
+        this.adoptedMonitor = handle;
     }
 
     /**
@@ -276,6 +352,12 @@ export class TunnelManager extends EventEmitter {
     async stop(): Promise<void> {
         logger.info('Stopping ngrok tunnel...');
         this.stopping = true;
+        const wasAdopted = this.adoptedMonitor !== null;
+
+        if (this.adoptedMonitor) {
+            clearInterval(this.adoptedMonitor);
+            this.adoptedMonitor = null;
+        }
 
         if (this.retryTimeout) {
             clearTimeout(this.retryTimeout);
@@ -284,15 +366,28 @@ export class TunnelManager extends EventEmitter {
 
         if (this.ngrokProcess) {
             try {
-                this.ngrokProcess.kill('SIGTERM');
-                // Give it a moment to exit gracefully
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                if (this.ngrokProcess && !this.ngrokProcess.killed) {
-                    this.ngrokProcess.kill('SIGKILL');
+                if (process.platform === 'win32' && this.ngrokProcess.pid) {
+                    // On Windows, kill('SIGTERM') only kills the cmd.exe shell wrapper —
+                    // ngrok.exe (the grandchild) survives as an orphan.
+                    // /T kills the entire process tree.
+                    execSync(`taskkill /F /T /PID ${this.ngrokProcess.pid} 2>nul || exit /b 0`, { stdio: 'ignore' });
+                } else {
+                    this.ngrokProcess.kill('SIGTERM');
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    if (this.ngrokProcess && !this.ngrokProcess.killed) {
+                        this.ngrokProcess.kill('SIGKILL');
+                    }
                 }
             } catch (err) {
                 logger.error('Error stopping ngrok', { error: err instanceof Error ? err.message : String(err) });
             }
+        }
+
+        // In adopted mode we had no PID, so kill ngrok by name instead
+        if (process.platform === 'win32' && wasAdopted) {
+            try {
+                execSync('taskkill /f /im ngrok.exe 2>nul || exit /b 0', { stdio: 'ignore' });
+            } catch { /* ignore */ }
         }
 
         this.cleanup();
@@ -304,7 +399,7 @@ export class TunnelManager extends EventEmitter {
      */
     getStatus(): TunnelStatus {
         return {
-            active: this.ngrokProcess !== null && this.url !== null,
+            active: this.url !== null,
             url: this.url,
             token: this.token,
             startedAt: this.startedAt,
@@ -317,7 +412,8 @@ export class TunnelManager extends EventEmitter {
      * Validate a token against the active tunnel token
      */
     validateToken(token: string): boolean {
-        if (!this.token || !this.ngrokProcess) return false;
+        if (!this.token) return false;
+        if (!this.ngrokProcess && !this.adoptedMonitor) return false;
         return token === this.token;
     }
 
@@ -325,6 +421,10 @@ export class TunnelManager extends EventEmitter {
      * Cleanup internal state
      */
     private cleanup(): void {
+        if (this.adoptedMonitor) {
+            clearInterval(this.adoptedMonitor);
+            this.adoptedMonitor = null;
+        }
         this.ngrokProcess = null;
         this.url = null;
         this.token = null;

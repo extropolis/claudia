@@ -486,6 +486,15 @@ export function useWebSocket() {
                         console.log(`[WebSocket] Scheduled task fired: ${payload.scheduledTaskId} → task ${payload.taskId}`);
                         break;
                     }
+                    case 'tunnel:status': {
+                        // Broadcast tunnel status change to App.tsx via a custom DOM event.
+                        // The tunnel token may have changed (e.g. after tsx watch reload + adopt),
+                        // so the UI needs to refresh its copy of the active state.
+                        const payload = message.payload as { active: boolean; url?: string | null; error?: string | null };
+                        console.log('[WebSocket] Tunnel status update:', payload.active, payload.url);
+                        window.dispatchEvent(new CustomEvent('claudia:tunnelStatus', { detail: payload }));
+                        break;
+                    }
                     case 'error': {
                         const payload = message.payload as WSErrorPayload;
                         console.error('[WebSocket] Server error:', payload.message, {

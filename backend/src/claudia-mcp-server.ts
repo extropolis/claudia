@@ -598,6 +598,19 @@ server.tool(
         taskId: z.string().describe('The task ID to stop'),
     },
     async ({ taskId }) => {
+        // Prevent a task from stopping itself — would kill the orchestrating Claude session
+        if (SELF_TASK_ID && taskId === SELF_TASK_ID) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: false,
+                        message: `Cannot stop task '${taskId}' because it is the currently running session. It will stop naturally when done.`,
+                    }, null, 2)
+                }]
+            };
+        }
+
         try {
             log.info(`Stopping task: ${taskId}`);
 
@@ -641,7 +654,7 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_stop_all_tasks',
-    `Stop all running tasks in the current workspace. Sends an interrupt signal (ESC) to every task that is busy, starting, or waiting for input. Tasks transition to idle and can be resumed later.${WORKSPACE_ID ? ` Scoped to workspace: ${WORKSPACE_ID}` : ''}`,
+    `Stop all running tasks in the current workspace. Sends an interrupt signal (ESC) to every task that is busy, starting, or waiting for input. Tasks transition to idle and can be resumed later. The calling task (orchestrator) is automatically excluded to prevent a race condition where the orchestrator stops itself.${WORKSPACE_ID ? ` Scoped to workspace: ${WORKSPACE_ID}` : ''}`,
     {},
     async () => {
         if (!WORKSPACE_ID) {
@@ -654,9 +667,14 @@ server.tool(
         }
 
         try {
-            log.info(`Stopping all tasks in workspace: ${WORKSPACE_ID}`);
+            log.info(`Stopping all tasks in workspace: ${WORKSPACE_ID}${SELF_TASK_ID ? ` (excluding self: ${SELF_TASK_ID})` : ''}`);
 
-            const result = await sendWSMessage('task:stopAll', { workspaceId: WORKSPACE_ID }) as {
+            const result = await sendWSMessage('task:stopAll', {
+                workspaceId: WORKSPACE_ID,
+                // Exclude the calling task itself to prevent race condition
+                // where the orchestrator stops its own Claude Code session
+                ...(SELF_TASK_ID ? { excludeTaskId: SELF_TASK_ID } : {}),
+            }) as {
                 workspaceId: string;
                 stoppedCount: number;
                 stoppedIds: string[];
@@ -692,13 +710,26 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_delete_task',
-    'Permanently delete a task — kills its process and removes it from the task list. This is irreversible. Use claudia_stop_task for a graceful stop that keeps the task around. NOTE: Do NOT use this to clean up completed tasks — users want to keep completed tasks to review their outputs. Only use this when explicitly asked to delete a task.',
+    'Archive a task — stops its process (if running) and moves it to the archive for later reference. Archived tasks are preserved and can be restored or permanently deleted by the user from the UI. NOTE: Do NOT use this to clean up completed tasks — users want to keep completed tasks to review their outputs. Only use this when explicitly asked to delete or remove a task.',
     {
-        taskId: z.string().describe('The task ID to delete'),
+        taskId: z.string().describe('The task ID to archive/delete'),
     },
     async ({ taskId }) => {
+        // Prevent a task from deleting itself — would kill the orchestrating Claude session
+        if (SELF_TASK_ID && taskId === SELF_TASK_ID) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: false,
+                        message: `Cannot delete task '${taskId}' because it is the currently running session. Use claudia_stop_task to gracefully stop it instead.`,
+                    }, null, 2)
+                }]
+            };
+        }
+
         try {
-            // Verify task exists before attempting destroy (avoids 30s timeout if task not found)
+            // Verify task exists before attempting archive (avoids 30s timeout if task not found)
             const tasksResponse = await backendFetch('/api/tasks');
             if (tasksResponse.ok) {
                 const tasks = await tasksResponse.json();
@@ -716,25 +747,25 @@ server.tool(
                 }
             }
 
-            log.info(`Deleting task: ${taskId}`);
+            log.info(`Archiving task: ${taskId}`);
 
-            const result = await sendWSMessage('task:destroy', { taskId });
+            const result = await sendWSMessage('task:archive', { taskId });
 
             return {
                 content: [{
                     type: 'text',
                     text: JSON.stringify({
                         success: true,
-                        message: `Task '${taskId}' has been deleted.`,
+                        message: `Task '${taskId}' has been archived. It can be restored or permanently deleted from the UI.`,
                     }, null, 2)
                 }]
             };
         } catch (error) {
-            log.error('Failed to delete task:', error);
+            log.error('Failed to archive task:', error);
             return {
                 content: [{
                     type: 'text',
-                    text: `Error deleting task: ${error instanceof Error ? error.message : String(error)}`
+                    text: `Error archiving task: ${error instanceof Error ? error.message : String(error)}`
                 }]
             };
         }

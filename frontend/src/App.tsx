@@ -362,6 +362,23 @@ function App() {
         })();
     }, []);
 
+    // Keep tunnel active state in sync with server-pushed tunnel:status WS messages.
+    // This handles tsx watch reloads where the backend adopts the existing ngrok process
+    // and re-emits tunnel:ready — without this the button would stay grey.
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent<{ active: boolean; error?: string | null }>).detail;
+            setTunnelActive(detail.active === true);
+            if (!detail.active && detail.error) {
+                setTunnelError(detail.error);
+            } else if (detail.active) {
+                setTunnelError(null);
+            }
+        };
+        window.addEventListener('claudia:tunnelStatus', handler);
+        return () => window.removeEventListener('claudia:tunnelStatus', handler);
+    }, []);
+
     // Start tunnel (used by both the header button and the modal's Start button)
     const startTunnel = useCallback(async () => {
         setTunnelLoading(true);

@@ -1456,7 +1456,7 @@ export class TaskSpawner extends EventEmitter {
     private sendEnterWithRetry(
         task: InternalTask,
         retriesLeft: number,
-        options: { isInitialPrompt?: boolean; enterKey?: string } = {}
+        options: { isInitialPrompt?: boolean; enterKey?: string; outputLengthAtSend?: number } = {}
     ): void {
         const { isInitialPrompt = false, enterKey = '\r' } = options;
         const context = isInitialPrompt ? 'initial prompt' : 'input';
@@ -1478,13 +1478,22 @@ export class TaskSpawner extends EventEmitter {
             this.emit('taskStateChanged', this.toPublicTask(task));
         }
 
+        // Record output length just before sending Enter so we can detect any output growth
+        const outputLengthBeforeEnter = options.outputLengthAtSend ??
+            task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
+
         // Send Enter
         task.process.write(enterKey);
 
         setTimeout(() => {
-            // Check if Claude started processing (not just any output change)
-            if (this.hasProcessingIndicators(task)) {
-                console.log(`[TaskSpawner] Claude processing detected for ${context} after attempt ${task.promptSubmitAttempts}`);
+            // Check if output has grown since we sent Enter (more reliable than pattern matching)
+            // even small output changes (≥10 bytes) indicate Claude accepted the Enter
+            const currentOutputLength = task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
+            const outputGrew = currentOutputLength > outputLengthBeforeEnter + 10;
+
+            // Check if Claude started processing (pattern-based or output-growth-based)
+            if (outputGrew || this.hasProcessingIndicators(task)) {
+                console.log(`[TaskSpawner] Claude processing detected for ${context} after attempt ${task.promptSubmitAttempts} (outputGrew=${outputGrew}, outputDelta=${currentOutputLength - outputLengthBeforeEnter})`);
                 if (isInitialPrompt && task.state === 'starting' && !task.hasStartedProcessing) {
                     task.hasStartedProcessing = true;
                     task.state = 'busy';
@@ -1495,8 +1504,8 @@ export class TaskSpawner extends EventEmitter {
             }
 
             // Not started yet - schedule retry with longer delay
-            console.log(`[TaskSpawner] No processing indicators found for ${context}, will retry Enter in 500ms`);
-            setTimeout(() => this.sendEnterWithRetry(task, retriesLeft - 1, options), 500);
+            console.log(`[TaskSpawner] No processing indicators found for ${context} (outputDelta=${currentOutputLength - outputLengthBeforeEnter}), will retry Enter in 500ms`);
+            setTimeout(() => this.sendEnterWithRetry(task, retriesLeft - 1, { ...options, outputLengthAtSend: outputLengthBeforeEnter }), 500);
         }, 800);
     }
 
@@ -2506,8 +2515,28 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                     if (task) {
                         task.isActive = true;
                         this.emit('tasksUpdated');
-                        // Give the PTY a moment to initialize before writing
-                        setTimeout(() => this.writeToTask(taskId, data), 500);
+                        // Wait for the task to reach idle state before delivering the write.
+                        // A fixed 500ms timeout was too short for large pastes — Claude Code
+                        // may not be ready to accept input yet when the TUI is still initializing.
+                        let delivered = false;
+                        const onStateChanged = (changedTask: Task) => {
+                            if (changedTask.id === taskId && changedTask.state === 'idle' && !delivered) {
+                                delivered = true;
+                                this.removeListener('taskStateChanged', onStateChanged);
+                                console.log(`[TaskSpawner] Task ${taskId} reached idle after reconnect, delivering pending write`);
+                                this.writeToTask(taskId, data);
+                            }
+                        };
+                        this.on('taskStateChanged', onStateChanged);
+                        // Safety fallback: if task never reaches idle within 15s, try anyway
+                        setTimeout(() => {
+                            if (!delivered) {
+                                delivered = true;
+                                this.removeListener('taskStateChanged', onStateChanged);
+                                console.log(`[TaskSpawner] Fallback: delivering pending write after 15s for task ${taskId}`);
+                                this.writeToTask(taskId, data);
+                            }
+                        }, 15000);
                         return;
                     }
                 }
@@ -2539,12 +2568,16 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             const messageContent = data.slice(0, -1);
             const enterKey = data.slice(-1);
 
-            console.log(`[TaskSpawner] Writing message to task ${taskId}, will retry Enter if needed`);
+            // Scale Enter delay based on message length - Claude Code's TUI needs time to render large pastes.
+            // Large pastes (36+ lines) can take >200ms to process before Enter is accepted.
+            // Base: 500ms, +50ms per 100 chars, capped at 2500ms.
+            const enterDelayMs = Math.min(500 + Math.floor(messageContent.length / 100) * 50, 2500);
+            console.log(`[TaskSpawner] Writing message to task ${taskId} (${messageContent.length} chars), sending Enter in ${enterDelayMs}ms`);
             task.process.write(messageContent);
             task.promptSubmitAttempts = 0;
 
-            // Use consolidated retry mechanism with follow-up input options
-            setTimeout(() => this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey }), 200);
+            // Use consolidated retry mechanism with follow-up input options (5 retries for reliability)
+            setTimeout(() => this.sendEnterWithRetry(task, 5, { isInitialPrompt: false, enterKey }), enterDelayMs);
         } else {
             // Single keypress or task is busy - write directly
             task.process.write(data);

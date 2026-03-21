@@ -353,12 +353,17 @@ export async function createApp(basePath?: string) {
             return next();
         }
 
-        // Tunnel visitor at root without a token → redirect with token so React can auth the WS
-        if (req.path === '/' && !req.query.token) {
+        // Tunnel visitor at root: redirect with the current token if missing or stale.
+        // This handles server restarts (tsx watch) where the token changes — mobile
+        // browsers that still have the old URL/token get seamlessly refreshed.
+        if (req.path === '/') {
             const status = tunnelManager.getStatus();
             if (status.active && status.token) {
-                logger.info('Tunnel visitor at root, redirecting with token', { host });
-                return res.redirect(`/?token=${status.token}`);
+                const requestToken = req.query.token as string | undefined;
+                if (!requestToken || !tunnelManager.validateToken(requestToken)) {
+                    logger.info('Tunnel visitor at root with missing/stale token, redirecting', { host });
+                    return res.redirect(`/?token=${status.token}`);
+                }
             }
         }
 
@@ -1249,12 +1254,18 @@ export async function createApp(basePath?: string) {
 
                     case 'task:stopAll': {
                         // Stop all running tasks in a workspace
-                        const { workspaceId } = payload as { workspaceId?: string };
+                        const { workspaceId, excludeTaskId } = payload as { workspaceId?: string; excludeTaskId?: string };
                         if (workspaceId) {
                             const tasks = taskSpawner.getActiveTasksForWorkspace(workspaceId);
                             let stoppedCount = 0;
                             const stoppedIds: string[] = [];
                             for (const task of tasks) {
+                                // Skip the calling task (orchestrator) to avoid race condition
+                                // where the orchestrator stops its own Claude Code session
+                                if (excludeTaskId && task.id === excludeTaskId) {
+                                    logger.info('task:stopAll - skipping caller task', { taskId: task.id });
+                                    continue;
+                                }
                                 if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
                                     const stopped = taskSpawner.stopTask(task.id);
                                     if (stopped) {
