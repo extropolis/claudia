@@ -503,6 +503,22 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 )}
                 {isMobile && (
                     <button
+                        className="mobile-interrupt-btn"
+                        onClick={() => {
+                            if (wsRef.current?.readyState === WebSocket.OPEN) {
+                                wsRef.current.send(JSON.stringify({
+                                    type: 'task:input',
+                                    payload: { taskId: task.id, input: '\x1b' }
+                                }));
+                            }
+                        }}
+                        title="Send Escape"
+                    >
+                        <span style={{ fontSize: '12px', fontWeight: 700, letterSpacing: '-0.5px' }}>ESC</span>
+                    </button>
+                )}
+                {isMobile && (
+                    <button
                         className="mobile-scroll-bottom-btn"
                         onClick={() => scrollToBottom(true)}
                         title="Scroll to bottom"
