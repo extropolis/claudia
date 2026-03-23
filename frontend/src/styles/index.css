@@ -318,6 +318,8 @@ body {
   flex-direction: column;
   position: relative;
   z-index: 10;
+  /* Never let the sidebar exceed the viewport width (handles narrow mobile viewports) */
+  max-width: 100vw;
 }
 
 /* Resize Handle */
@@ -2430,28 +2432,52 @@ body {
 }
 
 @media (max-width: 768px) {
+  /* Prevent horizontal scroll on real mobile browsers (iOS Safari / Android Chrome) */
+  html,
+  body {
+    overflow-x: hidden;
+    max-width: 100vw;
+  }
+
   /* Safe area padding for notched devices */
   .app {
     padding-top: env(safe-area-inset-top);
     padding-bottom: env(safe-area-inset-bottom);
+    /* Prevent horizontal scroll caused by overflowing header content */
+    overflow-x: hidden;
   }
 
-  /* Header */
+  /* Header — tighter on mobile to fit all controls within small screen widths */
   .app-header {
-    padding: 8px 12px;
-    gap: 8px;
+    padding: 8px 8px;
+    gap: 4px;
+    /* Prevent header content from expanding the page width */
+    overflow: hidden;
   }
 
   .logo {
     gap: 6px;
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .logo h1 {
     font-size: 1rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  /* Hide version number on mobile to save header space */
+  .app-version {
+    display: none;
   }
 
   .header-controls {
-    gap: 6px;
+    gap: 4px;
+    flex-shrink: 0;
   }
 
   /* Hide text labels on header buttons */
@@ -2465,6 +2491,7 @@ body {
 
   .settings-button,
   .restart-button,
+  .notification-toggle-button,
   .sound-toggle-button {
     padding: 6px;
   }
@@ -2516,7 +2543,7 @@ body {
 
   /* Running tasks indicator - compact on mobile */
   .running-tasks-indicator {
-    padding: 4px 8px;
+    padding: 4px 6px;
   }
 
   /* Hide system stats on mobile to save header space */
