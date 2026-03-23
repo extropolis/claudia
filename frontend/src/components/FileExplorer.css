@@ -485,10 +485,17 @@
 .git-change-item {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     padding: 4px 10px;
     font-size: 12px;
     transition: background 0.1s;
+}
+
+/* Prevent the status icon from being flex-shrunk below its rendered size,
+   which would cause the icon's visual box to overlap the leading character
+   of the filename (e.g. "CLAUDE.md" appearing as "LAUDE.md"). */
+.git-change-item > svg {
+    flex-shrink: 0;
 }
 
 .git-change-item.clickable {

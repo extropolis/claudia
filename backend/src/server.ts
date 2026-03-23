@@ -3251,8 +3251,12 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
             // Get status with porcelain v2 for richer info
             const { stdout: statusOutput } = await execAsync('git status --porcelain', { cwd: workspacePath });
-            const changes = statusOutput.trim().split('\n')
-                .filter(line => line.length > 0)
+            // Split on newlines WITHOUT trimming the full output first — trim() would strip the
+            // leading space from the first porcelain line (e.g. " M path") shifting all indices
+            // by one, which corrupts the XY status codes and drops the first path character.
+            const changes = statusOutput.split('\n')
+                .map(line => line.replace(/\r$/, ''))   // strip Windows CR if present
+                .filter(line => line.length > 2)
                 .map(line => {
                     const staged = line[0];
                     const unstaged = line[1];
