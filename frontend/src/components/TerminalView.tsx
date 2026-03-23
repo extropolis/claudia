@@ -287,6 +287,19 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         xtermRef.current = term;
         fitAddonRef.current = fitAddon;
 
+        // Track whether user has scrolled up (away from bottom)
+        // xterm native auto-scroll only works when viewport is exactly at bottom;
+        // fitAddon.fit() can shift scrollTop slightly and break it.
+        const viewport = terminalRef.current.querySelector('.xterm-viewport') as HTMLElement | null;
+        const handleViewportScroll = () => {
+            if (!viewport) return;
+            const atBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 50;
+            userHasScrolledRef.current = !atBottom;
+        };
+        if (viewport) {
+            viewport.addEventListener('scroll', handleViewportScroll, { passive: true });
+        }
+
         // Right-click: copy selection or paste (works in both Electron and browser)
         term.element?.addEventListener('contextmenu', (e) => {
             e.preventDefault();
@@ -366,8 +379,10 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 const message = JSON.parse(event.data);
                 if (message.type === 'task:output' && message.payload.taskId === task.id) {
                     term.write(message.payload.data);
-                    // xterm auto-follows output when viewport is at the bottom.
-                    // No explicit scrollToBottom needed - it would override manual scrolling.
+                    // Scroll to bottom only if user hasn't scrolled up.
+                    if (!userHasScrolledRef.current) {
+                        term.scrollToBottom();
+                    }
                     // Clear loading state on first output (task is live)
                     if (!historyLoadedRef.current) {
                         console.log(`[TerminalView] First output received, clearing loading state for ${task.id}`);
@@ -418,6 +433,9 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
             resizeObserver.disconnect();
             window.removeEventListener('resize', handleWindowResize);
+            if (viewport) {
+                viewport.removeEventListener('scroll', handleViewportScroll);
+            }
             if (wsRef.current) {
                 wsRef.current.removeEventListener('message', handleMessage);
             }
