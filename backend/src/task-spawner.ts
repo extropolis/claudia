@@ -211,6 +211,8 @@ export class TaskSpawner extends EventEmitter {
     private autoReconnectPromise: Promise<void> | null = null;
     private isReconnecting: boolean = false;
     private sessionToTaskId: Map<string, string> = new Map(); // Map session IDs to task IDs
+    /** Stores terminal size for disconnected tasks so it can be applied after reconnection */
+    private pendingResizes: Map<string, { cols: number; rows: number }> = new Map();
 
     // State polling (replaces hooks and output-based streaming detection)
     private statePollingInterval: NodeJS.Timeout | null = null;
@@ -2587,7 +2589,9 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     resizeTask(taskId: string, cols: number, rows: number): void {
         const task = this.tasks.get(taskId);
         if (!task) {
-            // Silently ignore resize for disconnected tasks (will reconnect on select)
+            // Task is disconnected — store the desired size so it can be applied
+            // when the task is reconnected (e.g., when the user sends input).
+            this.pendingResizes.set(taskId, { cols, rows });
             return;
         }
 
@@ -2726,6 +2730,9 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             destroyed = true;
             source = source ? 'both' : 'disconnected';
         }
+
+        // Clean up any pending resize for this task
+        this.pendingResizes.delete(taskId);
 
         // Only emit once, regardless of which map(s) the task was in
         if (destroyed) {
@@ -3213,6 +3220,20 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         this.tasks.set(task.id, task);
         this.taskBackends.set(task.id, taskBackendType);
         console.log(`[TaskSpawner] reconnectTask: Task ${task.id} added to tasks map (backend: ${taskBackendType})`);
+
+        // Apply pending resize if the frontend sent one while the task was disconnected.
+        // Without this, the new PTY starts at default 80x24 while the frontend terminal
+        // is at the actual container size, causing cursor positioning to be wrong.
+        const pendingResize = this.pendingResizes.get(taskId);
+        if (pendingResize) {
+            try {
+                ptyProcess.resize(pendingResize.cols, pendingResize.rows);
+                console.log(`[TaskSpawner] Applied pending resize for ${taskId}: ${pendingResize.cols}x${pendingResize.rows}`);
+            } catch (e) {
+                // PTY might not be ready yet; ignore
+            }
+            this.pendingResizes.delete(taskId);
+        }
 
         // Start fallback timer for shouldContinue tasks (same race condition as new tasks)
         if (shouldContinue && taskBackendType === 'claude-code') {
