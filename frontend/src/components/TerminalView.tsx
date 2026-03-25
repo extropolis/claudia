@@ -338,36 +338,41 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // History is raw PTY output captured at the original terminal size. If we
         // write it at default 80x24 and then fit to the actual size, xterm reflows
         // the content which garbles Claude Code's cursor-positioned TUI output.
-        // Using requestAnimationFrame ensures the browser has laid out the container
-        // so fitAddon.fit() gets the correct dimensions.
+        //
+        // Double-rAF: the first rAF fires before the browser paints; the second
+        // fires after layout + paint have completed, so container dimensions are
+        // final. A single rAF is NOT enough — flexbox/grid sizing may still be
+        // in-progress during the first frame.
         requestAnimationFrame(() => {
-            try {
-                fitAddon.fit();
-            } catch (e) {
-                console.error('[TerminalView] Initial fit failed:', e);
-            }
+            requestAnimationFrame(() => {
+                try {
+                    fitAddon.fit();
+                } catch (e) {
+                    console.error('[TerminalView] Initial fit failed:', e);
+                }
 
-            // End init phase — subsequent resizes (window resize, etc.) will
-            // be forwarded to the backend normally.
-            initPhase = false;
+                // End init phase — subsequent resizes (window resize, etc.) will
+                // be forwarded to the backend normally.
+                initPhase = false;
 
-            // Send ONE definitive resize to the backend with the correct dimensions
-            const { cols, rows } = term;
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({
-                    type: 'task:resize',
-                    payload: { taskId: task.id, cols, rows }
-                }));
-            }
+                // Send ONE definitive resize to the backend with the correct dimensions
+                const { cols, rows } = term;
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({
+                        type: 'task:resize',
+                        payload: { taskId: task.id, cols, rows }
+                    }));
+                }
 
-            // NOW request history — terminal is properly sized, so history
-            // will render correctly without reflow.
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({
-                    type: 'task:select',
-                    payload: { taskId: task.id }
-                }));
-            }
+                // NOW request history — terminal is properly sized, so history
+                // will render correctly without reflow.
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({
+                        type: 'task:select',
+                        payload: { taskId: task.id }
+                    }));
+                }
+            });
         });
 
         // ResizeObserver for container changes
@@ -463,14 +468,6 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             fitAddonRef.current = null;
         };
     }, [task.id, wsRef]);
-
-    // Safety-net refit when task ID changes (catches layout shifts after the initial mount)
-    useEffect(() => {
-        const timeoutId = setTimeout(() => {
-            fitTerminal();
-        }, 0);
-        return () => clearTimeout(timeoutId);
-    }, [task.id]);
 
     // Handle Resume button click - sends task:reconnect message to spawn new Claude process
     const handleResume = () => {
