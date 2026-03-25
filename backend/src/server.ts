@@ -230,6 +230,14 @@ function filterContextUpdateFromOutput(data: string): string {
 // can start buffering BEFORE the echo arrives (handles arbitrary chunk splits).
 const ctxUpdateInFlight = new Set<string>();
 
+// Tracks INLINE context-update injections (context prefix prepended to the user's
+// own message). Unlike standalone injections (e.g. workspace ref updates which end
+// with "acknowledge this update briefly\r"), inline injections produce a PTY echo
+// whose cursor-movement sequences are too complex to surgically filter — the
+// result is garbled display. Instead we discard the entire input-echo buffer for
+// inline injections; Claude Code's response comes through cleanly afterwards.
+const ctxInlineInFlight = new Set<string>();
+
 /**
  * Notify running tasks in a workspace that references have changed.
  * - Idle tasks: immediately receive a context update message
@@ -844,8 +852,17 @@ export async function createApp(basePath?: string) {
         if (entry) {
             clearTimeout(entry.timer);
             ctxUpdateBuffers.delete(taskId);
-            // Try filtering the accumulated buffer
-            emitFilteredOutput(taskId, entry.data);
+            if (ctxInlineInFlight.has(taskId)) {
+                // Inline injection: the echo has cursor-movement sequences interspersed
+                // that survive text-only filtering and corrupt the display. Discard the
+                // entire buffer — Claude's response arrives in subsequent chunks and
+                // renders cleanly without any of the echo noise.
+                ctxInlineInFlight.delete(taskId);
+            } else {
+                // Standalone injection (e.g. workspace ref / MCP config updates that
+                // end with "acknowledge this update briefly\r"): filter and emit.
+                emitFilteredOutput(taskId, entry.data);
+            }
         }
     }
 
@@ -1199,6 +1216,7 @@ export async function createApp(basePath?: string) {
                                             const enterKey = filteredInput.slice(-1);
                                             filteredInput = refPrefix + msgContent + enterKey;
                                             ctxUpdateInFlight.add(taskId);
+                                            ctxInlineInFlight.add(taskId);
                                             logger.info('Injected updated references into follow-up message', { taskId, refCount: currentValidRefs.length });
                                         } else {
                                             logger.info('References cleared for task', { taskId });
@@ -1220,6 +1238,7 @@ export async function createApp(basePath?: string) {
                                             : '';
                                         filteredInput = titleInstruction + msgContent + enterKey;
                                         ctxUpdateInFlight.add(taskId);
+                                        ctxInlineInFlight.add(taskId);
                                         logger.info('Injected auto-title instruction into existing session', { taskId });
                                     }
                                 }

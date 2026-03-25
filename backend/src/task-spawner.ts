@@ -1718,13 +1718,13 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
 **Task naming:**
 - When creating tasks, always provide a short \`displayName\` (e.g., "Build API endpoint", "Write unit tests") so tasks are easy to identify in the sidebar
-- Use \`claudia_rename_task\` to update your own task name if your work evolves beyond the original prompt
+- If your work evolves, call \`claudia_rename_task\` with taskId="${id}" and an updated title
 
-**Auto-title your task:**
-- Early in your work (after understanding the task), use \`claudia_rename_task\` to give YOUR OWN task a short, descriptive title (3-6 words) that reflects what you're actually doing
-- Your task ID is provided in the \`claudia_rename_task\` tool description — use it to rename yourself
-- If the user has manually edited your task title, the rename will be rejected — do NOT retry
-- If your work evolves significantly, update your title to reflect the new focus (unless user-edited)
+**Auto-title your task (YOUR TASK ID IS: ${id}):**
+- After you have produced your first meaningful response, call \`claudia_rename_task\` with taskId="${id}" and a short descriptive title (3-6 words) reflecting what you're working on
+- **Do NOT call \`claudia_rename_task\` before producing output** — write your first response first, then title yourself
+- If the rename is rejected (user manually edited the title), do NOT retry
+- If your work evolves significantly, call \`claudia_rename_task\` again with taskId="${id}" and an updated title (unless user-edited)
 
 **Guidelines:**
 - Prefer 2-4 parallel tasks — don't over-decompose simple work

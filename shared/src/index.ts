@@ -173,6 +173,8 @@ export type WSMessageType =
     | 'server:reloading'
     | 'server:reconnecting'
     | 'init'
+    // Tunnel status
+    | 'tunnel:status'
     // Error handling
     | 'error';
 

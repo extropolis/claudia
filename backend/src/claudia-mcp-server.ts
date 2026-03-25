@@ -777,9 +777,9 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_rename_task',
-    `Rename a task's display name in the Claudia UI sidebar. Use this to give tasks descriptive names that reflect what they're working on. Will be rejected if the user has manually edited the task title. ${SELF_TASK_ID ? `Your own task ID is: ${SELF_TASK_ID} — you should auto-title yourself early in your work with a short descriptive name (3-6 words).` : ''}`,
+    `Rename a task's display name in the Claudia UI sidebar. Use this to give tasks descriptive names that reflect what they're working on. Will be rejected if the user has manually edited the task title. ${SELF_TASK_ID ? `YOUR OWN TASK ID IS: ${SELF_TASK_ID} — after you have written your first response about the task, call this tool with taskId="${SELF_TASK_ID}" and a short descriptive title (3-6 words). Do NOT call this before producing output.` : ''}`,
     {
-        taskId: z.string().describe(`The task ID to rename.${SELF_TASK_ID ? ` Use "${SELF_TASK_ID}" to rename yourself.` : ''}`),
+        taskId: z.string().describe(`The task ID to rename.${SELF_TASK_ID ? ` To title your own task, use "${SELF_TASK_ID}".` : ''}`),
         displayName: z.string().describe('The new display name for the task (short, descriptive)'),
     },
     async ({ taskId, displayName }) => {

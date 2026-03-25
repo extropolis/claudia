@@ -125,6 +125,7 @@ function App() {
     });
     const [isResizing, setIsResizing] = useState(false);
     const [isResizingChat, setIsResizingChat] = useState(false);
+    const [terminalRefreshCounter, setTerminalRefreshCounter] = useState(0);
     const [showSettings, setShowSettings] = useState(false);
     const [settingsInitialPanel, setSettingsInitialPanel] = useState<string | undefined>(undefined);
     const [showChatPanel, setShowChatPanel] = useState(false);
@@ -245,6 +246,11 @@ function App() {
     const handleSelectTask = (taskId: string) => {
         // Hide shell view (but keep PTY alive) when selecting a task
         setShowingShell(false);
+        // If the same task is clicked again, force a terminal refresh by changing the key.
+        // This remounts TerminalView and re-fetches history, fixing any corrupted display.
+        if (taskId === selectedTaskId) {
+            setTerminalRefreshCounter(c => c + 1);
+        }
         // Only update local state - TerminalView will send task:select when it mounts
         useTaskStore.getState().selectTask(taskId);
 
@@ -266,12 +272,13 @@ function App() {
             }, delay);
         });
 
-        // Focus the task input bar after a short delay to allow the component to mount
-        setTimeout(() => {
+        // Focus the task input bar immediately after mount (requestAnimationFrame
+        // ensures the component has rendered before we dispatch the event).
+        requestAnimationFrame(() => {
             window.dispatchEvent(new CustomEvent('taskInput:focus', {
                 detail: { taskId }
             }));
-        }, 150);
+        });
     };
 
     // Mobile back button: return to workspace list
@@ -525,7 +532,7 @@ function App() {
                         // Screen 2: Full-screen terminal
                         <section className="main-panel mobile-full">
                             <TerminalView
-                                key={selectedTask!.id}
+                                key={`${selectedTask!.id}-${terminalRefreshCounter}`}
                                 task={selectedTask!}
                                 wsRef={wsRef}
                                 workspace={selectedWorkspace}
@@ -635,7 +642,7 @@ function App() {
                                             </button>
                                         )}
                                         <TerminalView
-                                            key={selectedTask.id}
+                                            key={`${selectedTask.id}-${terminalRefreshCounter}`}
                                             task={selectedTask}
                                             wsRef={wsRef}
                                             workspace={selectedWorkspace}

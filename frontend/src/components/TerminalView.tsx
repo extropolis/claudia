@@ -153,7 +153,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
         if (terminalRef.current && (terminalRef.current.clientWidth > 0 && terminalRef.current.clientHeight > 0)) {
             fitTerminal();
-            // Even if successful, try again shortly to ensure font metrics are loaded
+            // Retry a few times to catch font-metrics not yet loaded on first fit
             if (attempts < 3) {
                 setTimeout(() => attemptFit(attempts + 1), 100);
             }
@@ -272,8 +272,13 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             }
         });
 
+        // Suppress resize events during init to prevent multiple PTY resizes
+        // that trigger Claude TUI redraws interleaving with history output.
+        let initPhase = true;
+
         // Handle resize - sync to backend
         term.onResize(({ cols, rows }) => {
+            if (initPhase) return; // Skip during init — we send one resize after fit
             if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({
                     type: 'task:resize',
@@ -329,20 +334,39 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             }
         });
 
-        // Initial fit - Delayed to ensure DOM is ready
+        // CRITICAL: Fit the terminal BEFORE requesting history.
+        // History is raw PTY output captured at the original terminal size. If we
+        // write it at default 80x24 and then fit to the actual size, xterm reflows
+        // the content which garbles Claude Code's cursor-positioned TUI output.
+        // Using requestAnimationFrame ensures the browser has laid out the container
+        // so fitAddon.fit() gets the correct dimensions.
         requestAnimationFrame(() => {
             try {
                 fitAddon.fit();
-                // Force a resize event to ensure backend is synced even if size didn't "change" from default
-                const { cols, rows } = term;
-                if (wsRef.current?.readyState === WebSocket.OPEN) {
-                    wsRef.current.send(JSON.stringify({
-                        type: 'task:resize',
-                        payload: { taskId: task.id, cols, rows }
-                    }));
-                }
             } catch (e) {
                 console.error('[TerminalView] Initial fit failed:', e);
+            }
+
+            // End init phase — subsequent resizes (window resize, etc.) will
+            // be forwarded to the backend normally.
+            initPhase = false;
+
+            // Send ONE definitive resize to the backend with the correct dimensions
+            const { cols, rows } = term;
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({
+                    type: 'task:resize',
+                    payload: { taskId: task.id, cols, rows }
+                }));
+            }
+
+            // NOW request history — terminal is properly sized, so history
+            // will render correctly without reflow.
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({
+                    type: 'task:select',
+                    payload: { taskId: task.id }
+                }));
             }
         });
 
@@ -421,13 +445,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             wsRef.current.addEventListener('message', handleMessage);
         }
 
-        // Activate task
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({
-                type: 'task:select',
-                payload: { taskId: task.id }
-            }));
-        }
+        // NOTE: task:select is sent inside the requestAnimationFrame above
+        // (after fitAddon.fit()) so that history arrives at the correct terminal size.
 
         return () => {
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
@@ -445,10 +464,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         };
     }, [task.id, wsRef]);
 
-    // Refit on task ID change (when switching between tasks)
-    // Refit on task ID change (when switching between tasks)
+    // Safety-net refit when task ID changes (catches layout shifts after the initial mount)
     useEffect(() => {
-        // Use a small timeout to let layout settle after task switch
         const timeoutId = setTimeout(() => {
             fitTerminal();
         }, 0);
