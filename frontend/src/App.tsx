@@ -137,17 +137,17 @@ function App() {
     const sidebarRef = useRef<HTMLElement>(null);
     const aiCoreCheckDoneRef = useRef(false);
 
-    // When the WebSocket reconnects (e.g. after tsx watch reload), the TerminalView's
-    // message listener is still attached to the old WS object. Force a remount so it
-    // re-attaches to the new WS and re-fetches history.
-    const prevConnectedRef = useRef(isConnected);
+    // After a genuine server reload (tsx watch restart), the TerminalView's WS
+    // listener is on the old connection. Force remount only when isServerReloading
+    // transitions from true→false (server finished restarting), not on every
+    // reconnection — that would cause unwanted refreshes on tab switches.
+    const prevReloadingRef = useRef(isServerReloading);
     useEffect(() => {
-        if (isConnected && !prevConnectedRef.current) {
-            // Connection restored — force TerminalView remount
+        if (!isServerReloading && prevReloadingRef.current) {
             setTerminalRefreshCounter(c => c + 1);
         }
-        prevConnectedRef.current = isConnected;
-    }, [isConnected]);
+        prevReloadingRef.current = isServerReloading;
+    }, [isServerReloading]);
 
     const handleMouseDown = () => {
         setIsResizing(true);
