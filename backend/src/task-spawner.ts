@@ -1728,6 +1728,14 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - If the rename is rejected (user manually edited the title), do NOT retry
 - If your work evolves significantly, call \`claudia_rename_task\` again with taskId="${id}" and an updated title (unless user-edited)
 
+**Handling file edit conflicts:**
+- If you get an "Error editing file" (e.g., content mismatch, file changed on disk), another Claudia task may be editing the same file concurrently
+- When this happens: call \`claudia_list_tasks\` to check if another task is currently running that might be modifying the same file
+- If another task IS running and likely touching the same file, wait for it to complete by polling \`claudia_get_task_status\` every 15-30 seconds before retrying your edit
+- Once the other task finishes, re-read the file to get the latest content, then retry your edit
+- Do NOT blindly retry the edit in a loop — always re-read the file first to pick up changes from the other task
+- If no other task is running, re-read the file and retry — the mismatch may be from your own prior edit
+
 **Guidelines:**
 - Prefer 2-4 parallel tasks — don't over-decompose simple work
 - Only spawn tasks when parallelization provides real value; do simple work yourself
@@ -2400,17 +2408,17 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             totalSize += task.outputHistory[i].length;
         }
 
-        // Then add previous history if we still have room
-        if (task.previousHistory && totalSize < MAX_HISTORY_TO_SEND) {
-            const remainingSpace = MAX_HISTORY_TO_SEND - totalSize;
-            if (task.previousHistory.length <= remainingSpace) {
-                parts.unshift(task.previousHistory);
+        // Only include previousHistory as a FALLBACK when the current session
+        // has no output. For reconnected tasks the new Claude Code process
+        // redraws the entire TUI from scratch (via --resume), so stale TUI
+        // frames from the old session would just create visual artifacts.
+        if (totalSize === 0 && task.previousHistory && task.previousHistory.length > 0) {
+            if (task.previousHistory.length <= MAX_HISTORY_TO_SEND) {
+                parts.push(task.previousHistory);
             } else {
-                // Only include the tail of previous history
-                const tailStart = task.previousHistory.length - remainingSpace;
                 const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n');
-                parts.unshift(task.previousHistory.slice(tailStart));
-                parts.unshift(truncationMessage);
+                parts.push(truncationMessage);
+                parts.push(task.previousHistory.slice(task.previousHistory.length - MAX_HISTORY_TO_SEND));
             }
         }
 
