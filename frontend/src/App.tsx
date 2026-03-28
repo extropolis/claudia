@@ -258,11 +258,9 @@ function App() {
     const handleSelectTask = (taskId: string) => {
         // Hide shell view (but keep PTY alive) when selecting a task
         setShowingShell(false);
-        // If the same task is clicked again, force a terminal refresh by changing the key.
-        // This remounts TerminalView and re-fetches history, fixing any corrupted display.
-        if (taskId === selectedTaskId) {
-            setTerminalRefreshCounter(c => c + 1);
-        }
+        // NOTE: We intentionally do NOT remount on same-task click — that causes
+        // a black flash and loses the first character typed. The terminal garbling
+        // issues are addressed by the double-rAF fit + pending resize fixes.
         // Only update local state - TerminalView will send task:select when it mounts
         useTaskStore.getState().selectTask(taskId);
 

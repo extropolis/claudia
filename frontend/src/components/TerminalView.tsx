@@ -422,19 +422,18 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     const { history } = message.payload;
                     console.log(`[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}, alreadyLoaded: ${historyLoadedRef.current}`);
                     if (history && history.length > 0) {
-                        term.reset();
-                        // Strip screen-clearing sequences and write to terminal.
-                        // xterm.js renders the final frame state, which shows the
-                        // exit screen for completed tasks or idle prompt for active ones.
+                        // Strip screen-clearing sequences so completed tasks show
+                        // their output instead of a blank exit screen.
                         const cleaned = stripScreenClears(history);
-                        term.write(cleaned, () => {
-                            // Scroll after xterm finishes processing the write
+                        // Combine RIS (reset) + content in a SINGLE write to avoid
+                        // a visible black flash. term.reset() is sync but term.write()
+                        // is async, so calling them separately leaves one black frame.
+                        term.write('\x1bc' + cleaned, () => {
                             term.scrollToBottom();
                         });
                         console.log(`[TerminalView] History written for ${task.id} (original: ${history.length}, cleaned: ${cleaned.length})`);
                     } else {
-                        term.reset();
-                        term.write('\x1b[90m── Session history not available ──\x1b[0m\r\n');
+                        term.write('\x1bc\x1b[90m── Session history not available ──\x1b[0m\r\n');
                         console.log(`[TerminalView] Empty history for ${task.id}`);
                     }
                     // Clear loading state - history has been restored
