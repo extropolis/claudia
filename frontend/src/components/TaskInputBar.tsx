@@ -72,6 +72,19 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
         };
     }, [task.id]);
 
+    // Re-focus the textarea when the browser window regains focus.
+    // Without this, focus can land on the xterm terminal and the first
+    // keypress goes to the PTY instead of the input bar.
+    useEffect(() => {
+        const handleWindowFocus = () => {
+            if (inputRef.current && !isDisabled) {
+                inputRef.current.focus();
+            }
+        };
+        window.addEventListener('focus', handleWindowFocus);
+        return () => window.removeEventListener('focus', handleWindowFocus);
+    }, [isDisabled]);
+
     // Append voice transcript to message when this input is focused
     // We use a ref to track processed transcripts to prevent duplicate appending
     const lastProcessedTranscriptRef = useRef<string>('');
