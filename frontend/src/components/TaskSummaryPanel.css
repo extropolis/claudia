@@ -1,15 +1,20 @@
 .task-summary-panel {
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-    border: 1px solid #3a3a5a;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
     border-radius: 8px;
     padding: 12px;
     margin: 8px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow);
     animation: slideIn 0.3s ease-out;
     max-height: 300px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+}
+
+[data-theme="light"] .task-summary-panel {
+    background: linear-gradient(135deg, #f0f4ff 0%, #e8f0fe 100%);
+    border-color: #c8d6f0;
 }
 
 @keyframes slideIn {
@@ -29,7 +34,7 @@
     gap: 8px;
     margin-bottom: 10px;
     padding-bottom: 8px;
-    border-bottom: 1px solid #3a3a5a;
+    border-bottom: 1px solid var(--border-color);
     flex-shrink: 0;
 }
 
@@ -41,7 +46,7 @@
 
 .summary-title {
     font-weight: 600;
-    color: #e5e5e5;
+    color: var(--text-primary);
     flex: 1;
 }
 
@@ -51,26 +56,30 @@
 }
 
 .status-icon.completed {
-    color: #22c55e;
+    color: var(--accent-green);
 }
 
 .status-icon.error {
-    color: #ef4444;
+    color: var(--accent-red);
 }
 
 .status-icon.permission {
-    color: #f59e0b;
+    color: var(--accent-yellow);
 }
 
 .status-icon.input {
     color: #3b82f6;
 }
 
+[data-theme="light"] .status-icon.input {
+    color: #0969da;
+}
+
 .refresh-btn,
 .dismiss-btn {
     background: none;
     border: none;
-    color: #888;
+    color: var(--text-secondary);
     cursor: pointer;
     padding: 4px;
     border-radius: 4px;
@@ -79,8 +88,8 @@
 
 .refresh-btn:hover,
 .dismiss-btn:hover {
-    background: rgba(255, 255, 255, 0.1);
-    color: #fff;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
 }
 
 .dismiss-btn {
@@ -102,34 +111,34 @@
 }
 
 .summary-content::-webkit-scrollbar-track {
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--bg-tertiary);
     border-radius: 3px;
 }
 
 .summary-content::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.2);
+    background: var(--border-color);
     border-radius: 3px;
 }
 
 .summary-content::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.3);
+    background: var(--text-muted);
 }
 
 .summary-text {
-    color: #d4d4d4;
+    color: var(--text-primary);
     font-size: 13px;
     line-height: 1.5;
     margin: 0 0 8px 0;
 }
 
 .last-action {
-    color: #888;
+    color: var(--text-secondary);
     font-size: 12px;
     margin: 0;
 }
 
 .last-action strong {
-    color: #aaa;
+    color: var(--text-primary);
 }
 
 .suggested-actions {
@@ -151,7 +160,7 @@
 
 .action-btn:hover {
     transform: translateY(-1px);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow);
 }
 
 .action-btn.approve {
@@ -164,6 +173,16 @@
     background: #15803d;
 }
 
+[data-theme="light"] .action-btn.approve {
+    background: #dcfce7;
+    border-color: var(--accent-green);
+    color: #14532d;
+}
+
+[data-theme="light"] .action-btn.approve:hover {
+    background: #bbf7d0;
+}
+
 .action-btn.reject {
     background: #991b1b;
     border-color: #ef4444;
@@ -172,6 +191,16 @@
 
 .action-btn.reject:hover {
     background: #b91c1c;
+}
+
+[data-theme="light"] .action-btn.reject {
+    background: #fee2e2;
+    border-color: var(--accent-red);
+    color: #7f1d1d;
+}
+
+[data-theme="light"] .action-btn.reject:hover {
+    background: #fecaca;
 }
 
 .action-btn.command {
@@ -184,6 +213,16 @@
     background: #1d4ed8;
 }
 
+[data-theme="light"] .action-btn.command {
+    background: #dbeafe;
+    border-color: #0969da;
+    color: #1e3a8a;
+}
+
+[data-theme="light"] .action-btn.command:hover {
+    background: #bfdbfe;
+}
+
 .action-btn.custom {
     background: #374151;
     border-color: #6b7280;
@@ -192,6 +231,17 @@
 
 .action-btn.custom:hover {
     background: #4b5563;
+}
+
+[data-theme="light"] .action-btn.custom {
+    background: var(--bg-tertiary);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+}
+
+[data-theme="light"] .action-btn.custom:hover {
+    background: var(--bg-secondary);
+    border-color: var(--text-muted);
 }
 
 /* Default button style for 'input' type */
@@ -203,4 +253,14 @@
 
 .action-btn:not(.approve):not(.reject):not(.command):not(.custom):hover {
     background: #5b21b6;
+}
+
+[data-theme="light"] .action-btn:not(.approve):not(.reject):not(.command):not(.custom) {
+    background: #ede9fe;
+    border-color: #7c3aed;
+    color: #4c1d95;
+}
+
+[data-theme="light"] .action-btn:not(.approve):not(.reject):not(.command):not(.custom):hover {
+    background: #ddd6fe;
 }
