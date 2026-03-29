@@ -8,6 +8,7 @@ import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
+import { isBypassPermissionsPrompt } from './task-state-detection.js';
 import { sanitizePrompt } from './validation.js';
 import { createLogger } from './logger.js';
 import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
@@ -159,6 +160,7 @@ interface InternalTask extends Task {
     stateTransitionLock?: boolean; // Prevents concurrent state transitions during polling
     shouldContinue?: boolean; // True if this is a reconnected task that should auto-continue
     continuationSent?: boolean; // True if continuation prompt has been sent
+    bypassPermissionsHandled?: boolean; // True if bypass permissions prompt was auto-accepted
     consecutiveOutputChanges?: number; // Count of consecutive polls with output changes (for idle→busy debouncing)
     inactiveOutputLogged?: boolean; // True if we've already logged the "dropping output" message for this inactive state
     lastRefKey?: string; // Tracks which workspace references were last injected (sorted ref IDs)
@@ -1158,7 +1160,19 @@ export class TaskSpawner extends EventEmitter {
             .replace(/\r/g, '');
     }
 
-    private isReadyForInitialInput(str: string): boolean {
+    /**
+     * Check if terminal output indicates Claude is ready for initial input.
+     * @param str Terminal output to check.
+     * @param bypassHandled When true, bypass permissions was already accepted so its
+     *   text may still be in the accumulated-output buffer — skip the bypass guard to
+     *   avoid blocking the ready-state detection on stale history.
+     */
+    private isReadyForInitialInput(str: string, bypassHandled = false): boolean {
+        // Do not treat the bypass permissions confirmation menu as a ready signal,
+        // unless we have already handled it (stale text may remain in the buffer).
+        if (!bypassHandled && isBypassPermissionsPrompt(str)) {
+            return false;
+        }
         return str.includes('Try "') ||
             str.includes('? for shortcuts') ||
             (str.includes('───') && str.includes('❯'));
@@ -1175,6 +1189,20 @@ export class TaskSpawner extends EventEmitter {
         const READY_FALLBACK_MS = 15000;
         task.readyFallbackTimer = setTimeout(() => {
             if (!task.initialPromptSent && task.pendingPrompt) {
+                // Safety guard: if the bypass permissions prompt is still showing and has not
+                // been accepted, sending the task prompt text would be interpreted as input
+                // to the bypass menu, typically selecting "1. No, exit" and killing the task.
+                // In this case force-accept the bypass menu instead.
+                if (!task.bypassPermissionsHandled) {
+                    const recentOutput = this.getRecentOutput(task, 4096);
+                    if (isBypassPermissionsPrompt(recentOutput)) {
+                        console.log(`[TaskSpawner] FALLBACK: Bypass permissions prompt still visible for task ${task.id}, force-accepting`);
+                        task.bypassPermissionsHandled = true;
+                        task.process.write('2\n');
+                        task.readyFallbackTimer = undefined;
+                        return; // Let the next PTY data event detect the real ready state
+                    }
+                }
                 console.log(`[TaskSpawner] FALLBACK: Ready signal not detected after ${READY_FALLBACK_MS}ms for task ${task.id}, sending prompt anyway`);
                 console.log(`[TaskSpawner] FALLBACK: Recent output: ${JSON.stringify(this.getRecentOutput(task, 512))}`);
                 task.initialPromptSent = true;
@@ -1258,7 +1286,8 @@ export class TaskSpawner extends EventEmitter {
 
         // Numbered selection menu (like "Exit plan mode?" dialog)
         // Looks for pattern like: "❯ 1. Yes" or "  2. No" indicating a numbered choice menu
-        if (str.match(/❯\s*\d+\.\s+\w/) && str.match(/\s+\d+\.\s+\w/)) {
+        // Skip if this is the bypass permissions menu — that is handled separately on startup
+        if (str.match(/❯\s*\d+\.\s+\w/) && str.match(/\s+\d+\.\s+\w/) && !isBypassPermissionsPrompt(str)) {
             console.log(`[TaskSpawner] Numbered selection menu detected`);
             return 'question';
         }
@@ -1849,12 +1878,29 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 }
             }
 
-            // Send initial prompt when Claude is ready
+            // Auto-accept bypass permissions prompt when --dangerously-skip-permissions is active.
+            // Claude shows a confirmation menu on startup; if we don't intercept it first, the
+            // isReadyForInitialInput heuristics (─── + ❯) would falsely trigger and send Enter
+            // which selects "1. No, exit", causing the task to immediately terminate.
+            if (!task.bypassPermissionsHandled) {
+                const recentForBypass = this.getRecentOutput(task, 4096);
+                if (isBypassPermissionsPrompt(cleanData) || isBypassPermissionsPrompt(recentForBypass)) {
+                    console.log(`[TaskSpawner] Bypass permissions prompt detected for task ${task.id}, auto-accepting (user enabled skip permissions)`);
+                    task.bypassPermissionsHandled = true;
+                    task.process.write('2\n');
+                }
+            }
+
+            // Send initial prompt when Claude is ready.
             // Check BOTH the current chunk AND the accumulated output to handle
-            // the race condition where the ready signal is split across PTY data chunks
+            // the race condition where the ready signal is split across PTY data chunks.
+            // Pass bypassPermissionsHandled so that stale bypass menu text remaining in the
+            // accumulated-output buffer does not block detection of the real ready state.
+            const bypassHandled = !!task.bypassPermissionsHandled;
             if (!task.initialPromptSent && task.pendingPrompt &&
-                (this.isReadyForInitialInput(cleanData) || this.isReadyForInitialInput(this.getRecentOutput(task, 4096)))) {
-                console.log(`[TaskSpawner] Claude ready, sending prompt (detected in ${this.isReadyForInitialInput(cleanData) ? 'current chunk' : 'accumulated output'})`);
+                (this.isReadyForInitialInput(cleanData, bypassHandled) || this.isReadyForInitialInput(this.getRecentOutput(task, 4096), bypassHandled))) {
+                console.log(`[TaskSpawner] Claude ready, sending prompt (detected in ${this.isReadyForInitialInput(cleanData, bypassHandled) ? 'current chunk' : 'accumulated output'})`);
+
                 task.initialPromptSent = true;
                 const prompt = task.pendingPrompt;
                 task.pendingPrompt = null;
@@ -3044,6 +3090,9 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             hasStartedProcessing: !shouldContinue,  // Will be set true when continuation starts
             shouldContinue,
             continuationSent: false,
+            // bypassPermissionsHandled is intentionally omitted (starts as undefined/false) so that
+            // a reconnected task that spawns a new Claude process with --dangerously-skip-permissions
+            // will correctly detect and auto-accept the bypass menu on the new session.
             displayName: persisted.displayName,  // Preserve user-set display name across reconnection
             systemPrompt: persisted.systemPrompt,  // Preserve custom system prompt
             gitStateBefore: persisted.gitState ? persisted.gitState : undefined,  // Preserve git state

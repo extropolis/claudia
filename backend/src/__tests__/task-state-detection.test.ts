@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
     stripAnsi,
     isReadyForInitialInput,
+    isBypassPermissionsPrompt,
     extractSessionId,
     hasProcessingIndicators,
     detectWaitingForInput,
@@ -78,6 +79,66 @@ describe('isReadyForInitialInput', () => {
 
     it('should return false for empty string', () => {
         expect(isReadyForInitialInput('')).toBe(false);
+    });
+
+    it('should return false when bypass permissions prompt is present', () => {
+        const bypassPrompt = `⚠️ CAUTION: Claude Code running in Bypass Permissions mode.
+In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.
+This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.
+
+By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.
+https://code.claude.com/docs/security
+❯ 1. No, exit
+  2. Yes, I accept
+Enter to confirm - Esc to cancel`;
+        expect(isReadyForInitialInput(bypassPrompt)).toBe(false);
+    });
+
+    it('should return false when bypass permissions prompt has separator and chevron', () => {
+        const bypassPrompt = `───────────
+Bypass Permissions mode
+❯ 1. No, exit
+  2. Yes, I accept
+───────────`;
+        expect(isReadyForInitialInput(bypassPrompt)).toBe(false);
+    });
+});
+
+describe('isBypassPermissionsPrompt', () => {
+    it('should return true for typical bypass permissions output', () => {
+        const bypassPrompt = `⚠️ CAUTION: Claude Code running in Bypass Permissions mode.
+In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.
+This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.
+
+By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.
+https://code.claude.com/docs/security
+❯ 1. No, exit
+  2. Yes, I accept
+Enter to confirm - Esc to cancel`;
+        expect(isBypassPermissionsPrompt(bypassPrompt)).toBe(true);
+    });
+
+    it('should return true when "Bypass Permissions" and menu options are present', () => {
+        const bypassPrompt = `Bypass Permissions mode enabled.
+❯ 1. No, exit
+  2. Yes, I accept`;
+        expect(isBypassPermissionsPrompt(bypassPrompt)).toBe(true);
+    });
+
+    it('should return false for normal Claude ready state with separator and chevron only', () => {
+        const normalReady = `───────────
+❯`;
+        expect(isBypassPermissionsPrompt(normalReady)).toBe(false);
+    });
+
+    it('should return false for empty string', () => {
+        expect(isBypassPermissionsPrompt('')).toBe(false);
+    });
+
+    it('should return false for unrelated text with chevron', () => {
+        const unrelated = `Some output here
+❯ Enter your message`;
+        expect(isBypassPermissionsPrompt(unrelated)).toBe(false);
     });
 });
 
@@ -177,6 +238,19 @@ describe('detectWaitingForInput', () => {
         it('should detect numbered selection menu with multiple options', () => {
             const input = 'Choose an option:\n  ❯ 1. Option A\n    2. Option B\n    3. Option C';
             expect(detectWaitingForInput(input)).toBe('question');
+        });
+
+        it('should NOT treat bypass permissions menu as a numbered selection question', () => {
+            const bypassPrompt = `⚠️ CAUTION: Claude Code running in Bypass Permissions mode.
+In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.
+This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.
+
+By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.
+https://code.claude.com/docs/security
+❯ 1. No, exit
+  2. Yes, I accept
+Enter to confirm - Esc to cancel`;
+            expect(detectWaitingForInput(bypassPrompt)).toBeNull();
         });
     });
 

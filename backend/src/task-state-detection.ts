@@ -23,9 +23,28 @@ export function stripAnsi(str: string): string {
 }
 
 /**
+ * Check if terminal output is showing the bypass permissions confirmation menu.
+ * When Claude starts with --dangerously-skip-permissions, it shows a menu like:
+ *   ⚠️ CAUTION: Claude Code running in Bypass Permissions mode.
+ *   ❯ 1. No, exit
+ *     2. Yes, I accept
+ *   Enter to confirm - Esc to cancel
+ * We must detect this and NOT treat it as a normal ready-for-input state.
+ */
+export function isBypassPermissionsPrompt(str: string): boolean {
+    return (str.includes('Bypass Permissions') || str.includes('bypass permissions')) &&
+        str.includes('No, exit') &&
+        str.includes('Yes, I accept');
+}
+
+/**
  * Check if terminal output indicates Claude is ready for initial input
  */
 export function isReadyForInitialInput(str: string): boolean {
+    // Do not treat the bypass permissions confirmation menu as a ready signal
+    if (isBypassPermissionsPrompt(str)) {
+        return false;
+    }
     return str.includes('Try "') ||
         str.includes('? for shortcuts') ||
         (str.includes('───') && str.includes('❯'));
@@ -78,7 +97,8 @@ export function detectWaitingForInput(str: string): WaitingInputType | null {
 
     // Numbered selection menu (like "Exit plan mode?" dialog)
     // Looks for pattern like: "❯ 1. Yes" or "  2. No" indicating a numbered choice menu
-    if (str.match(/❯\s*\d+\.\s+\w/) && str.match(/\s+\d+\.\s+\w/)) {
+    // Skip if this is the bypass permissions menu — that is handled separately on startup
+    if (str.match(/❯\s*\d+\.\s+\w/) && str.match(/\s+\d+\.\s+\w/) && !isBypassPermissionsPrompt(str)) {
         console.log(`[StateDetection] Numbered selection menu detected`);
         return 'question';
     }
