@@ -102,6 +102,15 @@ Bypass Permissions mode
 ───────────`;
         expect(isReadyForInitialInput(bypassPrompt)).toBe(false);
     });
+
+    it('should return false when accumulated buffer contains bypass text mixed with ready signal', () => {
+        const mixedOutput = `⚠️ CAUTION: Claude Code running in Bypass Permissions mode.
+❯ 1. No, exit
+  2. Yes, I accept
+───────────
+❯`;
+        expect(isReadyForInitialInput(mixedOutput)).toBe(false);
+    });
 });
 
 describe('isBypassPermissionsPrompt', () => {
@@ -139,6 +148,15 @@ Enter to confirm - Esc to cancel`;
         const unrelated = `Some output here
 ❯ Enter your message`;
         expect(isBypassPermissionsPrompt(unrelated)).toBe(false);
+    });
+
+    it('should return true when bypass text and ready signal are both present', () => {
+        const mixedOutput = `⚠️ CAUTION: Claude Code running in Bypass Permissions mode.
+❯ 1. No, exit
+  2. Yes, I accept
+───────────
+❯`;
+        expect(isBypassPermissionsPrompt(mixedOutput)).toBe(true);
     });
 });
 

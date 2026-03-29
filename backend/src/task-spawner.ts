@@ -1199,8 +1199,18 @@ export class TaskSpawner extends EventEmitter {
                         console.log(`[TaskSpawner] FALLBACK: Bypass permissions prompt still visible for task ${task.id}, force-accepting`);
                         task.bypassPermissionsHandled = true;
                         task.process.write('2\n');
-                        task.readyFallbackTimer = undefined;
-                        return; // Let the next PTY data event detect the real ready state
+                        task.readyFallbackTimer = setTimeout(() => {
+                            if (!task.initialPromptSent && task.pendingPrompt) {
+                                console.log(`[TaskSpawner] FALLBACK (post-bypass): Ready signal not detected after 5s for task ${task.id}, sending prompt anyway`);
+                                task.initialPromptSent = true;
+                                const prompt = task.pendingPrompt;
+                                task.pendingPrompt = null;
+                                task.promptSubmitAttempts = 0;
+                                setTimeout(() => this.sendPromptWithRetry(task, prompt), 500);
+                            }
+                            task.readyFallbackTimer = undefined;
+                        }, 5000);
+                        return;
                     }
                 }
                 console.log(`[TaskSpawner] FALLBACK: Ready signal not detected after ${READY_FALLBACK_MS}ms for task ${task.id}, sending prompt anyway`);
