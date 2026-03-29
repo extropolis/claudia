@@ -1702,6 +1702,10 @@
 
 .theme-option.active {
     background: var(--accent-secondary);
-    color: #ffffff;
+    color: #000000;
     border-color: var(--accent-secondary);
+}
+
+[data-theme="light"] .theme-option.active {
+    color: #ffffff;
 }

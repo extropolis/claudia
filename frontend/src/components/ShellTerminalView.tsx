@@ -3,7 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { X, Copy, Check } from 'lucide-react';
-import { useTheme } from '../hooks/useTheme';
+import { useEffectiveTheme } from '../hooks/useTheme';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
 import '@xterm/xterm/css/xterm.css';
 import './ShellTerminalView.css';
@@ -17,7 +17,7 @@ interface ShellTerminalViewProps {
 }
 
 export function ShellTerminalView({ workspaceId, workspaceName, wsRef, onClose, visible = true }: ShellTerminalViewProps) {
-    const { effectiveTheme } = useTheme();
+    const effectiveTheme = useEffectiveTheme();
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);

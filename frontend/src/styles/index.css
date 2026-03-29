@@ -13,6 +13,7 @@
   --accent-red: #f85149;
   --accent-yellow: #d29922;
   --shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --bg-hover: #2d333b;
 }
 
 /* Light theme */
@@ -30,6 +31,7 @@
   --accent-red: #cf222e;
   --accent-yellow: #9a6700;
   --shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  --bg-hover: #eaeef2;
 }
 
 * {
@@ -84,7 +86,7 @@ body {
 
 .app-version {
   font-size: 0.7rem;
-  color: #666;
+  color: var(--text-muted);
   font-weight: 400;
   align-self: center;
 }
@@ -590,6 +592,16 @@ body {
 
 .shell-switch-banner span {
   opacity: 0.9;
+}
+
+[data-theme="light"] .shell-switch-banner {
+  background: #f0fdf4;
+  border-bottom-color: #bbf7d0;
+  color: var(--accent-green);
+}
+
+[data-theme="light"] .shell-switch-banner:hover {
+  background: #dcfce7;
 }
 
 /* Shell terminal wrapper - fills main panel when visible */
@@ -1232,6 +1244,20 @@ body {
   background: #484f58;
 }
 
+[data-theme="light"] .task-description-box {
+  background: var(--bg-secondary);
+  border-color: var(--border-color);
+  color: var(--text-secondary);
+}
+
+[data-theme="light"] .task-description-box::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+}
+
+[data-theme="light"] .task-description-box::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
 .terminal-line {
   color: #c9d1d9;
 }
@@ -1561,6 +1587,11 @@ body {
   display: block;
   white-space: pre;
   tab-size: 4;
+}
+
+[data-theme="light"] .code-block {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
 }
 
 /* Plan Viewer Styles */

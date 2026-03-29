@@ -452,3 +452,13 @@
     color: var(--text-primary);
     border-color: var(--text-muted);
 }
+
+[data-theme="light"] .terminal-state.disconnected {
+    background: #e2e5e9;
+    color: #57606a;
+}
+
+[data-theme="light"] .terminal-state.exited {
+    background: #d0d7de;
+    color: #57606a;
+}

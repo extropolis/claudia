@@ -5,7 +5,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Task, Workspace } from '@claudia/shared';
 import { Copy, Check, Play, BookOpen, ArrowDown } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
-import { useTheme } from '../hooks/useTheme';
+import { useEffectiveTheme } from '../hooks/useTheme';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
@@ -18,7 +18,7 @@ interface TerminalViewProps {
 }
 
 export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewProps) {
-    const { effectiveTheme } = useTheme();
+    const effectiveTheme = useEffectiveTheme();
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);

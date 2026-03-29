@@ -1,7 +1,7 @@
 .task-input-bar {
     padding: 12px 16px;
-    background: #1a1a1a;
-    border-top: 1px solid #333;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border-color);
     flex-shrink: 0;
     position: relative;
     display: flex;
@@ -22,8 +22,8 @@
     display: flex;
     align-items: flex-end;
     gap: 10px;
-    background: #0d0d0d;
-    border: 1px solid #333;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
     border-radius: 8px;
     padding: 10px 14px;
     transition: border-color 0.15s ease;
@@ -123,7 +123,7 @@
     height: 36px;
     border-radius: 6px;
     background: transparent;
-    border: 1px solid #444;
+    border: 1px solid var(--border-color);
 }
 
 .task-input-bar .voice-input-button:hover:not(:disabled) {
@@ -146,7 +146,7 @@
     width: 36px;
     height: 36px;
     background: transparent;
-    border: 1px solid #444;
+    border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-muted);
     cursor: pointer;
@@ -174,7 +174,7 @@
     width: 36px;
     height: 36px;
     background: transparent;
-    border: 1px solid #444;
+    border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-muted);
     cursor: pointer;
@@ -232,7 +232,7 @@
     height: 64px;
     border-radius: 6px;
     overflow: hidden;
-    border: 1px solid #444;
+    border: 1px solid var(--border-color);
 }
 
 .task-input-image-preview img {
