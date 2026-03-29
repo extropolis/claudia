@@ -5,6 +5,9 @@ import { resolve } from 'path';
 
 const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf-8'));
 
+const backendPort = process.env.CLAUDIA_BACKEND_PORT || '4001';
+const frontendPort = parseInt(process.env.CLAUDIA_FRONTEND_PORT || '5173', 10);
+
 export default defineConfig({
     plugins: [react()],
     define: {
@@ -12,11 +15,11 @@ export default defineConfig({
     },
     base: './', // Use relative paths for Electron
     server: {
-        port: 5173,
+        port: frontendPort,
         proxy: {
-            '/api': 'http://localhost:4001',
+            '/api': `http://localhost:${backendPort}`,
             '/ws': {
-                target: 'ws://localhost:4001',
+                target: `ws://localhost:${backendPort}`,
                 ws: true,
             },
         },
