@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
+import { ThemePreference } from '../types/theme';
 
 // Info about a task that is waiting for user input
 export interface WaitingInputInfo {
@@ -82,6 +83,7 @@ interface TaskStore {
     browserNotificationsEnabled: boolean;
     notifyOnCompletion: boolean;
     notifyOnWaitingInput: boolean;
+    themePreference: ThemePreference;
 
     // Actions
     setConnected: (connected: boolean) => void;
@@ -163,6 +165,7 @@ interface TaskStore {
     setBrowserNotificationsEnabled: (enabled: boolean) => void;
     setNotifyOnCompletion: (enabled: boolean) => void;
     setNotifyOnWaitingInput: (enabled: boolean) => void;
+    setThemePreference: (pref: ThemePreference) => void;
 }
 
 // Storage key for localStorage
@@ -193,6 +196,7 @@ interface PersistedState {
     browserNotificationsEnabled: boolean;
     notifyOnCompletion: boolean;
     notifyOnWaitingInput: boolean;
+    themePreference: ThemePreference;
     taskSummaries: [string, TaskSummary][];  // Stored as entries array
     chatMessages: ChatMessage[];
 }
@@ -261,6 +265,7 @@ export const useTaskStore = create<TaskStore>()(
             browserNotificationsEnabled: false,
             notifyOnCompletion: true,
             notifyOnWaitingInput: true,
+            themePreference: 'system' as ThemePreference,
 
             // Actions
             setConnected: (connected) => {
@@ -671,7 +676,8 @@ export const useTaskStore = create<TaskStore>()(
             setShowSystemStats: (show) => set({ showSystemStats: show }),
             setBrowserNotificationsEnabled: (enabled) => set({ browserNotificationsEnabled: enabled }),
             setNotifyOnCompletion: (enabled) => set({ notifyOnCompletion: enabled }),
-            setNotifyOnWaitingInput: (enabled) => set({ notifyOnWaitingInput: enabled })
+            setNotifyOnWaitingInput: (enabled) => set({ notifyOnWaitingInput: enabled }),
+            setThemePreference: (pref) => set({ themePreference: pref })
         }),
         {
             name: STORAGE_KEY,
@@ -701,6 +707,7 @@ export const useTaskStore = create<TaskStore>()(
                 browserNotificationsEnabled: state.browserNotificationsEnabled,
                 notifyOnCompletion: state.notifyOnCompletion,
                 notifyOnWaitingInput: state.notifyOnWaitingInput,
+                themePreference: state.themePreference,
                 taskSummaries: Array.from(state.taskSummaries.entries()),
                 chatMessages: state.chatMessages,
             }),
@@ -746,6 +753,7 @@ export const useTaskStore = create<TaskStore>()(
                     browserNotificationsEnabled: persisted.browserNotificationsEnabled ?? currentState.browserNotificationsEnabled,
                     notifyOnCompletion: persisted.notifyOnCompletion ?? currentState.notifyOnCompletion,
                     notifyOnWaitingInput: persisted.notifyOnWaitingInput ?? currentState.notifyOnWaitingInput,
+                    themePreference: persisted.themePreference ?? currentState.themePreference,
                     taskSummaries: persisted.taskSummaries
                         ? new Map(persisted.taskSummaries)
                         : currentState.taskSummaries,

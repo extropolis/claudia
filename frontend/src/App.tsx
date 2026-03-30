@@ -10,6 +10,7 @@ import { SystemStats } from './components/SystemStats';
 import { MobileAccessModal } from './components/MobileAccessModal';
 import { FileExplorer } from './components/FileExplorer';
 import { ShellTerminalView } from './components/ShellTerminalView';
+import { useTheme } from './hooks/useTheme';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
 import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff } from 'lucide-react';
@@ -35,6 +36,7 @@ const DEFAULT_CHAT_PANEL_WIDTH = 380;
 
 function App() {
     const isMobile = useIsMobile();
+    useTheme();
     const {
         createTask,
         interruptTask,

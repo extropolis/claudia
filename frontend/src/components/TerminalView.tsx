@@ -5,6 +5,8 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Task, Workspace } from '@claudia/shared';
 import { Copy, Check, Play, BookOpen, ArrowDown } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
+import { useEffectiveTheme } from '../hooks/useTheme';
+import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
 
@@ -36,6 +38,7 @@ interface TerminalViewProps {
 }
 
 export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewProps) {
+    const effectiveTheme = useEffectiveTheme();
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
@@ -183,27 +186,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             fontFamily: '"SF Mono", "Monaco", "Inconsolata", "Fira Code", monospace',
             scrollback: 10000,
             allowProposedApi: true,
-            theme: {
-                background: '#0a0a0a',
-                foreground: '#d4d4d4',
-                cursor: '#d4d4d4',
-                black: '#0a0a0a',
-                red: '#cd3131',
-                green: '#0dbc79',
-                yellow: '#e5e510',
-                blue: '#2472c8',
-                magenta: '#bc3fbc',
-                cyan: '#11a8cd',
-                white: '#e5e5e5',
-                brightBlack: '#666666',
-                brightRed: '#f14c4c',
-                brightGreen: '#23d18b',
-                brightYellow: '#f5f543',
-                brightBlue: '#3b8eea',
-                brightMagenta: '#d670d6',
-                brightCyan: '#29b8db',
-                brightWhite: '#e5e5e5',
-            },
+            theme: effectiveTheme === 'light' ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME,
         });
 
         const fitAddon = new FitAddon();
@@ -467,6 +450,21 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             fitAddonRef.current = null;
         };
     }, [task.id, wsRef]);
+
+    // Refit on task ID change (when switching between tasks)
+    useEffect(() => {
+        // Use a small timeout to let layout settle after task switch
+        const timeoutId = setTimeout(() => {
+            fitTerminal();
+        }, 0);
+        return () => clearTimeout(timeoutId);
+    }, [task.id]);
+
+    // Update terminal theme when app theme changes
+    useEffect(() => {
+        if (!xtermRef.current) return;
+        xtermRef.current.options.theme = effectiveTheme === 'light' ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME;
+    }, [effectiveTheme]);
 
     // Handle Resume button click - sends task:reconnect message to spawn new Claude process
     const handleResume = () => {

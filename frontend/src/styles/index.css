@@ -13,6 +13,25 @@
   --accent-red: #f85149;
   --accent-yellow: #d29922;
   --shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --bg-hover: #2d333b;
+}
+
+/* Light theme */
+[data-theme="light"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f6f8fa;
+  --bg-tertiary: #eaeef2;
+  --border-color: #d0d7de;
+  --text-primary: #1f2328;
+  --text-secondary: #656d76;
+  --text-muted: #6e7781;
+  --accent-primary: #ddf4ff;
+  --accent-secondary: #0969da;
+  --accent-green: #1a7f37;
+  --accent-red: #cf222e;
+  --accent-yellow: #9a6700;
+  --shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  --bg-hover: #eaeef2;
 }
 
 * {
@@ -67,7 +86,7 @@ body {
 
 .app-version {
   font-size: 0.7rem;
-  color: #666;
+  color: var(--text-muted);
   font-weight: 400;
   align-self: center;
 }
@@ -77,19 +96,19 @@ body {
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  background: #333;
-  border: 1px solid #555;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  color: #ccc;
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
   transition: all 0.2s;
 }
 
 .exit-fullscreen-button:hover {
-  background: #444;
-  color: #fff;
-  border-color: #666;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-color: var(--text-muted);
 }
 
 /* Sound Toggle Button */
@@ -575,6 +594,16 @@ body {
 
 .shell-switch-banner span {
   opacity: 0.9;
+}
+
+[data-theme="light"] .shell-switch-banner {
+  background: #f0fdf4;
+  border-bottom-color: #bbf7d0;
+  color: var(--accent-green);
+}
+
+[data-theme="light"] .shell-switch-banner:hover {
+  background: #dcfce7;
 }
 
 /* Shell terminal wrapper - fills main panel when visible */
@@ -1217,6 +1246,20 @@ body {
   background: #484f58;
 }
 
+[data-theme="light"] .task-description-box {
+  background: var(--bg-secondary);
+  border-color: var(--border-color);
+  color: var(--text-secondary);
+}
+
+[data-theme="light"] .task-description-box::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+}
+
+[data-theme="light"] .task-description-box::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
 .terminal-line {
   color: #c9d1d9;
 }
@@ -1546,6 +1589,11 @@ body {
   display: block;
   white-space: pre;
   tab-size: 4;
+}
+
+[data-theme="light"] .code-block {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
 }
 
 /* Plan Viewer Styles */
