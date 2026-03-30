@@ -18,6 +18,9 @@ import './TerminalView.css';
  */
 function stripScreenClears(history: string): string {
     return history
+        // \x1bc - RIS (Reset to Initial State) — causes a full terminal reset
+        // that blacks out the screen if no content follows immediately
+        .replace(/\x1bc/g, '')
         // \x1b[2J\x1b[H - Clear screen + cursor home (common cleanup pattern)
         // Strip as a pair so standalone \x1b[H used for TUI drawing is preserved
         .replace(/\x1b\[2J\x1b\[H/g, '')
@@ -405,18 +408,15 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     const { history } = message.payload;
                     console.log(`[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}, alreadyLoaded: ${historyLoadedRef.current}`);
                     if (history && history.length > 0) {
-                        // Strip screen-clearing sequences so completed tasks show
-                        // their output instead of a blank exit screen.
+                        term.reset();
                         const cleaned = stripScreenClears(history);
-                        // Combine RIS (reset) + content in a SINGLE write to avoid
-                        // a visible black flash. term.reset() is sync but term.write()
-                        // is async, so calling them separately leaves one black frame.
-                        term.write('\x1bc' + cleaned, () => {
+                        term.write(cleaned, () => {
                             term.scrollToBottom();
                         });
                         console.log(`[TerminalView] History written for ${task.id} (original: ${history.length}, cleaned: ${cleaned.length})`);
                     } else {
-                        term.write('\x1bc\x1b[90m── Session history not available ──\x1b[0m\r\n');
+                        term.reset();
+                        term.write('\x1b[90m── Session history not available ──\x1b[0m\r\n');
                         console.log(`[TerminalView] Empty history for ${task.id}`);
                     }
                     // Clear loading state - history has been restored
@@ -450,15 +450,6 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             fitAddonRef.current = null;
         };
     }, [task.id, wsRef]);
-
-    // Refit on task ID change (when switching between tasks)
-    useEffect(() => {
-        // Use a small timeout to let layout settle after task switch
-        const timeoutId = setTimeout(() => {
-            fitTerminal();
-        }, 0);
-        return () => clearTimeout(timeoutId);
-    }, [task.id]);
 
     // Update terminal theme when app theme changes
     useEffect(() => {
