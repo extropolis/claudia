@@ -72,6 +72,8 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
         };
     }, [task.id]);
 
+    const isDisabled = task.state === 'exited' || task.state === 'disconnected' || task.state === 'interrupted';
+
     // Re-focus the textarea when the browser window regains focus.
     // Without this, focus can land on the xterm terminal and the first
     // keypress goes to the PTY instead of the input bar.
@@ -320,8 +322,6 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
             imagesRef.current.forEach(img => URL.revokeObjectURL(img.previewUrl));
         };
     }, []);
-
-    const isDisabled = task.state === 'exited' || task.state === 'disconnected' || task.state === 'interrupted';
 
     // Show interim transcript when focused and listening
     const showInterim = globalVoiceEnabled && isFocused && voiceInterimTranscript;
