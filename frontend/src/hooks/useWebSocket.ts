@@ -281,6 +281,23 @@ export function useWebSocket() {
                             timestamp: new Date()
                         });
 
+                        // Log to activity feed; only mark unread if not currently viewing
+                        {
+                            const { tasks, selectedTaskId: sTaskId } = useTaskStore.getState();
+                            const task = tasks.get(payload.taskId);
+                            const inputLabel = payload.inputType === 'permission' ? 'Needs permission'
+                                : payload.inputType === 'question' ? 'Has a question'
+                                : 'Needs confirmation';
+                            const isViewing = sTaskId === payload.taskId;
+                            useTaskStore.getState().addActivityEvent({
+                                taskId: payload.taskId,
+                                type: 'waiting_input',
+                                taskName: task?.displayName || task?.prompt || 'Unknown',
+                                message: inputLabel,
+                                timestamp: new Date(),
+                            }, !isViewing);
+                        }
+
                         // Send browser notification for waiting input
                         {
                             const { browserNotificationsEnabled, notifyOnWaitingInput, tasks, selectedTaskId: currentTaskId } = useTaskStore.getState();
@@ -335,11 +352,20 @@ export function useWebSocket() {
                             // Play completion sound + browser notification on busy→idle transition
                             if (payload.task.state === 'idle' && previousState === 'busy' && initializedRef.current) {
                                 playTaskCompletionSound();
-                                const { browserNotificationsEnabled, notifyOnCompletion, selectedTaskId: currentTaskId } = useTaskStore.getState();
+                                const taskName = payload.task.displayName || payload.task.prompt;
+                                const taskId = payload.task.id;
+                                const { selectedTaskId: currentTaskId } = useTaskStore.getState();
+                                const isViewing = currentTaskId === payload.task.id;
+                                // Always log to activity feed; only mark unread if not currently viewing
+                                useTaskStore.getState().addActivityEvent({
+                                    taskId: payload.task.id,
+                                    type: 'completed',
+                                    taskName,
+                                    timestamp: new Date(),
+                                }, !isViewing);
+                                const { browserNotificationsEnabled, notifyOnCompletion } = useTaskStore.getState();
                                 if (browserNotificationsEnabled && notifyOnCompletion && currentTaskId !== payload.task.id) {
                                     // Fetch last Claude message from conversation API for the notification body
-                                    const taskName = payload.task.displayName || payload.task.prompt;
-                                    const taskId = payload.task.id;
                                     fetch(`${API_URL}/api/tasks/${taskId}/conversation`)
                                         .then(res => res.ok ? res.json() : null)
                                         .then(data => {

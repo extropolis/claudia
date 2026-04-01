@@ -704,6 +704,26 @@
     color: var(--text-primary);
 }
 
+/* Unread activity highlight - task completed or needs input but user hasn't clicked on it */
+.workspace-panel .task-item.unread {
+    border-left-color: var(--accent-green);
+    background: rgba(63, 185, 80, 0.08);
+}
+
+.workspace-panel .task-item.unread .task-prompt {
+    color: var(--accent-green);
+    font-weight: 600;
+}
+
+.workspace-panel .task-item.unread.has-question {
+    border-left-color: var(--accent-yellow, #ffab40);
+    background: rgba(255, 171, 64, 0.08);
+}
+
+.workspace-panel .task-item.unread.has-question .task-prompt {
+    color: var(--accent-yellow, #ffab40);
+}
+
 /* Subtle highlight for the last-selected task in each workspace (when not globally active) */
 .workspace-panel .task-item.last-selected {
     border-left-color: rgba(139, 148, 158, 0.35);

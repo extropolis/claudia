@@ -10,6 +10,7 @@ import { SystemStats } from './components/SystemStats';
 import { MobileAccessModal } from './components/MobileAccessModal';
 import { FileExplorer } from './components/FileExplorer';
 import { ShellTerminalView } from './components/ShellTerminalView';
+import { ActivityPanel } from './components/ActivityPanel';
 import { useTheme } from './hooks/useTheme';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
@@ -67,7 +68,7 @@ function App() {
         wsRef
     } = useWebSocket();
 
-    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats, errorNotification, clearErrorNotification } = useTaskStore();
+    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats, errorNotification, clearErrorNotification, unreadTaskIds } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
     const selectedWorkspace = selectedTask ? workspaces.find(w => w.id === selectedTask.workspaceId) : undefined;
 
@@ -132,6 +133,7 @@ function App() {
     const [settingsInitialPanel, setSettingsInitialPanel] = useState<string | undefined>(undefined);
     const [showChatPanel, setShowChatPanel] = useState(false);
     const [showMobileAccess, setShowMobileAccess] = useState(false);
+    const [showActivityPanel, setShowActivityPanel] = useState(false);
     const [soundMuted, setSoundMuted] = useState(() => !isSoundEnabled());
     const [tunnelActive, setTunnelActive] = useState(false);
     const [tunnelLoading, setTunnelLoading] = useState(false);
@@ -466,13 +468,20 @@ function App() {
                             <span className="btn-label">Exit Fullscreen</span>
                         </button>
                     )}
-                    {/* Running Process Counter */}
-                    <div className="running-tasks-indicator" title={taskTooltip}>
+                    {/* Activity: task counts + activity panel toggle */}
+                    <button
+                        className={`activity-button ${showActivityPanel ? 'active' : ''} ${busyCount > 0 ? 'has-busy' : ''}`}
+                        onClick={() => setShowActivityPanel(!showActivityPanel)}
+                        title={taskTooltip}
+                    >
                         <Activity size={18} className={busyCount > 0 ? 'active-pulse' : ''} />
                         <span className="count-busy">{busyCount}</span>
                         <span className="count-separator">/</span>
                         <span className="count-idle">{idleCount}</span>
-                    </div>
+                        {unreadTaskIds.size > 0 && (
+                            <span className="activity-badge">{unreadTaskIds.size}</span>
+                        )}
+                    </button>
 
                     {showSystemStats && <SystemStats />}
                     {!isMobile && supervisorEnabled && (
@@ -535,6 +544,12 @@ function App() {
                         <Settings size={isMobile ? 18 : 20} />
                     </button>
                 </div>
+                {showActivityPanel && (
+                    <ActivityPanel
+                        onClose={() => setShowActivityPanel(false)}
+                        onSelectTask={handleSelectTask}
+                    />
+                )}
             </header>
 
             <main className="app-main">

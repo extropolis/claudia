@@ -12,6 +12,14 @@
     animation: slideIn 0.3s ease-out;
 }
 
+.notification-clickable {
+    cursor: pointer;
+}
+
+.notification-clickable:hover {
+    filter: brightness(1.05);
+}
+
 @keyframes slideIn {
     from {
         transform: translateY(-20px);

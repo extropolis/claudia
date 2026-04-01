@@ -186,6 +186,59 @@ body {
   border-color: var(--accent-warning, #f59e0b);
 }
 
+.activity-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.activity-button:hover {
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
+}
+
+.activity-button.active {
+  border-color: var(--accent-secondary);
+  background: var(--bg-hover);
+}
+
+.activity-button svg {
+  color: var(--text-muted);
+}
+
+.activity-button svg.active-pulse {
+  color: var(--accent-green);
+  animation: pulse-ring 2s infinite;
+}
+
+.activity-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent-green, #3fb950);
+  color: #000;
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
 .push-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -204,34 +257,7 @@ body {
   gap: 12px;
 }
 
-.running-tasks-indicator {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  color: var(--text-secondary);
-  font-size: 0.8125rem;
-  font-weight: 600;
-  transition: all 0.2s ease;
-  cursor: help;
-}
-
-.running-tasks-indicator:hover {
-  background: var(--bg-hover);
-  border-color: var(--text-muted);
-}
-
-.running-tasks-indicator svg {
-  color: var(--text-muted);
-}
-
-.running-tasks-indicator svg.active-pulse {
-  color: var(--accent-green);
-  animation: pulse-ring 2s infinite;
-}
+/* running-tasks-indicator styles merged into .activity-button above */
 
 @keyframes pulse-ring {
   0% {
@@ -2589,8 +2615,8 @@ body {
     font-size: 0.8125rem;
   }
 
-  /* Running tasks indicator - compact on mobile */
-  .running-tasks-indicator {
+  /* Activity button - compact on mobile */
+  .activity-button {
     padding: 4px 6px;
   }
 
