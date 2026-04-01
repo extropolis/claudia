@@ -10,6 +10,7 @@ import {
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { getApiBaseUrl } from '../config/api-config';
+import { useTaskStore } from '../stores/taskStore';
 import { FileContentModal } from './FileContentModal';
 import './FileExplorer.css';
 
@@ -244,6 +245,7 @@ function FileNode({ item, depth = 0, onFileClick }: { item: FileItem; depth?: nu
 // ============== TAB: FILES ==============
 
 function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive: boolean }) {
+    const isConnected = useTaskStore(s => s.isConnected);
     const [rootItems, setRootItems] = useState<FileItem[]>([]);
     const [loading, setLoading] = useState(false);
     const [hasLoaded, setHasLoaded] = useState(false);
@@ -279,15 +281,15 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
             prevWorkspaceRef.current = workspacePath;
             setRootItems([]);
             setHasLoaded(false);
-            if (isActive) loadRootFiles();
+            if (isActive && isConnected) loadRootFiles();
         }
-    }, [workspacePath, isActive, loadRootFiles]);
+    }, [workspacePath, isActive, isConnected, loadRootFiles]);
 
     useEffect(() => {
-        if (isActive && !hasLoaded && workspacePath && !loading) {
+        if (isActive && isConnected && !hasLoaded && workspacePath && !loading) {
             loadRootFiles();
         }
-    }, [isActive, hasLoaded, workspacePath, loading, loadRootFiles]);
+    }, [isActive, isConnected, hasLoaded, workspacePath, loading, loadRootFiles]);
 
     const handleFileClick = useCallback((path: string) => {
         setSelectedFile(path);
@@ -334,6 +336,7 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
 // ============== TAB: CHANGES ==============
 
 function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActive: boolean }) {
+    const isConnected = useTaskStore(s => s.isConnected);
     const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
     const [gitLog, setGitLog] = useState<GitLogEntry[]>([]);
     const [loading, setLoading] = useState(false);
@@ -395,35 +398,35 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
             setGitLog([]);
             setHasLoaded(false);
             setHasLogLoaded(false);
-            if (isActive) {
+            if (isActive && isConnected) {
                 loadStatus();
                 loadLog();
             }
         }
-    }, [workspacePath, isActive, loadStatus, loadLog]);
+    }, [workspacePath, isActive, isConnected, loadStatus, loadLog]);
 
     useEffect(() => {
-        if (isActive && !hasLoaded && workspacePath && !loading) {
+        if (isActive && isConnected && !hasLoaded && workspacePath && !loading) {
             loadStatus();
         }
-    }, [isActive, hasLoaded, workspacePath, loading, loadStatus]);
+    }, [isActive, isConnected, hasLoaded, workspacePath, loading, loadStatus]);
 
     useEffect(() => {
-        if (isActive && !hasLogLoaded && workspacePath && !logLoading) {
+        if (isActive && isConnected && !hasLogLoaded && workspacePath && !logLoading) {
             loadLog();
         }
-    }, [isActive, hasLogLoaded, workspacePath, logLoading, loadLog]);
+    }, [isActive, isConnected, hasLogLoaded, workspacePath, logLoading, loadLog]);
 
-    // Auto-refresh status every 10s, log every 30s
+    // Auto-refresh status every 10s, log every 30s — only when connected
     useEffect(() => {
-        if (!isActive || !workspacePath) return;
+        if (!isActive || !workspacePath || !isConnected) return;
         const statusInterval = setInterval(loadStatus, 10000);
         const logInterval = setInterval(loadLog, 30000);
         return () => {
             clearInterval(statusInterval);
             clearInterval(logInterval);
         };
-    }, [isActive, workspacePath, loadStatus, loadLog]);
+    }, [isActive, workspacePath, isConnected, loadStatus, loadLog]);
 
     const statusIcon = (change: GitChange) => {
         switch (change.status) {
@@ -647,6 +650,7 @@ function timeAgo(dateStr: string): string {
 }
 
 function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: boolean }) {
+    const isConnected = useTaskStore(s => s.isConnected);
     const [ciStatus, setCIStatus] = useState<CIStatus | null>(null);
     const [loading, setLoading] = useState(false);
     const [hasLoaded, setHasLoaded] = useState(false);
@@ -719,22 +723,22 @@ function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: b
             prevWorkspaceRef.current = workspacePath;
             setCIStatus(null);
             setHasLoaded(false);
-            if (isActive) loadCI();
+            if (isActive && isConnected) loadCI();
         }
-    }, [workspacePath, isActive, loadCI]);
+    }, [workspacePath, isActive, isConnected, loadCI]);
 
     useEffect(() => {
-        if (isActive && !hasLoaded && workspacePath && !loading) {
+        if (isActive && isConnected && !hasLoaded && workspacePath && !loading) {
             loadCI();
         }
-    }, [isActive, hasLoaded, workspacePath, loading, loadCI]);
+    }, [isActive, isConnected, hasLoaded, workspacePath, loading, loadCI]);
 
-    // Auto-refresh every 30s when active
+    // Auto-refresh every 30s when active and connected
     useEffect(() => {
-        if (!isActive || !workspacePath) return;
+        if (!isActive || !workspacePath || !isConnected) return;
         const interval = setInterval(loadCI, 30000);
         return () => clearInterval(interval);
-    }, [isActive, workspacePath, loadCI]);
+    }, [isActive, workspacePath, isConnected, loadCI]);
 
     const checkIcon = (check: CICheck) => {
         if (check.status === 'completed') {
@@ -1011,6 +1015,7 @@ function CITab({ workspacePath, isActive }: { workspacePath: string; isActive: b
 // ============== TAB: ISSUES ==============
 
 function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActive: boolean }) {
+    const isConnected = useTaskStore(s => s.isConnected);
     const [issuesStatus, setIssuesStatus] = useState<GitHubIssuesStatus | null>(null);
     const [loading, setLoading] = useState(false);
     const [hasLoaded, setHasLoaded] = useState(false);
@@ -1119,29 +1124,29 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
             prevWorkspaceRef.current = workspacePath;
             setIssuesStatus(null);
             setHasLoaded(false);
-            if (isActive) loadIssues();
+            if (isActive && isConnected) loadIssues();
         }
-    }, [workspacePath, isActive, loadIssues]);
+    }, [workspacePath, isActive, isConnected, loadIssues]);
 
     useEffect(() => {
-        if (isActive && !hasLoaded && workspacePath && !loading) {
+        if (isActive && isConnected && !hasLoaded && workspacePath && !loading) {
             loadIssues();
         }
-    }, [isActive, hasLoaded, workspacePath, loading, loadIssues]);
+    }, [isActive, isConnected, hasLoaded, workspacePath, loading, loadIssues]);
 
     // Reload when filter changes
     useEffect(() => {
-        if (hasLoaded) {
+        if (hasLoaded && isConnected) {
             loadIssues();
         }
-    }, [filterState, filterAssignee, hasLoaded, loadIssues]);
+    }, [filterState, filterAssignee, hasLoaded, isConnected, loadIssues]);
 
-    // Auto-refresh every 2 minutes when active
+    // Auto-refresh every 2 minutes when active and connected
     useEffect(() => {
-        if (!isActive || !workspacePath) return;
+        if (!isActive || !workspacePath || !isConnected) return;
         const interval = setInterval(loadIssues, 120000);
         return () => clearInterval(interval);
-    }, [isActive, workspacePath, loadIssues]);
+    }, [isActive, workspacePath, isConnected, loadIssues]);
 
     const formatDate = (dateStr: string) => {
         const date = new Date(dateStr);

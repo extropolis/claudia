@@ -419,6 +419,7 @@ function WorkspaceSection({
     onResetWorkspace,
     onOpenScheduledTasks
 }: WorkspaceSectionProps) {
+    const isConnected = useTaskStore(s => s.isConnected);
     const [inputValue, setInputValue] = useState('');
     const [isEditingWorkspaceName, setIsEditingWorkspaceName] = useState(false);
     const [showReferencesSubmenu, setShowReferencesSubmenu] = useState(false);
@@ -448,7 +449,9 @@ function WorkspaceSection({
     }, [isMenuOpen]);
 
     // Fetch current git branch for this workspace (and poll every 30s to stay fresh)
+    // Only fetch when WebSocket is connected to avoid ERR_CONNECTION_RESET during server restarts
     useEffect(() => {
+        if (!isConnected) return;
         const fetchBranch = async () => {
             try {
                 const params = new URLSearchParams({ workspace: workspace.id });
@@ -464,7 +467,7 @@ function WorkspaceSection({
         fetchBranch();
         const interval = setInterval(fetchBranch, 30_000);
         return () => clearInterval(interval);
-    }, [workspace.id]);
+    }, [workspace.id, isConnected]);
 
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
