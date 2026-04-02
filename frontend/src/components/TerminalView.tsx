@@ -106,27 +106,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     }, [task.id]);
 
     const copyToClipboard = async () => {
-        if (!xtermRef.current) return;
-
-        // Get all text from the terminal buffer
-        const buffer = xtermRef.current.buffer.active;
-        const lines: string[] = [];
-        for (let i = 0; i < buffer.length; i++) {
-            const line = buffer.getLine(i);
-            if (line) {
-                lines.push(line.translateToString(true));
-            }
-        }
-
-        // Trim empty lines from end
-        while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
-            lines.pop();
-        }
-
-        const text = lines.join('\n');
-
         try {
-            await navigator.clipboard.writeText(text);
+            await navigator.clipboard.writeText(task.prompt);
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
         } catch (err) {
@@ -487,7 +468,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 <button
                     className={`copy-button ${copied ? 'copied' : ''}`}
                     onClick={copyToClipboard}
-                    title="Copy terminal content to clipboard"
+                    title="Copy prompt to clipboard"
                 >
                     {copied ? <Check size={16} /> : <Copy size={16} />}
                 </button>

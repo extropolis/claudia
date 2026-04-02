@@ -455,7 +455,7 @@ server.tool(
 
             const result = await sendWSMessage('task:input', {
                 taskId,
-                input: input + '\n',
+                input: input + '\r',
             });
 
             return {
@@ -525,7 +525,7 @@ server.tool(
 
             const result = await sendWSMessage('task:input', {
                 taskId,
-                input: prompt + '\n',
+                input: prompt + '\r',
             });
 
             return {
