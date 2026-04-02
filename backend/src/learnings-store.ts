@@ -133,8 +133,10 @@ export class LearningsStore {
      */
     private cosineSimilarity(a: number[], b: number[]): number {
         if (a.length !== b.length) {
-            // Handle dimension mismatch by padding shorter array
+            // Handle dimension mismatch by padding shorter array (without mutating originals)
             const maxLen = Math.max(a.length, b.length);
+            a = [...a];
+            b = [...b];
             while (a.length < maxLen) a.push(0);
             while (b.length < maxLen) b.push(0);
         }

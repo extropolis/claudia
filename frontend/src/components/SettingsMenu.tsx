@@ -2420,7 +2420,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                     </CollapsiblePanel>
 
                     <CollapsiblePanel
-                        title={<>Claudia MCP Server <span className="settings-badge settings-badge-experimental">Experimental</span></>}
+                        title="Claudia MCP Server"
                         icon={<Zap size={18} />}
                         isExpanded={expandedPanels.claudiaMcp}
                         onToggle={() => togglePanel('claudiaMcp')}

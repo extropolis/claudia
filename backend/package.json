@@ -1,10 +1,10 @@
 {
   "name": "backend",
-  "version": "0.2.28",
+  "version": "0.2.29",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "cross-env NODE_OPTIONS=--max-old-space-size=2048 tsx watch src/index.ts",
+    "dev": "cross-env NODE_OPTIONS=--max-old-space-size=2048 tsx watch --watch-path=src src/index.ts",
     "dev:no-watch": "cross-env NODE_OPTIONS=--max-old-space-size=2048 tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",

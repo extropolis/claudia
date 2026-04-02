@@ -43,6 +43,7 @@ export interface Task {
     sessionId?: string | null;      // Session ID for conversation history (null if not captured yet)
     backendType?: BackendType; // Which backend created this task (for conversation lookup)
     displayName?: string;    // User-editable display name (shown instead of prompt when set)
+    displayNameEditedByUser?: boolean; // True if the user manually edited the display name (prevents agent auto-title)
 }
 
 export interface WorkspaceReference {
@@ -111,6 +112,7 @@ export interface ScheduledTask {
     cronExpression: string;        // 5-field cron expression (minute hour day-of-month month day-of-week)
     prompt: string;                // The prompt to run when fired
     isRecurring: boolean;          // true = recurring, false = one-shot
+    isPaused: boolean;             // true = paused (won't fire until resumed)
     createdAt: string;             // ISO timestamp
     expiresAt: string;             // ISO timestamp (createdAt + 3 days for recurring)
     lastFiredAt?: string;          // ISO timestamp of last fire
@@ -126,6 +128,8 @@ export type WSMessageType =
     | 'task:output'
     | 'task:restore'
     | 'task:destroyed'
+    | 'task:stopped'
+    | 'task:stopAll:result'
     | 'task:waitingInput'
     | 'task:revertResult'
     | 'tasks:updated'
@@ -169,6 +173,8 @@ export type WSMessageType =
     | 'server:reloading'
     | 'server:reconnecting'
     | 'init'
+    // Tunnel status
+    | 'tunnel:status'
     // Error handling
     | 'error';
 

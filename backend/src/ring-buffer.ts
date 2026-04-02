@@ -71,8 +71,7 @@ export class BufferRingBuffer {
         }
 
         const combined = Buffer.concat(buffers);
-        const str = combined.toString('utf8');
-        return str.slice(-maxBytes);
+        return combined.slice(-maxBytes).toString('utf8');
     }
 
     /**

@@ -11,12 +11,13 @@ interface NotificationContextValue {
         type: NotificationType,
         title: string,
         message?: string,
-        duration?: number
+        duration?: number,
+        onClick?: () => void
     ) => void;
-    showSuccess: (title: string, message?: string) => void;
+    showSuccess: (title: string, message?: string, onClick?: () => void) => void;
     showError: (title: string, message?: string) => void;
     showWarning: (title: string, message?: string) => void;
-    showInfo: (title: string, message?: string) => void;
+    showInfo: (title: string, message?: string, onClick?: () => void) => void;
 }
 
 const NotificationContext = createContext<NotificationContextValue | undefined>(undefined);
@@ -41,7 +42,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     }, []);
 
     const showNotification = useCallback(
-        (type: NotificationType, title: string, message?: string, duration = 5000) => {
+        (type: NotificationType, title: string, message?: string, duration = 5000, onClick?: () => void) => {
             const id = `${Date.now()}-${Math.random()}`;
             const notification: NotificationItem = {
                 id,
@@ -49,6 +50,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
                 title,
                 message,
                 duration,
+                onClick,
             };
 
             setNotifications((prev) => [...prev, notification]);
@@ -57,8 +59,8 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     );
 
     const showSuccess = useCallback(
-        (title: string, message?: string) => {
-            showNotification('success', title, message);
+        (title: string, message?: string, onClick?: () => void) => {
+            showNotification('success', title, message, undefined, onClick);
         },
         [showNotification]
     );
@@ -78,8 +80,8 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     );
 
     const showInfo = useCallback(
-        (title: string, message?: string) => {
-            showNotification('info', title, message);
+        (title: string, message?: string, onClick?: () => void) => {
+            showNotification('info', title, message, undefined, onClick);
         },
         [showNotification]
     );

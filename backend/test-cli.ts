@@ -72,8 +72,9 @@ interface TestConfig {
     cronList: boolean;                // List scheduled tasks
     cronDelete: boolean;              // Delete a scheduled task
     cronExpression: string | null;    // Cron expression for --cron-create
-    cronId: string | null;            // Cron ID for --cron-delete
+    cronId: string | null;            // Cron ID for --cron-delete/--cron-pause
     cronRecurring: boolean;           // Whether the cron is recurring (default true)
+    cronPause: boolean | null;        // true to pause, false to resume, null = not set
 }
 
 class TestCLI {
@@ -1344,6 +1345,7 @@ function parseArgs(): TestConfig {
     let cronExpression: string | null = null;
     let cronId: string | null = null;
     let cronRecurring = true;
+    let cronPause: boolean | null = null;
 
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
@@ -1541,6 +1543,12 @@ function parseArgs(): TestConfig {
             case '--cron-recurring':
                 cronRecurring = args[++i] !== 'false';
                 break;
+            case '--cron-pause':
+                cronPause = true;
+                break;
+            case '--cron-resume':
+                cronPause = false;
+                break;
             case '--help':
             case '-h':
                 console.log(`
@@ -1620,8 +1628,10 @@ SCHEDULED TASK (CRON) OPERATIONS:
   --cron-create            Create a scheduled task (requires --task-id, --cron-expression, and --message)
   --cron-list              List scheduled tasks (optionally filter by --task-id)
   --cron-delete            Delete a scheduled task (requires --cron-id)
+  --cron-pause             Pause a scheduled task (requires --cron-id)
+  --cron-resume            Resume a paused scheduled task (requires --cron-id)
   --cron-expression <expr> Cron expression for scheduling (e.g., "*/5 * * * *")
-  --cron-id <id>           Scheduled task ID for deletion
+  --cron-id <id>           Scheduled task ID for operations
   --cron-recurring <bool>  Whether the task recurs (default: true, set to false for one-shot)
 
 Examples:
@@ -1803,6 +1813,7 @@ Examples:
         cronExpression,
         cronId,
         cronRecurring,
+        cronPause,
     };
 }
 
@@ -1868,11 +1879,12 @@ async function cronListTasks(baseHttpUrl: string, taskId?: string): Promise<void
         console.log('📅 SCHEDULED TASKS');
         console.log('='.repeat(80));
         for (const s of scheduled) {
-            console.log(`  🔹 ${s.id} (${s.isRecurring ? 'recurring' : 'one-shot'})`);
+            const pauseLabel = s.isPaused ? ' ⏸ PAUSED' : '';
+            console.log(`  🔹 ${s.id} (${s.isRecurring ? 'recurring' : 'one-shot'})${pauseLabel}`);
             console.log(`     Task: ${s.taskId}`);
             console.log(`     Schedule: ${s.description || s.cronExpression} (${s.cronExpression})`);
             console.log(`     Prompt: ${s.prompt.substring(0, 80)}${s.prompt.length > 80 ? '...' : ''}`);
-            console.log(`     Next fire: ${s.nextFireAt || 'N/A'}`);
+            console.log(`     Next fire: ${s.isPaused ? 'paused' : (s.nextFireAt || 'N/A')}`);
             console.log(`     Last fired: ${s.lastFiredAt || 'never'}`);
             console.log(`     Fire count: ${s.fireCount}`);
             console.log(`     Expires: ${s.expiresAt}`);
@@ -1906,6 +1918,37 @@ async function cronDeleteTask(baseHttpUrl: string, cronId: string): Promise<void
         console.log('');
     } catch (error) {
         console.error('❌ Failed to delete scheduled task:', error);
+    }
+}
+
+async function cronPauseTask(baseHttpUrl: string, cronId: string, paused: boolean): Promise<void> {
+    console.log(`📅 ${paused ? 'Pausing' : 'Resuming'} scheduled task: ${cronId}`);
+    console.log('');
+
+    try {
+        const response = await fetch(`${baseHttpUrl}/api/cron/${cronId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ isPaused: paused }),
+        });
+
+        if (!response.ok) {
+            if (response.status === 404) {
+                console.error(`❌ Scheduled task '${cronId}' not found.`);
+            } else {
+                console.error(`❌ Failed to ${paused ? 'pause' : 'resume'} scheduled task: ${response.statusText}`);
+            }
+            return;
+        }
+
+        const updated = await response.json();
+        console.log(`✅ Scheduled task '${cronId}' ${paused ? 'paused' : 'resumed'}.`);
+        if (!paused && updated.nextFireAt) {
+            console.log(`   Next fire: ${updated.nextFireAt}`);
+        }
+        console.log('');
+    } catch (error) {
+        console.error(`❌ Failed to ${paused ? 'pause' : 'resume'} scheduled task:`, error);
     }
 }
 
@@ -2137,6 +2180,15 @@ async function main() {
             process.exit(1);
         }
         await cronDeleteTask(baseHttpUrl, config.cronId);
+        process.exit(0);
+    }
+
+    if (config.cronPause !== null) {
+        if (!config.cronId) {
+            console.error(`❌ --cron-${config.cronPause ? 'pause' : 'resume'} requires --cron-id`);
+            process.exit(1);
+        }
+        await cronPauseTask(baseHttpUrl, config.cronId, config.cronPause);
         process.exit(0);
     }
 

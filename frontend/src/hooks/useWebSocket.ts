@@ -7,6 +7,29 @@ import { playTaskCompletionSound, sendTaskCompletionNotification, sendTaskWaitin
 const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
 
+/**
+ * Module-level singleton reference to the active WebSocket.
+ * Used by sendWsMessage() so components can send messages without
+ * instantiating a second useWebSocket hook (which would create a
+ * second connection and disconnect on unmount).
+ */
+let _activeWs: WebSocket | null = null;
+
+/**
+ * Send a WebSocket message from any component without needing to call
+ * useWebSocket() (which creates a new connection with a destructive cleanup).
+ */
+export function sendWsMessage(type: string, payload: unknown): void {
+    if (_activeWs?.readyState === WebSocket.OPEN) {
+        if (type !== 'task:input' && type !== 'task:resize' && type !== 'shell:input' && type !== 'shell:resize') {
+            console.log(`[WebSocket] Sending (singleton): ${type}`, payload);
+        }
+        _activeWs.send(JSON.stringify({ type, payload }));
+    } else {
+        console.warn(`[WebSocket] sendWsMessage: cannot send ${type} - WS not open (state: ${_activeWs?.readyState})`);
+    }
+}
+
 /** Base delay for reconnection in ms */
 const RECONNECT_BASE_DELAY = 1000;
 /** Maximum reconnection delay in ms */
@@ -103,6 +126,7 @@ export function useWebSocket() {
 
         ws.onopen = () => {
             console.log('[WebSocket] ✓✓✓ CONNECTION OPENED SUCCESSFULLY ✓✓✓');
+            _activeWs = ws;
             setConnected(true);
             // Reset reconnection attempts on successful connection
             reconnectAttempts.current = 0;
@@ -110,6 +134,7 @@ export function useWebSocket() {
 
         ws.onclose = (event) => {
             console.log(`[WebSocket] ❌ DISCONNECTED - code: ${event.code}, reason: ${event.reason || 'none'}, wasClean: ${event.wasClean}`);
+            if (_activeWs === ws) _activeWs = null;
             setConnected(false);
             // Exponential backoff: delay = min(base * 2^attempts, max)
             const delay = Math.min(
@@ -189,12 +214,14 @@ export function useWebSocket() {
                         break;
                     }
                     case 'task:created': {
-                        const payload = message.payload as { task: Task };
+                        const payload = message.payload as { task: Task; source?: string };
                         addTask(payload.task);
-                        // Auto-select newly created task (both locally and on server)
-                        selectTask(payload.task.id);
-                        // IMPORTANT: Notify server that task is active so it sends the initial prompt
-                        sendMessage('task:select', { taskId: payload.task.id });
+                        // Only auto-select tasks created from the UI (not MCP/agent-spawned)
+                        if (payload.source !== 'mcp') {
+                            selectTask(payload.task.id);
+                            // IMPORTANT: Notify server that task is active so it sends the initial prompt
+                            sendMessage('task:select', { taskId: payload.task.id });
+                        }
                         break;
                     }
                     case 'tasks:updated': {
@@ -279,6 +306,23 @@ export function useWebSocket() {
                             timestamp: new Date()
                         });
 
+                        // Log to activity feed; only mark unread if not currently viewing
+                        {
+                            const { tasks, selectedTaskId: sTaskId } = useTaskStore.getState();
+                            const task = tasks.get(payload.taskId);
+                            const inputLabel = payload.inputType === 'permission' ? 'Needs permission'
+                                : payload.inputType === 'question' ? 'Has a question'
+                                : 'Needs confirmation';
+                            const isViewing = sTaskId === payload.taskId;
+                            useTaskStore.getState().addActivityEvent({
+                                taskId: payload.taskId,
+                                type: 'waiting_input',
+                                taskName: task?.displayName || task?.prompt || 'Unknown',
+                                message: inputLabel,
+                                timestamp: new Date(),
+                            }, !isViewing);
+                        }
+
                         // Send browser notification for waiting input
                         {
                             const { browserNotificationsEnabled, notifyOnWaitingInput, tasks, selectedTaskId: currentTaskId } = useTaskStore.getState();
@@ -333,11 +377,20 @@ export function useWebSocket() {
                             // Play completion sound + browser notification on busy→idle transition
                             if (payload.task.state === 'idle' && previousState === 'busy' && initializedRef.current) {
                                 playTaskCompletionSound();
-                                const { browserNotificationsEnabled, notifyOnCompletion, selectedTaskId: currentTaskId } = useTaskStore.getState();
+                                const taskName = payload.task.displayName || payload.task.prompt;
+                                const taskId = payload.task.id;
+                                const { selectedTaskId: currentTaskId } = useTaskStore.getState();
+                                const isViewing = currentTaskId === payload.task.id;
+                                // Always log to activity feed; only mark unread if not currently viewing
+                                useTaskStore.getState().addActivityEvent({
+                                    taskId: payload.task.id,
+                                    type: 'completed',
+                                    taskName,
+                                    timestamp: new Date(),
+                                }, !isViewing);
+                                const { browserNotificationsEnabled, notifyOnCompletion } = useTaskStore.getState();
                                 if (browserNotificationsEnabled && notifyOnCompletion && currentTaskId !== payload.task.id) {
                                     // Fetch last Claude message from conversation API for the notification body
-                                    const taskName = payload.task.displayName || payload.task.prompt;
-                                    const taskId = payload.task.id;
                                     fetch(`${API_URL}/api/tasks/${taskId}/conversation`)
                                         .then(res => res.ok ? res.json() : null)
                                         .then(data => {
@@ -484,6 +537,15 @@ export function useWebSocket() {
                         console.log(`[WebSocket] Scheduled task fired: ${payload.scheduledTaskId} → task ${payload.taskId}`);
                         break;
                     }
+                    case 'tunnel:status': {
+                        // Broadcast tunnel status change to App.tsx via a custom DOM event.
+                        // The tunnel token may have changed (e.g. after tsx watch reload + adopt),
+                        // so the UI needs to refresh its copy of the active state.
+                        const payload = message.payload as { active: boolean; url?: string | null; error?: string | null };
+                        console.log('[WebSocket] Tunnel status update:', payload.active, payload.url);
+                        window.dispatchEvent(new CustomEvent('claudia:tunnelStatus', { detail: payload }));
+                        break;
+                    }
                     case 'error': {
                         const payload = message.payload as WSErrorPayload;
                         console.error('[WebSocket] Server error:', payload.message, {
@@ -558,6 +620,7 @@ export function useWebSocket() {
             window.removeEventListener('online', handleOnline);
             window.removeEventListener('offline', handleOffline);
             window.removeEventListener('notification:taskClick', handleNotificationClick);
+            _activeWs = null;
             wsRef.current?.close();
         };
     }, []);
@@ -691,7 +754,7 @@ export function useWebSocket() {
 
     // Rename actions
     const renameTask = useCallback((taskId: string, displayName: string) => {
-        sendMessage('task:rename', { taskId, displayName });
+        sendMessage('task:rename', { taskId, displayName, source: 'user' });
     }, [sendMessage]);
 
     const renameWorkspace = useCallback((workspaceId: string, displayName: string) => {
@@ -719,8 +782,12 @@ export function useWebSocket() {
         sendMessage('cron:delete', { cronId });
     }, [sendMessage]);
 
-    const updateScheduledTask = useCallback((cronId: string, updates: { cronExpression?: string; prompt?: string; isRecurring?: boolean }) => {
+    const updateScheduledTask = useCallback((cronId: string, updates: { cronExpression?: string; prompt?: string; isRecurring?: boolean; isPaused?: boolean }) => {
         sendMessage('cron:update', { cronId, ...updates });
+    }, [sendMessage]);
+
+    const pauseScheduledTask = useCallback((cronId: string, paused: boolean) => {
+        sendMessage('cron:update', { cronId, isPaused: paused });
     }, [sendMessage]);
 
     return {
@@ -762,6 +829,7 @@ export function useWebSocket() {
         createScheduledTask,
         deleteScheduledTask,
         updateScheduledTask,
+        pauseScheduledTask,
         wsRef
     };
 }

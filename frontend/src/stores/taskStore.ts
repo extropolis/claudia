@@ -12,6 +12,16 @@ export interface WaitingInputInfo {
     timestamp: Date;
 }
 
+// Activity event for the activity log
+export interface ActivityEvent {
+    id?: string; // auto-generated
+    taskId: string;
+    type: 'completed' | 'waiting_input' | 'error';
+    taskName: string;
+    message?: string;
+    timestamp: Date;
+}
+
 interface VoiceSettings {
     voiceName: string | null;
     rate: number;
@@ -74,6 +84,10 @@ interface TaskStore {
 
     // Scheduled tasks (cron) - keyed by scheduled task ID
     scheduledTasks: Map<string, ScheduledTask>;
+
+    // Activity tracking - tasks with unread events + activity log
+    unreadTaskIds: Set<string>;
+    activityLog: ActivityEvent[];
 
     // Settings
     autoFocusOnInput: boolean;
@@ -153,6 +167,11 @@ interface TaskStore {
     addScheduledTask: (task: ScheduledTask) => void;
     removeScheduledTask: (cronId: string) => void;
     getScheduledTasksForTask: (taskId: string) => ScheduledTask[];
+
+    // Activity actions
+    addActivityEvent: (event: ActivityEvent, markUnread?: boolean) => void;
+    clearTaskUnread: (taskId: string) => void;
+    clearAllActivityLog: () => void;
 
     // Layout actions
     setWorkspaceColumns: (columns: number) => void;
@@ -257,6 +276,10 @@ export const useTaskStore = create<TaskStore>()(
             // Scheduled tasks initial state
             scheduledTasks: new Map(),
 
+            // Activity tracking initial state
+            unreadTaskIds: new Set(),
+            activityLog: [],
+
             // Settings initial state
             autoFocusOnInput: false,
             supervisorEnabled: false,
@@ -284,13 +307,20 @@ export const useTaskStore = create<TaskStore>()(
             clearErrorNotification: () => set({ errorNotification: null }),
 
             selectTask: (id) => {
-                const { tasks, lastSelectedTaskByWorkspace } = get();
+                const { tasks, lastSelectedTaskByWorkspace, unreadTaskIds } = get();
                 if (id) {
                     const task = tasks.get(id);
                     if (task) {
                         const newMap = new Map(lastSelectedTaskByWorkspace);
                         newMap.set(task.workspaceId, id);
-                        set({ selectedTaskId: id, lastSelectedTaskByWorkspace: newMap });
+                        // Clear unread flag when task is selected
+                        if (unreadTaskIds.has(id)) {
+                            const newUnread = new Set(unreadTaskIds);
+                            newUnread.delete(id);
+                            set({ selectedTaskId: id, lastSelectedTaskByWorkspace: newMap, unreadTaskIds: newUnread });
+                        } else {
+                            set({ selectedTaskId: id, lastSelectedTaskByWorkspace: newMap });
+                        }
                         return;
                     }
                 }
@@ -523,6 +553,31 @@ export const useTaskStore = create<TaskStore>()(
                 const { scheduledTasks } = get();
                 return Array.from(scheduledTasks.values()).filter(s => s.taskId === taskId);
             },
+
+            // Activity tracking actions
+            addActivityEvent: (event, markUnread = true) => {
+                const { unreadTaskIds, activityLog } = get();
+                // One entry per task - replace existing entry for same taskId
+                const filtered = activityLog.filter(e => e.taskId !== event.taskId);
+                const newEvent = { ...event, id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
+                const newLog = [newEvent, ...filtered].slice(0, 50);
+                if (markUnread) {
+                    const newUnread = new Set(unreadTaskIds);
+                    newUnread.add(event.taskId);
+                    set({ unreadTaskIds: newUnread, activityLog: newLog });
+                } else {
+                    set({ activityLog: newLog });
+                }
+            },
+            clearTaskUnread: (taskId) => {
+                const { unreadTaskIds } = get();
+                if (unreadTaskIds.has(taskId)) {
+                    const newUnread = new Set(unreadTaskIds);
+                    newUnread.delete(taskId);
+                    set({ unreadTaskIds: newUnread });
+                }
+            },
+            clearAllActivityLog: () => set({ activityLog: [], unreadTaskIds: new Set() }),
 
             // Task reordering within a workspace
             reorderTasks: (workspaceId, fromIndex, toIndex) => {

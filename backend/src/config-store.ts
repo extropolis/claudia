@@ -46,14 +46,6 @@ export interface HyperspaceProxyConfig {
     alwaysThinkingEnabled: boolean;
 }
 
-// Hyperspace AI Proxy configuration
-export interface HyperspaceProxyConfig {
-    proxyUrl: string;
-    apiKey: string;
-    model: string;
-    alwaysThinkingEnabled: boolean;
-}
-
 export const DEFAULT_CLAUDE_CODE_SWITCHES: ClaudeCodeSwitches = {
     verbose: false,
     maxTurns: null,
@@ -96,7 +88,7 @@ export interface AppConfig {
         timeoutMs?: number;
     };
     enabledPlugins?: string[];  // List of enabled plugin names (all disabled by default)
-    claudiaMcpServerEnabled: boolean;  // [Experimental] Enable Claudia MCP server for Claude Code sessions
+    claudiaMcpServerEnabled: boolean;  // Enable Claudia MCP server for Claude Code sessions
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
@@ -139,7 +131,7 @@ const DEFAULT_CONFIG: AppConfig = {
     claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
     hyperspaceProxy: DEFAULT_HYPERSPACE_PROXY,
     enabledPlugins: [],  // All plugins disabled by default
-    claudiaMcpServerEnabled: false  // [Experimental] Disabled by default
+    claudiaMcpServerEnabled: true  // Enabled by default
 };
 
 export class ConfigStore {
@@ -184,7 +176,7 @@ export class ConfigStore {
                     hyperspaceProxy: loaded.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY,
                     aiCoreCredentials: loaded.aiCoreCredentials,
                     enabledPlugins: loaded.enabledPlugins ?? [],
-                    claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? false
+                    claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? true
                 };
             }
         } catch (error) {
@@ -204,7 +196,7 @@ export class ConfigStore {
             claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
             hyperspaceProxy: { ...DEFAULT_HYPERSPACE_PROXY },
             enabledPlugins: [],
-            claudiaMcpServerEnabled: false
+            claudiaMcpServerEnabled: true
         };
     }
 
@@ -330,7 +322,7 @@ export class ConfigStore {
             useLearnings: false,
             claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
             hyperspaceProxy: { ...DEFAULT_HYPERSPACE_PROXY },
-            claudiaMcpServerEnabled: false
+            claudiaMcpServerEnabled: true
         };
         this.saveConfig();
         return this.getConfig();
