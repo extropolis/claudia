@@ -7,6 +7,29 @@ import { playTaskCompletionSound, sendTaskCompletionNotification, sendTaskWaitin
 const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
 
+/**
+ * Module-level singleton reference to the active WebSocket.
+ * Used by sendWsMessage() so components can send messages without
+ * instantiating a second useWebSocket hook (which would create a
+ * second connection and disconnect on unmount).
+ */
+let _activeWs: WebSocket | null = null;
+
+/**
+ * Send a WebSocket message from any component without needing to call
+ * useWebSocket() (which creates a new connection with a destructive cleanup).
+ */
+export function sendWsMessage(type: string, payload: unknown): void {
+    if (_activeWs?.readyState === WebSocket.OPEN) {
+        if (type !== 'task:input' && type !== 'task:resize' && type !== 'shell:input' && type !== 'shell:resize') {
+            console.log(`[WebSocket] Sending (singleton): ${type}`, payload);
+        }
+        _activeWs.send(JSON.stringify({ type, payload }));
+    } else {
+        console.warn(`[WebSocket] sendWsMessage: cannot send ${type} - WS not open (state: ${_activeWs?.readyState})`);
+    }
+}
+
 /** Base delay for reconnection in ms */
 const RECONNECT_BASE_DELAY = 1000;
 /** Maximum reconnection delay in ms */
@@ -103,6 +126,7 @@ export function useWebSocket() {
 
         ws.onopen = () => {
             console.log('[WebSocket] ✓✓✓ CONNECTION OPENED SUCCESSFULLY ✓✓✓');
+            _activeWs = ws;
             setConnected(true);
             // Reset reconnection attempts on successful connection
             reconnectAttempts.current = 0;
@@ -110,6 +134,7 @@ export function useWebSocket() {
 
         ws.onclose = (event) => {
             console.log(`[WebSocket] ❌ DISCONNECTED - code: ${event.code}, reason: ${event.reason || 'none'}, wasClean: ${event.wasClean}`);
+            if (_activeWs === ws) _activeWs = null;
             setConnected(false);
             // Exponential backoff: delay = min(base * 2^attempts, max)
             const delay = Math.min(
@@ -595,6 +620,7 @@ export function useWebSocket() {
             window.removeEventListener('online', handleOnline);
             window.removeEventListener('offline', handleOffline);
             window.removeEventListener('notification:taskClick', handleNotificationClick);
+            _activeWs = null;
             wsRef.current?.close();
         };
     }, []);

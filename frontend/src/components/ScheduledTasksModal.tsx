@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Clock, Plus, Trash2, X, RefreshCw, Pencil, Copy, Check, Pause, Play } from 'lucide-react';
 import { useTaskStore } from '../stores/taskStore';
-import { useWebSocket } from '../hooks/useWebSocket';
+import { sendWsMessage } from '../hooks/useWebSocket';
 import { ScheduledTask } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
 import './ScheduledTasksModal.css';
@@ -51,7 +51,6 @@ function formatExpiry(iso: string): string {
 }
 
 export function ScheduledTasksModal({ taskId, taskName, initialPrompt, onClose }: ScheduledTasksModalProps) {
-    const { createScheduledTask, deleteScheduledTask, updateScheduledTask, pauseScheduledTask } = useWebSocket();
     const scheduledTasks = useTaskStore(state =>
         Array.from(state.scheduledTasks.values()).filter(s => s.taskId === taskId)
     );
@@ -123,13 +122,14 @@ export function ScheduledTasksModal({ taskId, taskName, initialPrompt, onClose }
         setSubmitting(true);
 
         if (formMode === 'edit' && editingId) {
-            updateScheduledTask(editingId, {
+            sendWsMessage('cron:update', {
+                cronId: editingId,
                 cronExpression: cronExpression.trim(),
                 prompt: prompt.trim(),
                 isRecurring,
             });
         } else {
-            createScheduledTask(taskId, cronExpression.trim(), prompt.trim(), isRecurring);
+            sendWsMessage('cron:create', { taskId, cronExpression: cronExpression.trim(), prompt: prompt.trim(), isRecurring });
         }
 
         setTimeout(() => {
@@ -140,7 +140,7 @@ export function ScheduledTasksModal({ taskId, taskName, initialPrompt, onClose }
     };
 
     const handleDelete = (cronId: string) => {
-        deleteScheduledTask(cronId);
+        sendWsMessage('cron:delete', { cronId });
         if (editingId === cronId) resetForm();
         setTimeout(refreshTasks, 300);
     };
@@ -156,7 +156,7 @@ export function ScheduledTasksModal({ taskId, taskName, initialPrompt, onClose }
     };
 
     const handleTogglePause = (cronId: string, currentlyPaused: boolean) => {
-        pauseScheduledTask(cronId, !currentlyPaused);
+        sendWsMessage('cron:update', { cronId, isPaused: !currentlyPaused });
         setTimeout(refreshTasks, 300);
     };
 
