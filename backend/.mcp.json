@@ -23,7 +23,7 @@
       "command": "npx",
       "args": [
         "tsx",
-        "src/claudia-mcp-server.ts"
+        "/Users/I850333/projects/experiments/claudia/backend/src/claudia-mcp-server.ts"
       ]
     }
   }

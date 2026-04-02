@@ -412,50 +412,6 @@ export async function createApp(basePath?: string) {
     );
     cronScheduler.start();
 
-    // Backfill workspaces from existing tasks
-    // This ensures tasks created before workspace tracking still show up in UI
-    // BUT: never re-add workspaces that the user explicitly deleted (in recentWorkspaces)
-    try {
-        const tasks = taskSpawner.getAllTasks();
-        logger.info(`Backfill: Found ${tasks.length} tasks`);
-        const workspacePathsToAdd = new Set<string>();
-
-        // Get recently deleted workspaces so we don't re-add them
-        const recentWorkspaces = workspaceStore.getRecentWorkspaces();
-        const recentlyDeletedIds = new Set(recentWorkspaces.map(r => r.id));
-        logger.info(`Backfill: ${recentlyDeletedIds.size} recently deleted workspace(s) will be excluded`);
-
-        for (const task of tasks) {
-            if (task.workspaceId) {
-                const exists = existsSync(task.workspaceId);
-                const alreadyInStore = workspaceStore.getWorkspace(task.workspaceId);
-                const wasDeleted = recentlyDeletedIds.has(task.workspaceId);
-
-                if (process.env.DEBUG_TASKS) {
-                    logger.info(`Backfill: Task ${task.id} workspace ${task.workspaceId} exists=${exists} inStore=${!!alreadyInStore} wasDeleted=${wasDeleted}`);
-                }
-
-                if (!alreadyInStore && exists && !wasDeleted) {
-                    workspacePathsToAdd.add(task.workspaceId);
-                }
-            }
-        }
-
-        logger.info(`Backfill: Will add ${workspacePathsToAdd.size} unique workspace(s)`);
-        if (workspacePathsToAdd.size > 0) {
-            for (const workspacePath of workspacePathsToAdd) {
-                try {
-                    const workspace = workspaceStore.addWorkspace(workspacePath);
-                    logger.info(`Added workspace: ${workspacePath}`, { workspace });
-                } catch (error) {
-                    logger.error(`Failed to add workspace ${workspacePath}:`, { error });
-                }
-            }
-        }
-    } catch (error) {
-        logger.error('Failed to backfill workspaces from tasks', { error });
-    }
-
     // Wire up tunnel events for broadcasting
     tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
         logger.info('Tunnel ready, broadcasting status', { url: data.url });
@@ -5089,4 +5045,3 @@ Guidelines:
 
     return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, tunnelManager };
 }
-
