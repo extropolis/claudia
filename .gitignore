@@ -62,3 +62,6 @@ backend/task-histories/
 
 # Vite cache
 vite
+
+# Playwright MCP snapshots
+.playwright-mcp/
