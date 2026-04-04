@@ -20,6 +20,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
     const userHasScrolledRef = useRef(false); // Track if user manually scrolled up
+    const programmaticScrollRef = useRef(false); // Track programmatic scrolls to ignore in scroll handler
     const [copied, setCopied] = useState(false);
     const [isLoadingHistory, setIsLoadingHistory] = useState(true);
     const [showSpinner, setShowSpinner] = useState(false);
@@ -58,7 +59,13 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             userHasScrolledRef.current = false;
         }
         if (xtermRef.current) {
+            // Mark as programmatic scroll
+            programmaticScrollRef.current = true;
             xtermRef.current.scrollToBottom();
+            // Reset flag after a short delay
+            setTimeout(() => {
+                programmaticScrollRef.current = false;
+            }, 50);
         }
     };
 
@@ -163,6 +170,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             fontFamily: '"SF Mono", "Monaco", "Inconsolata", "Fira Code", monospace',
             scrollback: 10000,
             allowProposedApi: true,
+            scrollOnInput: false, // Disable automatic scroll on data write - we'll control it manually
             theme: {
                 background: '#0a0a0a',
                 foreground: '#d4d4d4',
@@ -267,6 +275,35 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         xtermRef.current = term;
         fitAddonRef.current = fitAddon;
 
+        // Track user scroll position to prevent auto-scroll when user has scrolled up
+        // We need to distinguish between programmatic scrolls and user scrolls
+        const isAtBottom = () => {
+            if (!term) return true;
+            const viewport = term.buffer.active.viewportY;
+            const totalRows = term.buffer.active.length;
+            // Consider "at bottom" if within 2 rows of the bottom
+            return viewport + term.rows >= totalRows - 2;
+        };
+
+        const handleScroll = () => {
+            // Ignore programmatic scrolls (ones we triggered)
+            if (programmaticScrollRef.current) {
+                return;
+            }
+
+            // This is a user-initiated scroll - check if they scrolled back to bottom
+            const atBottom = isAtBottom();
+
+            if (atBottom && userHasScrolledRef.current) {
+                // User scrolled back to bottom, re-enable auto-scroll
+                console.log(`[TerminalView] User scrolled to bottom, enabling auto-scroll for ${task.id}`);
+                userHasScrolledRef.current = false;
+            }
+        };
+
+        // Attach scroll listener
+        term.onScroll(handleScroll);
+
         // Right-click: copy selection or paste (works in both Electron and browser)
         term.element?.addEventListener('contextmenu', (e) => {
             e.preventDefault();
@@ -345,7 +382,41 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             try {
                 const message = JSON.parse(event.data);
                 if (message.type === 'task:output' && message.payload.taskId === task.id) {
+                    // Check if user is at bottom BEFORE writing
+                    const viewport = term.buffer.active.viewportY;
+                    const totalRows = term.buffer.active.length;
+                    const wasAtBottom = viewport + term.rows >= totalRows - 2;
+
+                    // Update userHasScrolledRef based on current position
+                    if (!wasAtBottom && !userHasScrolledRef.current) {
+                        console.log(`[TerminalView] User has scrolled up, disabling auto-scroll for ${task.id}`);
+                        userHasScrolledRef.current = true;
+                    }
+
+                    console.log(`[TerminalView] Writing output, wasAtBottom: ${wasAtBottom}, userHasScrolled: ${userHasScrolledRef.current}, viewport: ${viewport}`);
+
                     term.write(message.payload.data);
+
+                    // Only auto-scroll if user was at bottom
+                    if (wasAtBottom) {
+                        programmaticScrollRef.current = true;
+                        requestAnimationFrame(() => {
+                            if (xtermRef.current) {
+                                xtermRef.current.scrollToBottom();
+                            }
+                            setTimeout(() => {
+                                programmaticScrollRef.current = false;
+                            }, 100);
+                        });
+                    } else {
+                        // User was scrolled up - maintain their position
+                        programmaticScrollRef.current = true;
+                        term.scrollToLine(viewport);
+                        setTimeout(() => {
+                            programmaticScrollRef.current = false;
+                        }, 100);
+                    }
+
                     // Clear loading state on first output (task is live)
                     if (!historyLoadedRef.current) {
                         console.log(`[TerminalView] First output received, clearing loading state for ${task.id}`);
@@ -359,6 +430,14 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                         term.reset();
                         term.write(history);
                         console.log(`[TerminalView] History written to terminal for ${task.id}`);
+                        // Scroll to bottom after history is restored (programmatic scroll)
+                        programmaticScrollRef.current = true;
+                        requestAnimationFrame(() => {
+                            term.scrollToBottom();
+                            setTimeout(() => {
+                                programmaticScrollRef.current = false;
+                            }, 50);
+                        });
                     } else {
                         console.warn(`[TerminalView] task:restore received but history is empty for ${task.id}`);
                     }
