@@ -51,7 +51,7 @@ script.js
 start.ps1
 .claude/settings.local.json
 
-# Runtime data (persisted state)
+# Runtime data (persisted state) — never commit per-user data
 backend/tasks.json
 backend/scheduled-tasks.json
 backend/config.json
@@ -59,6 +59,7 @@ backend/workspace-config.json
 backend/chat-history.json
 backend/archived-histories/
 backend/task-histories/
+backend/data/conversations.json
 
 # Vite cache
 vite

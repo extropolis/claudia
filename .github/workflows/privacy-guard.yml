@@ -1,0 +1,66 @@
+name: Privacy Guard
+
+# Prevents sensitive runtime/state files from ever being committed again.
+# These paths hold per-user data (task histories, config, chat logs,
+# workspace state) and were accidentally committed in the past. Keeping
+# this check cheap means it runs on every push/PR and fails fast.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  check-forbidden-paths:
+    name: Check forbidden paths
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Fail if any forbidden runtime/state files are tracked
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Paths that must NEVER be tracked in git. Kept in sync with
+          # the "Runtime data (persisted state)" section of .gitignore.
+          FORBIDDEN_PATTERNS=(
+            'backend/task-histories/'
+            'backend/archived-histories/'
+            'backend/tasks.json'
+            'backend/scheduled-tasks.json'
+            'backend/config.json'
+            'backend/workspace-config.json'
+            'backend/chat-history.json'
+            'backend/data/conversations.json'
+          )
+
+          FOUND=0
+          for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
+            # ls-files matches tracked files only. Using -- to avoid
+            # interpreting patterns as options.
+            matches=$(git ls-files -- "$pattern" || true)
+            if [ -n "$matches" ]; then
+              FOUND=1
+              echo "::error::Forbidden path is tracked in git: $pattern"
+              echo "$matches" | head -20 | sed 's/^/  /'
+              count=$(echo "$matches" | wc -l | tr -d ' ')
+              if [ "$count" -gt 20 ]; then
+                echo "  ... and $((count - 20)) more"
+              fi
+            fi
+          done
+
+          if [ "$FOUND" -ne 0 ]; then
+            echo ""
+            echo "::error::Runtime/state files must not be committed. They contain"
+            echo "::error::per-user data (terminal sessions, config, chat logs)."
+            echo "::error::Remove with: git rm --cached <path> && git commit"
+            echo "::error::These paths are gitignored — if they show up here, they"
+            echo "::error::were likely added via 'git add -f' or predate .gitignore."
+            exit 1
+          fi
+
+          echo "All forbidden paths clear. ✓"
