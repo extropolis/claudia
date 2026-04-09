@@ -1229,7 +1229,7 @@ export async function createApp(basePath?: string) {
                                     const claudiaMcpEnabled = configStore.getClaudioMcpServerEnabled();
                                     if (claudiaMcpEnabled && !inputTask.titleInstructionInjected) {
                                         inputTask.titleInstructionInjected = true;
-                                        const titleInstruction = `[CONTEXT UPDATE: You can update your task title using claudia_rename_task with your own task ID. Give your task a short, descriptive title (3-6 words) based on what you're working on. Do NOT rename if the user has manually edited the title (the tool will reject it).] `;
+                                        const titleInstruction = `[CONTEXT UPDATE: You can update your task title using claudia_rename_task. Call it with your own task ID and a \`displayName\` parameter (string, 3-6 words) describing what you're working on. The parameter is named \`displayName\`, NOT \`title\`. Do NOT rename if the user has manually edited the title (the tool will reject it).] `;
                                         const msgContent = filteredInput.endsWith('\r') || filteredInput.endsWith('\n')
                                             ? filteredInput.slice(0, -1)
                                             : filteredInput;

@@ -1720,13 +1720,14 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
 **Task naming:**
 - When creating tasks, always provide a short \`displayName\` (e.g., "Build API endpoint", "Write unit tests") so tasks are easy to identify in the sidebar
-- If your work evolves, call \`claudia_rename_task\` with taskId="${id}" and an updated title
+- If your work evolves, call \`claudia_rename_task\` with \`taskId="${id}"\` and a new \`displayName\` (the parameter is named \`displayName\`, NOT \`title\`)
 
 **Auto-title your task (YOUR TASK ID IS: ${id}):**
-- After you have produced your first meaningful response, call \`claudia_rename_task\` with taskId="${id}" and a short descriptive title (3-6 words) reflecting what you're working on
+- After you have produced your first meaningful response, call \`claudia_rename_task\` with \`taskId="${id}"\` and a \`displayName\` that is a short descriptive phrase (3-6 words) reflecting what you're working on
+- The parameter is literally named \`displayName\` (string). Do NOT pass it as \`title\` — that will fail validation.
 - **Do NOT call \`claudia_rename_task\` before producing output** — write your first response first, then title yourself
 - If the rename is rejected (user manually edited the title), do NOT retry
-- If your work evolves significantly, call \`claudia_rename_task\` again with taskId="${id}" and an updated title (unless user-edited)
+- If your work evolves significantly, call \`claudia_rename_task\` again with \`taskId="${id}"\` and an updated \`displayName\` (unless user-edited)
 
 **Handling file edit conflicts:**
 - If you get an "Error editing file" (e.g., content mismatch, file changed on disk), another Claudia task may be editing the same file concurrently
