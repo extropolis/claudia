@@ -50,6 +50,7 @@ script.js
 .env.local
 start.ps1
 .claude/settings.local.json
+.mcp.json
 
 # Runtime data (persisted state) — never commit per-user data
 backend/tasks.json
