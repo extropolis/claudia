@@ -798,28 +798,37 @@ export class TaskSpawner extends EventEmitter {
 
     private loadPersistedTasks(): void {
         try {
-            // SAFETY: If the main file is empty/missing but a backup exists with data,
-            // restore from the backup. This recovers from a save that wiped state.
+            // SAFETY: If the main file is empty/corrupt/missing but a backup exists with
+            // data, restore from the backup. This recovers from a save that wiped state.
             const bakPath = this.persistencePath + '.bak';
-            if (existsSync(this.persistencePath) && existsSync(bakPath)) {
-                try {
-                    const mainRaw = readFileSync(this.persistencePath, 'utf-8');
-                    const main = JSON.parse(mainRaw) as { tasks?: any[]; archivedTasks?: any[] };
-                    const mainTotal = (main.tasks?.length || 0) + (main.archivedTasks?.length || 0);
-                    if (mainTotal === 0) {
+            if (existsSync(bakPath)) {
+                let mainTotal = 0;
+                let mainParseable = false;
+                if (existsSync(this.persistencePath)) {
+                    try {
+                        const mainRaw = readFileSync(this.persistencePath, 'utf-8');
+                        const main = JSON.parse(mainRaw) as { tasks?: any[]; archivedTasks?: any[] };
+                        mainTotal = (main.tasks?.length || 0) + (main.archivedTasks?.length || 0);
+                        mainParseable = true;
+                    } catch (_e) {
+                        // Main file exists but is corrupt — treat as empty for recovery purposes.
+                    }
+                }
+                if (mainTotal === 0) {
+                    try {
                         const bakRaw = readFileSync(bakPath, 'utf-8');
                         const bak = JSON.parse(bakRaw) as { tasks?: any[]; archivedTasks?: any[] };
                         const bakTotal = (bak.tasks?.length || 0) + (bak.archivedTasks?.length || 0);
                         if (bakTotal > 0) {
                             console.warn(
-                                `[TaskSpawner] Main file is empty but backup has ${bakTotal} tasks — ` +
+                                `[TaskSpawner] Main file is ${mainParseable ? 'empty' : 'corrupt'} but backup has ${bakTotal} tasks — ` +
                                 `restoring from ${bakPath}`
                             );
                             writeFileSync(this.persistencePath, bakRaw);
                         }
+                    } catch (_e) {
+                        // Backup also corrupt; fall through to normal load.
                     }
-                } catch (_e) {
-                    // Best-effort recovery; fall through to normal load.
                 }
             }
 
@@ -1833,7 +1842,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - Only spawn tasks when parallelization provides real value; do simple work yourself
 - Each spawned task prompt should be fully self-contained — include file paths, context, and constraints so it can work independently
 - While waiting for spawned tasks, do NOT start implementing features that overlap with what they're doing
-- **NEVER delete or archive completed tasks** — the user wants to review their outputs. After a task completes, just report its status and read its output. Do NOT call \`claudia_delete_task\` or \`claudia_archive_task\` on finished tasks.
+- **NEVER delete or archive completed tasks** — the user wants to review their outputs. After a task completes, just report its status and read its output. The MCP server intentionally does NOT expose archive/delete tools — only the user can archive tasks via the UI.
 `;
             systemPrompt = systemPrompt
                 ? `${systemPrompt}\n\n${orchestrationGuidance}`

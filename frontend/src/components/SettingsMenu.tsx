@@ -2449,7 +2449,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 Tools available: <code>claudia_list_tasks</code>,
                                 <code>claudia_get_task_status</code>, <code>claudia_get_task_output</code>,
                                 <code>claudia_create_task</code>,
-                                <code>claudia_send_input</code>, <code>claudia_archive_task</code>.
+                                <code>claudia_send_input</code>, <code>claudia_continue_task</code>,
+                                <code>claudia_stop_task</code>, <code>claudia_rename_task</code>.
                                 Tasks are scoped to the current workspace.
                                 Requires server restart for running tasks to pick up the change.
                             </p>

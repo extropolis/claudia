@@ -168,6 +168,7 @@ export type WSMessageType =
     | 'cron:deleted'
     | 'cron:list'
     | 'cron:fired'
+    | 'cron:ran'
     | 'cron:updated'
     // Server status
     | 'server:reloading'
