@@ -17,6 +17,9 @@
  *   - claudia_continue_task: Send a follow-up prompt to resume an idle task
  *   - claudia_stop_task: Gracefully stop a running task
  *   - claudia_stop_all_tasks: Stop all running tasks in the workspace
+ *   - claudia_rename_task: Set a display name for a task
+ *   - claudia_cron_create / claudia_cron_list / claudia_cron_delete / claudia_cron_pause:
+ *     Manage scheduled (cron) prompts attached to tasks
  *
  * Note: Archive/delete tools intentionally NOT exposed to MCP. Only the user
  * can archive or delete tasks via the UI — agents must never archive tasks.

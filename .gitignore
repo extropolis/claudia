@@ -54,6 +54,8 @@ start.ps1
 
 # Runtime data (persisted state) — never commit per-user data
 backend/tasks.json
+backend/tasks.json.bak
+backend/tasks.json.*.tmp
 backend/scheduled-tasks.json
 backend/config.json
 backend/workspace-config.json

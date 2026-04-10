@@ -76,9 +76,14 @@ try {
         if (err.code === 'EADDRINUSE') {
             console.error(`Port ${PORT} is already in use`);
         }
+        // CRITICAL: Exit so tsx watch can retry. Otherwise the process keeps running
+        // with an active TaskSpawner that races on tasks.json with the other instance,
+        // and the user gets "stuck reconnecting to backend" because nothing serves HTTP.
+        process.exit(1);
     });
 } catch (err) {
     console.error('[Index] Exception during server.listen:', err);
+    process.exit(1);
 }
 
 // Graceful shutdown - use the server's gracefulShutdown which handles all cleanup
