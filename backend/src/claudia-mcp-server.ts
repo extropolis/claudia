@@ -15,10 +15,11 @@
  *   - claudia_create_task: Create a new task in the current workspace
  *   - claudia_send_input: Send input to a task waiting for input
  *   - claudia_continue_task: Send a follow-up prompt to resume an idle task
- *   - claudia_archive_task: Archive a completed task
  *   - claudia_stop_task: Gracefully stop a running task
  *   - claudia_stop_all_tasks: Stop all running tasks in the workspace
- *   - claudia_delete_task: Kill and remove a task permanently
+ *
+ * Note: Archive/delete tools intentionally NOT exposed to MCP. Only the user
+ * can archive or delete tasks via the UI — agents must never archive tasks.
  *
 
  */
@@ -550,45 +551,6 @@ server.tool(
 );
 
 // ============================================================================
-// Tool: claudia_archive_task
-// ============================================================================
-server.tool(
-    'claudia_archive_task',
-    'Archive a task that has completed or exited. Archived tasks are stored for later reference but removed from the active task list. NOTE: Only archive a task if explicitly instructed by the user — do NOT archive tasks just because they completed.',
-    {
-        taskId: z.string().describe('The task ID to archive'),
-    },
-    async ({ taskId }) => {
-        try {
-            log.info(`Archiving task: ${taskId}`);
-
-            const result = await sendWSMessage('task:archive', {
-                taskId,
-            });
-
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify({
-                        success: true,
-                        message: `Task '${taskId}' archived successfully.`,
-                        result
-                    }, null, 2)
-                }]
-            };
-        } catch (error) {
-            log.error('Failed to archive task:', error);
-            return {
-                content: [{
-                    type: 'text',
-                    text: `Error archiving task: ${error instanceof Error ? error.message : String(error)}`
-                }]
-            };
-        }
-    }
-);
-
-// ============================================================================
 // Tool: claudia_stop_task
 // ============================================================================
 server.tool(
@@ -699,73 +661,6 @@ server.tool(
                 content: [{
                     type: 'text',
                     text: `Error stopping tasks: ${error instanceof Error ? error.message : String(error)}`
-                }]
-            };
-        }
-    }
-);
-
-// ============================================================================
-// Tool: claudia_delete_task
-// ============================================================================
-server.tool(
-    'claudia_delete_task',
-    'Archive a task — stops its process (if running) and moves it to the archive for later reference. Archived tasks are preserved and can be restored or permanently deleted by the user from the UI. NOTE: Do NOT use this to clean up completed tasks — users want to keep completed tasks to review their outputs. Only use this when explicitly asked to delete or remove a task.',
-    {
-        taskId: z.string().describe('The task ID to archive/delete'),
-    },
-    async ({ taskId }) => {
-        // Prevent a task from deleting itself — would kill the orchestrating Claude session
-        if (SELF_TASK_ID && taskId === SELF_TASK_ID) {
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify({
-                        success: false,
-                        message: `Cannot delete task '${taskId}' because it is the currently running session. Use claudia_stop_task to gracefully stop it instead.`,
-                    }, null, 2)
-                }]
-            };
-        }
-
-        try {
-            // Verify task exists before attempting archive (avoids 30s timeout if task not found)
-            const tasksResponse = await backendFetch('/api/tasks');
-            if (tasksResponse.ok) {
-                const tasks = await tasksResponse.json();
-                const task = tasks.find((t: any) => t.id === taskId);
-                if (!task) {
-                    return {
-                        content: [{
-                            type: 'text',
-                            text: JSON.stringify({
-                                success: false,
-                                message: `Task '${taskId}' not found.`,
-                            }, null, 2)
-                        }]
-                    };
-                }
-            }
-
-            log.info(`Archiving task: ${taskId}`);
-
-            const result = await sendWSMessage('task:archive', { taskId });
-
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify({
-                        success: true,
-                        message: `Task '${taskId}' has been archived. It can be restored or permanently deleted from the UI.`,
-                    }, null, 2)
-                }]
-            };
-        } catch (error) {
-            log.error('Failed to archive task:', error);
-            return {
-                content: [{
-                    type: 'text',
-                    text: `Error archiving task: ${error instanceof Error ? error.message : String(error)}`
                 }]
             };
         }

@@ -3,7 +3,7 @@ import { EventEmitter } from 'events';
 import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS } from '@claudia/shared';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, statSync, openSync, readSync, closeSync, renameSync } from 'fs';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
@@ -205,6 +205,12 @@ export class TaskSpawner extends EventEmitter {
     private persistencePath: string;
     private saveDebounceTimer: NodeJS.Timeout | null = null;
     private fileModTimeOnLoad: number | null = null; // Track file mtime when we loaded it
+    /** Periodic heartbeat save — always fires every HEARTBEAT_SAVE_MS regardless of activity.
+     * Safety net against lost tasks when the process dies without a clean shutdown
+     * (SIGKILL, OOM, tsx watch abrupt restart, etc.). */
+    private heartbeatSaveInterval: NodeJS.Timeout | null = null;
+    /** Counter of persisted saves, for diagnostics. */
+    private saveCounter: number = 0;
     private configStore: ConfigStore | null = null;
     private pendingSessionCapture: Map<string, { taskId: string; workspaceId: string; startTime: number }> = new Map();
     /** Map of task IDs to their session capture interval timers */
@@ -792,6 +798,31 @@ export class TaskSpawner extends EventEmitter {
 
     private loadPersistedTasks(): void {
         try {
+            // SAFETY: If the main file is empty/missing but a backup exists with data,
+            // restore from the backup. This recovers from a save that wiped state.
+            const bakPath = this.persistencePath + '.bak';
+            if (existsSync(this.persistencePath) && existsSync(bakPath)) {
+                try {
+                    const mainRaw = readFileSync(this.persistencePath, 'utf-8');
+                    const main = JSON.parse(mainRaw) as { tasks?: any[]; archivedTasks?: any[] };
+                    const mainTotal = (main.tasks?.length || 0) + (main.archivedTasks?.length || 0);
+                    if (mainTotal === 0) {
+                        const bakRaw = readFileSync(bakPath, 'utf-8');
+                        const bak = JSON.parse(bakRaw) as { tasks?: any[]; archivedTasks?: any[] };
+                        const bakTotal = (bak.tasks?.length || 0) + (bak.archivedTasks?.length || 0);
+                        if (bakTotal > 0) {
+                            console.warn(
+                                `[TaskSpawner] Main file is empty but backup has ${bakTotal} tasks — ` +
+                                `restoring from ${bakPath}`
+                            );
+                            writeFileSync(this.persistencePath, bakRaw);
+                        }
+                    }
+                } catch (_e) {
+                    // Best-effort recovery; fall through to normal load.
+                }
+            }
+
             if (existsSync(this.persistencePath)) {
                 // Track file modification time to detect concurrent writes
                 const stats = statSync(this.persistencePath);
@@ -1015,9 +1046,45 @@ export class TaskSpawner extends EventEmitter {
                 mkdirSync(dir, { recursive: true });
             }
 
-            writeFileSync(this.persistencePath, JSON.stringify(persistence, null, 2));
+            // SAFETY: Refuse to overwrite a non-empty tasks.json with a near-empty save.
+            // This catches a class of bugs (race conditions, in-memory state cleared during
+            // shutdown, etc.) where we'd otherwise wipe out the user's task data.
+            const newTotal = tasksToSave.length + archivedTasksToSave.length;
+            if (newTotal === 0 && existsSync(this.persistencePath)) {
+                try {
+                    const existingRaw = readFileSync(this.persistencePath, 'utf-8');
+                    const existing = JSON.parse(existingRaw) as { tasks?: any[]; archivedTasks?: any[] };
+                    const existingTotal = (existing.tasks?.length || 0) + (existing.archivedTasks?.length || 0);
+                    if (existingTotal > 0) {
+                        console.error(
+                            `[TaskSpawner] REFUSING to save: would overwrite ${existingTotal} tasks ` +
+                            `with empty state. This is almost certainly a bug. ` +
+                            `In-memory: ${this.tasks.size} live, ${this.disconnectedTasks.size} disconnected, ` +
+                            `${this.archivedTasks.size} archived.`
+                        );
+                        return;
+                    }
+                } catch (_e) {
+                    // Existing file unparseable — fall through and overwrite
+                }
+            }
 
-            // Update our tracked modification time after successful save
+            // Atomic write: write to a temp file then rename. This ensures tasks.json
+            // is never left in a partial state if the process dies mid-write.
+            const tmpPath = this.persistencePath + '.tmp';
+            const bakPath = this.persistencePath + '.bak';
+            writeFileSync(tmpPath, JSON.stringify(persistence, null, 2));
+            // Keep a backup of the previous good save before replacing.
+            if (existsSync(this.persistencePath)) {
+                try {
+                    renameSync(this.persistencePath, bakPath);
+                } catch (_e) {
+                    // Backup is best-effort; continue with the rename.
+                }
+            }
+            renameSync(tmpPath, this.persistencePath);
+
+            // Update our tracked modification time after successful save (PR #37 multi-instance guard)
             const newStats = statSync(this.persistencePath);
             this.fileModTimeOnLoad = newStats.mtimeMs;
 

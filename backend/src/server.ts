@@ -92,6 +92,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'cron:delete',
     'cron:update',
     'cron:list',
+    'cron:run',
 ]);
 
 // WebSocket message validation
@@ -2027,6 +2028,38 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                             }
                         } catch (err) {
                             sendWSError(ws, err instanceof Error ? err.message : String(err), message.type, 'CRON_UPDATE_FAILED');
+                        }
+                        break;
+                    }
+
+                    case 'cron:run': {
+                        const { cronId } = payload as { cronId?: string };
+                        if (!cronId) {
+                            sendWSError(ws, 'cron:run requires cronId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const scheduled = cronScheduler.get(cronId);
+                        if (!scheduled) {
+                            sendWSError(ws, `Scheduled task '${cronId}' not found`, message.type, 'CRON_NOT_FOUND');
+                            break;
+                        }
+                        logger.info('Manual trigger requested for scheduled task', { cronId, taskId: scheduled.taskId });
+                        const fired = cronScheduler.fireNow(cronId);
+                        if (fired) {
+                            const refreshed = cronScheduler.get(cronId);
+                            ws.send(JSON.stringify({
+                                type: 'cron:ran',
+                                payload: {
+                                    cronId,
+                                    taskId: scheduled.taskId,
+                                    scheduledTask: refreshed
+                                        ? { ...refreshed, description: describeCronExpression(refreshed.cronExpression) }
+                                        : null,
+                                }
+                            }));
+                            broadcast({ type: 'cron:updated' as WSMessageType, payload: { cronId, taskId: scheduled.taskId } });
+                        } else {
+                            sendWSError(ws, `Failed to fire scheduled task '${cronId}'`, message.type, 'CRON_FIRE_FAILED');
                         }
                         break;
                     }
