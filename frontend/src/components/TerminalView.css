@@ -388,3 +388,77 @@
         padding: 6px 8px;
     }
 }
+
+/* Light theme terminal overrides */
+[data-theme="light"] .terminal-view {
+    background: #ffffff;
+}
+
+[data-theme="light"] .terminal-header {
+    background: #f6f8fa;
+    border-bottom: 1px solid #d0d7de;
+}
+
+[data-theme="light"] .terminal-container .xterm-viewport::-webkit-scrollbar-track {
+    background: #f6f8fa;
+}
+
+[data-theme="light"] .terminal-container .xterm-viewport::-webkit-scrollbar-thumb {
+    background: #d0d7de;
+    border: 2px solid #f6f8fa;
+}
+
+[data-theme="light"] .terminal-container .xterm-viewport::-webkit-scrollbar-thumb:hover {
+    background: #8c959f;
+}
+
+[data-theme="light"] .terminal-container .xterm-viewport::-webkit-scrollbar-thumb:active {
+    background: #57606a;
+}
+
+[data-theme="light"] .terminal-title {
+    color: #1f2328;
+}
+
+[data-theme="light"] .copy-button {
+    color: #57606a;
+}
+
+[data-theme="light"] .copy-button:hover {
+    color: #1f2328;
+    background: #eaeef2;
+}
+
+[data-theme="light"] .terminal-loading-overlay {
+    background: rgba(255, 255, 255, 0.85);
+}
+
+[data-theme="light"] .terminal-loading-spinner {
+    border-color: var(--border-color);
+    border-top-color: var(--accent-green);
+}
+
+[data-theme="light"] .terminal-loading-text {
+    color: var(--text-secondary);
+}
+
+[data-theme="light"] .history-button {
+    color: var(--text-secondary);
+    border-color: var(--border-color);
+}
+
+[data-theme="light"] .history-button:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border-color: var(--text-muted);
+}
+
+[data-theme="light"] .terminal-state.disconnected {
+    background: #e2e5e9;
+    color: #57606a;
+}
+
+[data-theme="light"] .terminal-state.exited {
+    background: #d0d7de;
+    color: #57606a;
+}

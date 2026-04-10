@@ -82,12 +82,13 @@ Get-Process -Name "claude" -ErrorAction SilentlyContinue | Stop-Process -Force -
 
 Start-Sleep -Seconds 2
 
-# Verify ports are free
+# Verify ports are free (ignore TimeWait connections with no owning process)
 foreach ($port in @($BACKEND_PORT, $FRONTEND_PORT, $OPENCODE_PORT)) {
-    $connections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
-    if ($connections) {
+    $activeConnections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -ne 0 }
+    if ($activeConnections) {
         Write-Host "Port $port is still in use. Please kill manually:"
-        $connections | Format-Table -AutoSize
+        $activeConnections | Format-Table -AutoSize
         exit 1
     }
 }

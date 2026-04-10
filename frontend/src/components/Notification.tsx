@@ -9,10 +9,11 @@ export interface NotificationProps {
     title: string;
     message?: string;
     duration?: number;
+    onClick?: () => void;
     onClose: () => void;
 }
 
-export function Notification({ type, title, message, duration = 5000, onClose }: NotificationProps) {
+export function Notification({ type, title, message, duration = 5000, onClick, onClose }: NotificationProps) {
     useEffect(() => {
         if (duration > 0) {
             const timer = setTimeout(() => {
@@ -36,14 +37,16 @@ export function Notification({ type, title, message, duration = 5000, onClose }:
         }
     };
 
+    const handleClick = onClick ? () => { onClick(); onClose(); } : undefined;
+
     return (
-        <div className={`notification notification-${type}`} role="alert">
+        <div className={`notification notification-${type}${onClick ? ' notification-clickable' : ''}`} role="alert" onClick={handleClick}>
             <div className="notification-icon">{getIcon()}</div>
             <div className="notification-content">
                 <div className="notification-title">{title}</div>
                 {message && <div className="notification-message">{message}</div>}
             </div>
-            <button className="notification-close" onClick={onClose} aria-label="Close notification">
+            <button className="notification-close" onClick={(e) => { e.stopPropagation(); onClose(); }} aria-label="Close notification">
                 <X size={16} />
             </button>
         </div>

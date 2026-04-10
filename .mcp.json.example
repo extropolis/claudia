@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp"
+      ]
+    },
+    "claudia": {
+      "command": "npx",
+      "args": [
+        "tsx",
+        "<ABSOLUTE_PATH_TO_REPO>/backend/src/claudia-mcp-server.ts"
+      ]
+    }
+  }
+}

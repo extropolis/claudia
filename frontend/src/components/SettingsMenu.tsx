@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, Zap, Bell } from 'lucide-react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, Zap, Bell, Palette } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
 import { hasBrowserNotifications, getNotificationPermission, requestNotificationPermission, sendBrowserNotification } from '../utils/browserCapabilities';
@@ -75,9 +75,10 @@ function CollapsiblePanel({ title, icon, isExpanded, onToggle, children }: Colla
 }
 
 export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProps) {
-    const { showSystemStats, setShowSystemStats, browserNotificationsEnabled, setBrowserNotificationsEnabled, notifyOnCompletion, setNotifyOnCompletion, notifyOnWaitingInput, setNotifyOnWaitingInput } = useTaskStore();
+    const { showSystemStats, setShowSystemStats, browserNotificationsEnabled, setBrowserNotificationsEnabled, notifyOnCompletion, setNotifyOnCompletion, notifyOnWaitingInput, setNotifyOnWaitingInput, themePreference, setThemePreference } = useTaskStore();
     const { showWarning } = useNotification();
     const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
+        appearance: false,
         sound: false,
         notifications: false,
         behavior: false,
@@ -1238,6 +1239,28 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
 
                 <div className="settings-menu-content">
                     <CollapsiblePanel
+                        title="Appearance"
+                        icon={<Palette size={16} />}
+                        isExpanded={expandedPanels.appearance}
+                        onToggle={() => togglePanel('appearance')}
+                    >
+                        <div className="settings-field" style={{ padding: '16px 20px' }}>
+                            <label className="settings-label">Theme</label>
+                            <div className="theme-selector">
+                                {(['system', 'light', 'dark'] as const).map((option) => (
+                                    <button
+                                        key={option}
+                                        className={`theme-option ${themePreference === option ? 'active' : ''}`}
+                                        onClick={() => setThemePreference(option)}
+                                    >
+                                        {option === 'system' ? '\u2699 System' : option === 'light' ? '\u2600 Light' : '\uD83C\uDF19 Dark'}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </CollapsiblePanel>
+
+                    <CollapsiblePanel
                         title="Sound"
                         icon={<Volume2 size={18} />}
                         isExpanded={expandedPanels.sound}
@@ -2397,7 +2420,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                     </CollapsiblePanel>
 
                     <CollapsiblePanel
-                        title={<>Claudia MCP Server <span className="settings-badge settings-badge-experimental">Experimental</span></>}
+                        title="Claudia MCP Server"
                         icon={<Zap size={18} />}
                         isExpanded={expandedPanels.claudiaMcp}
                         onToggle={() => togglePanel('claudiaMcp')}

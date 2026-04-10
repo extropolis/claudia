@@ -47,6 +47,8 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'task:input',
     'task:resize',
     'task:destroy',
+    'task:stop',
+    'task:stopAll',
     'task:interrupt',
     'task:archive',
     'task:reconnect',
@@ -228,6 +230,14 @@ function filterContextUpdateFromOutput(data: string): string {
 // can start buffering BEFORE the echo arrives (handles arbitrary chunk splits).
 const ctxUpdateInFlight = new Set<string>();
 
+// Tracks INLINE context-update injections (context prefix prepended to the user's
+// own message). Unlike standalone injections (e.g. workspace ref updates which end
+// with "acknowledge this update briefly\r"), inline injections produce a PTY echo
+// whose cursor-movement sequences are too complex to surgically filter — the
+// result is garbled display. Instead we discard the entire input-echo buffer for
+// inline injections; Claude Code's response comes through cleanly afterwards.
+const ctxInlineInFlight = new Set<string>();
+
 /**
  * Notify running tasks in a workspace that references have changed.
  * - Idle tasks: immediately receive a context update message
@@ -276,6 +286,48 @@ function notifyTasksOfReferenceChange(
     }
 }
 
+/**
+ * Build the context update message for an MCP server config change.
+ */
+function buildMcpChangeMessage(configStore: InstanceType<typeof import('./config-store.js').ConfigStore>): { msg: string; serverNames: string[] } {
+    const mcpServers = configStore.getMCPServers() || [];
+    const enabledServers = mcpServers.filter(s => s.enabled);
+    const serverNames = enabledServers.map(s => s.name);
+
+    const msg = serverNames.length > 0
+        ? `[CONTEXT UPDATE: MCP server configuration has changed. Currently enabled MCP servers: ${serverNames.join(', ')}. New MCP tools are available via the updated .mcp.json in your workspace. You may need to use /mcp to reload MCP servers to pick up the changes.] acknowledge this update briefly\r`
+        : `[CONTEXT UPDATE: All MCP servers have been disabled or removed. The .mcp.json in your workspace has been updated.] acknowledge this update briefly\r`;
+
+    return { msg, serverNames };
+}
+
+/**
+ * Notify all running tasks that MCP server configuration has changed.
+ * - Idle tasks: immediately receive a context update message
+ * - Busy/other tasks: flagged for notification when they next become idle
+ */
+function notifyTasksOfMcpChange(
+    taskSpawner: InstanceType<typeof import('./task-spawner.js').TaskSpawner>,
+    configStore: InstanceType<typeof import('./config-store.js').ConfigStore>
+): void {
+    const tasks = taskSpawner.getAllActiveTasks();
+    if (tasks.length === 0) return;
+
+    const { msg, serverNames } = buildMcpChangeMessage(configStore);
+
+    for (const task of tasks) {
+        if (task.state === 'idle') {
+            ctxUpdateInFlight.add(task.id);
+            taskSpawner.writeToTask(task.id, msg);
+            task.pendingMcpNotification = false;
+            logger.info('Sent immediate MCP config update to idle task', { taskId: task.id, servers: serverNames });
+        } else {
+            task.pendingMcpNotification = true;
+            logger.info('Queued MCP config update for busy task', { taskId: task.id, state: task.state });
+        }
+    }
+}
+
 export async function createApp(basePath?: string) {
     const app = express();
     const server = createServer(app);
@@ -291,6 +343,11 @@ export async function createApp(basePath?: string) {
     // TunnelManager for mobile remote access (ngrok-based, created early for middleware use)
     const tunnelManager = new TunnelManager(PORTS.BACKEND);
     logger.info('TunnelManager created (ngrok)');
+    // Auto-recover any orphaned ngrok left by a previous server instance (tsx watch restart).
+    // Fire-and-forget: completes quickly (2 s timeout) well before any client connects.
+    tunnelManager.autoRecover().catch(err =>
+        logger.warn('Tunnel auto-recover failed', { error: err instanceof Error ? err.message : String(err) })
+    );
 
     // ===== Tunnel → React Frontend Proxy =====
     // When accessed through the tunnel, proxy non-API requests to the Vite
@@ -309,12 +366,17 @@ export async function createApp(basePath?: string) {
             return next();
         }
 
-        // Tunnel visitor at root without a token → redirect with token so React can auth the WS
-        if (req.path === '/' && !req.query.token) {
+        // Tunnel visitor at root: redirect with the current token if missing or stale.
+        // This handles server restarts (tsx watch) where the token changes — mobile
+        // browsers that still have the old URL/token get seamlessly refreshed.
+        if (req.path === '/') {
             const status = tunnelManager.getStatus();
             if (status.active && status.token) {
-                logger.info('Tunnel visitor at root, redirecting with token', { host });
-                return res.redirect(`/?token=${status.token}`);
+                const requestToken = req.query.token as string | undefined;
+                if (!requestToken || !tunnelManager.validateToken(requestToken)) {
+                    logger.info('Tunnel visitor at root with missing/stale token, redirecting', { host });
+                    return res.redirect(`/?token=${status.token}`);
+                }
             }
         }
 
@@ -666,8 +728,10 @@ export async function createApp(basePath?: string) {
     }
 
     // Wire up TaskSpawner events
-    taskSpawner.on('taskCreated', (task: Task) => {
-        broadcast({ type: 'task:created', payload: { task } });
+    // Note: task:created broadcast is handled directly in the task:create WS handler
+    // (not here) so the source field is always correct even with concurrent creates.
+    // The taskCreated event is still emitted for other listeners (e.g., supervisor-chat).
+    taskSpawner.on('taskCreated', () => {
         queueTasksUpdated(); // Batched
     });
 
@@ -704,6 +768,15 @@ export async function createApp(basePath?: string) {
                 }
             }
 
+            // Deliver pending MCP config notifications when a task becomes idle
+            if (internalTask?.pendingMcpNotification) {
+                internalTask.pendingMcpNotification = false;
+                const { msg, serverNames } = buildMcpChangeMessage(configStore);
+                ctxUpdateInFlight.add(task.id);
+                taskSpawner.writeToTask(task.id, msg);
+                logger.info('Delivered pending MCP config update to now-idle task', { taskId: task.id, servers: serverNames });
+            }
+
             // Fire any pending scheduled prompts for this task
             cronScheduler.onTaskIdle(task.id);
         }
@@ -735,8 +808,17 @@ export async function createApp(basePath?: string) {
         if (entry) {
             clearTimeout(entry.timer);
             ctxUpdateBuffers.delete(taskId);
-            // Try filtering the accumulated buffer
-            emitFilteredOutput(taskId, entry.data);
+            if (ctxInlineInFlight.has(taskId)) {
+                // Inline injection: the echo has cursor-movement sequences interspersed
+                // that survive text-only filtering and corrupt the display. Discard the
+                // entire buffer — Claude's response arrives in subsequent chunks and
+                // renders cleanly without any of the echo noise.
+                ctxInlineInFlight.delete(taskId);
+            } else {
+                // Standalone injection (e.g. workspace ref / MCP config updates that
+                // end with "acknowledge this update briefly\r"): filter and emit.
+                emitFilteredOutput(taskId, entry.data);
+            }
         }
     }
 
@@ -930,6 +1012,12 @@ export async function createApp(basePath?: string) {
             type: 'init',
             payload: { tasks, workspaces }
         }));
+        // Send tunnel status so reconnecting clients (e.g. after tsx watch restart) know
+        // the tunnel is still active without waiting for a user action to trigger it.
+        const tunnelStatus = tunnelManager.getStatus();
+        if (tunnelStatus.active) {
+            ws.send(JSON.stringify({ type: 'tunnel:status' as WSMessageType, payload: tunnelStatus }));
+        }
 
         ws.on('message', async (data: Buffer) => {
             let messageTypeForError: string | undefined;
@@ -961,7 +1049,7 @@ export async function createApp(basePath?: string) {
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId, initialCols, initialRows } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number };
+                        const { prompt, workspaceId, initialCols, initialRows, source } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string };
                         if (!prompt || !workspaceId) {
                             logger.error('task:create requires prompt and workspaceId');
                             sendWSError(ws, 'task:create requires prompt and workspaceId', message.type, 'MISSING_PARAMS');
@@ -1007,6 +1095,10 @@ export async function createApp(basePath?: string) {
                         // Pass initial dimensions if provided
                         try {
                             const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows);
+                            // Broadcast task:created to all clients (UI sidebar update).
+                            // Done here (not in the taskCreated event handler) so the source
+                            // field is always correct even with concurrent creates.
+                            broadcast({ type: 'task:created', payload: { task: newTask, source } });
                             // Track which references were injected so we can detect changes on follow-ups
                             const internalTask = taskSpawner.getTask(newTask.id);
                             if (internalTask) {
@@ -1032,6 +1124,8 @@ export async function createApp(basePath?: string) {
 
                     case 'task:select': {
                         // Switch active task (for terminal viewing)
+                        // Context injections (references, auto-title) are deferred to task:input
+                        // so that merely clicking a task doesn't cause Claude to act
                         const { taskId } = payload as { taskId?: string };
                         if (taskId) {
                             try {
@@ -1078,11 +1172,30 @@ export async function createApp(basePath?: string) {
                                             const enterKey = filteredInput.slice(-1);
                                             filteredInput = refPrefix + msgContent + enterKey;
                                             ctxUpdateInFlight.add(taskId);
+                                            ctxInlineInFlight.add(taskId);
                                             logger.info('Injected updated references into follow-up message', { taskId, refCount: currentValidRefs.length });
                                         } else {
                                             logger.info('References cleared for task', { taskId });
                                         }
                                         inputTask.lastRefKey = currentRefKey;
+                                    }
+
+                                    // One-time auto-title instruction injection for existing sessions
+                                    // (new sessions get this in the orchestration guidance system prompt)
+                                    const claudiaMcpEnabled = configStore.getClaudioMcpServerEnabled();
+                                    if (claudiaMcpEnabled && !inputTask.titleInstructionInjected) {
+                                        inputTask.titleInstructionInjected = true;
+                                        const titleInstruction = `[CONTEXT UPDATE: You can update your task title using claudia_rename_task. Call it with your own task ID and a \`displayName\` parameter (string, 3-6 words) describing what you're working on. The parameter is named \`displayName\`, NOT \`title\`. Do NOT rename if the user has manually edited the title (the tool will reject it).] `;
+                                        const msgContent = filteredInput.endsWith('\r') || filteredInput.endsWith('\n')
+                                            ? filteredInput.slice(0, -1)
+                                            : filteredInput;
+                                        const enterKey = filteredInput.endsWith('\r') || filteredInput.endsWith('\n')
+                                            ? filteredInput.slice(-1)
+                                            : '';
+                                        filteredInput = titleInstruction + msgContent + enterKey;
+                                        ctxUpdateInFlight.add(taskId);
+                                        ctxInlineInFlight.add(taskId);
+                                        logger.info('Injected auto-title instruction into existing session', { taskId });
                                     }
                                 }
                             }
@@ -1108,6 +1221,52 @@ export async function createApp(basePath?: string) {
                             console.error('[Server] task:destroy missing taskId');
                         }
 
+                        break;
+                    }
+
+                    case 'task:stop': {
+                        // Gracefully stop a running task (send ESC to interrupt Claude)
+                        const { taskId } = payload as { taskId?: string };
+                        if (taskId) {
+                            const stopped = taskSpawner.stopTask(taskId);
+                            logger.info('task:stop', { taskId, stopped });
+                            ws.send(JSON.stringify({
+                                type: 'task:stopped' as WSMessageType,
+                                payload: { taskId, stopped }
+                            }));
+                        }
+                        break;
+                    }
+
+                    case 'task:stopAll': {
+                        // Stop all running tasks in a workspace
+                        const { workspaceId, excludeTaskId } = payload as { workspaceId?: string; excludeTaskId?: string };
+                        if (workspaceId) {
+                            const tasks = taskSpawner.getActiveTasksForWorkspace(workspaceId);
+                            let stoppedCount = 0;
+                            const stoppedIds: string[] = [];
+                            for (const task of tasks) {
+                                // Skip the calling task (orchestrator) to avoid race condition
+                                // where the orchestrator stops its own Claude Code session
+                                if (excludeTaskId && task.id === excludeTaskId) {
+                                    logger.info('task:stopAll - skipping caller task', { taskId: task.id });
+                                    continue;
+                                }
+                                if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
+                                    const stopped = taskSpawner.stopTask(task.id);
+                                    if (stopped) {
+                                        stoppedCount++;
+                                        stoppedIds.push(task.id);
+                                    }
+                                }
+                            }
+                            logger.info('task:stopAll', { workspaceId, stoppedCount, stoppedIds });
+                            // Send result back to the requesting client
+                            ws.send(JSON.stringify({
+                                type: 'task:stopAll:result' as WSMessageType,
+                                payload: { workspaceId, stoppedCount, stoppedIds }
+                            }));
+                        }
                         break;
                     }
 
@@ -1142,11 +1301,12 @@ export async function createApp(basePath?: string) {
 
                     case 'task:rename': {
                         // Rename a task (set displayName)
-                        const { taskId, displayName } = payload as { taskId?: string; displayName?: string };
+                        // source: 'user' (UI edit) locks title from agent auto-rename; 'agent' (MCP) is blocked if user-edited
+                        const { taskId, displayName, source } = payload as { taskId?: string; displayName?: string; source?: 'user' | 'agent' };
                         if (!taskId || displayName === undefined) break;
-                        const renamed = taskSpawner.renameTask(taskId, displayName);
+                        const renamed = taskSpawner.renameTask(taskId, displayName, source || 'user');
                         if (renamed) {
-                            broadcast({ type: 'task:stateChanged' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
+                            broadcast({ type: 'tasks:updated' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
                         }
                         break;
                     }
@@ -1273,6 +1433,9 @@ export async function createApp(basePath?: string) {
                             type: 'task:archived:deleted',
                             payload: { taskId, success: deleted }
                         }));
+                        if (deleted) {
+                            broadcast({ type: 'tasks:updated' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
+                        }
                         break;
                     }
 
@@ -1844,15 +2007,15 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     }
 
                     case 'cron:update': {
-                        const { cronId, cronExpression, prompt, isRecurring } = payload as {
-                            cronId?: string; cronExpression?: string; prompt?: string; isRecurring?: boolean;
+                        const { cronId, cronExpression, prompt, isRecurring, isPaused } = payload as {
+                            cronId?: string; cronExpression?: string; prompt?: string; isRecurring?: boolean; isPaused?: boolean;
                         };
                         if (!cronId) {
                             sendWSError(ws, 'cron:update requires cronId', message.type, 'MISSING_PARAMS');
                             break;
                         }
                         try {
-                            const updated = cronScheduler.update(cronId, { cronExpression, prompt, isRecurring });
+                            const updated = cronScheduler.update(cronId, { cronExpression, prompt, isRecurring, isPaused });
                             if (updated) {
                                 ws.send(JSON.stringify({
                                     type: 'cron:updated',
@@ -2921,10 +3084,10 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     // Update a scheduled task
     app.put('/api/cron/:cronId', (req, res) => {
         const { cronId } = req.params;
-        const { cronExpression, prompt, isRecurring } = req.body;
+        const { cronExpression, prompt, isRecurring, isPaused } = req.body;
 
         try {
-            const updated = cronScheduler.update(cronId, { cronExpression, prompt, isRecurring });
+            const updated = cronScheduler.update(cronId, { cronExpression, prompt, isRecurring, isPaused });
             if (updated) {
                 res.json({
                     ...updated,
@@ -3238,8 +3401,12 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
             // Get status with porcelain v2 for richer info
             const { stdout: statusOutput } = await execAsync('git status --porcelain', { cwd: workspacePath });
-            const changes = statusOutput.trim().split('\n')
-                .filter(line => line.length > 0)
+            // Split on newlines WITHOUT trimming the full output first — trim() would strip the
+            // leading space from the first porcelain line (e.g. " M path") shifting all indices
+            // by one, which corrupts the XY status codes and drops the first path character.
+            const changes = statusOutput.split('\n')
+                .map(line => line.replace(/\r$/, ''))   // strip Windows CR if present
+                .filter(line => line.length > 2)
                 .map(line => {
                     const staged = line[0];
                     const unstaged = line[1];
@@ -4083,6 +4250,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             }
 
             // If MCP servers were updated, sync .mcp.json and settings.local.json to all workspaces
+            // and notify running tasks of the change
             if (validation.data!.mcpServers !== undefined) {
                 const workspaces = workspaceStore.getWorkspaces();
                 if (workspaces.length > 0) {
@@ -4090,6 +4258,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     taskSpawner.syncWorkspaceMcpConfigs(workspaceIds);
                     logger.info('Synced MCP config to all workspaces after config update', { count: workspaceIds.length });
                 }
+                notifyTasksOfMcpChange(taskSpawner, configStore);
             }
 
             res.json(updatedConfig);

@@ -172,12 +172,12 @@
 }
 
 .file-content-modal-body::-webkit-scrollbar-thumb {
-    background: #333;
+    background: var(--border-color);
     border-radius: 4px;
 }
 
 .file-content-modal-body::-webkit-scrollbar-thumb:hover {
-    background: #555;
+    background: var(--text-muted);
 }
 
 .file-content-loading {

@@ -10,6 +10,8 @@ import { SystemStats } from './components/SystemStats';
 import { MobileAccessModal } from './components/MobileAccessModal';
 import { FileExplorer } from './components/FileExplorer';
 import { ShellTerminalView } from './components/ShellTerminalView';
+import { ActivityPanel } from './components/ActivityPanel';
+import { useTheme } from './hooks/useTheme';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
 import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff } from 'lucide-react';
@@ -35,6 +37,7 @@ const DEFAULT_CHAT_PANEL_WIDTH = 380;
 
 function App() {
     const isMobile = useIsMobile();
+    useTheme();
     const {
         createTask,
         interruptTask,
@@ -65,7 +68,7 @@ function App() {
         wsRef
     } = useWebSocket();
 
-    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats, errorNotification, clearErrorNotification } = useTaskStore();
+    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats, errorNotification, clearErrorNotification, unreadTaskIds } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
     const selectedWorkspace = selectedTask ? workspaces.find(w => w.id === selectedTask.workspaceId) : undefined;
 
@@ -125,16 +128,30 @@ function App() {
     });
     const [isResizing, setIsResizing] = useState(false);
     const [isResizingChat, setIsResizingChat] = useState(false);
+    const [terminalRefreshCounter, setTerminalRefreshCounter] = useState(0);
     const [showSettings, setShowSettings] = useState(false);
     const [settingsInitialPanel, setSettingsInitialPanel] = useState<string | undefined>(undefined);
     const [showChatPanel, setShowChatPanel] = useState(false);
     const [showMobileAccess, setShowMobileAccess] = useState(false);
+    const [showActivityPanel, setShowActivityPanel] = useState(false);
     const [soundMuted, setSoundMuted] = useState(() => !isSoundEnabled());
     const [tunnelActive, setTunnelActive] = useState(false);
     const [tunnelLoading, setTunnelLoading] = useState(false);
     const [tunnelError, setTunnelError] = useState<string | null>(null);
     const sidebarRef = useRef<HTMLElement>(null);
     const aiCoreCheckDoneRef = useRef(false);
+
+    // After a genuine server reload (tsx watch restart), the TerminalView's WS
+    // listener is on the old connection. Force remount only when isServerReloading
+    // transitions from true→false (server finished restarting), not on every
+    // reconnection — that would cause unwanted refreshes on tab switches.
+    const prevReloadingRef = useRef(isServerReloading);
+    useEffect(() => {
+        if (!isServerReloading && prevReloadingRef.current) {
+            setTerminalRefreshCounter(c => c + 1);
+        }
+        prevReloadingRef.current = isServerReloading;
+    }, [isServerReloading]);
 
     const handleMouseDown = () => {
         setIsResizing(true);
@@ -245,6 +262,9 @@ function App() {
     const handleSelectTask = (taskId: string) => {
         // Hide shell view (but keep PTY alive) when selecting a task
         setShowingShell(false);
+        // NOTE: We intentionally do NOT remount on same-task click — that causes
+        // a black flash and loses the first character typed. The terminal garbling
+        // issues are addressed by the double-rAF fit + pending resize fixes.
         // Only update local state - TerminalView will send task:select when it mounts
         useTaskStore.getState().selectTask(taskId);
 
@@ -266,12 +286,13 @@ function App() {
             }, delay);
         });
 
-        // Focus the task input bar after a short delay to allow the component to mount
-        setTimeout(() => {
+        // Focus the task input bar immediately after mount (requestAnimationFrame
+        // ensures the component has rendered before we dispatch the event).
+        requestAnimationFrame(() => {
             window.dispatchEvent(new CustomEvent('taskInput:focus', {
                 detail: { taskId }
             }));
-        }, 150);
+        });
     };
 
     // Mobile back button: return to workspace list
@@ -362,6 +383,23 @@ function App() {
         })();
     }, []);
 
+    // Keep tunnel active state in sync with server-pushed tunnel:status WS messages.
+    // This handles tsx watch reloads where the backend adopts the existing ngrok process
+    // and re-emits tunnel:ready — without this the button would stay grey.
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent<{ active: boolean; error?: string | null }>).detail;
+            setTunnelActive(detail.active === true);
+            if (!detail.active && detail.error) {
+                setTunnelError(detail.error);
+            } else if (detail.active) {
+                setTunnelError(null);
+            }
+        };
+        window.addEventListener('claudia:tunnelStatus', handler);
+        return () => window.removeEventListener('claudia:tunnelStatus', handler);
+    }, []);
+
     // Start tunnel (used by both the header button and the modal's Start button)
     const startTunnel = useCallback(async () => {
         setTunnelLoading(true);
@@ -430,13 +468,20 @@ function App() {
                             <span className="btn-label">Exit Fullscreen</span>
                         </button>
                     )}
-                    {/* Running Process Counter */}
-                    <div className="running-tasks-indicator" title={taskTooltip}>
+                    {/* Activity: task counts + activity panel toggle */}
+                    <button
+                        className={`activity-button ${showActivityPanel ? 'active' : ''} ${busyCount > 0 ? 'has-busy' : ''}`}
+                        onClick={() => setShowActivityPanel(!showActivityPanel)}
+                        title={taskTooltip}
+                    >
                         <Activity size={18} className={busyCount > 0 ? 'active-pulse' : ''} />
                         <span className="count-busy">{busyCount}</span>
                         <span className="count-separator">/</span>
                         <span className="count-idle">{idleCount}</span>
-                    </div>
+                        {unreadTaskIds.size > 0 && (
+                            <span className="activity-badge">{unreadTaskIds.size}</span>
+                        )}
+                    </button>
 
                     {showSystemStats && <SystemStats />}
                     {!isMobile && supervisorEnabled && (
@@ -499,6 +544,12 @@ function App() {
                         <Settings size={isMobile ? 18 : 20} />
                     </button>
                 </div>
+                {showActivityPanel && (
+                    <ActivityPanel
+                        onClose={() => setShowActivityPanel(false)}
+                        onSelectTask={handleSelectTask}
+                    />
+                )}
             </header>
 
             <main className="app-main">
@@ -508,7 +559,7 @@ function App() {
                         // Screen 2: Full-screen terminal
                         <section className="main-panel mobile-full">
                             <TerminalView
-                                key={selectedTask!.id}
+                                key={`${selectedTask!.id}-${terminalRefreshCounter}`}
                                 task={selectedTask!}
                                 wsRef={wsRef}
                                 workspace={selectedWorkspace}
@@ -618,7 +669,7 @@ function App() {
                                             </button>
                                         )}
                                         <TerminalView
-                                            key={selectedTask.id}
+                                            key={`${selectedTask.id}-${terminalRefreshCounter}`}
                                             task={selectedTask}
                                             wsRef={wsRef}
                                             workspace={selectedWorkspace}

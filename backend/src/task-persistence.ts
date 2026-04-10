@@ -26,6 +26,7 @@ export interface PersistedTask {
     systemPrompt?: string;
     shouldContinue?: boolean;
     displayName?: string;
+    displayNameEditedByUser?: boolean;
 }
 
 /**
@@ -42,6 +43,7 @@ export interface ArchivedTaskMetadata {
     systemPrompt?: string;
     historySize?: number;
     displayName?: string;
+    displayNameEditedByUser?: boolean;
 }
 
 /**

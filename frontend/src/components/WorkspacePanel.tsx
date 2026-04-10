@@ -99,6 +99,7 @@ interface TaskItemProps {
     isSelected: boolean;
     isLastSelected: boolean; // Was last selected in this workspace (but not globally active)
     hasActiveQuestion: boolean;
+    hasUnreadActivity: boolean; // Has completion/input event user hasn't seen
     // Drag and drop
     isDragging: boolean;
     dragIndex: number | null;
@@ -124,15 +125,17 @@ function formatTimeAgo(date: Date | string): string {
     return `${days}d`;
 }
 
-function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, onOpenScheduledTasks, isSelected, isLastSelected, hasActiveQuestion, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
+function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, onOpenScheduledTasks, isSelected, isLastSelected, hasActiveQuestion, hasUnreadActivity, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
     const [stopClicked, setStopClicked] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
     const [editValue, setEditValue] = useState('');
     const editInputRef = useRef<HTMLInputElement>(null);
     const [, setTick] = useState(0);
-    const scheduledTaskCount = useTaskStore(state =>
-        Array.from(state.scheduledTasks.values()).filter(s => s.taskId === task.id).length
+    const scheduledTasks = useTaskStore(state =>
+        Array.from(state.scheduledTasks.values()).filter(s => s.taskId === task.id)
     );
+    const scheduledTaskCount = scheduledTasks.length;
+    const allScheduledPaused = scheduledTaskCount > 0 && scheduledTasks.every(s => s.isPaused);
 
     // Reset stopClicked when task state changes from busy
     useEffect(() => {
@@ -206,7 +209,7 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
     return (
         <div
             ref={taskItemRef}
-            className={`task-item ${isSelected ? 'selected' : ''} ${isLastSelected && !isSelected ? 'last-selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
+            className={`task-item ${isSelected ? 'selected' : ''} ${isLastSelected && !isSelected ? 'last-selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${hasUnreadActivity && !isSelected ? 'unread' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
             draggable={!isEditing}
             onClick={() => !isEditing && onSelectTask(task.id)}
             onDragStart={(e) => {
@@ -245,8 +248,8 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
             )}
             {scheduledTaskCount > 0 && (
                 <button
-                    className="task-cron-badge"
-                    title={`${scheduledTaskCount} scheduled task${scheduledTaskCount > 1 ? 's' : ''} - click to manage`}
+                    className={`task-cron-badge${allScheduledPaused ? ' paused' : ''}`}
+                    title={`${scheduledTaskCount} scheduled task${scheduledTaskCount > 1 ? 's' : ''}${allScheduledPaused ? ' (paused)' : ''} - click to manage`}
                     onClick={(e) => { e.stopPropagation(); onOpenScheduledTasks?.(task.id); }}
                 >
                     <Clock size={10} />
@@ -337,6 +340,7 @@ interface WorkspaceSectionProps {
     workspace: Workspace;
     tasks: Task[];
     waitingInputTaskIds: Set<string>;
+    unreadTaskIds: Set<string>;
     selectedTaskId: string | null;
     lastSelectedTaskId: string | null; // Last selected task in this workspace
     isExpanded: boolean;
@@ -383,6 +387,7 @@ function WorkspaceSection({
     workspace,
     tasks,
     waitingInputTaskIds,
+    unreadTaskIds,
     selectedTaskId,
     lastSelectedTaskId,
     isExpanded,
@@ -417,6 +422,7 @@ function WorkspaceSection({
     onResetWorkspace,
     onOpenScheduledTasks
 }: WorkspaceSectionProps) {
+    const isConnected = useTaskStore(s => s.isConnected);
     const [inputValue, setInputValue] = useState('');
     const [isEditingWorkspaceName, setIsEditingWorkspaceName] = useState(false);
     const [showReferencesSubmenu, setShowReferencesSubmenu] = useState(false);
@@ -445,8 +451,10 @@ function WorkspaceSection({
         };
     }, [isMenuOpen]);
 
-    // Fetch current git branch for this workspace
+    // Fetch current git branch for this workspace (and poll every 30s to stay fresh)
+    // Only fetch when WebSocket is connected to avoid ERR_CONNECTION_RESET during server restarts
     useEffect(() => {
+        if (!isConnected) return;
         const fetchBranch = async () => {
             try {
                 const params = new URLSearchParams({ workspace: workspace.id });
@@ -460,13 +468,16 @@ function WorkspaceSection({
             }
         };
         fetchBranch();
-    }, [workspace.id]);
+        const interval = setInterval(fetchBranch, 30_000);
+        return () => clearInterval(interval);
+    }, [workspace.id, isConnected]);
 
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const imagesRef = useRef<UploadedImage[]>(images);
 
     // Task list resize state
     const [taskListHeight, setTaskListHeight] = useState<number | null>(null);
@@ -671,10 +682,13 @@ function WorkspaceSection({
         setIsUploading(false);
     };
 
+    // Keep ref in sync so the unmount cleanup can access the latest images
+    useEffect(() => { imagesRef.current = images; }, [images]);
+
     // Cleanup preview URLs on unmount
     useEffect(() => {
         return () => {
-            images.forEach(img => URL.revokeObjectURL(img.previewUrl));
+            imagesRef.current.forEach(img => URL.revokeObjectURL(img.previewUrl));
         };
     }, []);
 
@@ -1266,6 +1280,7 @@ function WorkspaceSection({
                                         isSelected={selectedTaskId === task.id}
                                         isLastSelected={lastSelectedTaskId === task.id}
                                         hasActiveQuestion={waitingInputTaskIds.has(task.id)}
+                                        hasUnreadActivity={unreadTaskIds.has(task.id)}
                                         onDeleteTask={onDeleteTask}
                                         onInterruptTask={onInterruptTask}
                                         onArchiveTask={onArchiveTask}
@@ -1453,6 +1468,7 @@ export function WorkspacePanel({
         toggleWorkspaceExpanded,
         setShowProjectPicker,
         waitingInputNotifications,
+        unreadTaskIds,
         archivedTasks,
         showArchivedTasks,
         setShowArchivedTasks,
@@ -1650,6 +1666,7 @@ export function WorkspacePanel({
                             workspace={workspace}
                             tasks={getTasksForWorkspace(workspace.id)}
                             waitingInputTaskIds={waitingInputTaskIds}
+                            unreadTaskIds={unreadTaskIds}
                             selectedTaskId={selectedTaskId}
                             lastSelectedTaskId={lastSelectedTaskByWorkspace.get(workspace.id) || null}
                             isExpanded={expandedWorkspaces.has(workspace.id)}

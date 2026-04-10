@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { getApiBaseUrl } from '../config/api-config';
+import { useTaskStore } from '../stores/taskStore';
 import './SystemStats.css';
 
 interface Stats {
@@ -12,10 +13,12 @@ interface Stats {
 }
 
 export function SystemStats() {
+    const isConnected = useTaskStore(s => s.isConnected);
     const [stats, setStats] = useState<Stats | null>(null);
     const [error, setError] = useState(false);
 
     useEffect(() => {
+        if (!isConnected) return;
         const fetchStats = async () => {
             try {
                 const response = await fetch(`${getApiBaseUrl()}/api/system/stats`);
@@ -38,7 +41,7 @@ export function SystemStats() {
         const interval = setInterval(fetchStats, 2000);
 
         return () => clearInterval(interval);
-    }, []);
+    }, [isConnected]);
 
     const formatBytes = (bytes: number): string => {
         const gb = bytes / (1024 * 1024 * 1024);
