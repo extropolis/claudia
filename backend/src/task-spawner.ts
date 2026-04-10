@@ -803,15 +803,15 @@ export class TaskSpawner extends EventEmitter {
             const bakPath = this.persistencePath + '.bak';
             if (existsSync(bakPath)) {
                 let mainTotal = 0;
-                let mainParseable = false;
+                let mainState: 'missing' | 'empty' | 'corrupt' | 'ok' = 'missing';
                 if (existsSync(this.persistencePath)) {
                     try {
                         const mainRaw = readFileSync(this.persistencePath, 'utf-8');
                         const main = JSON.parse(mainRaw) as { tasks?: any[]; archivedTasks?: any[] };
                         mainTotal = (main.tasks?.length || 0) + (main.archivedTasks?.length || 0);
-                        mainParseable = true;
+                        mainState = mainTotal === 0 ? 'empty' : 'ok';
                     } catch (_e) {
-                        // Main file exists but is corrupt — treat as empty for recovery purposes.
+                        mainState = 'corrupt';
                     }
                 }
                 if (mainTotal === 0) {
@@ -821,7 +821,7 @@ export class TaskSpawner extends EventEmitter {
                         const bakTotal = (bak.tasks?.length || 0) + (bak.archivedTasks?.length || 0);
                         if (bakTotal > 0) {
                             console.warn(
-                                `[TaskSpawner] Main file is ${mainParseable ? 'empty' : 'corrupt'} but backup has ${bakTotal} tasks — ` +
+                                `[TaskSpawner] Main file is ${mainState} but backup has ${bakTotal} tasks — ` +
                                 `restoring from ${bakPath}`
                             );
                             writeFileSync(this.persistencePath, bakRaw);
@@ -1080,18 +1080,26 @@ export class TaskSpawner extends EventEmitter {
 
             // Atomic write: write to a temp file then rename. This ensures tasks.json
             // is never left in a partial state if the process dies mid-write.
-            const tmpPath = this.persistencePath + '.tmp';
+            // Per-process unique tmp name so concurrent backend instances (e.g. two
+            // tsx watch processes from a stale dev server) don't race on the same .tmp.
+            const tmpPath = `${this.persistencePath}.${process.pid}.tmp`;
             const bakPath = this.persistencePath + '.bak';
             writeFileSync(tmpPath, JSON.stringify(persistence, null, 2));
-            // Keep a backup of the previous good save before replacing.
-            if (existsSync(this.persistencePath)) {
-                try {
-                    renameSync(this.persistencePath, bakPath);
-                } catch (_e) {
-                    // Backup is best-effort; continue with the rename.
+            try {
+                // Keep a backup of the previous good save before replacing.
+                if (existsSync(this.persistencePath)) {
+                    try {
+                        renameSync(this.persistencePath, bakPath);
+                    } catch (_e) {
+                        // Backup is best-effort; continue with the rename.
+                    }
                 }
+                renameSync(tmpPath, this.persistencePath);
+            } catch (renameErr) {
+                // Clean up our tmp file on failure so we don't leave junk behind.
+                try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch (_e) { /* ignore */ }
+                throw renameErr;
             }
-            renameSync(tmpPath, this.persistencePath);
 
             // Update our tracked modification time after successful save (PR #37 multi-instance guard)
             const newStats = statSync(this.persistencePath);
