@@ -85,16 +85,9 @@ try {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Last-resort synchronous save when process is exiting.
-// On Windows, tsx watch may use TerminateProcess which skips SIGTERM/SIGINT handlers,
-// but the 'exit' event still fires for process.exit() calls.
-process.on('exit', () => {
-    try {
-        taskSpawner.saveNow();
-    } catch (_e) {
-        // Best effort — process is exiting
-    }
-});
+// NOTE: We intentionally do NOT save on the 'exit' event because it causes race conditions
+// when tsx watch restarts the server. The debounced save mechanism (500ms) is sufficient,
+// and gracefulShutdown() already handles saving on SIGTERM/SIGINT.
 
 process.on('uncaughtException', (err) => {
     console.error('[Index] Uncaught Exception:', err);

@@ -474,50 +474,6 @@ export async function createApp(basePath?: string) {
     );
     cronScheduler.start();
 
-    // Backfill workspaces from existing tasks
-    // This ensures tasks created before workspace tracking still show up in UI
-    // BUT: never re-add workspaces that the user explicitly deleted (in recentWorkspaces)
-    try {
-        const tasks = taskSpawner.getAllTasks();
-        logger.info(`Backfill: Found ${tasks.length} tasks`);
-        const workspacePathsToAdd = new Set<string>();
-
-        // Get recently deleted workspaces so we don't re-add them
-        const recentWorkspaces = workspaceStore.getRecentWorkspaces();
-        const recentlyDeletedIds = new Set(recentWorkspaces.map(r => r.id));
-        logger.info(`Backfill: ${recentlyDeletedIds.size} recently deleted workspace(s) will be excluded`);
-
-        for (const task of tasks) {
-            if (task.workspaceId) {
-                const exists = existsSync(task.workspaceId);
-                const alreadyInStore = workspaceStore.getWorkspace(task.workspaceId);
-                const wasDeleted = recentlyDeletedIds.has(task.workspaceId);
-
-                if (process.env.DEBUG_TASKS) {
-                    logger.info(`Backfill: Task ${task.id} workspace ${task.workspaceId} exists=${exists} inStore=${!!alreadyInStore} wasDeleted=${wasDeleted}`);
-                }
-
-                if (!alreadyInStore && exists && !wasDeleted) {
-                    workspacePathsToAdd.add(task.workspaceId);
-                }
-            }
-        }
-
-        logger.info(`Backfill: Will add ${workspacePathsToAdd.size} unique workspace(s)`);
-        if (workspacePathsToAdd.size > 0) {
-            for (const workspacePath of workspacePathsToAdd) {
-                try {
-                    const workspace = workspaceStore.addWorkspace(workspacePath);
-                    logger.info(`Added workspace: ${workspacePath}`, { workspace });
-                } catch (error) {
-                    logger.error(`Failed to add workspace ${workspacePath}:`, { error });
-                }
-            }
-        }
-    } catch (error) {
-        logger.error('Failed to backfill workspaces from tasks', { error });
-    }
-
     // Wire up tunnel events for broadcasting
     tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
         logger.info('Tunnel ready, broadcasting status', { url: data.url });
@@ -2984,8 +2940,25 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         });
     });
 
-    app.get('/api/tasks', (_req, res) => {
-        res.json(taskSpawner.getAllTasks());
+    app.get('/api/tasks', (req, res) => {
+        const includeArchived = req.query.includeArchived === 'true';
+        const workspaceId = req.query.workspaceId as string | undefined;
+
+        if (includeArchived && workspaceId) {
+            // Get all tasks (active + disconnected) for this workspace
+            const allTasks = taskSpawner.getAllTasks().filter(t => t.workspaceId === workspaceId);
+            // Get archived tasks for this workspace
+            const archivedTasks = taskSpawner.getArchivedTasks().filter(t => t.workspaceId === workspaceId);
+            res.json([...allTasks, ...archivedTasks]);
+        } else if (includeArchived) {
+            // Get all tasks including archived
+            const allTasks = taskSpawner.getAllTasks();
+            const archivedTasks = taskSpawner.getArchivedTasks();
+            res.json([...allTasks, ...archivedTasks]);
+        } else {
+            // Original behavior - only active + disconnected tasks
+            res.json(taskSpawner.getAllTasks());
+        }
     });
 
     // Poll endpoint for task status - returns stored state (Stop hook manages transitions)
@@ -3236,6 +3209,164 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         } catch (err) {
             logger.error('Failed to list files', { error: err instanceof Error ? err.message : String(err) });
             res.status(500).json({ error: 'Failed to list directory contents' });
+        }
+    });
+
+    // File operations endpoints
+    app.post('/api/workspaces/files/copy', async (req, res) => {
+        const { workspace, sourcePath, destinationPath } = req.body;
+
+        if (!workspace || !sourcePath || !destinationPath) {
+            return res.status(400).json({ error: 'workspace, sourcePath, and destinationPath are required' });
+        }
+
+        const resolvedWorkspace = resolve(workspace);
+        const resolvedSource = resolve(workspace, sourcePath);
+        const resolvedDest = resolve(workspace, destinationPath);
+
+        // Security: ensure paths are within workspace
+        if (!resolvedSource.startsWith(resolvedWorkspace) || !resolvedDest.startsWith(resolvedWorkspace)) {
+            return res.status(403).json({ error: 'Path traversal not allowed' });
+        }
+
+        if (!existsSync(resolvedSource)) {
+            return res.status(404).json({ error: 'Source file not found' });
+        }
+
+        try {
+            const fs = await import('fs/promises');
+            const stat = await fs.stat(resolvedSource);
+
+            if (stat.isDirectory()) {
+                // Copy directory recursively
+                await fs.cp(resolvedSource, resolvedDest, { recursive: true });
+            } else {
+                // Copy file
+                await fs.copyFile(resolvedSource, resolvedDest);
+            }
+
+            logger.info('File/directory copied', { source: sourcePath, destination: destinationPath });
+            res.json({ success: true, message: 'File/directory copied successfully' });
+        } catch (err) {
+            logger.error('Failed to copy file/directory', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to copy file/directory' });
+        }
+    });
+
+    app.post('/api/workspaces/files/move', async (req, res) => {
+        const { workspace, sourcePath, destinationPath } = req.body;
+
+        if (!workspace || !sourcePath || !destinationPath) {
+            return res.status(400).json({ error: 'workspace, sourcePath, and destinationPath are required' });
+        }
+
+        const resolvedWorkspace = resolve(workspace);
+        const resolvedSource = resolve(workspace, sourcePath);
+        const resolvedDest = resolve(workspace, destinationPath);
+
+        // Security: ensure paths are within workspace
+        if (!resolvedSource.startsWith(resolvedWorkspace) || !resolvedDest.startsWith(resolvedWorkspace)) {
+            return res.status(403).json({ error: 'Path traversal not allowed' });
+        }
+
+        if (!existsSync(resolvedSource)) {
+            return res.status(404).json({ error: 'Source file not found' });
+        }
+
+        try {
+            const fs = await import('fs/promises');
+            await fs.rename(resolvedSource, resolvedDest);
+
+            logger.info('File/directory moved', { source: sourcePath, destination: destinationPath });
+            res.json({ success: true, message: 'File/directory moved successfully' });
+        } catch (err) {
+            logger.error('Failed to move file/directory', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to move file/directory' });
+        }
+    });
+
+    app.delete('/api/workspaces/files', async (req, res) => {
+        const { workspace, path } = req.body;
+
+        if (!workspace || !path) {
+            return res.status(400).json({ error: 'workspace and path are required' });
+        }
+
+        const resolvedWorkspace = resolve(workspace);
+        const resolvedPath = resolve(workspace, path);
+
+        // Security: ensure path is within workspace
+        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+            return res.status(403).json({ error: 'Path traversal not allowed' });
+        }
+
+        if (!existsSync(resolvedPath)) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+
+        try {
+            const fs = await import('fs/promises');
+            const stat = await fs.stat(resolvedPath);
+
+            if (stat.isDirectory()) {
+                // Delete directory recursively
+                await fs.rm(resolvedPath, { recursive: true, force: true });
+            } else {
+                // Delete file
+                await fs.unlink(resolvedPath);
+            }
+
+            logger.info('File/directory deleted', { path });
+            res.json({ success: true, message: 'File/directory deleted successfully' });
+        } catch (err) {
+            logger.error('Failed to delete file/directory', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to delete file/directory' });
+        }
+    });
+
+    app.post('/api/workspaces/files/reveal', async (req, res) => {
+        const { workspace, path } = req.body;
+
+        if (!workspace || !path) {
+            return res.status(400).json({ error: 'workspace and path are required' });
+        }
+
+        const resolvedWorkspace = resolve(workspace);
+        const resolvedPath = resolve(workspace, path);
+
+        // Security: ensure path is within workspace
+        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+            return res.status(403).json({ error: 'Path traversal not allowed' });
+        }
+
+        if (!existsSync(resolvedPath)) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+
+        try {
+            const { exec } = await import('child_process');
+            const { promisify } = await import('util');
+            const execAsync = promisify(exec);
+
+            const platform = process.platform;
+
+            if (platform === 'darwin') {
+                // macOS: reveal in Finder
+                await execAsync(`open -R "${resolvedPath}"`);
+            } else if (platform === 'win32') {
+                // Windows: reveal in Explorer
+                await execAsync(`explorer /select,"${resolvedPath.replace(/\//g, '\\')}"`);
+            } else {
+                // Linux: open parent directory in file manager
+                const parentDir = dirname(resolvedPath);
+                await execAsync(`xdg-open "${parentDir}"`);
+            }
+
+            logger.info('File revealed in file manager', { path });
+            res.json({ success: true, message: 'File revealed successfully' });
+        } catch (err) {
+            logger.error('Failed to reveal file', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to reveal file' });
         }
     });
 

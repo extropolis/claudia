@@ -204,6 +204,7 @@ export class TaskSpawner extends EventEmitter {
     private archivedTasks: Map<string, ArchivedTaskMetadata> = new Map();
     private persistencePath: string;
     private saveDebounceTimer: NodeJS.Timeout | null = null;
+    private fileModTimeOnLoad: number | null = null; // Track file mtime when we loaded it
     private configStore: ConfigStore | null = null;
     private pendingSessionCapture: Map<string, { taskId: string; workspaceId: string; startTime: number }> = new Map();
     /** Map of task IDs to their session capture interval timers */
@@ -792,10 +793,15 @@ export class TaskSpawner extends EventEmitter {
     private loadPersistedTasks(): void {
         try {
             if (existsSync(this.persistencePath)) {
+                // Track file modification time to detect concurrent writes
+                const stats = statSync(this.persistencePath);
+                this.fileModTimeOnLoad = stats.mtimeMs;
+
                 const data = readFileSync(this.persistencePath, 'utf-8');
                 // Use 'any' for raw persistence to handle migration from old format
                 const persistence = JSON.parse(data) as { tasks: PersistedTask[]; archivedTasks?: any[] };
-                console.log(`[TaskSpawner] Loading ${persistence.tasks.length} persisted tasks`);
+                console.log(`[TaskSpawner] ========== LOADING PERSISTED TASKS ==========`);
+                console.log(`[TaskSpawner] Loading ${persistence.tasks.length} active tasks, ${persistence.archivedTasks?.length || 0} archived tasks`);
 
                 // Ensure history directory exists
                 const historyDir = this.getHistoryDir();
@@ -904,6 +910,19 @@ export class TaskSpawner extends EventEmitter {
 
     private saveTasks(): void {
         try {
+            // Check if file has been modified by another process since we loaded it
+            if (this.fileModTimeOnLoad !== null && existsSync(this.persistencePath)) {
+                const currentStats = statSync(this.persistencePath);
+                if (currentStats.mtimeMs > this.fileModTimeOnLoad) {
+                    console.error(`[TaskSpawner] ⚠️  WARNING: tasks.json was modified by another process!`);
+                    console.error(`[TaskSpawner]     Loaded at:  ${new Date(this.fileModTimeOnLoad).toISOString()}`);
+                    console.error(`[TaskSpawner]     Modified at: ${new Date(currentStats.mtimeMs).toISOString()}`);
+                    console.error(`[TaskSpawner]     REFUSING TO SAVE to prevent data loss!`);
+                    console.error(`[TaskSpawner]     This indicates multiple server instances are running.`);
+                    return;
+                }
+            }
+
             const tasksToSave: PersistedTask[] = [];
 
             // Ensure history directory exists
@@ -997,6 +1016,11 @@ export class TaskSpawner extends EventEmitter {
             }
 
             writeFileSync(this.persistencePath, JSON.stringify(persistence, null, 2));
+
+            // Update our tracked modification time after successful save
+            const newStats = statSync(this.persistencePath);
+            this.fileModTimeOnLoad = newStats.mtimeMs;
+
             console.log(`[TaskSpawner] Saved ${tasksToSave.length} tasks, ${archivedTasksToSave.length} archived (metadata only)`);
         } catch (error) {
             console.error('[TaskSpawner] Failed to save tasks:', error);

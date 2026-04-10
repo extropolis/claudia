@@ -374,6 +374,19 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             try {
                 const message = JSON.parse(event.data);
                 if (message.type === 'task:output' && message.payload.taskId === task.id) {
+                    // Check if user is at bottom BEFORE writing
+                    const viewport = term.buffer.active.viewportY;
+                    const totalRows = term.buffer.active.length;
+                    const wasAtBottom = viewport + term.rows >= totalRows - 2;
+
+                    // Update userHasScrolledRef based on current position
+                    if (!wasAtBottom && !userHasScrolledRef.current) {
+                        console.log(`[TerminalView] User has scrolled up, disabling auto-scroll for ${task.id}`);
+                        userHasScrolledRef.current = true;
+                    }
+
+                    console.log(`[TerminalView] Writing output, wasAtBottom: ${wasAtBottom}, userHasScrolled: ${userHasScrolledRef.current}, viewport: ${viewport}`);
+
                     term.write(message.payload.data);
                     // Scroll to bottom only if user hasn't scrolled up.
                     if (!userHasScrolledRef.current) {

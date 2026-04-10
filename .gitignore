@@ -64,3 +64,6 @@ backend/data/conversations.json
 
 # Vite cache
 vite
+
+# Playwright MCP snapshots
+.playwright-mcp/
