@@ -178,7 +178,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
     }
 
     async createTask(config: TaskConfig, environment: TaskEnvironment): Promise<BackendTask> {
-        const id = `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        const id = `task-${Date.now()}-${require('crypto').randomBytes(5).toString('hex')}`;
 
         const customArgs = process.env['CC_CLAUDE_ARGS']
             ? process.env['CC_CLAUDE_ARGS'].split(' ')

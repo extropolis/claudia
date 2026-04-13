@@ -338,7 +338,20 @@ export async function createApp(basePath?: string) {
     const wss = new WebSocketServer({ noServer: true });
 
     // Middleware
-    app.use(cors());
+    // Restrict CORS to localhost origins only — Claudia is a local-first app
+    app.use(cors({
+        origin: (origin, callback) => {
+            // Allow requests with no origin (same-origin, curl, native apps)
+            if (!origin) return callback(null, true);
+            try {
+                const url = new URL(origin);
+                if (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1') {
+                    return callback(null, true);
+                }
+            } catch { /* invalid origin */ }
+            callback(new Error('CORS: origin not allowed'));
+        },
+    }));
     app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests
 
     // TunnelManager for mobile remote access (ngrok-based, created early for middleware use)
@@ -1490,55 +1503,56 @@ export async function createApp(basePath?: string) {
 
                     case 'workspace:browseFolder': {
                         // Open native OS folder picker dialog and return selected path
-                        const { execSync } = await import('child_process');
+                        const { execFileSync } = await import('child_process');
                         const platform = process.platform;
                         let selectedPath: string | null = null;
                         const lastBrowsed = workspaceStore.getLastBrowsedPath();
 
                         try {
                             if (platform === 'darwin') {
-                                let osascriptCmd = `osascript -e 'POSIX path of (choose folder with prompt "Select a workspace folder"`;
+                                // Build osascript args as an array — no shell interpolation
+                                const scriptParts = ['POSIX path of (choose folder with prompt "Select a workspace folder"'];
                                 if (lastBrowsed) {
-                                    osascriptCmd += ` default location POSIX file "${lastBrowsed}"`;
+                                    // Escape backslashes and quotes inside the AppleScript string
+                                    const safe = lastBrowsed.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                                    scriptParts.push(` default location POSIX file "${safe}"`);
                                 }
-                                osascriptCmd += `)'`;
-                                const result = execSync(
-                                    osascriptCmd,
+                                scriptParts.push(')');
+                                const result = execFileSync(
+                                    'osascript', ['-e', scriptParts.join('')],
                                     { encoding: 'utf-8', timeout: 120000 }
                                 ).trim();
                                 if (result) selectedPath = result.replace(/\/$/, ''); // remove trailing slash
                             } else if (platform === 'win32') {
-                                const initialDirLine = lastBrowsed ? `$dialog.SelectedPath = "${lastBrowsed}"` : '';
-                                const psScript = `
-Add-Type -AssemblyName System.Windows.Forms
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = "Select a workspace folder"
-$dialog.ShowNewFolderButton = $true
-${initialDirLine}
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-    Write-Output $dialog.SelectedPath
-}`;
-                                const result = execSync(
-                                    `powershell -NoProfile -Command "${psScript.replace(/\n/g, '; ')}"`,
+                                // Pass the PowerShell script via -EncodedCommand to avoid any shell quoting issues
+                                const initialDirLine = lastBrowsed
+                                    ? `$dialog.SelectedPath = [System.IO.Path]::GetFullPath("${lastBrowsed.replace(/"/g, '')}")`
+                                    : '';
+                                const psScript = [
+                                    'Add-Type -AssemblyName System.Windows.Forms',
+                                    '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
+                                    '$dialog.Description = "Select a workspace folder"',
+                                    '$dialog.ShowNewFolderButton = $true',
+                                    ...(initialDirLine ? [initialDirLine] : []),
+                                    'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }',
+                                ].join('\n');
+                                const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+                                const result = execFileSync(
+                                    'powershell', ['-NoProfile', '-EncodedCommand', encoded],
                                     { encoding: 'utf-8', timeout: 120000 }
                                 ).trim();
                                 if (result) selectedPath = result;
                             } else {
-                                // Linux - try zenity first, then kdialog
-                                const zenityFilename = lastBrowsed ? ` --filename="${lastBrowsed}/"` : '';
+                                // Linux - try zenity first, then kdialog — use execFileSync with arg arrays
                                 try {
-                                    const result = execSync(
-                                        `zenity --file-selection --directory --title="Select a workspace folder"${zenityFilename} 2>/dev/null`,
-                                        { encoding: 'utf-8', timeout: 120000 }
-                                    ).trim();
+                                    const zenityArgs = ['--file-selection', '--directory', '--title=Select a workspace folder'];
+                                    if (lastBrowsed) zenityArgs.push(`--filename=${lastBrowsed}/`);
+                                    const result = execFileSync('zenity', zenityArgs, { encoding: 'utf-8', timeout: 120000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
                                     if (result) selectedPath = result;
                                 } catch {
-                                    const kdialogStart = lastBrowsed || '~';
                                     try {
-                                        const result = execSync(
-                                            `kdialog --getexistingdirectory "${kdialogStart}" --title "Select a workspace folder" 2>/dev/null`,
-                                            { encoding: 'utf-8', timeout: 120000 }
-                                        ).trim();
+                                        const kdialogArgs = ['--getexistingdirectory', lastBrowsed || process.env['HOME'] || '/', '--title', 'Select a workspace folder'];
+                                        const result = execFileSync('kdialog', kdialogArgs, { encoding: 'utf-8', timeout: 120000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
                                         if (result) selectedPath = result;
                                     } catch {
                                         logger.warn('No folder dialog available (install zenity or kdialog)');
@@ -1568,21 +1582,22 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                         // Open workspace folder in native file explorer
                         const { workspaceId } = payload as { workspaceId?: string };
                         if (!workspaceId) break;
-                        const { exec } = await import('child_process');
+                        const { execFile } = await import('child_process');
                         const platform = process.platform;
-                        let command: string;
+                        // Use execFile with argument arrays — no shell, no injection risk
                         if (platform === 'darwin') {
-                            command = `open "${workspaceId}"`;
+                            execFile('open', [workspaceId], (error) => {
+                                if (error) logger.error('Failed to open folder', { workspaceId, error: error.message });
+                            });
                         } else if (platform === 'win32') {
-                            command = `explorer "${workspaceId}"`;
+                            execFile('explorer.exe', [workspaceId], (error) => {
+                                if (error) logger.error('Failed to open folder', { workspaceId, error: error.message });
+                            });
                         } else {
-                            command = `xdg-open "${workspaceId}"`;
+                            execFile('xdg-open', [workspaceId], (error) => {
+                                if (error) logger.error('Failed to open folder', { workspaceId, error: error.message });
+                            });
                         }
-                        exec(command, (error) => {
-                            if (error) {
-                                logger.error('Failed to open folder', { workspaceId, error: error.message });
-                            }
-                        });
                         break;
                     }
 
@@ -1590,23 +1605,37 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                         // Open terminal at workspace folder
                         const { workspaceId } = payload as { workspaceId?: string };
                         if (!workspaceId) break;
-                        const { exec } = await import('child_process');
+                        const { execFile } = await import('child_process');
                         const platform = process.platform;
-                        let command: string;
                         if (platform === 'darwin') {
-                            // Use AppleScript to open Terminal.app at the specified directory
-                            command = `osascript -e 'tell application "Terminal" to do script "cd \\"${workspaceId}\\""' -e 'tell application "Terminal" to activate'`;
+                            // Use osascript with the path set via cwd — quoted form of handles all special chars
+                            // We pass two -e args: the cd script and the activate command
+                            const safeId = workspaceId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                            execFile('osascript', [
+                                '-e', `tell application "Terminal" to do script "cd \\"${safeId}\\""`,
+                                '-e', 'tell application "Terminal" to activate',
+                            ], (error) => {
+                                if (error) logger.error('Failed to open terminal', { workspaceId, error: error.message });
+                            });
                         } else if (platform === 'win32') {
-                            command = `start cmd /K "cd /d "${workspaceId}""`;
+                            // Use cwd option instead of interpolating the path into the command
+                            execFile('cmd.exe', ['/C', 'start', 'cmd.exe'], { cwd: workspaceId }, (error) => {
+                                if (error) logger.error('Failed to open terminal', { workspaceId, error: error.message });
+                            });
                         } else {
-                            // Try common Linux terminal emulators
-                            command = `x-terminal-emulator --working-directory="${workspaceId}" 2>/dev/null || gnome-terminal --working-directory="${workspaceId}" 2>/dev/null || xterm -e "cd '${workspaceId}' && bash"`;
+                            // Try common Linux terminal emulators in order
+                            execFile('x-terminal-emulator', [`--working-directory=${workspaceId}`], (error) => {
+                                if (error) {
+                                    execFile('gnome-terminal', [`--working-directory=${workspaceId}`], (error2) => {
+                                        if (error2) {
+                                            execFile('xterm', ['-e', `cd '${workspaceId.replace(/'/g, "'\\''")}' && bash`], (error3) => {
+                                                if (error3) logger.error('Failed to open terminal', { workspaceId, error: error3.message });
+                                            });
+                                        }
+                                    });
+                                }
+                            });
                         }
-                        exec(command, (error) => {
-                            if (error) {
-                                logger.error('Failed to open terminal', { workspaceId, error: error.message });
-                            }
-                        });
                         break;
                     }
 
@@ -3377,22 +3406,22 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         }
 
         try {
-            const { exec } = await import('child_process');
+            const { execFile } = await import('child_process');
             const { promisify } = await import('util');
-            const execAsync = promisify(exec);
+            const execFileAsync = promisify(execFile);
 
             const platform = process.platform;
 
             if (platform === 'darwin') {
-                // macOS: reveal in Finder
-                await execAsync(`open -R "${resolvedPath}"`);
+                // macOS: reveal in Finder — -R flag with path as separate arg
+                await execFileAsync('open', ['-R', resolvedPath]);
             } else if (platform === 'win32') {
-                // Windows: reveal in Explorer
-                await execAsync(`explorer /select,"${resolvedPath.replace(/\//g, '\\')}"`);
+                // Windows: reveal in Explorer — /select with backslash path
+                await execFileAsync('explorer.exe', [`/select,${resolvedPath.replace(/\//g, '\\')}`]);
             } else {
                 // Linux: open parent directory in file manager
                 const parentDir = dirname(resolvedPath);
-                await execAsync(`xdg-open "${parentDir}"`);
+                await execFileAsync('xdg-open', [parentDir]);
             }
 
             logger.info('File revealed in file manager', { path });
