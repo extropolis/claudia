@@ -71,6 +71,10 @@ function buildClaudeCodeSwitchArgs(switches: ClaudeCodeSwitches): string[] {
         args.push('--append-system-prompt', switches.appendSystemPrompt.trim());
     }
 
+    if (switches.model && switches.model.trim()) {
+        args.push('--model', switches.model.trim());
+    }
+
     return args;
 }
 

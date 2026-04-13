@@ -36,6 +36,7 @@ export interface ClaudeCodeSwitches {
     disallowedTools: string;       // --disallowedTools TOOLS (empty = not set)
     appendSystemPrompt: string;    // --append-system-prompt TEXT (empty = not set)
     effortLevel: string;           // CLAUDE_CODE_EFFORT_LEVEL env var ('low' | 'medium' | 'high')
+    model: string;                 // --model MODEL (empty = use Claude's default)
 }
 
 // Hyperspace AI Proxy configuration
@@ -54,7 +55,8 @@ export const DEFAULT_CLAUDE_CODE_SWITCHES: ClaudeCodeSwitches = {
     allowedTools: '',
     disallowedTools: '',
     appendSystemPrompt: '',
-    effortLevel: 'high'
+    effortLevel: 'high',
+    model: '',
 };
 
 const DEFAULT_HYPERSPACE_PROXY: HyperspaceProxyConfig = {

@@ -132,7 +132,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         allowedTools: '',
         disallowedTools: '',
         appendSystemPrompt: '',
-        effortLevel: 'high'
+        effortLevel: 'high',
+        model: '',
     });
     const cliSwitchesTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -348,7 +349,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                         allowedTools: config.claudeCodeSwitches.allowedTools || '',
                         disallowedTools: config.claudeCodeSwitches.disallowedTools || '',
                         appendSystemPrompt: config.claudeCodeSwitches.appendSystemPrompt || '',
-                        effortLevel: config.claudeCodeSwitches.effortLevel || 'high'
+                        effortLevel: config.claudeCodeSwitches.effortLevel || 'high',
+                        model: config.claudeCodeSwitches.model || '',
                     });
                 }
             }
@@ -2293,6 +2295,25 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     value={cliSwitches.disallowedTools}
                                     placeholder="e.g. Write, Bash (leave empty to disable)"
                                     onChange={(e) => handleCliSwitchChange({ disallowedTools: e.target.value })}
+                                />
+                            </div>
+
+                            {/* Default Model */}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Default Model</span>
+                                    <span className="permission-description">
+                                        Model to use for new sessions (e.g. claude-opus-4-5, claude-sonnet-4-5). Leave empty to use Claude's default. Custom model IDs (e.g. Claude-Opus-4.6[1m]) are supported.
+                                    </span>
+                                </div>
+                            </div>
+                            <div className="cli-switch-text-row">
+                                <input
+                                    type="text"
+                                    className="cli-switch-text-input"
+                                    value={cliSwitches.model}
+                                    placeholder="e.g. claude-opus-4-5 (leave empty for default)"
+                                    onChange={(e) => handleCliSwitchChange({ model: e.target.value })}
                                 />
                             </div>
 

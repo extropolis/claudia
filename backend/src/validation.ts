@@ -53,6 +53,7 @@ export interface ConfigUpdatePayload {
         allowedTools?: string;
         disallowedTools?: string;
         appendSystemPrompt?: string;
+        model?: string;
     };
     deepgramApiKey?: string;
     hyperspaceProxy?: {
@@ -301,6 +302,13 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
                 return { valid: false, error: 'claudeCodeSwitches.appendSystemPrompt must be a string' };
             }
             result.claudeCodeSwitches.appendSystemPrompt = switches.appendSystemPrompt;
+        }
+
+        if (switches.model !== undefined) {
+            if (typeof switches.model !== 'string') {
+                return { valid: false, error: 'claudeCodeSwitches.model must be a string' };
+            }
+            result.claudeCodeSwitches.model = switches.model;
         }
     }
 
