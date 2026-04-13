@@ -1541,15 +1541,32 @@ export class TaskSpawner extends EventEmitter {
     private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 5): void {
         console.log(`[TaskSpawner] Writing prompt to PTY: "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}"`);
 
-        // Paste the entire prompt at once then send Enter.
-        // Character-by-character typing added unnecessary latency (5-10ms * N chars).
-        // The PTY/TUI handles pasted input reliably; a short settle delay before Enter is enough.
-        task.process.write(prompt);
-        task.promptSubmitAttempts = 0;
-        // Short settle delay: 80ms base + 2ms per 100 chars for very long prompts, capped at 300ms
-        const delayMs = Math.min(80 + Math.floor(prompt.length / 100) * 2, 300);
-        console.log(`[TaskSpawner] Waiting ${delayMs}ms before sending Enter for prompt of ${prompt.length} chars`);
-        setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), delayMs);
+        // For small messages (≤200 chars), type character by character
+        // This gives the TUI time to process and makes Enter more reliable
+        // For longer prompts, paste directly to avoid excessive delay
+        if (prompt.length <= 200) {
+            let charIndex = 0;
+            const charDelay = prompt.length <= 20 ? 10 : 5; // Slower for very short messages
+            const writeNextChar = () => {
+                if (charIndex < prompt.length) {
+                    task.process.write(prompt[charIndex]);
+                    charIndex++;
+                    setTimeout(writeNextChar, charDelay);
+                } else {
+                    // Give TUI time to settle before Enter
+                    setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), 500);
+                }
+            };
+            writeNextChar();
+        } else {
+            // Paste the entire prompt at once, then use retry mechanism to ensure Enter is accepted
+            task.process.write(prompt);
+            task.promptSubmitAttempts = 0;
+            // Give more time for longer prompts to be written before sending Enter
+            const delayMs = Math.min(500 + Math.floor(prompt.length / 100) * 50, 1000);
+            console.log(`[TaskSpawner] Waiting ${delayMs}ms before sending Enter for prompt of ${prompt.length} chars`);
+            setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), delayMs);
+        }
     }
 
     /**
@@ -2040,7 +2057,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                     task.readyFallbackTimer = undefined;
                 }
 
-                setTimeout(() => this.sendPromptWithRetry(task, prompt), 50);
+                setTimeout(() => this.sendPromptWithRetry(task, prompt), 1200);
             }
 
             // Note: State detection is now handled by polling in checkTaskStates()
@@ -3173,6 +3190,12 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     }
 
     reconnectTask(taskId: string): Task | null {
+        // Guard: if the task is already live, return it without spawning a second process
+        if (this.tasks.has(taskId)) {
+            console.log(`[TaskSpawner] Task ${taskId} is already live, skipping reconnect`);
+            return this.toPublicTask(this.tasks.get(taskId)!);
+        }
+
         const persisted = this.disconnectedTasks.get(taskId);
         if (!persisted) {
             console.log(`[TaskSpawner] Cannot reconnect: task ${taskId} not found`);
@@ -3357,6 +3380,12 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             gitStateBefore: persisted.gitState ? persisted.gitState : undefined,  // Preserve git state
         };
 
+        // Remove from disconnectedTasks FIRST before registering handlers or emitting events.
+        // If we delete after emitting taskStateChanged, a concurrent writeToTask call can see
+        // the task still in disconnectedTasks and trigger a second reconnectTask, causing the
+        // "Resuming session X" message to appear multiple times and old history to be shown.
+        this.disconnectedTasks.delete(taskId);
+
         console.log(`[TaskSpawner] reconnectTask: Setting up process handlers for ${task.id}, ptyPid=${ptyProcess.pid}`);
         this.setupProcessHandlers(task);
         this.tasks.set(task.id, task);
@@ -3382,7 +3411,6 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             this.startReadyFallbackTimer(task);
         }
 
-        this.disconnectedTasks.delete(taskId);
         this.scheduleSave();
 
         // Start session capture so we detect the new/resumed session file
