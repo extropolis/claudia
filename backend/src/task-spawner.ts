@@ -1541,32 +1541,15 @@ export class TaskSpawner extends EventEmitter {
     private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 5): void {
         console.log(`[TaskSpawner] Writing prompt to PTY: "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}"`);
 
-        // For small messages (≤200 chars), type character by character
-        // This gives the TUI time to process and makes Enter more reliable
-        // For longer prompts, paste directly to avoid excessive delay
-        if (prompt.length <= 200) {
-            let charIndex = 0;
-            const charDelay = prompt.length <= 20 ? 10 : 5; // Slower for very short messages
-            const writeNextChar = () => {
-                if (charIndex < prompt.length) {
-                    task.process.write(prompt[charIndex]);
-                    charIndex++;
-                    setTimeout(writeNextChar, charDelay);
-                } else {
-                    // Give TUI time to settle before Enter
-                    setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), 500);
-                }
-            };
-            writeNextChar();
-        } else {
-            // Paste the entire prompt at once, then use retry mechanism to ensure Enter is accepted
-            task.process.write(prompt);
-            task.promptSubmitAttempts = 0;
-            // Give more time for longer prompts to be written before sending Enter
-            const delayMs = Math.min(500 + Math.floor(prompt.length / 100) * 50, 1000);
-            console.log(`[TaskSpawner] Waiting ${delayMs}ms before sending Enter for prompt of ${prompt.length} chars`);
-            setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), delayMs);
-        }
+        // Paste the entire prompt at once then send Enter.
+        // Character-by-character typing added unnecessary latency (5-10ms * N chars).
+        // The PTY/TUI handles pasted input reliably; a short settle delay before Enter is enough.
+        task.process.write(prompt);
+        task.promptSubmitAttempts = 0;
+        // Short settle delay: 80ms base + 2ms per 100 chars for very long prompts, capped at 300ms
+        const delayMs = Math.min(80 + Math.floor(prompt.length / 100) * 2, 300);
+        console.log(`[TaskSpawner] Waiting ${delayMs}ms before sending Enter for prompt of ${prompt.length} chars`);
+        setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), delayMs);
     }
 
     /**
@@ -1665,41 +1648,30 @@ export class TaskSpawner extends EventEmitter {
         const sanitizedPrompt = sanitizePrompt(prompt);
         let sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
 
-        const gitStateBefore = await captureGitStateBefore(workspaceId);
+        // Start git capture and learnings search in parallel — do NOT await before spawning.
+        // Git operations (especially on repos with GitHub remotes) can involve auth and network
+        // I/O that takes seconds. We fire these off now and attach results to the task later.
+        const gitStatePromise = captureGitStateBefore(workspaceId).catch(err => {
+            logger.warn('Git state capture failed (non-blocking)', { error: err instanceof Error ? err.message : String(err) });
+            return null;
+        });
 
-        // Search for relevant learnings and inject if enabled
-        let injectedLearnings: LearningSearchResult[] = [];
+        let learningsPromise: Promise<LearningSearchResult[]> = Promise.resolve([]);
         if (this.configStore?.getUseLearnings() && this.learningsStore) {
-            try {
-                // Add a timeout to prevent learnings search from blocking task creation
-                const learningsPromise = this.learningsStore.searchLearnings({
-                    query: sanitizedPrompt,
-                    workspaceId,
-                    topK: 5,
-                    minScore: 0.3
-                });
-                const timeoutPromise = new Promise<LearningSearchResult[]>((_, reject) =>
-                    setTimeout(() => reject(new Error('Learnings search timed out')), 5000)
-                );
-                injectedLearnings = await Promise.race([learningsPromise, timeoutPromise]);
-
-                if (injectedLearnings.length > 0) {
-                    const learningsContext = this.learningsStore.formatForContext(injectedLearnings);
-                    logger.info('Injecting learnings into task', {
-                        count: injectedLearnings.length,
-                        scores: injectedLearnings.map(l => l.score.toFixed(3))
-                    });
-
-                    // Prepend learnings to system prompt
-                    if (sanitizedSystemPrompt) {
-                        sanitizedSystemPrompt = `${learningsContext}\n\n${sanitizedSystemPrompt}`;
-                    } else {
-                        sanitizedSystemPrompt = learningsContext;
-                    }
-                }
-            } catch (err) {
+            learningsPromise = this.learningsStore.searchLearnings({
+                query: sanitizedPrompt,
+                workspaceId,
+                topK: 5,
+                minScore: 0.3
+            }).catch(err => {
                 logger.error('Failed to search learnings', { error: err instanceof Error ? err.message : String(err) });
-            }
+                return [];
+            });
+            // Hard cap: learnings must resolve within 2s or we skip them
+            learningsPromise = Promise.race([
+                learningsPromise,
+                new Promise<LearningSearchResult[]>(resolve => setTimeout(() => resolve([]), 2000))
+            ]);
         }
 
         // Log which backend we're using for debugging
@@ -1707,7 +1679,6 @@ export class TaskSpawner extends EventEmitter {
             backendType: this.backendType,
             hasBackend: !!this.backend,
             configBackend: this.configStore?.getBackend(),
-            learningsInjected: injectedLearnings.length,
             initialDims: initialCols && initialRows ? `${initialCols}x${initialRows}` : 'default'
         });
 
@@ -1715,17 +1686,29 @@ export class TaskSpawner extends EventEmitter {
         let task: Task;
         if (this.backendType === 'opencode' && this.backend) {
             logger.info('Using OpenCode backend for task creation');
+            // OpenCode needs git state synchronously — await here since it uses HTTP not PTY
+            const gitStateBefore = await gitStatePromise;
             task = await this.createTaskWithOpenCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore);
         } else {
-            // Default: Use Claude Code with PTY (existing logic)
+            // Default: Use Claude Code with PTY.
+            // Pass the git state promise — the PTY spawns immediately, git result is stored
+            // on the task once resolved (non-blocking).
             logger.info('Using Claude Code backend for task creation');
-            task = await this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore, initialCols, initialRows);
+            task = await this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStatePromise, initialCols, initialRows);
         }
 
-        // Track which learnings were injected for this task (for utility updates later)
-        if (injectedLearnings.length > 0) {
-            this.taskLearnings.set(task.id, injectedLearnings.map(l => l.learning.id));
-        }
+        // Resolve learnings and inject into system prompt / track after task is created
+        // This runs in the background and only affects future tasks, not this one's initial prompt.
+        // (Learnings are informational context; the main prompt is already sent.)
+        learningsPromise.then(injectedLearnings => {
+            if (injectedLearnings.length > 0) {
+                logger.info('Learnings resolved (post-spawn)', {
+                    count: injectedLearnings.length,
+                    scores: injectedLearnings.map(l => l.score.toFixed(3))
+                });
+                this.taskLearnings.set(task.id, injectedLearnings.map(l => l.learning.id));
+            }
+        });
 
         return task;
     }
@@ -1812,16 +1795,12 @@ export class TaskSpawner extends EventEmitter {
         prompt: string,
         workspaceId: string,
         systemPrompt: string | undefined,
-        gitStateBefore: Partial<TaskGitState> | null,
+        gitStatePromise: Promise<Partial<TaskGitState> | null>,
         initialCols?: number,
         initialRows?: number
     ): Promise<Task> {
         console.log(`[TaskSpawner] createTaskWithClaudeCode called with workspaceId: "${workspaceId}"`);
-        const id = `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-
-        if (gitStateBefore) {
-            logger.info(`Captured git state before task`, { taskId: id, commit: gitStateBefore.commitBefore?.substring(0, 7) });
-        }
+        const id = `task-${Date.now()}-${require('crypto').randomBytes(5).toString('hex')}`;
 
         const customArgs = process.env['CC_CLAUDE_ARGS']
             ? process.env['CC_CLAUDE_ARGS'].split(' ')
@@ -1976,11 +1955,19 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             initialPromptSent: false,
             pendingPrompt: prompt,
             sessionId: null,
-            gitStateBefore: gitStateBefore || undefined,
+            gitStateBefore: undefined, // Will be set asynchronously below
             systemPrompt: systemPrompt?.trim() || undefined,
             lastOutputLength: 0,  // Initialize for state polling
             hasStartedProcessing: false,  // Will be true once output changes after prompt sent
         };
+
+        // Attach git state once resolved — this is non-blocking and happens after PTY is already running
+        gitStatePromise.then(gitStateBefore => {
+            if (gitStateBefore) {
+                task.gitStateBefore = gitStateBefore;
+                logger.info(`Git state attached to task`, { taskId: id, commit: gitStateBefore.commitBefore?.substring(0, 7) });
+            }
+        });
 
 
 
@@ -2053,7 +2040,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                     task.readyFallbackTimer = undefined;
                 }
 
-                setTimeout(() => this.sendPromptWithRetry(task, prompt), 1200);
+                setTimeout(() => this.sendPromptWithRetry(task, prompt), 50);
             }
 
             // Note: State detection is now handled by polling in checkTaskStates()
