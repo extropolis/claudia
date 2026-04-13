@@ -373,6 +373,17 @@ export class TaskSpawner extends EventEmitter {
             }
         });
 
+        // Allow session ID update when a task reconnects with a fresh session
+        // (e.g. after tsx watch reload where the old session file was missing)
+        this.backend.on('task:sessionUpdated', (taskId: string, sessionId: string) => {
+            const task = this.tasks.get(taskId);
+            if (task && task.sessionId !== sessionId) {
+                task.sessionId = sessionId;
+                this.sessionToTaskId.set(sessionId, taskId);
+                this.saveTasks();
+            }
+        });
+
         this.backend.on('task:exit', (taskId: string, exitCode: number) => {
             const task = this.tasks.get(taskId);
             if (task) {
@@ -3346,7 +3357,9 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             isActive: false,
             initialPromptSent: !shouldContinue,  // False if we need to send continuation prompt
             pendingPrompt: shouldContinue ? 'continue' : null,  // Trigger continuation
-            sessionId: persisted.sessionId,
+            // Use sessionIdToUse (not persisted.sessionId) — if the session file was missing,
+            // sessionIdToUse was cleared to null so the PTY handler can capture the new session ID.
+            sessionId: sessionIdToUse,
             lastOutputLength: resumeMessage.length,  // Initialize for state polling
             hasStartedProcessing: !shouldContinue,  // Will be set true when continuation starts
             shouldContinue,
