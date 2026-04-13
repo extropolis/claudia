@@ -81,6 +81,25 @@ function exe(name: string): string {
 }
 
 /**
+ * On Windows, `npm install -g` creates `claude.cmd` not `claude.exe`, so
+ * node-pty cannot spawn it directly. Locate the underlying JS entry-point
+ * via APPDATA and run it with the current node executable — no PATH needed.
+ */
+function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } {
+    if (!isWindows) return { command: 'claude', prefixArgs: [] };
+    const appData = process.env['APPDATA'];
+    if (appData) {
+        const cliPath = join(appData, 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
+        if (existsSync(cliPath)) {
+            console.log(`[TaskSpawner] Resolved Claude CLI via APPDATA: ${process.execPath} ${cliPath}`);
+            return { command: process.execPath, prefixArgs: [cliPath] };
+        }
+    }
+    console.warn('[TaskSpawner] APPDATA-based Claude CLI not found, falling back to cmd.exe /c claude.cmd');
+    return { command: 'cmd.exe', prefixArgs: ['/c', 'claude.cmd'] };
+}
+
+/**
  * Check if Claude Code CLI is installed and available
  */
 export function checkClaudeCodeInstalled(): { installed: boolean; version?: string; error?: string } {
@@ -1918,7 +1937,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             apiMode: this.configStore?.getApiMode()
         });
 
-        const ptyProcess = spawn(exe('claude'), claudeArgs, {
+        const { command: claudeCmd1, prefixArgs: claudePrefix1 } = resolveClaudeSpawn();
+        const ptyProcess = spawn(claudeCmd1, [...claudePrefix1, ...claudeArgs], {
             name: 'xterm-256color',
             cols: initialCols || 120, // Use provided cols or default 120 (increased from 80)
             rows: initialRows || 40,  // Use provided rows or default 40 (increased from 24)
@@ -3246,7 +3266,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 console.log(`[TaskSpawner] Reconnecting Claude Code task ${taskId} (fresh start)`);
             }
 
-            ptyProcess = spawn(exe('claude'), claudeArgs, {
+            const { command: claudeCmd2, prefixArgs: claudePrefix2 } = resolveClaudeSpawn();
+            ptyProcess = spawn(claudeCmd2, [...claudePrefix2, ...claudeArgs], {
                 name: 'xterm-256color',
                 cols: 120,
                 rows: 40,
