@@ -3443,11 +3443,16 @@ export async function createApp(basePath?: string) {
         }
 
         try {
-            const execAsync = (await import('util')).promisify((await import('child_process')).exec);
+            const { execFile: execFileGit } = await import('child_process');
+            const { promisify } = await import('util');
+            const execFileAsync = promisify(execFileGit);
+            // Prevent git from hanging on auth prompts or credential helpers
+            const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo' };
+            const gitOpts = { cwd: workspacePath, env: gitEnv, timeout: 5000 };
 
             // Check if it's a git repo
             try {
-                await execAsync('git rev-parse --git-dir', { cwd: workspacePath });
+                await execFileAsync('git', ['rev-parse', '--git-dir'], gitOpts);
             } catch {
                 return res.json({ isGitRepo: false, branch: null, changes: [] });
             }
@@ -3455,14 +3460,14 @@ export async function createApp(basePath?: string) {
             // Get current branch
             let branch = '';
             try {
-                const { stdout } = await execAsync('git branch --show-current', { cwd: workspacePath });
+                const { stdout } = await execFileAsync('git', ['branch', '--show-current'], gitOpts);
                 branch = stdout.trim();
             } catch {
                 branch = 'HEAD';
             }
 
-            // Get status with porcelain v2 for richer info
-            const { stdout: statusOutput } = await execAsync('git status --porcelain', { cwd: workspacePath });
+            // Get status with porcelain format
+            const { stdout: statusOutput } = await execFileAsync('git', ['status', '--porcelain'], gitOpts);
             // Split on newlines WITHOUT trimming the full output first — trim() would strip the
             // leading space from the first porcelain line (e.g. " M path") shifting all indices
             // by one, which corrupts the XY status codes and drops the first path character.
@@ -3497,16 +3502,19 @@ export async function createApp(basePath?: string) {
                     return { path: filePath, status, staged: isStaged };
                 });
 
-            // Get ahead/behind info
+            // Get ahead/behind counts from local tracking data only — no network calls
             let ahead = 0;
             let behind = 0;
             try {
-                const { stdout: abOutput } = await execAsync('git rev-list --left-right --count HEAD...@{upstream}', { cwd: workspacePath });
+                const { stdout: abOutput } = await execFileAsync(
+                    'git', ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'],
+                    gitOpts
+                );
                 const parts = abOutput.trim().split(/\s+/);
                 ahead = parseInt(parts[0], 10) || 0;
                 behind = parseInt(parts[1], 10) || 0;
             } catch {
-                // No upstream configured
+                // No upstream configured or upstream not reachable
             }
 
             res.json({ isGitRepo: true, branch, changes, ahead, behind });

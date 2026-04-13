@@ -13,6 +13,7 @@ import { createLogger } from './logger.js';
 import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
+import { randomBytes } from 'crypto';
 
 const logger = createLogger('[TaskSpawner]');
 
@@ -1817,7 +1818,7 @@ export class TaskSpawner extends EventEmitter {
         initialRows?: number
     ): Promise<Task> {
         console.log(`[TaskSpawner] createTaskWithClaudeCode called with workspaceId: "${workspaceId}"`);
-        const id = `task-${Date.now()}-${require('crypto').randomBytes(5).toString('hex')}`;
+        const id = `task-${Date.now()}-${randomBytes(5).toString('hex')}`;
 
         const customArgs = process.env['CC_CLAUDE_ARGS']
             ? process.env['CC_CLAUDE_ARGS'].split(' ')
