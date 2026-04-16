@@ -1,13 +1,17 @@
 /**
  * Config Store - Manages application configuration (MCP servers, CLI switches)
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { BackendType } from './backends/types.js';
+import { loadVersioned, saveVersioned } from './utils/schema-version.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+/** Schema version for config.json. Bump when the AppConfig shape changes. */
+const CONFIG_SCHEMA_VERSION = 1;
 
 export interface MCPServerConfig {
     name: string;
@@ -152,59 +156,58 @@ export class ConfigStore {
         this.config = this.loadConfig();
     }
 
+    /** Apply defaults to a partial config. Used after load to guarantee every field. */
+    private normalize(loaded: Partial<AppConfig>): AppConfig {
+        return {
+            // Use defaults if mcpServers is undefined or empty array
+            mcpServers: (loaded.mcpServers && loaded.mcpServers.length > 0) ? loaded.mcpServers : DEFAULT_MCP_SERVERS,
+            skipPermissions: loaded.skipPermissions ?? false,
+            rules: loaded.rules ?? '',
+            supervisorEnabled: loaded.supervisorEnabled ?? false,
+            supervisorSystemPrompt: loaded.supervisorSystemPrompt ?? DEFAULT_SUPERVISOR_PROMPT,
+            autoFocusOnInput: loaded.autoFocusOnInput ?? false,
+            apiMode: loaded.apiMode ?? 'default',
+            customAnthropicApiKey: loaded.customAnthropicApiKey,
+            deepgramApiKey: loaded.deepgramApiKey,
+            backend: loaded.backend ?? 'claude-code',
+            opencodePort: loaded.opencodePort ?? 4096,
+            useLearnings: loaded.useLearnings ?? false,
+            claudeCodeSwitches: {
+                ...DEFAULT_CLAUDE_CODE_SWITCHES,
+                ...(loaded.claudeCodeSwitches || {})
+            },
+            hyperspaceProxy: loaded.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY,
+            aiCoreCredentials: loaded.aiCoreCredentials,
+            enabledPlugins: loaded.enabledPlugins ?? [],
+            claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? true
+        };
+    }
+
+    private defaultConfig(): AppConfig {
+        return this.normalize({});
+    }
+
     private loadConfig(): AppConfig {
         try {
-            if (existsSync(this.configFile)) {
-                const data = readFileSync(this.configFile, 'utf-8');
-                const loaded = JSON.parse(data) as Partial<AppConfig>;
-                return {
-                    // Use defaults if mcpServers is undefined or empty array
-                    mcpServers: (loaded.mcpServers && loaded.mcpServers.length > 0) ? loaded.mcpServers : DEFAULT_MCP_SERVERS,
-                    skipPermissions: loaded.skipPermissions ?? false,
-                    rules: loaded.rules ?? '',
-                    supervisorEnabled: loaded.supervisorEnabled ?? false,
-                    supervisorSystemPrompt: loaded.supervisorSystemPrompt ?? DEFAULT_SUPERVISOR_PROMPT,
-                    autoFocusOnInput: loaded.autoFocusOnInput ?? false,
-                    apiMode: loaded.apiMode ?? 'default',
-                    customAnthropicApiKey: loaded.customAnthropicApiKey,
-                    deepgramApiKey: loaded.deepgramApiKey,
-                    backend: loaded.backend ?? 'claude-code',
-                    opencodePort: loaded.opencodePort ?? 4096,
-                    useLearnings: loaded.useLearnings ?? false,
-                    claudeCodeSwitches: {
-                        ...DEFAULT_CLAUDE_CODE_SWITCHES,
-                        ...(loaded.claudeCodeSwitches || {})
-                    },
-                    hyperspaceProxy: loaded.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY,
-                    aiCoreCredentials: loaded.aiCoreCredentials,
-                    enabledPlugins: loaded.enabledPlugins ?? [],
-                    claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? true
-                };
-            }
+            // loadVersioned handles: missing file → defaultData; legacy unversioned
+            // file → legacyLoader; future versioned files → migrations (none yet).
+            // We run normalize() over the result so newly-added fields always have
+            // a default, regardless of the on-disk version.
+            const data = loadVersioned<Partial<AppConfig>>(this.configFile, {
+                currentVersion: CONFIG_SCHEMA_VERSION,
+                defaultData: this.defaultConfig(),
+                legacyLoader: (raw) => raw as Partial<AppConfig>,
+            });
+            return this.normalize(data);
         } catch (error) {
             console.error('[ConfigStore] Error loading config:', error);
+            return this.defaultConfig();
         }
-        return {
-            mcpServers: [...DEFAULT_MCP_SERVERS],
-            skipPermissions: false,
-            rules: '',
-            supervisorEnabled: false,
-            supervisorSystemPrompt: DEFAULT_SUPERVISOR_PROMPT,
-            autoFocusOnInput: false,
-            apiMode: 'default',
-            backend: 'claude-code',
-            opencodePort: 4096,
-            useLearnings: false,
-            claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
-            hyperspaceProxy: { ...DEFAULT_HYPERSPACE_PROXY },
-            enabledPlugins: [],
-            claudiaMcpServerEnabled: true
-        };
     }
 
     private saveConfig(): void {
         try {
-            writeFileSync(this.configFile, JSON.stringify(this.config, null, 2), 'utf-8');
+            saveVersioned(this.configFile, this.config, CONFIG_SCHEMA_VERSION);
             console.log('[ConfigStore] Config saved to', this.configFile);
         } catch (error) {
             console.error('[ConfigStore] Error saving config:', error);
