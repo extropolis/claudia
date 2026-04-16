@@ -109,7 +109,11 @@ function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } {
  */
 export function checkClaudeCodeInstalled(): { installed: boolean; version?: string; error?: string } {
     try {
-        const version = execSync('claude --version', { encoding: 'utf8', timeout: 5000 }).trim();
+        const { command, prefixArgs } = resolveClaudeSpawn();
+        const versionCmd = command === process.execPath
+            ? `"${command}" "${prefixArgs[0]}" --version`
+            : `${command} ${prefixArgs.join(' ')} --version`.trim();
+        const version = execSync(versionCmd, { encoding: 'utf8', timeout: 5000 }).trim();
         return { installed: true, version };
     } catch (error) {
         return {
@@ -172,6 +176,7 @@ interface InternalTask extends Task {
     process: IPty;
     outputHistory: Buffer[];
     previousHistory?: Buffer; // Historical output from before reconnection (kept separate)
+    resumeSeparator?: string; // "─── Resuming session ───" shown live but NOT saved to history file
     lazyHistoryBase64?: string; // Base64-encoded history for lazy loading (memory efficient)
     isActive: boolean;
     initialPromptSent: boolean;
@@ -2516,7 +2521,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
      * knows history loading is complete and can clear the loading spinner.
      */
     private sendTaskHistory(task: InternalTask): void {
-        const history = this.getCombinedHistory(task);
+        let history = this.getCombinedHistory(task);
+        // Append the resume separator for display (it's not in outputHistory / not saved to disk)
+        if (task.resumeSeparator) {
+            history = (history || '') + task.resumeSeparator;
+        }
         this.emit('taskRestore', task.id, history || '');
     }
 
@@ -2827,7 +2836,37 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
             // Use consolidated retry mechanism with follow-up input options (5 retries for reliability)
             setTimeout(() => this.sendEnterWithRetry(task, 5, { isInitialPrompt: false, enterKey }), enterDelayMs);
-        } else if (task.state !== 'exited') {
+        } else if (task.state === 'exited') {
+            // Task's PTY has exited — reconnect it (with --resume) and deliver the write
+            console.log(`[TaskSpawner] Task ${taskId} is exited, auto-reconnecting before write`);
+            const reconnected = this.reconnectTask(taskId);
+            if (reconnected) {
+                const newTask = this.tasks.get(taskId);
+                if (newTask) {
+                    newTask.isActive = true;
+                    this.emit('tasksUpdated');
+                    // Wait for idle state before delivering write (same pattern as disconnected reconnect)
+                    let delivered = false;
+                    const onStateChanged = (changedTask: Task) => {
+                        if (changedTask.id === taskId && changedTask.state === 'idle' && !delivered) {
+                            delivered = true;
+                            this.removeListener('taskStateChanged', onStateChanged);
+                            console.log(`[TaskSpawner] Task ${taskId} reached idle after exited-reconnect, delivering pending write`);
+                            this.writeToTask(taskId, data);
+                        }
+                    };
+                    this.on('taskStateChanged', onStateChanged);
+                    setTimeout(() => {
+                        if (!delivered) {
+                            delivered = true;
+                            this.removeListener('taskStateChanged', onStateChanged);
+                            console.log(`[TaskSpawner] Fallback: delivering pending write after 15s for exited-reconnect ${taskId}`);
+                            this.writeToTask(taskId, data);
+                        }
+                    }, 15000);
+                }
+            }
+        } else {
             // Single keypress or task is busy - write directly
             task.process.write(data);
         }
@@ -3283,8 +3322,32 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     reconnectTask(taskId: string): Task | null {
         // Guard: if the task is already live, return it without spawning a second process
         if (this.tasks.has(taskId)) {
-            console.log(`[TaskSpawner] Task ${taskId} is already live, skipping reconnect`);
-            return this.toPublicTask(this.tasks.get(taskId)!);
+            const existing = this.tasks.get(taskId)!;
+            if (existing.state !== 'exited') {
+                console.log(`[TaskSpawner] Task ${taskId} is already live (state=${existing.state}), skipping reconnect`);
+                return this.toPublicTask(existing);
+            }
+            // Task's PTY exited but task is still in the live map — move it to
+            // disconnectedTasks so it can be properly reconnected with --resume
+            console.log(`[TaskSpawner] Task ${taskId} is exited, moving to disconnected for reconnect`);
+            const persisted: PersistedTask = {
+                id: existing.id,
+                prompt: existing.prompt,
+                workspaceId: existing.workspaceId,
+                createdAt: existing.createdAt.toISOString(),
+                lastActivity: existing.lastActivity.toISOString(),
+                lastState: 'exited',
+                sessionId: existing.sessionId,
+                backendType: this.taskBackends.get(existing.id) || 'claude-code',
+                gitState: existing.gitState,
+                systemPrompt: existing.systemPrompt,
+                displayName: existing.displayName,
+                displayNameEditedByUser: existing.displayNameEditedByUser,
+                order: existing.order,
+            };
+            this.disconnectedTasks.set(taskId, persisted);
+            this.tasks.delete(taskId);
+            // Fall through to normal reconnect logic below
         }
 
         const persisted = this.disconnectedTasks.get(taskId);
@@ -3451,8 +3514,9 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             processStartedAt: shouldContinue
                 ? (persisted.processStartedAt ? new Date(persisted.processStartedAt) : now)
                 : undefined,  // Preserve original start time across reconnect, or use now as fallback
-            outputHistory: [Buffer.from(resumeMessage)], // Start fresh, only resume message
+            outputHistory: [], // Start empty — resume separator is emitted live but not persisted
             previousHistory, // Historical output from before reconnect (loaded from file or in-memory)
+            resumeSeparator: resumeMessage, // Shown live when task becomes active, not saved to disk
             lastActivity: now,
             createdAt: new Date(persisted.createdAt),
             isActive: false,
@@ -3461,8 +3525,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             // Use sessionIdToUse (not persisted.sessionId) — if the session file was missing,
             // sessionIdToUse was cleared to null so the PTY handler can capture the new session ID.
             sessionId: sessionIdToUse,
-            lastOutputLength: resumeMessage.length,  // Initialize for state polling
-            totalOutputSize: resumeMessage.length,  // Incremental output size tracking
+            lastOutputLength: 0,  // Initialize for state polling
+            totalOutputSize: 0,  // Incremental output size tracking
             savedBufferCount: 0,  // Incremental history saves
             hasStartedProcessing: !shouldContinue,  // Will be set true when continuation starts
             shouldContinue,

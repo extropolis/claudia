@@ -72,7 +72,10 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
         };
     }, [task.id]);
 
-    const isDisabled = task.state === 'exited' || task.state === 'disconnected' || task.state === 'interrupted';
+    // Allow input for disconnected/exited/interrupted tasks — the backend auto-reconnects
+    // with --resume when input is sent, preserving the session context.
+    // Previously these states disabled the input bar, but writeToTask/reconnectTask handle them.
+    const isDisabled = false; // All states accept input; backend handles reconnection as needed
 
     // Re-focus the textarea when the browser window regains focus.
     // Without this, focus can land on the xterm terminal and the first
