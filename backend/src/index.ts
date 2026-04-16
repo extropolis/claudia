@@ -9,18 +9,20 @@ import { PORTS } from '@claudia/shared';
 
 const PORT = process.env.CLAUDIA_BACKEND_PORT || PORTS.BACKEND;
 
-// Check if Claude Code CLI is installed before starting
+// Check if Claude Code CLI is installed — warn but don't block startup.
+// The CLI may be unreachable when off VPN or during network issues;
+// the server should still start so the UI is accessible.
 const claudeCheck = checkClaudeCodeInstalled();
 if (!claudeCheck.installed) {
-    console.error('\n╔══════════════════════════════════════════════════════════════════╗');
-    console.error('║  ERROR: Claude Code CLI is not installed!                        ║');
-    console.error('║                                                                  ║');
-    console.error('║  This application requires Claude Code CLI to function.         ║');
-    console.error('║  Please install it from: https://claude.ai/code                 ║');
-    console.error('╚══════════════════════════════════════════════════════════════════╝\n');
-    process.exit(1);
+    console.warn('\n╔══════════════════════════════════════════════════════════════════╗');
+    console.warn('║  WARNING: Claude Code CLI not detected                          ║');
+    console.warn('║                                                                  ║');
+    console.warn('║  Task creation will fail until the CLI is available.             ║');
+    console.warn('║  Install from: https://claude.ai/code                            ║');
+    console.warn('╚══════════════════════════════════════════════════════════════════╝\n');
+} else {
+    console.log(`Claude Code CLI detected: ${claudeCheck.version}`);
 }
-console.log(`Claude Code CLI detected: ${claudeCheck.version}`);
 
 // Auto-install the /learn command to ~/.claude/commands/ so it's available in all Claude Code sessions
 function installLearnCommand() {

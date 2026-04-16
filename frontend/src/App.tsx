@@ -153,6 +153,26 @@ function App() {
         prevReloadingRef.current = isServerReloading;
     }, [isServerReloading]);
 
+    // Force TerminalView remount on ANY WebSocket reconnection, not just server reloads.
+    // When the browser tab is inactive, the WS heartbeat times out after 90s and the
+    // connection drops. On reconnect, TerminalView's message listener is still on the
+    // dead WebSocket, so no output/history is received → blank terminal.
+    // On Windows, tsx watch kills with TerminateProcess (no SIGTERM), so the
+    // server:reloading message is never sent and the isServerReloading path above
+    // never fires. This effect catches ALL reconnect scenarios.
+    const hasConnectedOnceRef = useRef(false);
+    const prevConnectedRef = useRef(isConnected);
+    useEffect(() => {
+        if (isConnected && !prevConnectedRef.current) {
+            if (hasConnectedOnceRef.current) {
+                console.log('[App] WS reconnected — forcing TerminalView remount');
+                setTerminalRefreshCounter(c => c + 1);
+            }
+            hasConnectedOnceRef.current = true;
+        }
+        prevConnectedRef.current = isConnected;
+    }, [isConnected]);
+
     const handleMouseDown = () => {
         setIsResizing(true);
     };

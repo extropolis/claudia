@@ -29,7 +29,11 @@ function stripScreenClears(history: string): string {
         // \x1b[3J - Clear entire screen + scrollback
         .replace(/\x1b\[3J/g, '')
         // \x1b[?1049h / \x1b[?1049l - Alt screen buffer enter/exit
-        .replace(/\x1b\[\?1049[hl]/g, '');
+        .replace(/\x1b\[\?1049[hl]/g, '')
+        // Strip accumulated "Resuming session" / "Session reconnected" separator lines.
+        // These accumulate across server restarts and fill the terminal with noise,
+        // hiding the actual conversation content.
+        .replace(/\r?\n?\x1b\[90m─── (Resuming session [a-f0-9-]+|Session reconnected) ───\x1b\[0m\r?\n?\r?\n?/g, '');
 }
 
 
