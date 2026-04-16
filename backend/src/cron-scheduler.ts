@@ -15,10 +15,11 @@
 
 import { EventEmitter } from 'events';
 import { ScheduledTask } from '@claudia/shared';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { createLogger } from './logger.js';
+import { loadVersioned, saveVersioned } from './utils/schema-version.js';
 
 const logger = createLogger('[CronScheduler]');
 
@@ -30,6 +31,9 @@ const MAX_SCHEDULED_TASKS_PER_TASK = 50;
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 const CHECK_INTERVAL_MS = 1000; // Check every second
 const PERSISTENCE_PATH = join(__dirname, '..', 'scheduled-tasks.json');
+
+/** Schema version for scheduled-tasks.json. Bump when ScheduledTask shape changes. */
+const CRON_SCHEMA_VERSION = 1;
 
 /**
  * Generate an 8-character random ID for scheduled tasks
@@ -610,7 +614,7 @@ export class CronScheduler extends EventEmitter {
     private save(): void {
         try {
             const data = Array.from(this.scheduledTasks.values());
-            writeFileSync(PERSISTENCE_PATH, JSON.stringify(data, null, 2), 'utf8');
+            saveVersioned(PERSISTENCE_PATH, data, CRON_SCHEMA_VERSION);
             logger.debug('Saved scheduled tasks', { count: data.length });
         } catch (error) {
             logger.error('Failed to save scheduled tasks', { error });
@@ -624,8 +628,12 @@ export class CronScheduler extends EventEmitter {
         try {
             if (!existsSync(PERSISTENCE_PATH)) return;
 
-            const raw = readFileSync(PERSISTENCE_PATH, 'utf8');
-            const data: ScheduledTask[] = JSON.parse(raw);
+            const data = loadVersioned<ScheduledTask[]>(PERSISTENCE_PATH, {
+                currentVersion: CRON_SCHEMA_VERSION,
+                defaultData: [],
+                // Legacy format was a bare ScheduledTask[] — pass through.
+                legacyLoader: (raw) => (Array.isArray(raw) ? (raw as ScheduledTask[]) : []),
+            });
 
             for (const task of data) {
                 try {
