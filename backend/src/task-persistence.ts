@@ -5,9 +5,14 @@
  * Manages task history files and archived task storage.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, statSync, openSync, readSync, closeSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, unlinkSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { dirname, join } from 'path';
 import { TaskState, TaskGitState } from '@claudia/shared';
+import { atomicWriteFileSync } from './utils/atomic-write.js';
+import { loadVersioned, saveVersioned } from './utils/schema-version.js';
+
+/** Schema version for tasks.json. Bump when TaskPersistence shape changes. */
+const TASKS_SCHEMA_VERSION = 1;
 
 /**
  * Persisted task data (no process, just metadata)
@@ -132,8 +137,19 @@ export class TaskPersistenceManager {
                 return result;
             }
 
-            const data = readFileSync(this.persistencePath, 'utf-8');
-            const persistence = JSON.parse(data) as { tasks: PersistedTask[]; archivedTasks?: any[] };
+            const persistence = loadVersioned<{ tasks: PersistedTask[]; archivedTasks?: any[] }>(
+                this.persistencePath,
+                {
+                    currentVersion: TASKS_SCHEMA_VERSION,
+                    defaultData: { tasks: [], archivedTasks: [] },
+                    // Legacy format was the raw TaskPersistence object; pass through.
+                    legacyLoader: (raw) =>
+                        (raw as { tasks: PersistedTask[]; archivedTasks?: any[] }) ?? {
+                            tasks: [],
+                            archivedTasks: [],
+                        },
+                }
+            );
             console.log(`[TaskPersistence] Loading ${persistence.tasks.length} persisted tasks`);
 
             this.ensureHistoryDir();
@@ -143,7 +159,7 @@ export class TaskPersistenceManager {
                 // MIGRATION: If task has outputHistory string, move it to file
                 if (persisted.outputHistory && typeof persisted.outputHistory === 'string') {
                     try {
-                        writeFileSync(this.getTaskHistoryPath(persisted.id), persisted.outputHistory);
+                        atomicWriteFileSync(this.getTaskHistoryPath(persisted.id), persisted.outputHistory);
                         if (process.env.DEBUG_TASKS) {
                             console.log(`[TaskPersistence] Migrated history for task ${persisted.id} to file`);
                         }
@@ -168,7 +184,7 @@ export class TaskPersistenceManager {
                     if (archived.outputHistory && typeof archived.outputHistory === 'string') {
                         this.ensureArchivedHistoryDir();
                         try {
-                            writeFileSync(this.getArchivedHistoryPath(archived.id), archived.outputHistory);
+                            atomicWriteFileSync(this.getArchivedHistoryPath(archived.id), archived.outputHistory);
                             result.migratedCount++;
                         } catch (e) {
                             console.error(`[TaskPersistence] Failed to migrate history for ${archived.id}:`, e);
@@ -221,7 +237,7 @@ export class TaskPersistenceManager {
                 mkdirSync(dir, { recursive: true });
             }
 
-            writeFileSync(this.persistencePath, JSON.stringify(persistence, null, 2));
+            saveVersioned(this.persistencePath, persistence, TASKS_SCHEMA_VERSION);
             console.log(`[TaskPersistence] Saved ${tasks.length} tasks, ${archivedTasks.length} archived (metadata only)`);
         } catch (error) {
             console.error('[TaskPersistence] Failed to save tasks:', error);
@@ -264,7 +280,7 @@ export class TaskPersistenceManager {
 
             if (parts.length > 0 || !existsSync(historyPath)) {
                 const fullHistory = Buffer.concat(parts);
-                writeFileSync(historyPath, fullHistory.toString('base64'));
+                atomicWriteFileSync(historyPath, fullHistory.toString('base64'));
             }
         } catch (e) {
             console.error(`[TaskPersistence] Failed to save history for task ${taskId}:`, e);
@@ -326,7 +342,7 @@ export class TaskPersistenceManager {
     saveArchivedHistory(taskId: string, base64Content: string): void {
         this.ensureArchivedHistoryDir();
         try {
-            writeFileSync(this.getArchivedHistoryPath(taskId), base64Content);
+            atomicWriteFileSync(this.getArchivedHistoryPath(taskId), base64Content);
         } catch (e) {
             console.error(`[TaskPersistence] Failed to save archived history for ${taskId}:`, e);
         }
