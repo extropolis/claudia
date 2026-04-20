@@ -257,6 +257,30 @@ export class TaskSpawner extends EventEmitter {
     /** Polling interval in ms - configurable via STATE_POLLING_MS env var */
     private readonly statePollingMs: number;
 
+    // Idle task reaper — periodically disconnects tasks that have been idle for
+    // too long, reclaiming their PTY + Claude CLI + MCP server processes.
+    // Without this, long-lived backends accumulate hundreds of idle Claude
+    // processes (one per task) consuming GB of RAM and eventually thrashing
+    // the system (load avg climbs, typing into the xterm goes slow because
+    // the OS can't schedule keystrokes promptly).
+    private idleReaperInterval: NodeJS.Timeout | null = null;
+    /** Idle timeout in ms — a task idle longer than this is reaped. Configurable
+     * via IDLE_TASK_REAP_HOURS env var. 0 disables the reaper entirely. */
+    private readonly idleReapMs: number;
+    /** How often the reaper runs. Configurable via IDLE_TASK_REAP_INTERVAL_MS. */
+    private readonly idleReapIntervalMs: number;
+
+    // On-disk history file cap.
+    // The in-memory outputHistory is trimmed to 2MB (see MAX_HISTORY_SIZE in
+    // setupProcessHandlers), but the disk file is only appended to and was
+    // previously unbounded — files grew to 50+ MB each, 3.6 GB total for 354
+    // files. When this backend has been up for days, that I/O pressure alone
+    // slows the system and wastes disk.
+    /** Max size of an on-disk history file before it's rotated. 0 disables. */
+    private readonly historyFileMaxBytes: number;
+    /** After rotation, how many bytes of the tail we keep. */
+    private readonly historyFileKeepBytes: number;
+
     // Backend abstraction for multi-backend support (Claude Code, OpenCode, etc.)
     private backend: CodeBackend | null = null;
     private backendType: BackendType = 'claude-code';
@@ -283,6 +307,31 @@ export class TaskSpawner extends EventEmitter {
         const envPollingMs = parseInt(process.env.STATE_POLLING_MS || '', 10);
         this.statePollingMs = !isNaN(envPollingMs) && envPollingMs >= 500 ? envPollingMs : 3000;
 
+        // Idle task reaper config (disabled with 0). Default: reap tasks idle
+        // >24h, check every 10 min. Floor of 1 min on the interval to keep tests
+        // fast but not spammy.
+        const envReapHours = parseFloat(process.env.IDLE_TASK_REAP_HOURS || '');
+        this.idleReapMs = !isNaN(envReapHours) && envReapHours >= 0
+            ? envReapHours * 60 * 60 * 1000
+            : 24 * 60 * 60 * 1000;
+        const envReapInterval = parseInt(process.env.IDLE_TASK_REAP_INTERVAL_MS || '', 10);
+        this.idleReapIntervalMs = !isNaN(envReapInterval) && envReapInterval >= 60_000
+            ? envReapInterval
+            : 10 * 60 * 1000;
+
+        // History file cap config. Default: rotate at 5MB, keep last 2MB tail.
+        // The 2MB floor matches MAX_HISTORY_SIZE for in-memory outputHistory,
+        // so a reconnect that reads the file has roughly the same context as
+        // a task that never disconnected.
+        const envMaxBytes = parseInt(process.env.HISTORY_FILE_MAX_BYTES || '', 10);
+        this.historyFileMaxBytes = !isNaN(envMaxBytes) && envMaxBytes >= 0
+            ? envMaxBytes
+            : 5 * 1024 * 1024;
+        const envKeepBytes = parseInt(process.env.HISTORY_FILE_KEEP_BYTES || '', 10);
+        this.historyFileKeepBytes = !isNaN(envKeepBytes) && envKeepBytes > 0
+            ? envKeepBytes
+            : 2 * 1024 * 1024;
+
         // Initialize backend based on config
         this.backendType = configStore?.getBackend() || 'claude-code';
         this.initializeBackend();
@@ -292,10 +341,17 @@ export class TaskSpawner extends EventEmitter {
 
         this.loadPersistedTasks();
 
+        // Sweep orphan history files left behind by destroyed/archived tasks
+        // in older versions. Runs once at startup; new destroys/archives clean
+        // up inline.
+        this.sweepOrphanHistoryFiles();
+
         // Start state polling (only for claude-code backend which uses PTY)
         // OpenCode backend handles its own state management via HTTP API
         if (this.backendType === 'claude-code') {
             this.startStatePolling();
+            // Start idle-task reaper (claude-code only — OpenCode has its own lifecycle)
+            this.startIdleTaskReaper();
         }
 
         if (autoReconnect && this.disconnectedTasks.size > 0) {
@@ -605,6 +661,11 @@ export class TaskSpawner extends EventEmitter {
             clearInterval(this.statePollingInterval);
             this.statePollingInterval = null;
         }
+        // Stop idle-task reaper for claude-code (OpenCode has its own lifecycle)
+        if (this.backendType === 'claude-code' && this.idleReaperInterval) {
+            clearInterval(this.idleReaperInterval);
+            this.idleReaperInterval = null;
+        }
 
         // Update the config store if we have one
         if (this.configStore) {
@@ -617,6 +678,7 @@ export class TaskSpawner extends EventEmitter {
         // Start state polling if switching to claude-code
         if (this.backendType === 'claude-code') {
             this.startStatePolling();
+            this.startIdleTaskReaper();
         }
     }
 
@@ -673,6 +735,192 @@ export class TaskSpawner extends EventEmitter {
      */
     private getArchivedHistoryPath(taskId: string): string {
         return join(this.getArchivedHistoryDir(), `${taskId}.txt`);
+    }
+
+    /**
+     * Delete task-histories/*.txt files whose taskId is not referenced by any
+     * live, disconnected, or archived task. Prior versions of destroyTask did
+     * not remove the history file, so these orphans accumulated (118 totalling
+     * ~3 GB on the reporter's machine).
+     *
+     * Runs once at startup. After this, destroyTask removes the history file
+     * inline, so orphans shouldn't recur.
+     */
+    private sweepOrphanHistoryFiles(): void {
+        const historyDir = this.getHistoryDir();
+        if (!existsSync(historyDir)) return;
+
+        const knownIds = new Set<string>();
+        for (const id of this.tasks.keys()) knownIds.add(id);
+        for (const id of this.disconnectedTasks.keys()) knownIds.add(id);
+        for (const id of this.archivedTasks.keys()) knownIds.add(id);
+
+        let deletedCount = 0;
+        let reclaimedBytes = 0;
+        try {
+            for (const entry of readdirSync(historyDir)) {
+                if (!entry.endsWith('.txt')) continue;
+                const taskId = entry.slice(0, -'.txt'.length);
+                if (knownIds.has(taskId)) continue;
+                // Skip per-process tmp files from atomicWriteHistorySync — they
+                // may be mid-rename by another instance.
+                if (entry.includes('.tmp')) continue;
+
+                const full = join(historyDir, entry);
+                try {
+                    const size = statSync(full).size;
+                    unlinkSync(full);
+                    deletedCount++;
+                    reclaimedBytes += size;
+                } catch (e) {
+                    logger.warn('Failed to delete orphan history file', { file: entry, error: (e as Error).message });
+                }
+            }
+        } catch (e) {
+            logger.error('Orphan history sweep failed', { error: (e as Error).message });
+            return;
+        }
+
+        if (deletedCount > 0) {
+            logger.info('Swept orphan history files', {
+                files: deletedCount,
+                reclaimedMB: Math.round(reclaimedBytes / 1024 / 1024)
+            });
+        }
+
+        // Second pass: rotate any already-oversized files. Per-append rotation
+        // only fires on active tasks; idle tasks' old bloated files need this.
+        if (this.historyFileMaxBytes > 0) {
+            let rotated = 0;
+            try {
+                for (const entry of readdirSync(historyDir)) {
+                    if (!entry.endsWith('.txt')) continue;
+                    if (entry.includes('.tmp')) continue;
+                    const full = join(historyDir, entry);
+                    try {
+                        if (statSync(full).size > this.historyFileMaxBytes) {
+                            this.rotateHistoryFileIfNeeded(full);
+                            rotated++;
+                        }
+                    } catch (_e) { /* ignore individual failures */ }
+                }
+            } catch (_e) { /* ignore dir-wide failure */ }
+            if (rotated > 0) {
+                logger.info('Rotated oversized history files on startup', { rotated });
+            }
+        }
+    }
+
+    /**
+     * If the history file on disk exceeds historyFileMaxBytes, rewrite it so
+     * only the last historyFileKeepBytes are preserved. Tries to align the cut
+     * at a newline so the first rendered line isn't a partial-UTF-8 mess.
+     *
+     * We rotate instead of truncating the in-memory buffer because the on-disk
+     * path was previously unbounded — files accumulated to 50+ MB each.
+     */
+    private rotateHistoryFileIfNeeded(historyPath: string): void {
+        if (this.historyFileMaxBytes <= 0) return;
+        if (!existsSync(historyPath)) return;
+
+        let stat;
+        try {
+            stat = statSync(historyPath);
+        } catch (_e) {
+            return;
+        }
+        if (stat.size <= this.historyFileMaxBytes) return;
+
+        const keep = this.historyFileKeepBytes;
+        try {
+            const fd = openSync(historyPath, 'r');
+            try {
+                const start = Math.max(0, stat.size - keep);
+                const buf = Buffer.alloc(stat.size - start);
+                readSync(fd, buf, 0, buf.length, start);
+
+                // Align to first newline within the first 1KB if possible, to
+                // drop a likely-partial opening line. Fall back to raw cut.
+                let offset = 0;
+                const scan = Math.min(1024, buf.length);
+                const nl = buf.indexOf(0x0a, 0);
+                if (nl >= 0 && nl < scan) offset = nl + 1;
+
+                const marker = Buffer.from(`\x1b[90m── history trimmed (${Math.round((stat.size - start) / 1024)} KB shown of ${Math.round(stat.size / 1024)} KB) ──\x1b[0m\r\n`);
+                const payload = Buffer.concat([marker, buf.subarray(offset)]);
+                this.atomicWriteHistorySync(historyPath, payload.toString('utf8'));
+                logger.info('Rotated history file', {
+                    file: historyPath,
+                    originalBytes: stat.size,
+                    newBytes: payload.length,
+                });
+            } finally {
+                closeSync(fd);
+            }
+        } catch (e) {
+            logger.warn('Failed to rotate history file', { file: historyPath, error: (e as Error).message });
+        }
+    }
+
+    /**
+     * Start the idle-task reaper. Runs `reapIdleTasks` on an interval.
+     */
+    private startIdleTaskReaper(): void {
+        if (this.idleReaperInterval) return;
+        if (this.idleReapMs <= 0) {
+            logger.info('Idle task reaper disabled (IDLE_TASK_REAP_HOURS=0)');
+            return;
+        }
+        this.idleReaperInterval = setInterval(() => {
+            try {
+                this.reapIdleTasks();
+            } catch (e) {
+                logger.error('Idle task reaper threw', { error: (e as Error).message });
+            }
+        }, this.idleReapIntervalMs);
+        logger.info('Idle task reaper started', {
+            intervalMs: this.idleReapIntervalMs,
+            idleThresholdMs: this.idleReapMs,
+        });
+    }
+
+    /**
+     * Disconnect live tasks that have been idle longer than idleReapMs. The
+     * disconnected PTY is killed (freeing its Claude CLI + MCP processes) but
+     * the task metadata is preserved with its sessionId — the user can still
+     * resume it, and the backend will --resume cleanly.
+     *
+     * Skips tasks that are starting/busy/waiting_input (they aren't actually
+     * idle, just quiet). State 'exited' tasks have no process to reclaim.
+     */
+    private reapIdleTasks(): void {
+        const now = Date.now();
+        const toReap: string[] = [];
+        for (const task of this.tasks.values()) {
+            if (task.state !== 'idle') continue;
+            const age = now - task.lastActivity.getTime();
+            if (age >= this.idleReapMs) toReap.push(task.id);
+        }
+        if (toReap.length === 0) return;
+
+        logger.info('Reaping idle tasks', {
+            count: toReap.length,
+            idleThresholdHours: Math.round(this.idleReapMs / 3600_000),
+        });
+        for (const id of toReap) {
+            try {
+                this.disconnectTask(id);
+                // Clear continuation flags so the reaped task doesn't auto-reconnect
+                // on next startup — the user must click into it to wake it up.
+                const persisted = this.disconnectedTasks.get(id);
+                if (persisted) {
+                    persisted.shouldContinue = false;
+                    persisted.wasInterrupted = false;
+                }
+            } catch (e) {
+                logger.warn('Failed to reap idle task', { taskId: id, error: (e as Error).message });
+            }
+        }
     }
 
     /**
@@ -1132,6 +1380,9 @@ export class TaskSpawner extends EventEmitter {
                             const newData = Buffer.concat(newBuffers).toString('utf8');
                             appendFileSync(historyPath, newData);
                             task.savedBufferCount = task.outputHistory.length;
+                            // Cap on-disk growth. Without this the file grew unbounded
+                            // (files reached 50+ MB each, 3.6 GB total in prod).
+                            this.rotateHistoryFileIfNeeded(historyPath);
                         }
                     }
                 } catch (e) {
@@ -2989,6 +3240,19 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // Clean up any pending session capture for this task
         this.clearSessionCapture(taskId);
 
+        // Delete the task's on-disk history file so it doesn't become an
+        // orphan (prior versions leaked these — 118 files, ~3 GB in prod).
+        const historyPath = this.getTaskHistoryPath(taskId);
+        if (existsSync(historyPath)) {
+            try {
+                unlinkSync(historyPath);
+            } catch (e) {
+                logger.warn('Failed to delete history file on destroyTask', {
+                    taskId, error: (e as Error).message,
+                });
+            }
+        }
+
         // Clean up MCP temp config files
         this.cleanupMcpTempFiles(taskId);
 
@@ -3614,6 +3878,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         if (this.statePollingInterval) {
             clearInterval(this.statePollingInterval);
             this.statePollingInterval = null;
+        }
+        // Stop idle-task reaper
+        if (this.idleReaperInterval) {
+            clearInterval(this.idleReaperInterval);
+            this.idleReaperInterval = null;
         }
 
         // Clean up all session capture intervals to prevent memory leaks
