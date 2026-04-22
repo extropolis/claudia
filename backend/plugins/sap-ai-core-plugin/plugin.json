@@ -12,6 +12,10 @@
       "apiMode": "sap-ai-core",
       "models": [
         {
+          "id": "anthropic--claude-opus-4-6",
+          "name": "Claude Opus 4.6"
+        },
+        {
           "id": "anthropic--claude-4.5-opus",
           "name": "Claude 4.5 Opus"
         },

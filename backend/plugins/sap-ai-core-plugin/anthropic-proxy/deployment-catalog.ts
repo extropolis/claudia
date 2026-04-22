@@ -38,6 +38,15 @@ const MODEL_MAPPINGS: Record<string, string> = {
     'claude-3-opus-20240229': 'anthropic--claude-3-opus',
     'claude-opus-4-20250514': 'anthropic--claude-opus-4',
     'claude-4-5-opus': 'anthropic--claude-4.5-opus',
+    'claude-opus-4-6': 'anthropic--claude-4.6-opus',
+};
+
+/**
+ * Static deployment ID mappings for specific models.
+ * Use this when you know the deployment ID but it's not returned by the API.
+ */
+const STATIC_DEPLOYMENT_IDS: Record<string, string> = {
+    'anthropic--claude-4.6-opus': 'dd24dcb0862e67a9',
 };
 
 // Build reverse mapping
@@ -96,6 +105,25 @@ export class DeploymentCatalog {
      * Find deployment for a given model name.
      */
     async findDeploymentFor(modelName: string): Promise<Deployment | undefined> {
+        // Check static deployment IDs first
+        if (STATIC_DEPLOYMENT_IDS[modelName]) {
+            console.log(`[DeploymentCatalog] Using static deployment ID for ${modelName}: ${STATIC_DEPLOYMENT_IDS[modelName]}`);
+            return {
+                id: STATIC_DEPLOYMENT_IDS[modelName],
+                status: DEPLOYMENT_STATUS_RUNNING,
+                details: {
+                    resources: {
+                        backendDetails: {
+                            model: {
+                                name: modelName
+                            }
+                        }
+                    }
+                }
+            };
+        }
+
+        // Fall back to dynamic lookup
         const deployments = await this.getAvailableDeployments();
         return deployments.find(d => this.extractModelName(d) === modelName);
     }

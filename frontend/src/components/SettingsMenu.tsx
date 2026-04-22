@@ -121,6 +121,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [autoFocusOnInput, setAutoFocusOnInput] = useState(false);
     const [useLearnings, setUseLearnings] = useState(false);
     const [claudiaMcpServerEnabled, setClaudiaMcpServerEnabled] = useState(false);
+    const [defaultBaseDirectory, setDefaultBaseDirectory] = useState('');
 
     // CLI Switches state
     const [cliSwitches, setCliSwitches] = useState({
@@ -131,7 +132,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         allowedTools: '',
         disallowedTools: '',
         appendSystemPrompt: '',
-        effortLevel: 'high'
+        effortLevel: 'high',
+        defaultModel: 'claude-opus-latest'
     });
     const cliSwitchesTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -319,6 +321,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 setBackend(config.backend || 'claude-code');
                 setUseLearnings(config.useLearnings || false);
                 setClaudiaMcpServerEnabled(config.claudiaMcpServerEnabled || false);
+                setDefaultBaseDirectory(config.defaultBaseDirectory || '');
 
                 // Load SAP AI Core config
                 if (config.sapAiCore) {
@@ -347,7 +350,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                         allowedTools: config.claudeCodeSwitches.allowedTools || '',
                         disallowedTools: config.claudeCodeSwitches.disallowedTools || '',
                         appendSystemPrompt: config.claudeCodeSwitches.appendSystemPrompt || '',
-                        effortLevel: config.claudeCodeSwitches.effortLevel || 'high'
+                        effortLevel: config.claudeCodeSwitches.effortLevel || 'high',
+                        defaultModel: config.claudeCodeSwitches.defaultModel || 'claude-opus-latest'
                     });
                 }
             }
@@ -662,6 +666,21 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     };
 
+    const saveDefaultBaseDirectory = async (value: string) => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ defaultBaseDirectory: value || undefined })
+            });
+            if (response.ok) {
+                setDefaultBaseDirectory(value);
+            }
+        } catch (error) {
+            console.error('Failed to save default base directory:', error);
+        }
+    };
+
     const saveUseLearnings = async (value: boolean) => {
         try {
             const response = await fetch(`${getApiBaseUrl()}/api/config`, {
@@ -836,7 +855,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         try {
             // Save to backend
             const response = await fetch(`${getApiBaseUrl()}/api/config`, {
-                method: 'POST',
+                method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     sapAiCore: {
@@ -1395,6 +1414,23 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     />
                                     <span className="toggle-slider"></span>
                                 </label>
+                            </div>
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Default Base Directory</span>
+                                    <span className="permission-description">
+                                        Default directory for new workspaces. Enter just a folder name to create workspaces under this directory.
+                                    </span>
+                                </div>
+                                <input
+                                    type="text"
+                                    value={defaultBaseDirectory}
+                                    onChange={(e) => setDefaultBaseDirectory(e.target.value)}
+                                    onBlur={(e) => saveDefaultBaseDirectory(e.target.value)}
+                                    placeholder="/path/to/projects"
+                                    className="text-input"
+                                    style={{ width: '100%', marginTop: '0.5em' }}
+                                />
                             </div>
                         </div>
                     </CollapsiblePanel>
@@ -2140,6 +2176,28 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     <option value="low">Low (faster)</option>
                                     <option value="medium">Medium</option>
                                     <option value="high">High (default)</option>
+                                </select>
+                            </div>
+
+                            {/* Default Model */}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Default Model</span>
+                                    <span className="permission-description">
+                                        Model used for new tasks. Passed as --model to Claude Code CLI.
+                                    </span>
+                                </div>
+                                <select
+                                    className="cli-switch-select"
+                                    value={cliSwitches.defaultModel || 'claude-opus-latest'}
+                                    onChange={(e) => handleCliSwitchToggle({ defaultModel: e.target.value })}
+                                >
+                                    <option value="claude-opus-latest">Opus 4.7 (default)</option>
+                                    <option value="claude-sonnet-4-6">Sonnet 4.6</option>
+                                    <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+                                    <option value="opus">Opus (latest alias)</option>
+                                    <option value="sonnet">Sonnet (latest alias)</option>
+                                    <option value="haiku">Haiku (latest alias)</option>
                                 </select>
                             </div>
 

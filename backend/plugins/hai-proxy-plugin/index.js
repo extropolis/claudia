@@ -254,9 +254,65 @@ export default class HaiProxyPlugin {
     }
 
     async onConfigChange(config) {
+        this.context?.logger.info('[HAI Plugin] onConfigChange called', {
+            apiMode: config?.apiMode,
+            hasHyperspaceProxy: !!config?.hyperspaceProxy
+        });
+
         // Config changes are handled automatically by the hyperspace proxy router
         // which reads from configStore on each request
-        this.context?.logger.info('HAI proxy config changed (handled by router)');
+
+        // Auto-start proxy if API mode is changed to hyperspace-proxy
+        const fullConfig = this.context.configStore.getConfig();
+        this.context?.logger.info('[HAI Plugin] Current apiMode from config store', {
+            apiMode: fullConfig.apiMode
+        });
+
+        if (fullConfig.apiMode === 'hyperspace-proxy') {
+            // Check if proxy is already running
+            const storedConfig = this.context.configStore.getHyperspaceProxy();
+            const candidateKey = this.haiProxyApiKey || storedConfig?.apiKey || null;
+
+            this.context?.logger.info('[HAI Plugin] Checking if proxy is already running', {
+                hasApiKey: !!candidateKey,
+                apiKeySource: this.haiProxyApiKey ? 'instance' : 'config'
+            });
+
+            if (candidateKey) {
+                const running = await this.isHaiProxyRunning(candidateKey);
+                if (running) {
+                    this.context.logger.info('[HAI Plugin] Proxy already running, no auto-start needed');
+                    return;
+                }
+                this.context.logger.info('[HAI Plugin] Proxy not responding, will auto-start');
+            }
+
+            // Proxy not running, auto-start it
+            this.context.logger.info('[HAI Plugin] API mode is hyperspace-proxy, auto-starting HAI proxy...');
+            try {
+                const result = await this.startProxy();
+                if (result.success) {
+                    this.context.logger.info('[HAI Plugin] Proxy auto-started successfully on config change', {
+                        apiKey: result.apiKey?.substring(0, 8) + '...',
+                        alreadyRunning: result.alreadyRunning
+                    });
+                } else {
+                    this.context.logger.error('[HAI Plugin] Failed to auto-start proxy on config change', {
+                        error: result.error,
+                        statusCode: result.statusCode
+                    });
+                }
+            } catch (error) {
+                this.context.logger.error('[HAI Plugin] Exception during proxy auto-start on config change', {
+                    error: error.message,
+                    stack: error.stack
+                });
+            }
+        } else {
+            this.context?.logger.info('[HAI Plugin] API mode is not hyperspace-proxy, skipping auto-start', {
+                apiMode: fullConfig.apiMode
+            });
+        }
     }
 
     getTaskEnvironment(config) {

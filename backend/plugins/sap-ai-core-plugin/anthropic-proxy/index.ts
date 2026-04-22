@@ -74,6 +74,7 @@ export function createAnthropicProxy(config: AnthropicProxyConfig): AnthropicPro
      * POST /v1/messages - Anthropic Messages API
      */
     router.post('/v1/messages', async (req: Request, res: Response) => {
+        console.log('[AnthropicProxy] ✅ REQUEST INTERCEPTED - Routing through SAP AI Core proxy');
         try {
             const { model, stream = false } = req.body;
 

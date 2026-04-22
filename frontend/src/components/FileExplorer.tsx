@@ -5,12 +5,13 @@ import {
     GitBranch, CircleDot, Plus, Trash2, Pencil, FileQuestion,
     CheckCircle2, XCircle, Clock, Loader2, SkipForward, ExternalLink,
     ArrowUp, ArrowDown, GitPullRequest, MessageSquare, Tag, User,
-    FileText, Activity, GitCommit
+    FileText, Activity, GitCommit, Copy, FolderInput, Eye
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { getApiBaseUrl } from '../config/api-config';
 import { FileContentModal } from './FileContentModal';
+import { ContextMenu, ContextMenuItem } from './ContextMenu';
 import './FileExplorer.css';
 
 // ============== SHARED TYPES ==============
@@ -115,6 +116,12 @@ interface FileExplorerProps {
     workspaceName: string | undefined;
 }
 
+interface ContextMenuState {
+    x: number;
+    y: number;
+    items: ContextMenuItem[];
+}
+
 // ============== FILE UTILITIES ==============
 
 function getFileColor(name: string): string {
@@ -159,14 +166,28 @@ function getFileIcon(name: string): string {
 // ============== FILE TREE COMPONENTS ==============
 
 function DirectoryNode({
-    item, workspacePath, depth = 0, onFileClick,
-}: { item: FileItem; workspacePath: string; depth?: number; onFileClick: (path: string) => void }) {
+    item, workspacePath, depth = 0, onFileClick, selectedPaths, onContextMenu, onSelect,
+}: {
+    item: FileItem;
+    workspacePath: string;
+    depth?: number;
+    onFileClick: (path: string) => void;
+    selectedPaths: Set<string>;
+    onContextMenu: (e: React.MouseEvent, path: string, type: 'file' | 'directory') => void;
+    onSelect: (path: string, type: 'file' | 'directory', multi: boolean) => void;
+}) {
     const [expanded, setExpanded] = useState(false);
     const [children, setChildren] = useState<FileItem[]>([]);
     const [loading, setLoading] = useState(false);
     const [loaded, setLoaded] = useState(false);
+    const isSelected = selectedPaths.has(item.path);
 
-    const toggleExpand = useCallback(async () => {
+    const toggleExpand = useCallback(async (e: React.MouseEvent) => {
+        // Don't expand if user is selecting
+        if (e.ctrlKey || e.metaKey || e.shiftKey) {
+            return;
+        }
+
         if (!expanded && !loaded) {
             setLoading(true);
             try {
@@ -186,10 +207,30 @@ function DirectoryNode({
         setExpanded(!expanded);
     }, [expanded, loaded, workspacePath, item.path]);
 
+    const handleClick = useCallback((e: React.MouseEvent) => {
+        if (e.ctrlKey || e.metaKey || e.shiftKey) {
+            e.stopPropagation();
+            onSelect(item.path, 'directory', true);
+        } else {
+            toggleExpand(e);
+        }
+    }, [item.path, onSelect, toggleExpand]);
+
+    const handleContextMenu = useCallback((e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onContextMenu(e, item.path, 'directory');
+    }, [item.path, onContextMenu]);
+
     return (
         <div className="file-tree-node">
-            <div className="file-tree-item directory" style={{ paddingLeft: `${depth * 16 + 8}px` }}
-                onClick={toggleExpand} title={item.path}>
+            <div
+                className={`file-tree-item directory ${isSelected ? 'selected' : ''}`}
+                style={{ paddingLeft: `${depth * 16 + 8}px` }}
+                onClick={handleClick}
+                onContextMenu={handleContextMenu}
+                title={item.path}
+            >
                 <span className="file-tree-chevron">
                     {loading ? <RefreshCw size={12} className="spinning" />
                         : expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
@@ -211,9 +252,26 @@ function DirectoryNode({
                     )}
                     {children.map((child) =>
                         child.type === 'directory' ? (
-                            <DirectoryNode key={child.path} item={child} workspacePath={workspacePath} depth={depth + 1} onFileClick={onFileClick} />
+                            <DirectoryNode
+                                key={child.path}
+                                item={child}
+                                workspacePath={workspacePath}
+                                depth={depth + 1}
+                                onFileClick={onFileClick}
+                                selectedPaths={selectedPaths}
+                                onContextMenu={onContextMenu}
+                                onSelect={onSelect}
+                            />
                         ) : (
-                            <FileNode key={child.path} item={child} depth={depth + 1} onFileClick={onFileClick} />
+                            <FileNode
+                                key={child.path}
+                                item={child}
+                                depth={depth + 1}
+                                onFileClick={onFileClick}
+                                selectedPaths={selectedPaths}
+                                onContextMenu={onContextMenu}
+                                onSelect={onSelect}
+                            />
                         )
                     )}
                 </div>
@@ -222,13 +280,65 @@ function DirectoryNode({
     );
 }
 
-function FileNode({ item, depth = 0, onFileClick }: { item: FileItem; depth?: number; onFileClick: (path: string) => void }) {
+function FileNode({
+    item, depth = 0, onFileClick, selectedPaths, onContextMenu, onSelect,
+}: {
+    item: FileItem;
+    depth?: number;
+    onFileClick: (path: string) => void;
+    selectedPaths: Set<string>;
+    onContextMenu: (e: React.MouseEvent, path: string, type: 'file' | 'directory') => void;
+    onSelect: (path: string, type: 'file' | 'directory', multi: boolean) => void;
+}) {
     const color = getFileColor(item.name);
     const badge = getFileIcon(item.name);
+    const isSelected = selectedPaths.has(item.path);
+    const clickTimeoutRef = useRef<number | null>(null);
+
+    const handleClick = useCallback((e: React.MouseEvent) => {
+        if (e.ctrlKey || e.metaKey || e.shiftKey) {
+            // Multi-select
+            e.stopPropagation();
+            onSelect(item.path, 'file', true);
+        } else {
+            // Single click - select, double click - open
+            if (clickTimeoutRef.current !== null) {
+                // Double click detected
+                clearTimeout(clickTimeoutRef.current);
+                clickTimeoutRef.current = null;
+                onFileClick(item.path);
+            } else {
+                // Wait for potential double click
+                clickTimeoutRef.current = window.setTimeout(() => {
+                    clickTimeoutRef.current = null;
+                    onSelect(item.path, 'file', false);
+                }, 300);
+            }
+        }
+    }, [item.path, onFileClick, onSelect]);
+
+    const handleContextMenu = useCallback((e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onContextMenu(e, item.path, 'file');
+    }, [item.path, onContextMenu]);
+
+    useEffect(() => {
+        return () => {
+            if (clickTimeoutRef.current !== null) {
+                clearTimeout(clickTimeoutRef.current);
+            }
+        };
+    }, []);
+
     return (
-        <div className="file-tree-item file clickable" style={{ paddingLeft: `${depth * 16 + 8}px` }}
+        <div
+            className={`file-tree-item file clickable ${isSelected ? 'selected' : ''}`}
+            style={{ paddingLeft: `${depth * 16 + 8}px` }}
             title={`${item.path}${item.size ? ` (${formatSize(item.size)})` : ''}`}
-            onClick={() => onFileClick(item.path)}>
+            onClick={handleClick}
+            onContextMenu={handleContextMenu}
+        >
             <span className="file-tree-chevron" />
             <span className="file-tree-icon file-icon" style={{ color }}>
                 {badge ? <span className="file-type-badge" style={{ color }}>{badge}</span> : <File size={14} />}
@@ -249,6 +359,8 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
     const [hasLoaded, setHasLoaded] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [selectedFile, setSelectedFile] = useState<string | null>(null);
+    const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+    const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
     const prevWorkspaceRef = useRef<string | undefined>(undefined);
 
     const loadRootFiles = useCallback(async () => {
@@ -279,6 +391,7 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
             prevWorkspaceRef.current = workspacePath;
             setRootItems([]);
             setHasLoaded(false);
+            setSelectedPaths(new Set());
             if (isActive) loadRootFiles();
         }
     }, [workspacePath, isActive, loadRootFiles]);
@@ -292,6 +405,153 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
     const handleFileClick = useCallback((path: string) => {
         setSelectedFile(path);
     }, []);
+
+    const handleSelect = useCallback((path: string, _type: 'file' | 'directory', multi: boolean) => {
+        if (multi) {
+            setSelectedPaths(prev => {
+                const newSet = new Set(prev);
+                if (newSet.has(path)) {
+                    newSet.delete(path);
+                } else {
+                    newSet.add(path);
+                }
+                return newSet;
+            });
+        } else {
+            setSelectedPaths(new Set([path]));
+        }
+    }, []);
+
+    const handleContextMenu = useCallback((e: React.MouseEvent, path: string, _type: 'file' | 'directory') => {
+        // Select the item if not already selected
+        if (!selectedPaths.has(path)) {
+            setSelectedPaths(new Set([path]));
+        }
+
+        const itemName = path.split('/').pop() || path;
+
+        const items: ContextMenuItem[] = [
+            {
+                label: 'Show in Finder',
+                icon: <Eye size={14} />,
+                onClick: async () => {
+                    try {
+                        const res = await fetch(`${getApiBaseUrl()}/api/workspaces/files/reveal`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ workspace: workspacePath, path }),
+                        });
+                        if (!res.ok) {
+                            const error = await res.json();
+                            alert(`Failed to reveal file: ${error.error}`);
+                        }
+                    } catch (err) {
+                        console.error('Failed to reveal file:', err);
+                        alert('Failed to reveal file');
+                    }
+                },
+            },
+            { divider: true, label: '', icon: null, onClick: () => {} },
+            {
+                label: 'Copy',
+                icon: <Copy size={14} />,
+                onClick: async () => {
+                    const newName = prompt(`Copy "${itemName}" to:`, itemName);
+                    if (!newName || newName === itemName) return;
+
+                    const parentPath = path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '';
+                    const destinationPath = parentPath ? `${parentPath}/${newName}` : newName;
+
+                    try {
+                        const res = await fetch(`${getApiBaseUrl()}/api/workspaces/files/copy`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                workspace: workspacePath,
+                                sourcePath: path,
+                                destinationPath,
+                            }),
+                        });
+
+                        if (res.ok) {
+                            loadRootFiles();
+                        } else {
+                            const error = await res.json();
+                            alert(`Failed to copy: ${error.error}`);
+                        }
+                    } catch (err) {
+                        console.error('Failed to copy:', err);
+                        alert('Failed to copy file');
+                    }
+                },
+            },
+            {
+                label: 'Move/Rename',
+                icon: <FolderInput size={14} />,
+                onClick: async () => {
+                    const newName = prompt(`Move/Rename "${itemName}" to:`, itemName);
+                    if (!newName || newName === itemName) return;
+
+                    const parentPath = path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '';
+                    const destinationPath = parentPath ? `${parentPath}/${newName}` : newName;
+
+                    try {
+                        const res = await fetch(`${getApiBaseUrl()}/api/workspaces/files/move`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                workspace: workspacePath,
+                                sourcePath: path,
+                                destinationPath,
+                            }),
+                        });
+
+                        if (res.ok) {
+                            loadRootFiles();
+                            setSelectedPaths(new Set());
+                        } else {
+                            const error = await res.json();
+                            alert(`Failed to move: ${error.error}`);
+                        }
+                    } catch (err) {
+                        console.error('Failed to move:', err);
+                        alert('Failed to move file');
+                    }
+                },
+            },
+            { divider: true, label: '', icon: null, onClick: () => {} },
+            {
+                label: 'Delete',
+                icon: <Trash2 size={14} />,
+                danger: true,
+                onClick: async () => {
+                    const confirm = window.confirm(`Are you sure you want to delete "${itemName}"?`);
+                    if (!confirm) return;
+
+                    try {
+                        const res = await fetch(`${getApiBaseUrl()}/api/workspaces/files`, {
+                            method: 'DELETE',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ workspace: workspacePath, path }),
+                        });
+
+                        if (res.ok) {
+                            loadRootFiles();
+                            setSelectedPaths(new Set());
+                        } else {
+                            const error = await res.json();
+                            alert(`Failed to delete: ${error.error}`);
+                        }
+                    } catch (err) {
+                        console.error('Failed to delete:', err);
+                        alert('Failed to delete file');
+                    }
+                },
+            },
+        ];
+
+        setContextMenu({ x: e.clientX, y: e.clientY, items });
+    }, [workspacePath, selectedPaths, loadRootFiles]);
 
     const dirCount = rootItems.filter(i => i.type === 'directory').length;
     const fileCount = rootItems.filter(i => i.type === 'file').length;
@@ -315,8 +575,25 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
                     {!loading && !error && hasLoaded && rootItems.length === 0 && <div className="fe-empty">No files found</div>}
                     {rootItems.map((item) =>
                         item.type === 'directory'
-                            ? <DirectoryNode key={item.path} item={item} workspacePath={workspacePath} depth={0} onFileClick={handleFileClick} />
-                            : <FileNode key={item.path} item={item} depth={0} onFileClick={handleFileClick} />
+                            ? <DirectoryNode
+                                key={item.path}
+                                item={item}
+                                workspacePath={workspacePath}
+                                depth={0}
+                                onFileClick={handleFileClick}
+                                selectedPaths={selectedPaths}
+                                onContextMenu={handleContextMenu}
+                                onSelect={handleSelect}
+                            />
+                            : <FileNode
+                                key={item.path}
+                                item={item}
+                                depth={0}
+                                onFileClick={handleFileClick}
+                                selectedPaths={selectedPaths}
+                                onContextMenu={handleContextMenu}
+                                onSelect={handleSelect}
+                            />
                     )}
                 </div>
             </div>
@@ -325,6 +602,14 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
                     workspacePath={workspacePath}
                     filePath={selectedFile}
                     onClose={() => setSelectedFile(null)}
+                />
+            )}
+            {contextMenu && (
+                <ContextMenu
+                    x={contextMenu.x}
+                    y={contextMenu.y}
+                    items={contextMenu.items}
+                    onClose={() => setContextMenu(null)}
                 />
             )}
         </>

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Volume2, Mic, Radio, Clock, Key } from 'lucide-react';
+import { Volume2, Mic, Radio, Clock, Key, Bell, CheckCircle } from 'lucide-react';
 import { useTaskStore } from '../stores/taskStore';
 import { useSpeechSynthesis } from '../hooks/useSpeechSynthesis';
 
@@ -15,12 +15,22 @@ export function VoiceSettingsContent() {
         autoSendEnabled,
         autoSendDelayMs,
         deepgramApiKey,
+        thinkingSoundEnabled,
+        thinkingSoundInterval,
+        voiceSummaryOnCompletion,
+        voiceProgressUpdatesEnabled,
+        voiceProgressUpdateInterval,
         setVoiceEnabled,
         setAutoSpeakResponses,
         setVoiceSettings,
         setGlobalVoiceEnabled,
         setAutoSendSettings,
-        setDeepgramApiKey
+        setDeepgramApiKey,
+        setThinkingSoundEnabled,
+        setThinkingSoundInterval,
+        setVoiceSummaryOnCompletion,
+        setVoiceProgressUpdatesEnabled,
+        setVoiceProgressUpdateInterval
     } = useTaskStore();
 
     const { voices, speak } = useSpeechSynthesis();
@@ -30,10 +40,14 @@ export function VoiceSettingsContent() {
     const [localPitch, setLocalPitch] = useState(voicePitch);
     const [localVolume, setLocalVolume] = useState(voiceVolume);
     const [localAutoSendDelay, setLocalAutoSendDelay] = useState(autoSendDelayMs / 1000);
+    const [localThinkingSoundInterval, setLocalThinkingSoundInterval] = useState(thinkingSoundInterval / 1000);
+    const [localProgressUpdateInterval, setLocalProgressUpdateInterval] = useState(voiceProgressUpdateInterval / 1000);
 
     // Debounce timers
     const voiceTimerRef = useRef<NodeJS.Timeout | null>(null);
     const autoSendTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const thinkingSoundTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const progressUpdateTimerRef = useRef<NodeJS.Timeout | null>(null);
 
     useEffect(() => {
         if (!localVoice && voices.length > 0) {
@@ -101,6 +115,28 @@ export function VoiceSettingsContent() {
         }, 500);
     };
 
+    const handleThinkingSoundIntervalChange = (interval: number) => {
+        setLocalThinkingSoundInterval(interval);
+        // Auto-save with debounce
+        if (thinkingSoundTimerRef.current) {
+            clearTimeout(thinkingSoundTimerRef.current);
+        }
+        thinkingSoundTimerRef.current = setTimeout(() => {
+            setThinkingSoundInterval(interval * 1000);
+        }, 500);
+    };
+
+    const handleProgressUpdateIntervalChange = (interval: number) => {
+        setLocalProgressUpdateInterval(interval);
+        // Auto-save with debounce
+        if (progressUpdateTimerRef.current) {
+            clearTimeout(progressUpdateTimerRef.current);
+        }
+        progressUpdateTimerRef.current = setTimeout(() => {
+            setVoiceProgressUpdateInterval(interval * 1000);
+        }, 500);
+    };
+
     const handleTest = () => {
         const testText = "Hello! This is how I sound with the current voice settings.";
         speak(testText);
@@ -160,29 +196,34 @@ export function VoiceSettingsContent() {
             </div>
 
             <div className="settings-section">
+                <h3 className="settings-section-title">
+                    <Clock size={16} />
+                    Hands-Free Mode
+                </h3>
                 <label className="toggle-label">
                     <input
                         type="checkbox"
                         checked={autoSendEnabled}
                         onChange={(e) => setAutoSendSettings(e.target.checked, localAutoSendDelay * 1000)}
-                        disabled={!isMicSupported || !hasApiKey}
+                        disabled={!isMicSupported || !hasApiKey || !globalVoiceEnabled}
                     />
-                    <Clock size={16} />
-                    <span>Auto-send on Silence</span>
+                    <span>Enable Hands-Free Mode</span>
                 </label>
                 <p className="setting-description">
-                    Automatically send message after you stop speaking
+                    {!globalVoiceEnabled
+                        ? 'Enable Always-Listening Mode above to use hands-free mode.'
+                        : 'Automatically send your message after you stop speaking. Perfect for truly hands-free interaction.'}
                 </p>
             </div>
 
             {autoSendEnabled && (
                 <div className="settings-section">
                     <label className="setting-label">
-                        Silence Threshold: {localAutoSendDelay.toFixed(1)}s
+                        Auto-Send Delay: {localAutoSendDelay.toFixed(1)}s
                     </label>
                     <input
                         type="range"
-                        min="1"
+                        min="0.5"
                         max="5"
                         step="0.5"
                         value={localAutoSendDelay}
@@ -190,10 +231,132 @@ export function VoiceSettingsContent() {
                         className="slider"
                     />
                     <div className="slider-labels">
-                        <span>1s</span>
-                        <span>3s</span>
-                        <span>5s</span>
+                        <span>Fast (0.5s)</span>
+                        <span>Normal (2.5s)</span>
+                        <span>Slow (5s)</span>
                     </div>
+                    <p className="setting-description" style={{ marginTop: '8px', fontSize: '12px' }}>
+                        Message will be sent automatically after {localAutoSendDelay.toFixed(1)} seconds of silence
+                    </p>
+                </div>
+            )}
+
+            <div className="settings-divider"></div>
+
+            {/* Voice Summary on Completion Section */}
+            <div className="settings-section">
+                <h3 className="settings-section-title">
+                    <CheckCircle size={16} />
+                    Hands-Free Completion Summaries
+                </h3>
+                <label className="toggle-label">
+                    <input
+                        type="checkbox"
+                        checked={voiceSummaryOnCompletion}
+                        onChange={(e) => setVoiceSummaryOnCompletion(e.target.checked)}
+                        disabled={!globalVoiceEnabled}
+                    />
+                    <span>Announce Task Summaries When Complete</span>
+                </label>
+                <p className="setting-description">
+                    {!globalVoiceEnabled
+                        ? 'Enable Always-Listening Mode above to use this feature.'
+                        : 'Automatically speaks the task summary when a task completes. Perfect for hands-free workflow - you can use your voice to give the next instruction immediately.'}
+                </p>
+            </div>
+
+            <div className="settings-divider"></div>
+
+            {/* Voice Progress Updates Section */}
+            <div className="settings-section">
+                <h3 className="settings-section-title">
+                    <Clock size={16} />
+                    Hands-Free Progress Updates
+                </h3>
+                <label className="toggle-label">
+                    <input
+                        type="checkbox"
+                        checked={voiceProgressUpdatesEnabled}
+                        onChange={(e) => setVoiceProgressUpdatesEnabled(e.target.checked)}
+                        disabled={!globalVoiceEnabled}
+                    />
+                    <span>Announce Progress for Long-Running Tasks</span>
+                </label>
+                <p className="setting-description">
+                    {!globalVoiceEnabled
+                        ? 'Enable Always-Listening Mode above to use this feature.'
+                        : 'Periodically announces what active tasks are working on. Helpful for staying informed without looking at the screen.'}
+                </p>
+            </div>
+
+            {voiceProgressUpdatesEnabled && (
+                <div className="settings-section">
+                    <label className="setting-label">
+                        Update Interval: {Math.floor(localProgressUpdateInterval / 60)}m {Math.floor(localProgressUpdateInterval % 60)}s
+                    </label>
+                    <input
+                        type="range"
+                        min="60"
+                        max="600"
+                        step="60"
+                        value={localProgressUpdateInterval}
+                        onChange={(e) => handleProgressUpdateIntervalChange(parseFloat(e.target.value))}
+                        className="slider"
+                    />
+                    <div className="slider-labels">
+                        <span>Frequent (1m)</span>
+                        <span>Default (3m)</span>
+                        <span>Rare (10m)</span>
+                    </div>
+                    <p className="setting-description" style={{ marginTop: '8px', fontSize: '12px' }}>
+                        Progress will be announced every {Math.floor(localProgressUpdateInterval / 60)} minutes {Math.floor(localProgressUpdateInterval % 60) > 0 ? `and ${Math.floor(localProgressUpdateInterval % 60)} seconds` : ''} for busy tasks
+                    </p>
+                </div>
+            )}
+
+            <div className="settings-divider"></div>
+
+            {/* Thinking Sound Section */}
+            <div className="settings-section">
+                <h3 className="settings-section-title">
+                    <Bell size={16} />
+                    Thinking Sound
+                </h3>
+                <label className="toggle-label">
+                    <input
+                        type="checkbox"
+                        checked={thinkingSoundEnabled}
+                        onChange={(e) => setThinkingSoundEnabled(e.target.checked)}
+                    />
+                    <span>Play Sound When Claude is Thinking</span>
+                </label>
+                <p className="setting-description">
+                    Play a gentle notification sound at regular intervals while any task is actively thinking or processing
+                </p>
+            </div>
+
+            {thinkingSoundEnabled && (
+                <div className="settings-section">
+                    <label className="setting-label">
+                        Sound Interval: {localThinkingSoundInterval.toFixed(1)}s
+                    </label>
+                    <input
+                        type="range"
+                        min="1"
+                        max="30"
+                        step="1"
+                        value={localThinkingSoundInterval}
+                        onChange={(e) => handleThinkingSoundIntervalChange(parseFloat(e.target.value))}
+                        className="slider"
+                    />
+                    <div className="slider-labels">
+                        <span>Frequent (1s)</span>
+                        <span>Normal (15s)</span>
+                        <span>Rare (30s)</span>
+                    </div>
+                    <p className="setting-description" style={{ marginTop: '8px', fontSize: '12px' }}>
+                        Sound will play every {localThinkingSoundInterval.toFixed(1)} seconds while Claude is thinking
+                    </p>
                 </div>
             )}
 

@@ -47,6 +47,20 @@ export function GlobalVoiceManager() {
     const handleResult = useCallback((transcript: string, isFinal: boolean) => {
         lastTranscriptTimeRef.current = Date.now();
 
+        // Auto-focus logic: if no input is focused and we receive voice input,
+        // automatically focus the most appropriate input field
+        if (!focusedInputId && transcript.trim()) {
+            // Try to focus the selected task's input, or fall back to new task input
+            const selectedTaskInput = document.querySelector('[data-input-type="task-input"]') as HTMLElement;
+            const newTaskInput = document.querySelector('[data-input-type="new-task-input"]') as HTMLElement;
+
+            if (selectedTaskInput) {
+                selectedTaskInput.focus();
+            } else if (newTaskInput) {
+                newTaskInput.focus();
+            }
+        }
+
         if (isFinal) {
             appendVoiceTranscript(transcript);
             setVoiceInterimTranscript('');
@@ -57,7 +71,7 @@ export function GlobalVoiceManager() {
             // Clear timer while still receiving interim results
             clearSilenceTimer();
         }
-    }, [appendVoiceTranscript, setVoiceInterimTranscript, scheduleAutoSend, clearSilenceTimer]);
+    }, [appendVoiceTranscript, setVoiceInterimTranscript, scheduleAutoSend, clearSilenceTimer, focusedInputId]);
 
     // Handle listening state changes - just for logging
     // We intentionally do NOT auto-disable globalVoiceEnabled here because:

@@ -170,7 +170,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             fontFamily: '"SF Mono", "Monaco", "Inconsolata", "Fira Code", monospace',
             scrollback: 10000,
             allowProposedApi: true,
-            scrollOnInput: false, // Disable automatic scroll on data write - we'll control it manually
+            scrollOnUserInput: false, // Disable automatic scroll on user input - we'll control it manually
             theme: {
                 background: '#0a0a0a',
                 foreground: '#d4d4d4',

@@ -16,6 +16,8 @@ export function GlobalVoiceToggle() {
         globalVoiceEnabled,
         focusedInputId,
         deepgramApiKey,
+        autoSendEnabled,
+        autoSendDelayMs,
         setGlobalVoiceEnabled,
         clearVoiceTranscript
     } = useTaskStore();
@@ -97,9 +99,11 @@ export function GlobalVoiceToggle() {
 
     return (
         <button
-            className={`global-voice-toggle ${globalVoiceEnabled ? 'active' : ''}`}
+            className={`global-voice-toggle ${globalVoiceEnabled ? 'active' : ''} ${globalVoiceEnabled && autoSendEnabled ? 'hands-free' : ''}`}
             onClick={handleToggle}
-            title={globalVoiceEnabled ? `Voice Mode ON - Speaking to: ${targetDescription}` : 'Enable Voice Mode'}
+            title={globalVoiceEnabled
+                ? `Voice Mode ON - Speaking to: ${targetDescription}${autoSendEnabled ? ` | Hands-Free (${autoSendDelayMs / 1000}s)` : ''}`
+                : 'Enable Voice Mode'}
         >
             {globalVoiceEnabled ? (
                 <Mic size={18} className="mic-active" />
@@ -110,6 +114,7 @@ export function GlobalVoiceToggle() {
             {globalVoiceEnabled && (
                 <span className="voice-target-indicator">
                     {targetDescription}
+                    {autoSendEnabled && <span className="hands-free-badge">🤲</span>}
                 </span>
             )}
         </button>
