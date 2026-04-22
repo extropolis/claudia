@@ -3863,13 +3863,30 @@ export async function createApp(basePath?: string) {
                 body: string;
             }
 
+            // Validate state against an allowlist before passing to gh
+            if (!['open', 'closed', 'all'].includes(state)) {
+                return res.status(400).json({ error: 'state must be "open", "closed", or "all"' });
+            }
+            // Validate assignee: allow @me or a GitHub username (alphanumerics + dashes, max 39 chars)
+            if (assignee && assignee !== '@me' && !/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,38})$/.test(assignee)) {
+                return res.status(400).json({ error: 'Invalid assignee' });
+            }
+
             let issues: GitHubIssue[] = [];
             try {
-                const assigneeArg = assignee ? `--assignee ${assignee}` : '';
-                const { stdout } = await execAsync(
-                    `gh issue list --repo ${owner}/${repo} --state ${state} ${assigneeArg} --limit ${limit} --json number,title,state,url,createdAt,updatedAt,closedAt,author,assignees,labels,comments,body`,
-                    { cwd: workspacePath }
-                );
+                const { execFile } = await import('child_process');
+                const execFileAsync = (await import('util')).promisify(execFile);
+                const ghArgs = [
+                    'issue', 'list',
+                    '--repo', `${owner}/${repo}`,
+                    '--state', state,
+                    '--limit', String(limit),
+                    '--json', 'number,title,state,url,createdAt,updatedAt,closedAt,author,assignees,labels,comments,body',
+                ];
+                if (assignee) {
+                    ghArgs.push('--assignee', assignee);
+                }
+                const { stdout } = await execFileAsync('gh', ghArgs, { cwd: workspacePath });
                 issues = JSON.parse(stdout);
             } catch (err) {
                 const errorMsg = err instanceof Error ? err.message : String(err);
@@ -3984,11 +4001,20 @@ export async function createApp(basePath?: string) {
 
             // Create issue using gh CLI
             try {
+                const { execFile } = await import('child_process');
+                const execFileAsync = (await import('util')).promisify(execFile);
                 // gh CLI requires --body when running non-interactively, so provide empty string if not given
                 const bodyText = body || '';
                 // Auto-assign to current user (@me)
-                const { stdout } = await execAsync(
-                    `gh issue create --repo ${owner}/${repo} --title "${title.replace(/"/g, '\\"')}" --body "${bodyText.replace(/"/g, '\\"')}" --assignee @me`,
+                const { stdout } = await execFileAsync(
+                    'gh',
+                    [
+                        'issue', 'create',
+                        '--repo', `${owner}/${repo}`,
+                        '--title', title,
+                        '--body', bodyText,
+                        '--assignee', '@me',
+                    ],
                     { cwd: workspacePath }
                 );
                 // gh issue create returns the URL of the created issue
@@ -4099,9 +4125,12 @@ export async function createApp(basePath?: string) {
 
             // Close or reopen the issue using gh CLI
             try {
-                const stateArg = state === 'closed' ? '--close' : '--reopen';
-                await execAsync(
-                    `gh issue ${state === 'closed' ? 'close' : 'reopen'} ${issueNumber} --repo ${owner}/${repo}`,
+                const { execFile } = await import('child_process');
+                const execFileAsync = (await import('util')).promisify(execFile);
+                const subcommand = state === 'closed' ? 'close' : 'reopen';
+                await execFileAsync(
+                    'gh',
+                    ['issue', subcommand, String(issueNumber), '--repo', `${owner}/${repo}`],
                     { cwd: workspacePath }
                 );
 
@@ -4245,10 +4274,12 @@ export async function createApp(basePath?: string) {
             // Get the diff
             let diff = '';
             try {
-                const command = staged
-                    ? `git diff --cached -- "${filePath}"`
-                    : `git diff -- "${filePath}"`;
-                const { stdout } = await execAsync(command, { cwd: workspacePath, maxBuffer: 10 * 1024 * 1024 });
+                const { execFile } = await import('child_process');
+                const execFileAsync = (await import('util')).promisify(execFile);
+                const args = staged
+                    ? ['diff', '--cached', '--', filePath]
+                    : ['diff', '--', filePath];
+                const { stdout } = await execFileAsync('git', args, { cwd: workspacePath, maxBuffer: 10 * 1024 * 1024 });
                 diff = stdout;
             } catch (err) {
                 logger.error('Failed to get git diff', { error: err instanceof Error ? err.message : String(err) });
