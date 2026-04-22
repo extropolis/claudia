@@ -3,9 +3,10 @@ import { EventEmitter } from 'events';
 import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS } from '@claudia/shared';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, statSync, openSync, readSync, closeSync, renameSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
+import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
 import { sanitizePrompt } from './validation.js';
@@ -614,7 +615,7 @@ export class TaskSpawner extends EventEmitter {
             // Write .mcp.json
             const workspaceMcpFile = `${workspaceId}/.mcp.json`;
             try {
-                writeFileSync(workspaceMcpFile, mcpConfigJson);
+                atomicWriteFileSync(workspaceMcpFile, mcpConfigJson);
                 logger.info('Synced .mcp.json', { workspaceId });
             } catch (err) {
                 logger.error('Failed to write .mcp.json', { workspaceId, error: err });
@@ -627,7 +628,7 @@ export class TaskSpawner extends EventEmitter {
                 if (!existsSync(claudeSettingsDir)) {
                     mkdirSync(claudeSettingsDir, { recursive: true });
                 }
-                writeFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
+                atomicWriteFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
                 logger.info('Synced settings.local.json', { workspaceId });
             } catch (err) {
                 logger.error('Failed to write settings.local.json', { workspaceId, error: err });
@@ -1200,7 +1201,7 @@ export class TaskSpawner extends EventEmitter {
                                 `[TaskSpawner] Main file is ${mainState} but backup has ${bakTotal} tasks — ` +
                                 `restoring from ${bakPath}`
                             );
-                            writeFileSync(this.persistencePath, bakRaw);
+                            atomicWriteFileSync(this.persistencePath, bakRaw);
                         }
                     } catch (_e) {
                         // Backup also corrupt; fall through to normal load.
@@ -1238,7 +1239,7 @@ export class TaskSpawner extends EventEmitter {
                             if (contentToWrite.includes('\x1b') || contentToWrite.includes(' ')) {
                                 contentToWrite = Buffer.from(contentToWrite, 'utf8').toString('base64');
                             }
-                            writeFileSync(this.getTaskHistoryPath(persisted.id), contentToWrite);
+                            atomicWriteFileSync(this.getTaskHistoryPath(persisted.id), contentToWrite);
                             if (process.env.DEBUG_TASKS) {
                                 console.log(`[TaskSpawner] Migrated history for task ${persisted.id} to file`);
                             }
@@ -1279,7 +1280,7 @@ export class TaskSpawner extends EventEmitter {
                                 if (contentToWrite.includes('\x1b') || contentToWrite.includes(' ')) {
                                     contentToWrite = Buffer.from(contentToWrite, 'utf8').toString('base64');
                                 }
-                                writeFileSync(this.getArchivedHistoryPath(archived.id), contentToWrite);
+                                atomicWriteFileSync(this.getArchivedHistoryPath(archived.id), contentToWrite);
                                 migratedCount++;
                             } catch (e) {
                                 console.error(`[TaskSpawner] Failed to migrate history for ${archived.id}:`, e);
@@ -1375,6 +1376,9 @@ export class TaskSpawner extends EventEmitter {
                         }
                     } else if (task.savedBufferCount < task.outputHistory.length) {
                         // File exists — incrementally append only NEW buffers (O(new) not O(total))
+                        // appendFileSync is kept (not replaced with atomicWriteFileSync) because
+                        // an append is not a full-file replacement; the tmp+rename atomic write
+                        // semantics don't apply to incremental appends.
                         const newBuffers = task.outputHistory.slice(task.savedBufferCount);
                         if (newBuffers.length > 0) {
                             const newData = Buffer.concat(newBuffers).toString('utf8');
@@ -1456,28 +1460,15 @@ export class TaskSpawner extends EventEmitter {
                 }
             }
 
-            // Atomic write: write to a temp file then rename. This ensures tasks.json
-            // is never left in a partial state if the process dies mid-write.
-            // Per-process unique tmp name so concurrent backend instances (e.g. two
-            // tsx watch processes from a stale dev server) don't race on the same .tmp.
-            const tmpPath = `${this.persistencePath}.${process.pid}.tmp`;
-            const bakPath = this.persistencePath + '.bak';
-            writeFileSync(tmpPath, JSON.stringify(persistence, null, 2));
-            try {
-                // Keep a backup of the previous good save before replacing.
-                if (existsSync(this.persistencePath)) {
-                    try {
-                        renameSync(this.persistencePath, bakPath);
-                    } catch (_e) {
-                        // Backup is best-effort; continue with the rename.
-                    }
-                }
-                renameSync(tmpPath, this.persistencePath);
-            } catch (renameErr) {
-                // Clean up our tmp file on failure so we don't leave junk behind.
-                try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch (_e) { /* ignore */ }
-                throw renameErr;
-            }
+            // Atomic write with .bak rollover: write to a per-pid temp file, rename the
+            // current file to tasks.json.bak, then rename the temp file into place.
+            // The previous good save is recoverable from .bak if a future load hits
+            // an empty/corrupt main file.
+            atomicWriteFileSync(
+                this.persistencePath,
+                JSON.stringify(persistence, null, 2),
+                { backup: true }
+            );
 
             // Update our tracked modification time after successful save (PR #37 multi-instance guard)
             const newStats = statSync(this.persistencePath);
@@ -2264,7 +2255,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
             // Write to temp file for --mcp-config
             const mcpConfigFile = join(tmpdir(), `claudia-mcp-${id}.json`);
-            writeFileSync(mcpConfigFile, mcpConfigJson);
+            atomicWriteFileSync(mcpConfigFile, mcpConfigJson);
             logger.info(`MCP config written to: ${mcpConfigFile}`);
             logger.debug(`MCP config contents: ${mcpConfigJson}`);
             claudeArgs.push('--mcp-config', mcpConfigFile);
@@ -3359,7 +3350,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 if (!existsSync(historyDir)) {
                     mkdirSync(historyDir, { recursive: true });
                 }
-                writeFileSync(this.getArchivedHistoryPath(taskId), historyBase64);
+                atomicWriteFileSync(this.getArchivedHistoryPath(taskId), historyBase64);
                 console.log(`[TaskSpawner] Saved archived task history to disk: ${historySize} bytes`);
             } catch (e) {
                 console.error(`[TaskSpawner] Failed to save archived history:`, e);
@@ -3412,7 +3403,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                     if (!existsSync(historyDir)) {
                         mkdirSync(historyDir, { recursive: true });
                     }
-                    writeFileSync(this.getArchivedHistoryPath(taskId), disconnected.outputHistory);
+                    atomicWriteFileSync(this.getArchivedHistoryPath(taskId), disconnected.outputHistory);
                     const historySize = Math.floor(disconnected.outputHistory.length * 0.75);
                     console.log(`[TaskSpawner] Saved disconnected task history to disk: ${historySize} bytes`);
                 } catch (e) {
@@ -3721,7 +3712,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             if (mcpResult) {
                 const mcpConfigJson = JSON.stringify({ mcpServers: mcpResult.mcpConfig }, null, 2);
                 const mcpConfigFile = join(tmpdir(), `claudia-mcp-${taskId}-reconnect.json`);
-                writeFileSync(mcpConfigFile, mcpConfigJson);
+                atomicWriteFileSync(mcpConfigFile, mcpConfigJson);
                 claudeArgs.push('--mcp-config', mcpConfigFile);
                 console.log(`[TaskSpawner] Added ${mcpResult.enabledMcpServers.length} MCP server(s) for reconnection via ${mcpConfigFile}`);
             }
