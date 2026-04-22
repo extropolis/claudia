@@ -639,6 +639,23 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Atomically write history to disk via a per-process temp file + rename.
+     * Mirrors the pattern used for tasks.json so a crash mid-write can't leave
+     * a truncated history file. Per-process tmp name avoids races between
+     * concurrent backend instances.
+     */
+    private atomicWriteHistorySync(historyPath: string, data: string): void {
+        const tmpPath = `${historyPath}.${process.pid}.tmp`;
+        writeFileSync(tmpPath, data);
+        try {
+            renameSync(tmpPath, historyPath);
+        } catch (e) {
+            try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch (_e) { /* ignore */ }
+            throw e;
+        }
+    }
+
+    /**
      * Get the directory for task histories
      */
     private getHistoryDir(): string {
@@ -1090,20 +1107,23 @@ export class TaskSpawner extends EventEmitter {
                 // on EVERY save. With 15+ tasks and 112MB of history, this caused OOM crashes.
                 const historyPath = this.getTaskHistoryPath(task.id);
                 try {
-                    if (task.previousHistory) {
-                        // First save after reconnect — write base + current output as raw text
+                    if (task.previousHistory && !existsSync(historyPath)) {
+                        // Legacy/first-seed: previousHistory came from in-memory/tasks.json
+                        // and no on-disk file exists yet. Seed the file once; subsequent saves
+                        // fall through to the incremental-append branch below. Keep previousHistory
+                        // in memory (UI fallback, archive) — it will be dropped by setTaskActive.
                         const buffers: Buffer[] = [task.previousHistory];
                         if (task.outputHistory.length > 0) {
                             buffers.push(...task.outputHistory);
                         }
                         const fullHistory = Buffer.concat(buffers);
-                        atomicWriteFileSync(historyPath, fullHistory.toString('utf8'));
+                        this.atomicWriteHistorySync(historyPath, fullHistory.toString('utf8'));
                         task.savedBufferCount = task.outputHistory.length;
                     } else if (!existsSync(historyPath)) {
                         // New file — write current output as raw text
                         if (task.outputHistory.length > 0) {
                             const fullHistory = Buffer.concat(task.outputHistory);
-                            atomicWriteFileSync(historyPath, fullHistory.toString('utf8'));
+                            this.atomicWriteHistorySync(historyPath, fullHistory.toString('utf8'));
                             task.savedBufferCount = task.outputHistory.length;
                         }
                     } else if (task.savedBufferCount < task.outputHistory.length) {

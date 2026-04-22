@@ -9,6 +9,7 @@ import { execSync } from 'child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { randomBytes } from 'crypto';
 import { TaskState, WaitingInputType, TaskGitState } from '@claudia/shared';
 import {
     CodeBackend,
@@ -178,7 +179,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
     }
 
     async createTask(config: TaskConfig, environment: TaskEnvironment): Promise<BackendTask> {
-        const id = `task-${Date.now()}-${require('crypto').randomBytes(5).toString('hex')}`;
+        const id = `task-${Date.now()}-${randomBytes(5).toString('hex')}`;
 
         const customArgs = process.env['CC_CLAUDE_ARGS']
             ? process.env['CC_CLAUDE_ARGS'].split(' ')
