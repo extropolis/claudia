@@ -2081,6 +2081,8 @@ export class TaskSpawner extends EventEmitter {
                 });
                 this.taskLearnings.set(task.id, injectedLearnings.map(l => l.learning.id));
             }
+        }).catch(err => {
+            logger.warn('Learnings promise rejected (post-spawn)', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
         });
 
         return task;
@@ -2344,6 +2346,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 task.gitStateBefore = gitStateBefore;
                 logger.info(`Git state attached to task`, { taskId: id, commit: gitStateBefore.commitBefore?.substring(0, 7) });
             }
+        }).catch(err => {
+            logger.warn('Git state promise rejected (post-spawn)', { taskId: id, error: err instanceof Error ? err.message : String(err) });
         });
 
 
