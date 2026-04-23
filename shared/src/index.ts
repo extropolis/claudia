@@ -44,6 +44,7 @@ export interface Task {
     backendType?: BackendType; // Which backend created this task (for conversation lookup)
     displayName?: string;    // User-editable display name (shown instead of prompt when set)
     displayNameEditedByUser?: boolean; // True if the user manually edited the display name (prevents agent auto-title)
+    tokenUsage?: TaskTokenUsage; // Token usage data for this task
 }
 
 export interface WorkspaceReference {
@@ -170,6 +171,8 @@ export type WSMessageType =
     | 'cron:fired'
     | 'cron:ran'
     | 'cron:updated'
+    // Token usage
+    | 'task:tokenUsage'
     // Server status
     | 'server:reloading'
     | 'server:reconnecting'
@@ -191,4 +194,50 @@ export interface WSErrorPayload {
     message: string;
     code?: string;
     originalType?: string;
+}
+
+// Token usage tracking types
+export interface ModelPricing {
+    inputPer1MTokens: number;
+    outputPer1MTokens: number;
+    cacheCreatePer1MTokens: number;
+    cacheReadPer1MTokens: number;
+}
+
+export interface ModelTokenUsage {
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+    costUsd: number;
+}
+
+export interface TaskTokenUsage {
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+    totalCostUsd: number;
+    modelBreakdown: Record<string, ModelTokenUsage>;
+    lastUpdated: string;
+}
+
+export interface UsageDashboardData {
+    totalCostUsd: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCacheCreationTokens: number;
+    totalCacheReadTokens: number;
+    byWorkspace: Record<string, {
+        name: string;
+        costUsd: number;
+        inputTokens: number;
+        outputTokens: number;
+        cacheCreationTokens: number;
+        cacheReadTokens: number;
+        taskCount: number;
+    }>;
+    byModel: Record<string, ModelTokenUsage>;
+    taskCount: number;
+    lastUpdated: string;
 }

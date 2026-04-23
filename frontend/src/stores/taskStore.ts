@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask } from '@claudia/shared';
+import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask, TaskTokenUsage } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
 import { ThemePreference } from '../types/theme';
 
@@ -109,6 +109,7 @@ interface TaskStore {
     setTasks: (tasks: Task[]) => void;
     addTask: (task: Task) => void;
     updateTask: (task: Task) => void;
+    updateTaskTokenUsage: (taskId: string, tokenUsage: TaskTokenUsage) => void;
     deleteTask: (taskId: string) => void;
 
     // Archived tasks actions
@@ -407,6 +408,16 @@ export const useTaskStore = create<TaskStore>()(
                 const newTasks = new Map(tasks);
                 newTasks.set(task.id, mergedTask);
                 set({ tasks: newTasks });
+            },
+
+            updateTaskTokenUsage: (taskId, tokenUsage) => {
+                const { tasks } = get();
+                const task = tasks.get(taskId);
+                if (task) {
+                    const newTasks = new Map(tasks);
+                    newTasks.set(taskId, { ...task, tokenUsage });
+                    set({ tasks: newTasks });
+                }
             },
 
             deleteTask: (taskId) => {

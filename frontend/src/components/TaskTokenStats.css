@@ -1,0 +1,91 @@
+.task-token-stats {
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, monospace;
+    font-size: 0.7rem;
+}
+
+.task-token-stats-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 4px 12px;
+    border: none;
+    background: transparent;
+    color: #6b7280;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s ease;
+}
+
+.task-token-stats-bar:hover {
+    background: var(--bg-tertiary);
+}
+
+.token-value {
+    color: #6b7280;
+}
+
+.token-cache {
+    color: #6b7280;
+}
+
+.token-sep {
+    color: #555;
+    opacity: 0.5;
+}
+
+.token-sep-section {
+    margin: 0 6px;
+}
+
+.token-cost {
+    color: #6b7280;
+}
+
+.token-model {
+    color: #6b7280;
+}
+
+.token-expand-icon {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    color: #555;
+    opacity: 0.6;
+}
+
+/* Expanded detail table */
+.task-token-stats-detail {
+    padding: 4px 12px 8px;
+    border-top: 1px solid var(--border-color);
+}
+
+.token-breakdown-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.675rem;
+}
+
+.token-breakdown-table th {
+    text-align: left;
+    color: #555;
+    font-weight: 500;
+    padding: 3px 8px 3px 0;
+    border-bottom: 1px solid var(--border-color);
+    text-transform: uppercase;
+    font-size: 0.6rem;
+    letter-spacing: 0.5px;
+}
+
+.token-breakdown-table td {
+    padding: 3px 8px 3px 0;
+    color: #6b7280;
+}
+
+.token-breakdown-table td.model-name {
+    color: #6b7280;
+}
+
+.token-breakdown-table tbody tr:hover {
+    background: var(--bg-tertiary);
+}

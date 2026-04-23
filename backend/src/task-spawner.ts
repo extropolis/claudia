@@ -1,11 +1,12 @@
 import { spawn, IPty } from 'node-pty';
 import { EventEmitter } from 'events';
-import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS } from '@claudia/shared';
+import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, TaskTokenUsage } from '@claudia/shared';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, statSync, openSync, readSync, closeSync, renameSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
+import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
 import { sanitizePrompt } from './validation.js';
@@ -13,6 +14,7 @@ import { createLogger } from './logger.js';
 import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
+import { getTaskTokenUsage } from './token-parser.js';
 import { randomBytes } from 'crypto';
 
 const logger = createLogger('[TaskSpawner]');
@@ -148,6 +150,7 @@ interface PersistedTask {
     displayNameEditedByUser?: boolean; // True if the user manually edited the display name
     processStartedAt?: string; // When the current processing run started (preserved across reconnect)
     order?: number;            // Display order within workspace (lower = higher in list)
+    tokenUsage?: TaskTokenUsage; // Aggregated token usage for this task
 }
 
 // Lightweight metadata for archived tasks (no outputHistory - loaded lazily from disk)
@@ -257,6 +260,30 @@ export class TaskSpawner extends EventEmitter {
     /** Polling interval in ms - configurable via STATE_POLLING_MS env var */
     private readonly statePollingMs: number;
 
+    // Idle task reaper — periodically disconnects tasks that have been idle for
+    // too long, reclaiming their PTY + Claude CLI + MCP server processes.
+    // Without this, long-lived backends accumulate hundreds of idle Claude
+    // processes (one per task) consuming GB of RAM and eventually thrashing
+    // the system (load avg climbs, typing into the xterm goes slow because
+    // the OS can't schedule keystrokes promptly).
+    private idleReaperInterval: NodeJS.Timeout | null = null;
+    /** Idle timeout in ms — a task idle longer than this is reaped. Configurable
+     * via IDLE_TASK_REAP_HOURS env var. 0 disables the reaper entirely. */
+    private readonly idleReapMs: number;
+    /** How often the reaper runs. Configurable via IDLE_TASK_REAP_INTERVAL_MS. */
+    private readonly idleReapIntervalMs: number;
+
+    // On-disk history file cap.
+    // The in-memory outputHistory is trimmed to 2MB (see MAX_HISTORY_SIZE in
+    // setupProcessHandlers), but the disk file is only appended to and was
+    // previously unbounded — files grew to 50+ MB each, 3.6 GB total for 354
+    // files. When this backend has been up for days, that I/O pressure alone
+    // slows the system and wastes disk.
+    /** Max size of an on-disk history file before it's rotated. 0 disables. */
+    private readonly historyFileMaxBytes: number;
+    /** After rotation, how many bytes of the tail we keep. */
+    private readonly historyFileKeepBytes: number;
+
     // Backend abstraction for multi-backend support (Claude Code, OpenCode, etc.)
     private backend: CodeBackend | null = null;
     private backendType: BackendType = 'claude-code';
@@ -283,6 +310,31 @@ export class TaskSpawner extends EventEmitter {
         const envPollingMs = parseInt(process.env.STATE_POLLING_MS || '', 10);
         this.statePollingMs = !isNaN(envPollingMs) && envPollingMs >= 500 ? envPollingMs : 3000;
 
+        // Idle task reaper config (disabled with 0). Default: reap tasks idle
+        // >24h, check every 10 min. Floor of 1 min on the interval to keep tests
+        // fast but not spammy.
+        const envReapHours = parseFloat(process.env.IDLE_TASK_REAP_HOURS || '');
+        this.idleReapMs = !isNaN(envReapHours) && envReapHours >= 0
+            ? envReapHours * 60 * 60 * 1000
+            : 24 * 60 * 60 * 1000;
+        const envReapInterval = parseInt(process.env.IDLE_TASK_REAP_INTERVAL_MS || '', 10);
+        this.idleReapIntervalMs = !isNaN(envReapInterval) && envReapInterval >= 60_000
+            ? envReapInterval
+            : 10 * 60 * 1000;
+
+        // History file cap config. Default: rotate at 5MB, keep last 2MB tail.
+        // The 2MB floor matches MAX_HISTORY_SIZE for in-memory outputHistory,
+        // so a reconnect that reads the file has roughly the same context as
+        // a task that never disconnected.
+        const envMaxBytes = parseInt(process.env.HISTORY_FILE_MAX_BYTES || '', 10);
+        this.historyFileMaxBytes = !isNaN(envMaxBytes) && envMaxBytes >= 0
+            ? envMaxBytes
+            : 5 * 1024 * 1024;
+        const envKeepBytes = parseInt(process.env.HISTORY_FILE_KEEP_BYTES || '', 10);
+        this.historyFileKeepBytes = !isNaN(envKeepBytes) && envKeepBytes > 0
+            ? envKeepBytes
+            : 2 * 1024 * 1024;
+
         // Initialize backend based on config
         this.backendType = configStore?.getBackend() || 'claude-code';
         this.initializeBackend();
@@ -292,10 +344,17 @@ export class TaskSpawner extends EventEmitter {
 
         this.loadPersistedTasks();
 
+        // Sweep orphan history files left behind by destroyed/archived tasks
+        // in older versions. Runs once at startup; new destroys/archives clean
+        // up inline.
+        this.sweepOrphanHistoryFiles();
+
         // Start state polling (only for claude-code backend which uses PTY)
         // OpenCode backend handles its own state management via HTTP API
         if (this.backendType === 'claude-code') {
             this.startStatePolling();
+            // Start idle-task reaper (claude-code only — OpenCode has its own lifecycle)
+            this.startIdleTaskReaper();
         }
 
         if (autoReconnect && this.disconnectedTasks.size > 0) {
@@ -558,7 +617,7 @@ export class TaskSpawner extends EventEmitter {
             // Write .mcp.json
             const workspaceMcpFile = `${workspaceId}/.mcp.json`;
             try {
-                writeFileSync(workspaceMcpFile, mcpConfigJson);
+                atomicWriteFileSync(workspaceMcpFile, mcpConfigJson);
                 logger.info('Synced .mcp.json', { workspaceId });
             } catch (err) {
                 logger.error('Failed to write .mcp.json', { workspaceId, error: err });
@@ -571,7 +630,7 @@ export class TaskSpawner extends EventEmitter {
                 if (!existsSync(claudeSettingsDir)) {
                     mkdirSync(claudeSettingsDir, { recursive: true });
                 }
-                writeFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
+                atomicWriteFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
                 logger.info('Synced settings.local.json', { workspaceId });
             } catch (err) {
                 logger.error('Failed to write settings.local.json', { workspaceId, error: err });
@@ -605,6 +664,11 @@ export class TaskSpawner extends EventEmitter {
             clearInterval(this.statePollingInterval);
             this.statePollingInterval = null;
         }
+        // Stop idle-task reaper for claude-code (OpenCode has its own lifecycle)
+        if (this.backendType === 'claude-code' && this.idleReaperInterval) {
+            clearInterval(this.idleReaperInterval);
+            this.idleReaperInterval = null;
+        }
 
         // Update the config store if we have one
         if (this.configStore) {
@@ -617,6 +681,7 @@ export class TaskSpawner extends EventEmitter {
         // Start state polling if switching to claude-code
         if (this.backendType === 'claude-code') {
             this.startStatePolling();
+            this.startIdleTaskReaper();
         }
     }
 
@@ -638,6 +703,23 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Atomically write history to disk via a per-process temp file + rename.
+     * Mirrors the pattern used for tasks.json so a crash mid-write can't leave
+     * a truncated history file. Per-process tmp name avoids races between
+     * concurrent backend instances.
+     */
+    private atomicWriteHistorySync(historyPath: string, data: string): void {
+        const tmpPath = `${historyPath}.${process.pid}.tmp`;
+        writeFileSync(tmpPath, data);
+        try {
+            renameSync(tmpPath, historyPath);
+        } catch (e) {
+            try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch (_e) { /* ignore */ }
+            throw e;
+        }
+    }
+
+    /**
      * Get the directory for task histories
      */
     private getHistoryDir(): string {
@@ -656,6 +738,192 @@ export class TaskSpawner extends EventEmitter {
      */
     private getArchivedHistoryPath(taskId: string): string {
         return join(this.getArchivedHistoryDir(), `${taskId}.txt`);
+    }
+
+    /**
+     * Delete task-histories/*.txt files whose taskId is not referenced by any
+     * live, disconnected, or archived task. Prior versions of destroyTask did
+     * not remove the history file, so these orphans accumulated (118 totalling
+     * ~3 GB on the reporter's machine).
+     *
+     * Runs once at startup. After this, destroyTask removes the history file
+     * inline, so orphans shouldn't recur.
+     */
+    private sweepOrphanHistoryFiles(): void {
+        const historyDir = this.getHistoryDir();
+        if (!existsSync(historyDir)) return;
+
+        const knownIds = new Set<string>();
+        for (const id of this.tasks.keys()) knownIds.add(id);
+        for (const id of this.disconnectedTasks.keys()) knownIds.add(id);
+        for (const id of this.archivedTasks.keys()) knownIds.add(id);
+
+        let deletedCount = 0;
+        let reclaimedBytes = 0;
+        try {
+            for (const entry of readdirSync(historyDir)) {
+                if (!entry.endsWith('.txt')) continue;
+                const taskId = entry.slice(0, -'.txt'.length);
+                if (knownIds.has(taskId)) continue;
+                // Skip per-process tmp files from atomicWriteHistorySync — they
+                // may be mid-rename by another instance.
+                if (entry.includes('.tmp')) continue;
+
+                const full = join(historyDir, entry);
+                try {
+                    const size = statSync(full).size;
+                    unlinkSync(full);
+                    deletedCount++;
+                    reclaimedBytes += size;
+                } catch (e) {
+                    logger.warn('Failed to delete orphan history file', { file: entry, error: (e as Error).message });
+                }
+            }
+        } catch (e) {
+            logger.error('Orphan history sweep failed', { error: (e as Error).message });
+            return;
+        }
+
+        if (deletedCount > 0) {
+            logger.info('Swept orphan history files', {
+                files: deletedCount,
+                reclaimedMB: Math.round(reclaimedBytes / 1024 / 1024)
+            });
+        }
+
+        // Second pass: rotate any already-oversized files. Per-append rotation
+        // only fires on active tasks; idle tasks' old bloated files need this.
+        if (this.historyFileMaxBytes > 0) {
+            let rotated = 0;
+            try {
+                for (const entry of readdirSync(historyDir)) {
+                    if (!entry.endsWith('.txt')) continue;
+                    if (entry.includes('.tmp')) continue;
+                    const full = join(historyDir, entry);
+                    try {
+                        if (statSync(full).size > this.historyFileMaxBytes) {
+                            this.rotateHistoryFileIfNeeded(full);
+                            rotated++;
+                        }
+                    } catch (_e) { /* ignore individual failures */ }
+                }
+            } catch (_e) { /* ignore dir-wide failure */ }
+            if (rotated > 0) {
+                logger.info('Rotated oversized history files on startup', { rotated });
+            }
+        }
+    }
+
+    /**
+     * If the history file on disk exceeds historyFileMaxBytes, rewrite it so
+     * only the last historyFileKeepBytes are preserved. Tries to align the cut
+     * at a newline so the first rendered line isn't a partial-UTF-8 mess.
+     *
+     * We rotate instead of truncating the in-memory buffer because the on-disk
+     * path was previously unbounded — files accumulated to 50+ MB each.
+     */
+    private rotateHistoryFileIfNeeded(historyPath: string): void {
+        if (this.historyFileMaxBytes <= 0) return;
+        if (!existsSync(historyPath)) return;
+
+        let stat;
+        try {
+            stat = statSync(historyPath);
+        } catch (_e) {
+            return;
+        }
+        if (stat.size <= this.historyFileMaxBytes) return;
+
+        const keep = this.historyFileKeepBytes;
+        try {
+            const fd = openSync(historyPath, 'r');
+            try {
+                const start = Math.max(0, stat.size - keep);
+                const buf = Buffer.alloc(stat.size - start);
+                readSync(fd, buf, 0, buf.length, start);
+
+                // Align to first newline within the first 1KB if possible, to
+                // drop a likely-partial opening line. Fall back to raw cut.
+                let offset = 0;
+                const scan = Math.min(1024, buf.length);
+                const nl = buf.indexOf(0x0a, 0);
+                if (nl >= 0 && nl < scan) offset = nl + 1;
+
+                const marker = Buffer.from(`\x1b[90m── history trimmed (${Math.round((stat.size - start) / 1024)} KB shown of ${Math.round(stat.size / 1024)} KB) ──\x1b[0m\r\n`);
+                const payload = Buffer.concat([marker, buf.subarray(offset)]);
+                this.atomicWriteHistorySync(historyPath, payload.toString('utf8'));
+                logger.info('Rotated history file', {
+                    file: historyPath,
+                    originalBytes: stat.size,
+                    newBytes: payload.length,
+                });
+            } finally {
+                closeSync(fd);
+            }
+        } catch (e) {
+            logger.warn('Failed to rotate history file', { file: historyPath, error: (e as Error).message });
+        }
+    }
+
+    /**
+     * Start the idle-task reaper. Runs `reapIdleTasks` on an interval.
+     */
+    private startIdleTaskReaper(): void {
+        if (this.idleReaperInterval) return;
+        if (this.idleReapMs <= 0) {
+            logger.info('Idle task reaper disabled (IDLE_TASK_REAP_HOURS=0)');
+            return;
+        }
+        this.idleReaperInterval = setInterval(() => {
+            try {
+                this.reapIdleTasks();
+            } catch (e) {
+                logger.error('Idle task reaper threw', { error: (e as Error).message });
+            }
+        }, this.idleReapIntervalMs);
+        logger.info('Idle task reaper started', {
+            intervalMs: this.idleReapIntervalMs,
+            idleThresholdMs: this.idleReapMs,
+        });
+    }
+
+    /**
+     * Disconnect live tasks that have been idle longer than idleReapMs. The
+     * disconnected PTY is killed (freeing its Claude CLI + MCP processes) but
+     * the task metadata is preserved with its sessionId — the user can still
+     * resume it, and the backend will --resume cleanly.
+     *
+     * Skips tasks that are starting/busy/waiting_input (they aren't actually
+     * idle, just quiet). State 'exited' tasks have no process to reclaim.
+     */
+    private reapIdleTasks(): void {
+        const now = Date.now();
+        const toReap: string[] = [];
+        for (const task of this.tasks.values()) {
+            if (task.state !== 'idle') continue;
+            const age = now - task.lastActivity.getTime();
+            if (age >= this.idleReapMs) toReap.push(task.id);
+        }
+        if (toReap.length === 0) return;
+
+        logger.info('Reaping idle tasks', {
+            count: toReap.length,
+            idleThresholdHours: Math.round(this.idleReapMs / 3600_000),
+        });
+        for (const id of toReap) {
+            try {
+                this.disconnectTask(id);
+                // Clear continuation flags so the reaped task doesn't auto-reconnect
+                // on next startup — the user must click into it to wake it up.
+                const persisted = this.disconnectedTasks.get(id);
+                if (persisted) {
+                    persisted.shouldContinue = false;
+                    persisted.wasInterrupted = false;
+                }
+            } catch (e) {
+                logger.warn('Failed to reap idle task', { taskId: id, error: (e as Error).message });
+            }
+        }
     }
 
     /**
@@ -736,6 +1004,9 @@ export class TaskSpawner extends EventEmitter {
                         this.transitionTaskState(task, 'idle', undefined, 'polling: output stable');
                         this.captureGitStateAfterTask(task.id).catch(err => {
                             logger.error('Unhandled error in captureGitStateAfterTask', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+                        });
+                        this.captureTokenUsage(task.id).catch(err => {
+                            logger.error('Unhandled error in captureTokenUsage', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
                         });
                     }
                 }
@@ -830,41 +1101,42 @@ export class TaskSpawner extends EventEmitter {
             return true;
         });
 
-        // Limit to 2 concurrent reconnects to prevent resource exhaustion
-        // (each task starts 2 MCP servers — too many at once overwhelms the system)
-        const MAX_AUTO_RECONNECT = 2;
-        const capped = tasksToReconnect.slice(0, MAX_AUTO_RECONNECT);
-        if (tasksToReconnect.length > MAX_AUTO_RECONNECT) {
-            console.log(`[TaskSpawner] Capping auto-reconnect to ${MAX_AUTO_RECONNECT} of ${tasksToReconnect.length} eligible tasks. Remaining will reconnect on-demand.`);
-            // Clear shouldContinue on tasks we're skipping so they don't retry next restart
-            for (let i = MAX_AUTO_RECONNECT; i < tasksToReconnect.length; i++) {
-                const task = this.disconnectedTasks.get(tasksToReconnect[i]);
-                if (task) {
-                    task.shouldContinue = false;
-                    task.wasInterrupted = false;
-                }
-            }
-        }
-
-        if (capped.length === 0) {
+        if (tasksToReconnect.length === 0) {
             console.log(`[TaskSpawner] No eligible tasks to auto-reconnect. ${disconnectedIds.length} tasks in lazy load.`);
             this.autoReconnectPromise = null;
             this.scheduleSave(); // Persist cleared shouldContinue flags
             return;
         }
 
+        // Sort by most recently active first so the most important tasks reconnect first
+        tasksToReconnect.sort((a, b) => {
+            const taskA = this.disconnectedTasks.get(a);
+            const taskB = this.disconnectedTasks.get(b);
+            const timeA = taskA?.lastActivity ? new Date(taskA.lastActivity).getTime() : 0;
+            const timeB = taskB?.lastActivity ? new Date(taskB.lastActivity).getTime() : 0;
+            return timeB - timeA; // most recent first
+        });
+
+        // Reconnect in batches of BATCH_SIZE to prevent resource exhaustion
+        // (each task starts 2 MCP servers — too many at once overwhelms the system).
+        // Unlike the old approach which abandoned tasks beyond the cap, this
+        // processes ALL eligible tasks in staggered batches.
+        const BATCH_SIZE = 2;
+
         this.isReconnecting = true;
-        this.emit('reconnectStart', capped.length);
-        console.log(`[TaskSpawner] Auto-reconnecting ${capped.length} tasks (of ${disconnectedIds.length} total)...`);
+        this.emit('reconnectStart', tasksToReconnect.length);
+        console.log(`[TaskSpawner] Auto-reconnecting ${tasksToReconnect.length} tasks in batches of ${BATCH_SIZE}...`);
 
         const failedTasks: string[] = [];
 
-        for (let i = 0; i < capped.length; i++) {
-            const taskId = capped[i];
+        for (let i = 0; i < tasksToReconnect.length; i++) {
+            const taskId = tasksToReconnect[i];
             const persisted = this.disconnectedTasks.get(taskId);
             if (!persisted) continue;
 
-            console.log(`[TaskSpawner] Auto-reconnecting task ${i + 1}/${capped.length}: ${taskId}`);
+            const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+            const totalBatches = Math.ceil(tasksToReconnect.length / BATCH_SIZE);
+            console.log(`[TaskSpawner] Auto-reconnecting task ${i + 1}/${tasksToReconnect.length} (batch ${batchNum}/${totalBatches}): ${taskId}`);
 
             let success = false;
             try {
@@ -886,24 +1158,26 @@ export class TaskSpawner extends EventEmitter {
                 }
             }
 
-            // 5-second delay between reconnects to let MCP servers initialize
-            if (i < capped.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 5000));
+            // 5-second delay between reconnects to let MCP servers initialize.
+            // Extra 3-second pause between batches for system recovery.
+            if (i < tasksToReconnect.length - 1) {
+                const isBatchBoundary = (i + 1) % BATCH_SIZE === 0;
+                await new Promise(resolve => setTimeout(resolve, isBatchBoundary ? 8000 : 5000));
             }
         }
 
         this.isReconnecting = false;
         this.autoReconnectPromise = null;
         this.emit('reconnectComplete', {
-            total: disconnectedIds.length,
+            total: tasksToReconnect.length,
             failed: failedTasks.length,
             failedIds: failedTasks
         });
 
         if (failedTasks.length > 0) {
-            console.log(`[TaskSpawner] Auto-reconnect complete. ${failedTasks.length} task(s) failed to reconnect.`);
+            console.log(`[TaskSpawner] Auto-reconnect complete. ${failedTasks.length}/${tasksToReconnect.length} task(s) failed to reconnect.`);
         } else {
-            console.log(`[TaskSpawner] Auto-reconnect complete. All tasks reconnected successfully.`);
+            console.log(`[TaskSpawner] Auto-reconnect complete. All ${tasksToReconnect.length} tasks reconnected successfully.`);
         }
     }
 
@@ -935,7 +1209,7 @@ export class TaskSpawner extends EventEmitter {
                                 `[TaskSpawner] Main file is ${mainState} but backup has ${bakTotal} tasks — ` +
                                 `restoring from ${bakPath}`
                             );
-                            writeFileSync(this.persistencePath, bakRaw);
+                            atomicWriteFileSync(this.persistencePath, bakRaw);
                         }
                     } catch (_e) {
                         // Backup also corrupt; fall through to normal load.
@@ -973,7 +1247,7 @@ export class TaskSpawner extends EventEmitter {
                             if (contentToWrite.includes('\x1b') || contentToWrite.includes(' ')) {
                                 contentToWrite = Buffer.from(contentToWrite, 'utf8').toString('base64');
                             }
-                            writeFileSync(this.getTaskHistoryPath(persisted.id), contentToWrite);
+                            atomicWriteFileSync(this.getTaskHistoryPath(persisted.id), contentToWrite);
                             if (process.env.DEBUG_TASKS) {
                                 console.log(`[TaskSpawner] Migrated history for task ${persisted.id} to file`);
                             }
@@ -1014,7 +1288,7 @@ export class TaskSpawner extends EventEmitter {
                                 if (contentToWrite.includes('\x1b') || contentToWrite.includes(' ')) {
                                     contentToWrite = Buffer.from(contentToWrite, 'utf8').toString('base64');
                                 }
-                                writeFileSync(this.getArchivedHistoryPath(archived.id), contentToWrite);
+                                atomicWriteFileSync(this.getArchivedHistoryPath(archived.id), contentToWrite);
                                 migratedCount++;
                             } catch (e) {
                                 console.error(`[TaskSpawner] Failed to migrate history for ${archived.id}:`, e);
@@ -1089,29 +1363,38 @@ export class TaskSpawner extends EventEmitter {
                 // on EVERY save. With 15+ tasks and 112MB of history, this caused OOM crashes.
                 const historyPath = this.getTaskHistoryPath(task.id);
                 try {
-                    if (task.previousHistory) {
-                        // First save after reconnect — write base + current output as raw text
+                    if (task.previousHistory && !existsSync(historyPath)) {
+                        // Legacy/first-seed: previousHistory came from in-memory/tasks.json
+                        // and no on-disk file exists yet. Seed the file once; subsequent saves
+                        // fall through to the incremental-append branch below. Keep previousHistory
+                        // in memory (UI fallback, archive) — it will be dropped by setTaskActive.
                         const buffers: Buffer[] = [task.previousHistory];
                         if (task.outputHistory.length > 0) {
                             buffers.push(...task.outputHistory);
                         }
                         const fullHistory = Buffer.concat(buffers);
-                        writeFileSync(historyPath, fullHistory.toString('utf8'));
+                        this.atomicWriteHistorySync(historyPath, fullHistory.toString('utf8'));
                         task.savedBufferCount = task.outputHistory.length;
                     } else if (!existsSync(historyPath)) {
                         // New file — write current output as raw text
                         if (task.outputHistory.length > 0) {
                             const fullHistory = Buffer.concat(task.outputHistory);
-                            writeFileSync(historyPath, fullHistory.toString('utf8'));
+                            this.atomicWriteHistorySync(historyPath, fullHistory.toString('utf8'));
                             task.savedBufferCount = task.outputHistory.length;
                         }
                     } else if (task.savedBufferCount < task.outputHistory.length) {
                         // File exists — incrementally append only NEW buffers (O(new) not O(total))
+                        // appendFileSync is kept (not replaced with atomicWriteFileSync) because
+                        // an append is not a full-file replacement; the tmp+rename atomic write
+                        // semantics don't apply to incremental appends.
                         const newBuffers = task.outputHistory.slice(task.savedBufferCount);
                         if (newBuffers.length > 0) {
                             const newData = Buffer.concat(newBuffers).toString('utf8');
                             appendFileSync(historyPath, newData);
                             task.savedBufferCount = task.outputHistory.length;
+                            // Cap on-disk growth. Without this the file grew unbounded
+                            // (files reached 50+ MB each, 3.6 GB total in prod).
+                            this.rotateHistoryFileIfNeeded(historyPath);
                         }
                     }
                 } catch (e) {
@@ -1143,6 +1426,7 @@ export class TaskSpawner extends EventEmitter {
                     displayNameEditedByUser: task.displayNameEditedByUser,
                     processStartedAt: task.processStartedAt?.toISOString(),
                     order: task.order,
+                    tokenUsage: task.tokenUsage,
                 });
             }
 
@@ -1185,28 +1469,15 @@ export class TaskSpawner extends EventEmitter {
                 }
             }
 
-            // Atomic write: write to a temp file then rename. This ensures tasks.json
-            // is never left in a partial state if the process dies mid-write.
-            // Per-process unique tmp name so concurrent backend instances (e.g. two
-            // tsx watch processes from a stale dev server) don't race on the same .tmp.
-            const tmpPath = `${this.persistencePath}.${process.pid}.tmp`;
-            const bakPath = this.persistencePath + '.bak';
-            writeFileSync(tmpPath, JSON.stringify(persistence, null, 2));
-            try {
-                // Keep a backup of the previous good save before replacing.
-                if (existsSync(this.persistencePath)) {
-                    try {
-                        renameSync(this.persistencePath, bakPath);
-                    } catch (_e) {
-                        // Backup is best-effort; continue with the rename.
-                    }
-                }
-                renameSync(tmpPath, this.persistencePath);
-            } catch (renameErr) {
-                // Clean up our tmp file on failure so we don't leave junk behind.
-                try { if (existsSync(tmpPath)) unlinkSync(tmpPath); } catch (_e) { /* ignore */ }
-                throw renameErr;
-            }
+            // Atomic write with .bak rollover: write to a per-pid temp file, rename the
+            // current file to tasks.json.bak, then rename the temp file into place.
+            // The previous good save is recoverable from .bak if a future load hits
+            // an empty/corrupt main file.
+            atomicWriteFileSync(
+                this.persistencePath,
+                JSON.stringify(persistence, null, 2),
+                { backup: true }
+            );
 
             // Update our tracked modification time after successful save (PR #37 multi-instance guard)
             const newStats = statSync(this.persistencePath);
@@ -1810,6 +2081,8 @@ export class TaskSpawner extends EventEmitter {
                 });
                 this.taskLearnings.set(task.id, injectedLearnings.map(l => l.learning.id));
             }
+        }).catch(err => {
+            logger.warn('Learnings promise rejected (post-spawn)', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
         });
 
         return task;
@@ -1991,7 +2264,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
             // Write to temp file for --mcp-config
             const mcpConfigFile = join(tmpdir(), `claudia-mcp-${id}.json`);
-            writeFileSync(mcpConfigFile, mcpConfigJson);
+            atomicWriteFileSync(mcpConfigFile, mcpConfigJson);
             logger.info(`MCP config written to: ${mcpConfigFile}`);
             logger.debug(`MCP config contents: ${mcpConfigJson}`);
             claudeArgs.push('--mcp-config', mcpConfigFile);
@@ -2073,6 +2346,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 task.gitStateBefore = gitStateBefore;
                 logger.info(`Git state attached to task`, { taskId: id, commit: gitStateBefore.commitBefore?.substring(0, 7) });
             }
+        }).catch(err => {
+            logger.warn('Git state promise rejected (post-spawn)', { taskId: id, error: err instanceof Error ? err.message : String(err) });
         });
 
 
@@ -2189,6 +2464,12 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 return;
             }
             task.state = 'exited';
+
+            // Capture token usage on exit
+            this.captureTokenUsage(task.id).catch(err => {
+                logger.error('Unhandled error in captureTokenUsage (onExit)', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+            });
+
             this.scheduleSave();
             this.emit('taskStateChanged', this.toPublicTask(task));
             this.emit('taskExit', task.id, exitCode);
@@ -2215,6 +2496,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             displayName: task.displayName,
             displayNameEditedByUser: task.displayNameEditedByUser,
             order: task.order,
+            tokenUsage: task.tokenUsage,
         };
     }
 
@@ -2230,6 +2512,26 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             this.emit('taskStateChanged', this.toPublicTask(task));
         } catch (error) {
             console.error(`[TaskSpawner] Failed to capture git state:`, error);
+        }
+    }
+
+    private async captureTokenUsage(taskId: string): Promise<void> {
+        const task = this.tasks.get(taskId);
+        if (!task?.sessionId) return;
+
+        try {
+            const pricingMap = this.configStore?.getTokenPricing();
+            const usage = await getTaskTokenUsage(task.workspaceId, task.sessionId, pricingMap);
+            if (!usage) return;
+
+            task.tokenUsage = usage;
+            this.emit('taskTokenUsage', taskId, usage);
+            this.scheduleSave();
+        } catch (err) {
+            logger.error('Failed to capture token usage', {
+                taskId,
+                error: err instanceof Error ? err.message : String(err)
+            });
         }
     }
 
@@ -2932,6 +3234,29 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     stopTask(taskId: string): boolean {
         const task = this.tasks.get(taskId);
         if (!task) {
+            // Check if it's a disconnected task (zombie)
+            const disconnected = this.disconnectedTasks.get(taskId);
+            if (disconnected) {
+                logger.info(`stopTask: task is disconnected, transitioning to disconnected state`, { taskId });
+                // Clear stale flags
+                disconnected.wasInterrupted = false;
+                disconnected.shouldContinue = false;
+                disconnected.lastState = 'disconnected';
+                this.scheduleSave();
+                this.emit('taskStateChanged', {
+                    id: disconnected.id,
+                    prompt: disconnected.prompt,
+                    state: 'disconnected' as TaskState,
+                    workspaceId: disconnected.workspaceId,
+                    createdAt: new Date(disconnected.createdAt),
+                    lastActivity: new Date(disconnected.lastActivity),
+                    displayName: disconnected.displayName,
+                    displayNameEditedByUser: disconnected.displayNameEditedByUser,
+                    sessionId: disconnected.sessionId || undefined,
+                    backendType: disconnected.backendType || 'claude-code',
+                });
+                return true;
+            }
             logger.info(`stopTask: task not found`, { taskId });
             return false;
         }
@@ -2968,6 +3293,19 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
         // Clean up any pending session capture for this task
         this.clearSessionCapture(taskId);
+
+        // Delete the task's on-disk history file so it doesn't become an
+        // orphan (prior versions leaked these — 118 files, ~3 GB in prod).
+        const historyPath = this.getTaskHistoryPath(taskId);
+        if (existsSync(historyPath)) {
+            try {
+                unlinkSync(historyPath);
+            } catch (e) {
+                logger.warn('Failed to delete history file on destroyTask', {
+                    taskId, error: (e as Error).message,
+                });
+            }
+        }
 
         // Clean up MCP temp config files
         this.cleanupMcpTempFiles(taskId);
@@ -3071,7 +3409,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 if (!existsSync(historyDir)) {
                     mkdirSync(historyDir, { recursive: true });
                 }
-                writeFileSync(this.getArchivedHistoryPath(taskId), historyBase64);
+                atomicWriteFileSync(this.getArchivedHistoryPath(taskId), historyBase64);
                 console.log(`[TaskSpawner] Saved archived task history to disk: ${historySize} bytes`);
             } catch (e) {
                 console.error(`[TaskSpawner] Failed to save archived history:`, e);
@@ -3124,7 +3462,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                     if (!existsSync(historyDir)) {
                         mkdirSync(historyDir, { recursive: true });
                     }
-                    writeFileSync(this.getArchivedHistoryPath(taskId), disconnected.outputHistory);
+                    atomicWriteFileSync(this.getArchivedHistoryPath(taskId), disconnected.outputHistory);
                     const historySize = Math.floor(disconnected.outputHistory.length * 0.75);
                     console.log(`[TaskSpawner] Saved disconnected task history to disk: ${historySize} bytes`);
                 } catch (e) {
@@ -3301,9 +3639,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         const disconnectedTasks = Array.from(this.disconnectedTasks.values()).map(persisted => ({
             id: persisted.id,
             prompt: persisted.prompt,
-            // Show 'interrupted' state if task was busy when killed, otherwise show the original state
-            // This makes the UI show tasks in their proper state rather than all showing "disconnected"
-            state: (persisted.wasInterrupted ? 'interrupted' : persisted.lastState) as TaskState,
+            // Show 'interrupted' if task was busy when killed, otherwise 'disconnected'.
+            // Previously this showed persisted.lastState which could be 'busy' — making
+            // tasks appear busy with no running process (zombie tasks).
+            state: (persisted.wasInterrupted ? 'interrupted' : 'disconnected') as TaskState,
             workspaceId: persisted.workspaceId,
             createdAt: new Date(persisted.createdAt),
             lastActivity: new Date(persisted.lastActivity),
@@ -3314,6 +3653,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             systemPrompt: persisted.systemPrompt,
             backendType: this.taskBackends.get(persisted.id) || 'claude-code' as const,
             order: persisted.order,
+            tokenUsage: persisted.tokenUsage,
         }));
 
         return [...liveTasks, ...disconnectedTasks];
@@ -3344,6 +3684,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 displayName: existing.displayName,
                 displayNameEditedByUser: existing.displayNameEditedByUser,
                 order: existing.order,
+                tokenUsage: existing.tokenUsage,
             };
             this.disconnectedTasks.set(taskId, persisted);
             this.tasks.delete(taskId);
@@ -3433,7 +3774,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             if (mcpResult) {
                 const mcpConfigJson = JSON.stringify({ mcpServers: mcpResult.mcpConfig }, null, 2);
                 const mcpConfigFile = join(tmpdir(), `claudia-mcp-${taskId}-reconnect.json`);
-                writeFileSync(mcpConfigFile, mcpConfigJson);
+                atomicWriteFileSync(mcpConfigFile, mcpConfigJson);
                 claudeArgs.push('--mcp-config', mcpConfigFile);
                 console.log(`[TaskSpawner] Added ${mcpResult.enabledMcpServers.length} MCP server(s) for reconnection via ${mcpConfigFile}`);
             }
@@ -3535,6 +3876,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             displayNameEditedByUser: persisted.displayNameEditedByUser,  // Preserve user-edit flag
             systemPrompt: persisted.systemPrompt,  // Preserve custom system prompt
             gitStateBefore: persisted.gitState ? persisted.gitState : undefined,  // Preserve git state
+            tokenUsage: persisted.tokenUsage,  // Preserve token usage across reconnection
         };
 
         // Remove from disconnectedTasks FIRST before registering handlers or emitting events.
@@ -3594,6 +3936,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         if (this.statePollingInterval) {
             clearInterval(this.statePollingInterval);
             this.statePollingInterval = null;
+        }
+        // Stop idle-task reaper
+        if (this.idleReaperInterval) {
+            clearInterval(this.idleReaperInterval);
+            this.idleReaperInterval = null;
         }
 
         // Clean up all session capture intervals to prevent memory leaks

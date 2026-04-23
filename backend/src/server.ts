@@ -16,7 +16,7 @@ import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS } from '@claudia/shared';
+import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch } from './git-utils.js';
@@ -932,6 +932,10 @@ export async function createApp(basePath?: string) {
         console.log(`[Server] Reconnection complete: ${result.total - result.failed}/${result.total} tasks`);
         // Send updated task list after reconnection (immediate, not batched - important for startup)
         broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+    });
+
+    taskSpawner.on('taskTokenUsage', (taskId: string, tokenUsage: TaskTokenUsage) => {
+        broadcast({ type: 'task:tokenUsage' as WSMessageType, payload: { taskId, tokenUsage } });
     });
 
     // Wire up SupervisorChat events (handles both auto-analysis and user chat)
@@ -3863,13 +3867,30 @@ export async function createApp(basePath?: string) {
                 body: string;
             }
 
+            // Validate state against an allowlist before passing to gh
+            if (!['open', 'closed', 'all'].includes(state)) {
+                return res.status(400).json({ error: 'state must be "open", "closed", or "all"' });
+            }
+            // Validate assignee: allow @me or a GitHub username (alphanumerics + dashes, max 39 chars)
+            if (assignee && assignee !== '@me' && !/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,38})$/.test(assignee)) {
+                return res.status(400).json({ error: 'Invalid assignee' });
+            }
+
             let issues: GitHubIssue[] = [];
             try {
-                const assigneeArg = assignee ? `--assignee ${assignee}` : '';
-                const { stdout } = await execAsync(
-                    `gh issue list --repo ${owner}/${repo} --state ${state} ${assigneeArg} --limit ${limit} --json number,title,state,url,createdAt,updatedAt,closedAt,author,assignees,labels,comments,body`,
-                    { cwd: workspacePath }
-                );
+                const { execFile } = await import('child_process');
+                const execFileAsync = (await import('util')).promisify(execFile);
+                const ghArgs = [
+                    'issue', 'list',
+                    '--repo', `${owner}/${repo}`,
+                    '--state', state,
+                    '--limit', String(limit),
+                    '--json', 'number,title,state,url,createdAt,updatedAt,closedAt,author,assignees,labels,comments,body',
+                ];
+                if (assignee) {
+                    ghArgs.push('--assignee', assignee);
+                }
+                const { stdout } = await execFileAsync('gh', ghArgs, { cwd: workspacePath });
                 issues = JSON.parse(stdout);
             } catch (err) {
                 const errorMsg = err instanceof Error ? err.message : String(err);
@@ -3984,11 +4005,20 @@ export async function createApp(basePath?: string) {
 
             // Create issue using gh CLI
             try {
+                const { execFile } = await import('child_process');
+                const execFileAsync = (await import('util')).promisify(execFile);
                 // gh CLI requires --body when running non-interactively, so provide empty string if not given
                 const bodyText = body || '';
                 // Auto-assign to current user (@me)
-                const { stdout } = await execAsync(
-                    `gh issue create --repo ${owner}/${repo} --title "${title.replace(/"/g, '\\"')}" --body "${bodyText.replace(/"/g, '\\"')}" --assignee @me`,
+                const { stdout } = await execFileAsync(
+                    'gh',
+                    [
+                        'issue', 'create',
+                        '--repo', `${owner}/${repo}`,
+                        '--title', title,
+                        '--body', bodyText,
+                        '--assignee', '@me',
+                    ],
                     { cwd: workspacePath }
                 );
                 // gh issue create returns the URL of the created issue
@@ -4099,9 +4129,12 @@ export async function createApp(basePath?: string) {
 
             // Close or reopen the issue using gh CLI
             try {
-                const stateArg = state === 'closed' ? '--close' : '--reopen';
-                await execAsync(
-                    `gh issue ${state === 'closed' ? 'close' : 'reopen'} ${issueNumber} --repo ${owner}/${repo}`,
+                const { execFile } = await import('child_process');
+                const execFileAsync = (await import('util')).promisify(execFile);
+                const subcommand = state === 'closed' ? 'close' : 'reopen';
+                await execFileAsync(
+                    'gh',
+                    ['issue', subcommand, String(issueNumber), '--repo', `${owner}/${repo}`],
                     { cwd: workspacePath }
                 );
 
@@ -4245,10 +4278,12 @@ export async function createApp(basePath?: string) {
             // Get the diff
             let diff = '';
             try {
-                const command = staged
-                    ? `git diff --cached -- "${filePath}"`
-                    : `git diff -- "${filePath}"`;
-                const { stdout } = await execAsync(command, { cwd: workspacePath, maxBuffer: 10 * 1024 * 1024 });
+                const { execFile } = await import('child_process');
+                const execFileAsync = (await import('util')).promisify(execFile);
+                const args = staged
+                    ? ['diff', '--cached', '--', filePath]
+                    : ['diff', '--', filePath];
+                const { stdout } = await execFileAsync('git', args, { cwd: workspacePath, maxBuffer: 10 * 1024 * 1024 });
                 diff = stdout;
             } catch (err) {
                 logger.error('Failed to get git diff', { error: err instanceof Error ? err.message : String(err) });
@@ -5203,6 +5238,110 @@ Guidelines:
         } catch (error) {
             console.error('[Server] Failed to save learnings:', error);
             res.status(500).json({ error: 'Failed to save learnings' });
+        }
+    });
+
+    // ===== Token Usage / Dashboard Endpoints =====
+
+    app.get('/api/usage/dashboard', (_req, res) => {
+        try {
+            const allTasks = taskSpawner.getAllTasks();
+            const workspaces = workspaceStore.getWorkspaces();
+            const workspaceNames: Record<string, string> = {};
+            for (const ws of workspaces) {
+                workspaceNames[ws.id] = ws.displayName || ws.name;
+            }
+
+            const dashboard: UsageDashboardData = {
+                totalCostUsd: 0,
+                totalInputTokens: 0,
+                totalOutputTokens: 0,
+                totalCacheCreationTokens: 0,
+                totalCacheReadTokens: 0,
+                byWorkspace: {},
+                byModel: {},
+                taskCount: 0,
+                lastUpdated: new Date().toISOString(),
+            };
+
+            for (const task of allTasks) {
+                if (!task.tokenUsage) continue;
+                dashboard.taskCount++;
+
+                const usage = task.tokenUsage;
+                dashboard.totalCostUsd += usage.totalCostUsd;
+                dashboard.totalInputTokens += usage.inputTokens;
+                dashboard.totalOutputTokens += usage.outputTokens;
+                dashboard.totalCacheCreationTokens += usage.cacheCreationTokens;
+                dashboard.totalCacheReadTokens += usage.cacheReadTokens;
+
+                // Group by workspace
+                if (!dashboard.byWorkspace[task.workspaceId]) {
+                    dashboard.byWorkspace[task.workspaceId] = {
+                        name: workspaceNames[task.workspaceId] || task.workspaceId,
+                        costUsd: 0,
+                        inputTokens: 0,
+                        outputTokens: 0,
+                        taskCount: 0,
+                    };
+                }
+                const wsData = dashboard.byWorkspace[task.workspaceId];
+                wsData.costUsd += usage.totalCostUsd;
+                wsData.inputTokens += usage.inputTokens;
+                wsData.outputTokens += usage.outputTokens;
+                wsData.cacheCreationTokens += usage.cacheCreationTokens;
+                wsData.cacheReadTokens += usage.cacheReadTokens;
+                wsData.taskCount++;
+
+                // Group by model
+                for (const [model, modelUsage] of Object.entries(usage.modelBreakdown)) {
+                    if (!dashboard.byModel[model]) {
+                        dashboard.byModel[model] = {
+                            inputTokens: 0,
+                            outputTokens: 0,
+                            cacheCreationTokens: 0,
+                            cacheReadTokens: 0,
+                            costUsd: 0,
+                        };
+                    }
+                    const m = dashboard.byModel[model];
+                    m.inputTokens += modelUsage.inputTokens;
+                    m.outputTokens += modelUsage.outputTokens;
+                    m.cacheCreationTokens += modelUsage.cacheCreationTokens;
+                    m.cacheReadTokens += modelUsage.cacheReadTokens;
+                    m.costUsd += modelUsage.costUsd;
+                }
+            }
+
+            res.json(dashboard);
+        } catch (error) {
+            logger.error('Failed to get usage dashboard', { error });
+            res.status(500).json({ error: 'Failed to get usage dashboard' });
+        }
+    });
+
+    app.get('/api/usage/config', (_req, res) => {
+        try {
+            res.json({
+                pricing: configStore.getTokenPricing(),
+                enabled: configStore.getTokenTrackingEnabled(),
+            });
+        } catch (error) {
+            logger.error('Failed to get usage config', { error });
+            res.status(500).json({ error: 'Failed to get usage config' });
+        }
+    });
+
+    app.put('/api/usage/config', (req, res) => {
+        try {
+            const { pricing } = req.body;
+            if (pricing) {
+                configStore.setTokenPricing(pricing);
+            }
+            res.json({ ok: true });
+        } catch (error) {
+            logger.error('Failed to update usage config', { error });
+            res.status(500).json({ error: 'Failed to update usage config' });
         }
     });
 

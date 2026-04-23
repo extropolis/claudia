@@ -14,7 +14,8 @@ import { ActivityPanel } from './components/ActivityPanel';
 import { useTheme } from './hooks/useTheme';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff, BarChart3 } from 'lucide-react';
+import { UsageDashboard } from './components/UsageDashboard';
 import { getApiBaseUrl } from './config/api-config';
 import { isSoundEnabled, setSoundEnabled } from './utils/browserCapabilities';
 
@@ -130,6 +131,7 @@ function App() {
     const [isResizingChat, setIsResizingChat] = useState(false);
     const [terminalRefreshCounter, setTerminalRefreshCounter] = useState(0);
     const [showSettings, setShowSettings] = useState(false);
+    const [showUsageDashboard, setShowUsageDashboard] = useState(false);
     const [settingsInitialPanel, setSettingsInitialPanel] = useState<string | undefined>(undefined);
     const [showChatPanel, setShowChatPanel] = useState(false);
     const [showMobileAccess, setShowMobileAccess] = useState(false);
@@ -558,6 +560,13 @@ function App() {
                     </button>
                     <button
                         className="settings-button"
+                        onClick={() => setShowUsageDashboard(true)}
+                        title="Token Usage"
+                    >
+                        <BarChart3 size={isMobile ? 18 : 20} />
+                    </button>
+                    <button
+                        className="settings-button"
                         onClick={handleSettingsOpen}
                         title="Settings"
                     >
@@ -746,6 +755,7 @@ function App() {
 
             <ProjectPicker onSelect={handleProjectSelect} wsRef={wsRef} requestRecentWorkspaces={requestRecentWorkspaces} clearRecentWorkspace={clearRecentWorkspace} />
             <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
+            <UsageDashboard isOpen={showUsageDashboard} onClose={() => setShowUsageDashboard(false)} />
             {!isMobile && <MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} error={tunnelError} tunnelActive={tunnelActive} tunnelLoading={tunnelLoading} onStopTunnel={handleStopTunnel} onStartTunnel={startTunnel} />}
             <GlobalVoiceManager />
 

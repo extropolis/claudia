@@ -452,6 +452,11 @@ export function useWebSocket() {
                         setServerReloading(true);
                         break;
                     }
+                    case 'task:tokenUsage': {
+                        const payload = message.payload as { taskId: string; tokenUsage: import('@claudia/shared').TaskTokenUsage };
+                        useTaskStore.getState().updateTaskTokenUsage(payload.taskId, payload.tokenUsage);
+                        break;
+                    }
                     case 'task:archived:list': {
                         const payload = message.payload as { tasks: Task[] };
                         console.log('[WebSocket] Archived tasks received:', payload.tasks.length);
