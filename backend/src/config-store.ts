@@ -98,6 +98,7 @@ export interface AppConfig {
     claudiaMcpServerEnabled: boolean;  // Enable Claudia MCP server for Claude Code sessions
     tokenPricing?: Record<string, ModelPricing>;  // Custom token pricing per model
     tokenTrackingEnabled?: boolean;  // Enable token usage tracking
+    tokenCostEnabled?: boolean;  // Enable cost calculation display (default: false)
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.

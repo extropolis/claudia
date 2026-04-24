@@ -284,6 +284,12 @@ export class TaskSpawner extends EventEmitter {
     /** After rotation, how many bytes of the tail we keep. */
     private readonly historyFileKeepBytes: number;
 
+    /** Wall-clock time when this TaskSpawner instance was created. Used by the
+     *  idle reaper to avoid disconnecting tasks that were already idle before
+     *  this server session started — their lastActivity timestamp predates the
+     *  server, so the 24h window would fire immediately on every restart. */
+    private readonly startedAt: Date = new Date();
+
     // Backend abstraction for multi-backend support (Claude Code, OpenCode, etc.)
     private backend: CodeBackend | null = null;
     private backendType: BackendType = 'claude-code';
@@ -901,6 +907,11 @@ export class TaskSpawner extends EventEmitter {
         const toReap: string[] = [];
         for (const task of this.tasks.values()) {
             if (task.state !== 'idle') continue;
+            // Only reap tasks that went idle during this server session. A task
+            // whose lastActivity predates startedAt was already idle when the
+            // server started; its age would immediately exceed the 24h threshold
+            // on every restart, disconnecting tasks the user hasn't touched yet.
+            if (task.lastActivity < this.startedAt) continue;
             const age = now - task.lastActivity.getTime();
             if (age >= this.idleReapMs) toReap.push(task.id);
         }
@@ -1401,10 +1412,12 @@ export class TaskSpawner extends EventEmitter {
                     console.error(`[TaskSpawner] Failed to save history for task ${task.id}:`, e);
                 }
 
-                // Track if task was busy when being saved (will be interrupted)
-                const wasInterrupted = task.state === 'busy' || task.state === 'starting';
-                // Tasks that were busy should auto-continue on restart
-                const shouldContinue = wasInterrupted && task.sessionId != null;
+                // All live tasks are interrupted by a server restart (their PTY is killed).
+                // idle/waiting_input tasks also get their PTY destroyed, so they should reconnect too.
+                const wasInterrupted = true;
+                // Only auto-continue tasks that were actively mid-turn (busy/starting)
+                const wasMidTurn = task.state === 'busy' || task.state === 'starting';
+                const shouldContinue = wasMidTurn && task.sessionId != null;
 
                 // Get the backend type for this task (needed for correct reconnection)
                 const taskBackendType = this.taskBackends.get(task.id);
@@ -3639,10 +3652,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         const disconnectedTasks = Array.from(this.disconnectedTasks.values()).map(persisted => ({
             id: persisted.id,
             prompt: persisted.prompt,
-            // Show 'interrupted' if task was busy when killed, otherwise 'disconnected'.
-            // Previously this showed persisted.lastState which could be 'busy' — making
-            // tasks appear busy with no running process (zombie tasks).
-            state: (persisted.wasInterrupted ? 'interrupted' : 'disconnected') as TaskState,
+            // Show 'interrupted' if task was mid-turn (busy/starting) when killed, otherwise 'disconnected'.
+            // wasInterrupted=true now applies to all live tasks killed by a server restart, so use
+            // lastState to distinguish mid-turn interruptions from idle reconnects.
+            state: ((persisted.wasInterrupted && (persisted.lastState === 'busy' || persisted.lastState === 'starting')) ? 'interrupted' : 'disconnected') as TaskState,
             workspaceId: persisted.workspaceId,
             createdAt: new Date(persisted.createdAt),
             lastActivity: new Date(persisted.lastActivity),
