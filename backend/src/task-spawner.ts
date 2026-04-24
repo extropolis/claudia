@@ -1012,12 +1012,17 @@ export class TaskSpawner extends EventEmitter {
                         this.transitionTaskState(task, 'waiting_input', inputType, `polling: detected ${inputType}`);
                         this.emit('taskWaitingInput', task.id, inputType, recentOutput);
                     } else {
-                        this.transitionTaskState(task, 'idle', undefined, 'polling: output stable');
+                        // Capture token usage before transitioning to idle so the save
+                        // triggered by transitionTaskState includes the latest costs.
+                        this.captureTokenUsage(task.id)
+                            .catch(err => {
+                                logger.error('Unhandled error in captureTokenUsage', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+                            })
+                            .finally(() => {
+                                this.transitionTaskState(task, 'idle', undefined, 'polling: output stable');
+                            });
                         this.captureGitStateAfterTask(task.id).catch(err => {
                             logger.error('Unhandled error in captureGitStateAfterTask', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
-                        });
-                        this.captureTokenUsage(task.id).catch(err => {
-                            logger.error('Unhandled error in captureTokenUsage', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
                         });
                     }
                 }
@@ -2478,12 +2483,15 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             }
             task.state = 'exited';
 
-            // Capture token usage on exit
-            this.captureTokenUsage(task.id).catch(err => {
-                logger.error('Unhandled error in captureTokenUsage (onExit)', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
-            });
-
-            this.scheduleSave();
+            // Capture token usage before saving so the persisted record has costs.
+            // Run async but schedule save only after it resolves.
+            this.captureTokenUsage(task.id)
+                .catch(err => {
+                    logger.error('Unhandled error in captureTokenUsage (onExit)', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+                })
+                .finally(() => {
+                    this.scheduleSave();
+                });
             this.emit('taskStateChanged', this.toPublicTask(task));
             this.emit('taskExit', task.id, exitCode);
         });

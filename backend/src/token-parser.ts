@@ -64,10 +64,16 @@ export function calculateCost(
 ): number {
     if (!pricing) return 0;
 
-    const inputCost = (usage.inputTokens / 1_000_000) * pricing.inputPer1MTokens;
-    const outputCost = (usage.outputTokens / 1_000_000) * pricing.outputPer1MTokens;
-    const cacheCreateCost = (usage.cacheCreationTokens / 1_000_000) * pricing.cacheCreatePer1MTokens;
-    const cacheReadCost = (usage.cacheReadTokens / 1_000_000) * pricing.cacheReadPer1MTokens;
+    // Guard against NaN from malformed token counts
+    const inputTokens = usage.inputTokens || 0;
+    const outputTokens = usage.outputTokens || 0;
+    const cacheCreationTokens = usage.cacheCreationTokens || 0;
+    const cacheReadTokens = usage.cacheReadTokens || 0;
+
+    const inputCost = (inputTokens / 1_000_000) * pricing.inputPer1MTokens;
+    const outputCost = (outputTokens / 1_000_000) * pricing.outputPer1MTokens;
+    const cacheCreateCost = (cacheCreationTokens / 1_000_000) * pricing.cacheCreatePer1MTokens;
+    const cacheReadCost = (cacheReadTokens / 1_000_000) * pricing.cacheReadPer1MTokens;
 
     return inputCost + outputCost + cacheCreateCost + cacheReadCost;
 }
@@ -131,7 +137,11 @@ export async function parseSessionTokenUsage(
                 if (entry.type === 'assistant' && entry.message?.usage && entry.uuid) {
                     const msg = entry as JsonlAssistantEntry;
                     const usage = msg.message!.usage!;
-                    const model = msg.message!.model || 'unknown';
+                    const rawModel = msg.message!.model;
+                    if (!rawModel) {
+                        console.warn(`[TokenParser] Assistant entry ${entry.uuid} missing model field`);
+                    }
+                    const model = rawModel || 'unknown';
                     const stopReason = msg.message!.stop_reason;
 
                     // Only count entries with a stop_reason (final entries, not partials)
@@ -236,6 +246,9 @@ export async function parseSessionTokenUsage(
                 totalCostUsd = 0;
                 for (const [model, modelUsage] of Object.entries(modelBreakdown)) {
                     const pricing = pricingMap[model];
+                    if (!pricing && model !== 'subagent' && model !== 'unknown') {
+                        console.warn(`[TokenParser] No pricing found for model "${model}", cost will be $0`);
+                    }
                     const cost = calculateCost(modelUsage, pricing);
                     modelUsage.costUsd = cost;
                     totalCostUsd += cost;

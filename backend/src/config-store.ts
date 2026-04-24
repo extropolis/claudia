@@ -208,7 +208,10 @@ export class ConfigStore {
             hyperspaceProxy: loaded.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY,
             aiCoreCredentials: loaded.aiCoreCredentials,
             enabledPlugins: loaded.enabledPlugins ?? [],
-            claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? true
+            claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? true,
+            tokenTrackingEnabled: loaded.tokenTrackingEnabled ?? true,
+            tokenCostEnabled: loaded.tokenCostEnabled ?? false,
+            tokenPricing: loaded.tokenPricing,
         };
     }
 
@@ -300,6 +303,15 @@ export class ConfigStore {
         if (updates.claudiaMcpServerEnabled !== undefined) {
             this.config.claudiaMcpServerEnabled = updates.claudiaMcpServerEnabled;
         }
+        if (updates.tokenTrackingEnabled !== undefined) {
+            this.config.tokenTrackingEnabled = updates.tokenTrackingEnabled;
+        }
+        if (updates.tokenCostEnabled !== undefined) {
+            this.config.tokenCostEnabled = updates.tokenCostEnabled;
+        }
+        if (updates.tokenPricing !== undefined) {
+            this.config.tokenPricing = updates.tokenPricing;
+        }
         this.saveConfig();
         return this.getConfig();
     }
@@ -356,7 +368,10 @@ export class ConfigStore {
             useLearnings: false,
             claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
             hyperspaceProxy: { ...DEFAULT_HYPERSPACE_PROXY },
-            claudiaMcpServerEnabled: true
+            claudiaMcpServerEnabled: true,
+            tokenTrackingEnabled: true,
+            tokenCostEnabled: false,
+            tokenPricing: { ...DEFAULT_TOKEN_PRICING },
         };
         this.saveConfig();
         return this.getConfig();
@@ -443,6 +458,20 @@ export class ConfigStore {
 
     getTokenTrackingEnabled(): boolean {
         return this.config.tokenTrackingEnabled ?? true;
+    }
+
+    setTokenTrackingEnabled(enabled: boolean): void {
+        this.config.tokenTrackingEnabled = enabled;
+        this.saveConfig();
+    }
+
+    getTokenCostEnabled(): boolean {
+        return this.config.tokenCostEnabled ?? false;
+    }
+
+    setTokenCostEnabled(enabled: boolean): void {
+        this.config.tokenCostEnabled = enabled;
+        this.saveConfig();
     }
 
     getTokenPricing(): Record<string, ModelPricing> {

@@ -126,7 +126,8 @@ export function TaskTokenStats({ taskId }: TaskTokenStatsProps) {
                                 <th>Model</th>
                                 <th>Input</th>
                                 <th>Output</th>
-                                <th>Cache</th>
+                                <th>Cache Write</th>
+                                <th>Cache Read</th>
                                 <th>Cost</th>
                             </tr>
                         </thead>
@@ -136,6 +137,7 @@ export function TaskTokenStats({ taskId }: TaskTokenStatsProps) {
                                     <td className="model-name">{formatModelName(name)}</td>
                                     <td>{formatTokenCount(usage.inputTokens)}</td>
                                     <td>{formatTokenCount(usage.outputTokens)}</td>
+                                    <td>{formatTokenCount(usage.cacheCreationTokens)}</td>
                                     <td>{formatTokenCount(usage.cacheReadTokens)}</td>
                                     <td>{formatCost(usage.costUsd)}</td>
                                 </tr>
