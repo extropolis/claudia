@@ -1,5 +1,4 @@
-# Claudia - Clean Start Script (PowerShell)
-# Kills existing processes and restarts on proper ports
+# Claudia - Start Script (PowerShell)
 
 $ErrorActionPreference = "Stop"
 
@@ -20,9 +19,9 @@ if (Test-Path $LOCK_FILE) {
     if ($LOCK_PID) {
         $proc = Get-Process -Id $LOCK_PID -ErrorAction SilentlyContinue
         if ($proc) {
-            Write-Host "Claudia is already running (PID: $LOCK_PID), killing it first..."
-            Stop-Process -Id $LOCK_PID -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
+            Write-Host "Claudia is already running (PID: $LOCK_PID)."
+            Write-Host "   Stop it first or remove the lock file: Remove-Item $LOCK_FILE"
+            exit 1
         }
     }
     Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
@@ -37,60 +36,23 @@ $null = Register-EngineEvent PowerShell.Exiting -Action {
     Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host "Cleaning up existing processes..."
-
-# Kill processes on our ports
-foreach ($port in @($BACKEND_PORT, $FRONTEND_PORT, $OPENCODE_PORT)) {
-    $connections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
-    if ($connections) {
-        $procIds = $connections | Select-Object -ExpandProperty OwningProcess -Unique
-        foreach ($procId in $procIds) {
-            if ($procId -ne 0) {
-                Write-Host "   Killing process on port ${port}: PID $procId"
-                Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
-}
-
-# Kill project-specific processes
-$processPatterns = @(
-    "claudia*backend*tsx",
-    "claudia*backend*index.ts",
-    "claudia*backend*test-cli",
-    "vite*claudia"
-)
-
-Get-Process -Name "node" -ErrorAction SilentlyContinue | ForEach-Object {
-    try {
-        $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
-        if ($cmdLine) {
-            foreach ($pattern in $processPatterns) {
-                if ($cmdLine -like "*$pattern*") {
-                    Write-Host "   Killing process: $($_.Id) - $cmdLine"
-                    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-                    break
-                }
-            }
-        }
-    } catch {}
-}
-
-# Kill stray Claude Code CLI processes
-Write-Host "Killing zombie Claude processes..."
-Get-Process -Name "claude" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-
-Start-Sleep -Seconds 2
-
-# Verify ports are free (ignore TimeWait connections with no owning process)
+Write-Host "Checking ports..."
+$ports_busy = $false
 foreach ($port in @($BACKEND_PORT, $FRONTEND_PORT, $OPENCODE_PORT)) {
     $activeConnections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
         Where-Object { $_.OwningProcess -ne 0 }
     if ($activeConnections) {
-        Write-Host "Port $port is still in use. Please kill manually:"
-        $activeConnections | Format-Table -AutoSize
-        exit 1
+        Write-Host "Port $port is already in use (PID: $($activeConnections[0].OwningProcess))"
+        $ports_busy = $true
     }
+}
+
+if ($ports_busy) {
+    Write-Host ""
+    Write-Host "Please free the ports above and try again."
+    Write-Host "You can kill a process on a port with: Stop-Process -Id (Get-NetTCPConnection -LocalPort <port>).OwningProcess -Force"
+    Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
+    exit 1
 }
 
 Write-Host "Ports are free"
