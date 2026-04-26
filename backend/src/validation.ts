@@ -53,6 +53,7 @@ export interface ConfigUpdatePayload {
         allowedTools?: string;
         disallowedTools?: string;
         appendSystemPrompt?: string;
+        model?: string;
     };
     deepgramApiKey?: string;
     hyperspaceProxy?: {
@@ -131,9 +132,12 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
                 if (typeof server.url !== 'string' || !server.url) {
                     return { valid: false, error: `mcpServers[${i}].url is required for streamableHttp type` };
                 }
-                // Validate url is a valid URL
+                // Validate url is a valid URL with an allowed scheme
                 try {
-                    new URL(server.url);
+                    const parsed = new URL(server.url);
+                    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+                        return { valid: false, error: `mcpServers[${i}].url must use http or https scheme` };
+                    }
                 } catch {
                     return { valid: false, error: `mcpServers[${i}].url must be a valid URL` };
                 }
@@ -316,6 +320,13 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
                 return { valid: false, error: 'claudeCodeSwitches.appendSystemPrompt must be a string' };
             }
             result.claudeCodeSwitches.appendSystemPrompt = switches.appendSystemPrompt;
+        }
+
+        if (switches.model !== undefined) {
+            if (typeof switches.model !== 'string') {
+                return { valid: false, error: 'claudeCodeSwitches.model must be a string' };
+            }
+            result.claudeCodeSwitches.model = switches.model;
         }
     }
 

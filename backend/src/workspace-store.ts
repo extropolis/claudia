@@ -2,14 +2,18 @@
  * Workspace Store - Manages workspace directories
  * Workspaces are simply folder paths - the name comes from the folder name
  */
-import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from 'fs';
+import { existsSync, statSync, mkdirSync } from 'fs';
 import { join, dirname, resolve, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { Workspace, RecentWorkspace, WorkspaceReference } from '@claudia/shared';
 import { randomUUID } from 'crypto';
+import { loadVersioned, saveVersioned } from './utils/schema-version.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+/** Schema version for workspace-config.json. Bump when WorkspaceConfig shape changes. */
+const WORKSPACE_SCHEMA_VERSION = 1;
 
 // Re-export for convenience
 export type { RecentWorkspace };
@@ -50,31 +54,31 @@ export class WorkspaceStore {
 
     private loadConfig(): WorkspaceConfig {
         try {
-            if (existsSync(this.workspaceFile)) {
-                const data = readFileSync(this.workspaceFile, 'utf-8');
-                const loaded = JSON.parse(data) as WorkspaceConfig;
+            const loaded = loadVersioned<WorkspaceConfig>(this.workspaceFile, {
+                currentVersion: WORKSPACE_SCHEMA_VERSION,
+                defaultData: { ...DEFAULT_CONFIG },
+                // Legacy unversioned format was the raw WorkspaceConfig.
+                legacyLoader: (raw) => (raw as WorkspaceConfig) ?? { ...DEFAULT_CONFIG },
+            });
 
-                // Filter out workspaces that no longer exist
-                loaded.workspaces = (loaded.workspaces || []).filter(w =>
-                    existsSync(w.id)
-                );
+            // Filter out workspaces that no longer exist.
+            loaded.workspaces = (loaded.workspaces || []).filter(w => existsSync(w.id));
 
-                // Initialize recentWorkspaces if not present
-                if (!loaded.recentWorkspaces) {
-                    loaded.recentWorkspaces = [];
-                }
-
-                return loaded;
+            // Initialize recentWorkspaces if not present.
+            if (!loaded.recentWorkspaces) {
+                loaded.recentWorkspaces = [];
             }
+
+            return loaded;
         } catch (error) {
             console.error('[WorkspaceStore] Error loading config:', error);
+            return { ...DEFAULT_CONFIG };
         }
-        return { ...DEFAULT_CONFIG };
     }
 
     private saveConfig(): void {
         try {
-            writeFileSync(this.workspaceFile, JSON.stringify(this.config, null, 2), 'utf-8');
+            saveVersioned(this.workspaceFile, this.config, WORKSPACE_SCHEMA_VERSION);
             console.log('[WorkspaceStore] Config saved to', this.workspaceFile);
         } catch (error) {
             console.error('[WorkspaceStore] Error saving config:', error);

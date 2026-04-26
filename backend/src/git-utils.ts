@@ -1,8 +1,20 @@
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { TaskGitState, FileDiff } from '@claudia/shared';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+/** Validate a git commit hash (full or abbreviated SHA-1) */
+function isValidCommitHash(hash: string): boolean {
+    return /^[a-f0-9]{4,40}$/i.test(hash);
+}
+
+/** Validate a git branch/ref name (no shell metacharacters) */
+function isValidBranchName(name: string): boolean {
+    // Based on git-check-ref-format rules, simplified
+    return /^[a-zA-Z0-9._\-/]+$/.test(name) && !name.startsWith('-');
+}
 
 /**
  * Git utilities for task revert functionality
@@ -58,8 +70,11 @@ export async function getCurrentBranch(cwd: string): Promise<string | null> {
  * Checkout a branch in a git repository
  */
 export async function checkoutBranch(cwd: string, branch: string): Promise<{ success: boolean; error?: string }> {
+    if (!isValidBranchName(branch)) {
+        return { success: false, error: 'Invalid branch name' };
+    }
     try {
-        await execAsync(`git checkout ${branch}`, { cwd });
+        await execFileAsync('git', ['checkout', branch], { cwd });
         return { success: true };
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -121,8 +136,9 @@ export async function getModifiedFiles(cwd: string): Promise<string[]> {
  * Get files changed between two commits
  */
 export async function getFilesBetweenCommits(cwd: string, fromCommit: string, toCommit: string): Promise<string[]> {
+    if (!isValidCommitHash(fromCommit) || !isValidCommitHash(toCommit)) return [];
     try {
-        const { stdout } = await execAsync(`git diff --name-only ${fromCommit} ${toCommit}`, { cwd });
+        const { stdout } = await execFileAsync('git', ['diff', '--name-only', fromCommit, toCommit], { cwd });
         return stdout.trim().split('\n').filter(f => f.length > 0);
     } catch {
         return [];
@@ -133,8 +149,9 @@ export async function getFilesBetweenCommits(cwd: string, fromCommit: string, to
  * Count commits between two commits (how many commits is fromCommit behind toCommit)
  */
 export async function countCommitsBetween(cwd: string, fromCommit: string, toCommit: string): Promise<number> {
+    if (!isValidCommitHash(fromCommit) || !isValidCommitHash(toCommit)) return -1;
     try {
-        const { stdout } = await execAsync(`git rev-list --count ${fromCommit}..${toCommit}`, { cwd });
+        const { stdout } = await execFileAsync('git', ['rev-list', '--count', `${fromCommit}..${toCommit}`], { cwd });
         return parseInt(stdout.trim(), 10) || 0;
     } catch {
         return -1; // Error case
@@ -145,8 +162,9 @@ export async function countCommitsBetween(cwd: string, fromCommit: string, toCom
  * Check if a commit exists in the repository
  */
 export async function commitExists(cwd: string, commit: string): Promise<boolean> {
+    if (!isValidCommitHash(commit)) return false;
     try {
-        await execAsync(`git cat-file -t ${commit}`, { cwd });
+        await execFileAsync('git', ['cat-file', '-t', commit], { cwd });
         return true;
     } catch {
         return false;
@@ -297,18 +315,21 @@ export async function revertTaskChanges(
 
         // If commit changed, reset to before commit
         if (currentHead !== gitState.commitBefore) {
+            if (!isValidCommitHash(gitState.commitBefore)) {
+                return { success: false, error: 'Invalid commit hash in stored git state', filesReverted: [] };
+            }
             console.log(`[GitUtils] Resetting to commit ${gitState.commitBefore.substring(0, 7)} (undoing ${await countCommitsBetween(cwd, gitState.commitBefore, currentHead)} commits)`);
-            await execAsync(`git reset --hard ${gitState.commitBefore}`, { cwd });
+            await execFileAsync('git', ['reset', '--hard', gitState.commitBefore], { cwd });
         } else if (hasUncommitted) {
             // Just discard uncommitted changes
             console.log(`[GitUtils] Discarding uncommitted changes`);
-            await execAsync('git checkout -- .', { cwd });
+            await execFileAsync('git', ['checkout', '--', '.'], { cwd });
         }
 
         // Optionally clean untracked files
         if (cleanUntracked) {
             console.log(`[GitUtils] Cleaning untracked files`);
-            await execAsync('git clean -fd', { cwd });
+            await execFileAsync('git', ['clean', '-fd'], { cwd });
         }
 
         return {

@@ -1,6 +1,6 @@
 {
   "name": "frontend",
-  "version": "0.2.28",
+  "version": "0.2.30",
   "private": true,
   "type": "module",
   "scripts": {
@@ -34,7 +34,7 @@
     "@vitejs/plugin-react": "^4.2.1",
     "jsdom": "^27.4.0",
     "typescript": "^5.3.3",
-    "vite": "^5.0.12",
+    "vite": "^8.0.3",
     "vitest": "^4.0.17"
   }
 }

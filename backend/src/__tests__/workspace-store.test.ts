@@ -336,10 +336,11 @@ describe('WorkspaceStore', () => {
                 store.deleteWorkspace(dir);
             }
 
-            // Read the raw config to check the internal limit
+            // Read the raw config to check the internal limit.
+            // File is now a versioned envelope: { schemaVersion, data: { ... } }
             const configPath = join(testBaseDir, 'workspace-config.json');
             const configData = JSON.parse(readFileSync(configPath, 'utf-8'));
-            expect(configData.recentWorkspaces.length).toBeLessThanOrEqual(10);
+            expect(configData.data.recentWorkspaces.length).toBeLessThanOrEqual(10);
         });
     });
 

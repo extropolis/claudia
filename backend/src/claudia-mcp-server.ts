@@ -14,9 +14,17 @@
  *   - claudia_get_task_output: Fetch recent terminal output from a task
  *   - claudia_create_task: Create a new task in the current workspace
  *   - claudia_send_input: Send input to a task waiting for input
- *   - claudia_archive_task: Archive a completed task
+ *   - claudia_continue_task: Send a follow-up prompt to resume an idle task
+ *   - claudia_stop_task: Gracefully stop a running task
+ *   - claudia_stop_all_tasks: Stop all running tasks in the workspace
+ *   - claudia_rename_task: Set a display name for a task
+ *   - claudia_cron_create / claudia_cron_list / claudia_cron_delete / claudia_cron_pause:
+ *     Manage scheduled (cron) prompts attached to tasks
  *
- * @experimental This feature is experimental and may change in future versions.
+ * Note: Archive/delete tools intentionally NOT exposed to MCP. Only the user
+ * can archive or delete tasks via the UI — agents must never archive tasks.
+ *
+
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -101,8 +109,9 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
                 const msg = JSON.parse(data.toString());
                 log.debug(`WS received: ${msg.type}`, JSON.stringify(msg.payload).substring(0, 200));
 
-                // For task:create, wait for task:created response
-                if (type === 'task:create' && msg.type === 'task:created') {
+                // For task:create, wait for task:created direct response.
+                // Filter by source='mcp' to ignore broadcasts for other tasks.
+                if (type === 'task:create' && msg.type === 'task:created' && msg.payload?.source === 'mcp') {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
@@ -115,8 +124,8 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
                     resolve(msg.payload);
                 }
 
-                // For task:archive, wait for task:archived
-                if (type === 'task:archive' && msg.type === 'task:archived') {
+                // For task:archive, wait for task:destroyed (archiving emits taskDestroyed internally)
+                if (type === 'task:archive' && msg.type === 'task:destroyed') {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
@@ -129,8 +138,29 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
                     resolve(msg.payload);
                 }
 
-                // For task:rename, wait for task:stateChanged (broadcast after rename)
-                if (type === 'task:rename' && msg.type === 'task:stateChanged') {
+                // For task:rename, wait for task:stateChanged (active tasks) or tasks:updated (disconnected/archived)
+                if (type === 'task:rename' && (msg.type === 'task:stateChanged' || msg.type === 'tasks:updated')) {
+                    clearTimeout(timeout);
+                    ws.close();
+                    resolve(msg.payload);
+                }
+
+                // For task:stop, wait for task:stopped response
+                if (type === 'task:stop' && msg.type === 'task:stopped') {
+                    clearTimeout(timeout);
+                    ws.close();
+                    resolve(msg.payload);
+                }
+
+                // For task:stopAll, wait for task:stopAll:result response
+                if (type === 'task:stopAll' && msg.type === 'task:stopAll:result') {
+                    clearTimeout(timeout);
+                    ws.close();
+                    resolve(msg.payload);
+                }
+
+                // For task:destroy, wait for task:destroyed broadcast
+                if (type === 'task:destroy' && msg.type === 'task:destroyed') {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
@@ -358,6 +388,7 @@ server.tool(
             const result = await sendWSMessage('task:create', {
                 prompt,
                 workspaceId: WORKSPACE_ID,
+                source: 'mcp',
             });
 
             const task = (result as any)?.task;
@@ -367,7 +398,7 @@ server.tool(
                 // Rename the task if displayName was provided
                 if (displayName) {
                     try {
-                        await sendWSMessage('task:rename', { taskId: task.id, displayName });
+                        await sendWSMessage('task:rename', { taskId: task.id, displayName, source: 'agent' });
                         log.info(`Task renamed to: ${displayName}`);
                     } catch (renameErr) {
                         log.error('Failed to rename task after creation:', renameErr);
@@ -428,7 +459,7 @@ server.tool(
 
             const result = await sendWSMessage('task:input', {
                 taskId,
-                input: input + '\n',
+                input: input + '\r',
             });
 
             return {
@@ -454,20 +485,51 @@ server.tool(
 );
 
 // ============================================================================
-// Tool: claudia_archive_task
+// Tool: claudia_continue_task
 // ============================================================================
 server.tool(
-    'claudia_archive_task',
-    'Archive a task that has completed or exited. Archived tasks are stored for later reference but removed from the active task list.',
+    'claudia_continue_task',
+    'Send a follow-up prompt to an idle or exited Claude Code task, resuming its session with a new instruction. Works on tasks in idle, exited, or disconnected states. The task will reconnect if needed and start processing the new prompt.',
     {
-        taskId: z.string().describe('The task ID to archive'),
+        taskId: z.string().describe('The task ID to continue'),
+        prompt: z.string().describe('The follow-up prompt/instructions to send to the task'),
     },
-    async ({ taskId }) => {
+    async ({ taskId, prompt }) => {
         try {
-            log.info(`Archiving task: ${taskId}`);
+            // Verify task exists and check its state
+            const tasksResponse = await backendFetch('/api/tasks');
+            if (tasksResponse.ok) {
+                const tasks = await tasksResponse.json();
+                const task = tasks.find((t: any) => t.id === taskId);
+                if (!task) {
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify({
+                                success: false,
+                                message: `Task '${taskId}' not found.`,
+                            }, null, 2)
+                        }]
+                    };
+                }
+                if (task.state === 'busy' || task.state === 'starting') {
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify({
+                                success: false,
+                                message: `Task '${taskId}' is currently ${task.state}. Wait for it to finish or stop it first before sending a follow-up prompt.`,
+                            }, null, 2)
+                        }]
+                    };
+                }
+            }
 
-            const result = await sendWSMessage('task:archive', {
+            log.info(`Continuing task: ${taskId}`);
+
+            const result = await sendWSMessage('task:input', {
                 taskId,
+                input: prompt + '\r',
             });
 
             return {
@@ -475,17 +537,133 @@ server.tool(
                     type: 'text',
                     text: JSON.stringify({
                         success: true,
-                        message: `Task '${taskId}' archived successfully.`,
-                        result
+                        message: `Follow-up prompt sent to task '${taskId}'. The task is now processing.`,
                     }, null, 2)
                 }]
             };
         } catch (error) {
-            log.error('Failed to archive task:', error);
+            log.error('Failed to continue task:', error);
             return {
                 content: [{
                     type: 'text',
-                    text: `Error archiving task: ${error instanceof Error ? error.message : String(error)}`
+                    text: `Error continuing task: ${error instanceof Error ? error.message : String(error)}`
+                }]
+            };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_stop_task
+// ============================================================================
+server.tool(
+    'claudia_stop_task',
+    'Gracefully stop a running task by sending an interrupt signal (ESC). This cancels the current Claude Code operation without killing the process — the task transitions to idle and can be resumed later. Works on tasks in busy, starting, or waiting_input states.',
+    {
+        taskId: z.string().describe('The task ID to stop'),
+    },
+    async ({ taskId }) => {
+        // Prevent a task from stopping itself — would kill the orchestrating Claude session
+        if (SELF_TASK_ID && taskId === SELF_TASK_ID) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: false,
+                        message: `Cannot stop task '${taskId}' because it is the currently running session. It will stop naturally when done.`,
+                    }, null, 2)
+                }]
+            };
+        }
+
+        try {
+            log.info(`Stopping task: ${taskId}`);
+
+            const result = await sendWSMessage('task:stop', { taskId }) as { taskId: string; stopped: boolean };
+
+            if (result.stopped) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({
+                            success: true,
+                            message: `Task '${taskId}' stopped successfully. The task is now idle and can be resumed.`,
+                        }, null, 2)
+                    }]
+                };
+            } else {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({
+                            success: false,
+                            message: `Task '${taskId}' could not be stopped — it may not be in a running state.`,
+                        }, null, 2)
+                    }]
+                };
+            }
+        } catch (error) {
+            log.error('Failed to stop task:', error);
+            return {
+                content: [{
+                    type: 'text',
+                    text: `Error stopping task: ${error instanceof Error ? error.message : String(error)}`
+                }]
+            };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_stop_all_tasks
+// ============================================================================
+server.tool(
+    'claudia_stop_all_tasks',
+    `Stop all running tasks in the current workspace. Sends an interrupt signal (ESC) to every task that is busy, starting, or waiting for input. Tasks transition to idle and can be resumed later. The calling task (orchestrator) is automatically excluded to prevent a race condition where the orchestrator stops itself.${WORKSPACE_ID ? ` Scoped to workspace: ${WORKSPACE_ID}` : ''}`,
+    {},
+    async () => {
+        if (!WORKSPACE_ID) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: 'Error: No workspace ID configured. The CLAUDIA_WORKSPACE_ID environment variable is not set.'
+                }]
+            };
+        }
+
+        try {
+            log.info(`Stopping all tasks in workspace: ${WORKSPACE_ID}${SELF_TASK_ID ? ` (excluding self: ${SELF_TASK_ID})` : ''}`);
+
+            const result = await sendWSMessage('task:stopAll', {
+                workspaceId: WORKSPACE_ID,
+                // Exclude the calling task itself to prevent race condition
+                // where the orchestrator stops its own Claude Code session
+                ...(SELF_TASK_ID ? { excludeTaskId: SELF_TASK_ID } : {}),
+            }) as {
+                workspaceId: string;
+                stoppedCount: number;
+                stoppedIds: string[];
+            };
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        stoppedCount: result.stoppedCount,
+                        stoppedIds: result.stoppedIds,
+                        message: result.stoppedCount > 0
+                            ? `Stopped ${result.stoppedCount} task(s): ${result.stoppedIds.join(', ')}`
+                            : 'No running tasks found in this workspace.',
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to stop all tasks:', error);
+            return {
+                content: [{
+                    type: 'text',
+                    text: `Error stopping tasks: ${error instanceof Error ? error.message : String(error)}`
                 }]
             };
         }
@@ -497,18 +675,39 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_rename_task',
-    `Rename a task's display name in the Claudia UI sidebar. Use this to give tasks descriptive names that reflect what they're working on. ${SELF_TASK_ID ? `Your own task ID is: ${SELF_TASK_ID} — you can rename yourself too.` : ''}`,
+    `Rename a task's display name in the Claudia UI sidebar. Use this to give tasks descriptive names that reflect what they're working on. Will be rejected if the user has manually edited the task title. ${SELF_TASK_ID ? `YOUR OWN TASK ID IS: ${SELF_TASK_ID} — after you have written your first response about the task, call this tool with taskId="${SELF_TASK_ID}" and a short descriptive title (3-6 words). Do NOT call this before producing output.` : ''}`,
     {
-        taskId: z.string().describe(`The task ID to rename.${SELF_TASK_ID ? ` Use "${SELF_TASK_ID}" to rename yourself.` : ''}`),
+        taskId: z.string().describe(`The task ID to rename.${SELF_TASK_ID ? ` To title your own task, use "${SELF_TASK_ID}".` : ''}`),
         displayName: z.string().describe('The new display name for the task (short, descriptive)'),
     },
     async ({ taskId, displayName }) => {
         try {
+            // Check if the task title was user-edited before attempting rename
+            const tasksResponse = await backendFetch('/api/tasks');
+            if (tasksResponse.ok) {
+                const tasks = await tasksResponse.json();
+                const task = tasks.find((t: any) => t.id === taskId);
+                if (task?.displayNameEditedByUser) {
+                    log.info(`Rename blocked for task ${taskId} — title was edited by user`);
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify({
+                                success: false,
+                                message: `Cannot rename task '${taskId}' — the title was manually edited by the user. Do not retry.`,
+                                displayNameEditedByUser: true,
+                            }, null, 2)
+                        }]
+                    };
+                }
+            }
+
             log.info(`Renaming task ${taskId} to: ${displayName}`);
 
             const result = await sendWSMessage('task:rename', {
                 taskId,
                 displayName,
+                source: 'agent',
             });
 
             return {
@@ -615,6 +814,7 @@ server.tool(
                         description: s.description,
                         prompt: s.prompt.substring(0, 100) + (s.prompt.length > 100 ? '...' : ''),
                         isRecurring: s.isRecurring,
+                        isPaused: s.isPaused || false,
                         nextFireAt: s.nextFireAt,
                         lastFiredAt: s.lastFiredAt || null,
                         fireCount: s.fireCount,
@@ -661,6 +861,52 @@ server.tool(
             };
         } catch (error) {
             log.error('Failed to delete scheduled task:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_cron_pause
+// ============================================================================
+server.tool(
+    'claudia_cron_pause',
+    'Pause or resume a scheduled task. Paused tasks will not fire until resumed. Use claudia_cron_list to find scheduled task IDs and their current pause state.',
+    {
+        cronId: z.string().describe('The 8-character scheduled task ID to pause/resume'),
+        paused: z.boolean().describe('true to pause the scheduled task, false to resume it'),
+    },
+    async ({ cronId, paused }) => {
+        try {
+            log.info(`${paused ? 'Pausing' : 'Resuming'} scheduled task: ${cronId}`);
+
+            const response = await backendFetch(`/api/cron/${cronId}`, {
+                method: 'PUT',
+                body: JSON.stringify({ isPaused: paused }),
+            });
+
+            if (!response.ok) {
+                if (response.status === 404) {
+                    return { content: [{ type: 'text', text: `Error: Scheduled task '${cronId}' not found.` }] };
+                }
+                const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                return { content: [{ type: 'text', text: `Error: ${error.error || response.statusText}` }] };
+            }
+
+            const updated = await response.json();
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        message: `Scheduled task '${cronId}' ${paused ? 'paused' : 'resumed'} successfully.`,
+                        isPaused: updated.isPaused,
+                        nextFireAt: updated.nextFireAt || null,
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error(`Failed to ${paused ? 'pause' : 'resume'} scheduled task:`, error);
             return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
         }
     }

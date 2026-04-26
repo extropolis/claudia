@@ -144,6 +144,11 @@
     color: var(--accent-yellow);
 }
 
+.scheduled-task-badge.paused {
+    background: rgba(248, 81, 73, 0.12);
+    color: var(--accent-red);
+}
+
 .scheduled-task-cron {
     font-size: 0.75rem;
     background: rgba(255, 255, 255, 0.06);
@@ -183,6 +188,8 @@
     flex-shrink: 0;
 }
 
+.scheduled-task-pause,
+.scheduled-task-copy,
 .scheduled-task-edit,
 .scheduled-task-delete {
     background: none;
@@ -196,6 +203,25 @@
     transition: all 0.15s ease;
 }
 
+.scheduled-task-pause:hover {
+    background: rgba(210, 153, 34, 0.12);
+    color: var(--accent-yellow);
+}
+
+.scheduled-task-pause.is-paused {
+    color: var(--accent-green, #3fb950);
+}
+
+.scheduled-task-pause.is-paused:hover {
+    background: rgba(63, 185, 80, 0.12);
+    color: var(--accent-green, #3fb950);
+}
+
+.scheduled-task-copy:hover {
+    background: rgba(0, 212, 255, 0.12);
+    color: var(--accent-secondary);
+}
+
 .scheduled-task-edit:hover {
     background: rgba(0, 212, 255, 0.12);
     color: var(--accent-secondary);
@@ -204,6 +230,14 @@
 .scheduled-task-delete:hover {
     background: rgba(248, 81, 73, 0.12);
     color: var(--accent-red);
+}
+
+.scheduled-task-item.paused {
+    opacity: 0.6;
+}
+
+.scheduled-task-item.paused:hover {
+    opacity: 0.85;
 }
 
 .scheduled-task-item.editing {

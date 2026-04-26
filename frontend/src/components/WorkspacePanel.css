@@ -5,6 +5,9 @@
     height: 100%;
     min-height: 0; /* Allow panel to shrink in flex layout so workspace-panel-content can scroll */
     background: var(--bg-secondary);
+    /* Never exceed viewport width — ensures header spans exactly the screen width */
+    max-width: 100vw;
+    overflow-x: hidden;
 }
 
 .workspace-panel-header {
@@ -54,9 +57,11 @@
     z-index: 1; /* Establish stacking context so scrollbar stays on top of children */
     /* CSS Grid with auto-fit columns for multi-column workspace layout.
        auto-fit collapses empty tracks so workspace cards expand to fill width.
-       A second column only appears once the sidebar exceeds ~960px. */
+       A second column only appears once the sidebar exceeds ~960px.
+       min(480px, 100%) prevents grid blowout on narrow viewports — when the
+       container is narrower than 480px the column uses 100% instead. */
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(480px, 100%), 1fr));
     gap: 8px;
     align-content: start; /* Pack rows to the top instead of stretching */
 }
@@ -101,6 +106,7 @@
     background: var(--bg-secondary);
     transition: transform 0.15s ease, opacity 0.15s ease, border-color 0.2s ease, box-shadow 0.2s ease;
     align-self: start; /* Don't stretch to fill grid row height */
+    min-width: 0; /* Allow grid item to shrink below content min-content width */
 }
 
 .workspace-section:hover {
@@ -173,7 +179,9 @@
     align-items: center;
     gap: 8px;
     flex: 1;
+    min-width: 0; /* Allow flex item to shrink below children's min-content width */
     cursor: pointer;
+    overflow: hidden; /* Clip children that exceed the available width */
 }
 
 .workspace-header-actions {
@@ -689,6 +697,15 @@
     background: rgba(0, 212, 255, 0.18);
 }
 
+.workspace-panel .task-item .task-cron-badge.paused {
+    background: rgba(255, 171, 64, 0.12);
+    color: #ffab40;
+}
+
+.workspace-panel .task-item .task-cron-badge.paused:hover {
+    background: rgba(255, 171, 64, 0.22);
+}
+
 .workspace-panel .task-item .task-cron-badge .task-cron-count {
     font-variant-numeric: tabular-nums;
     line-height: 1;
@@ -734,6 +751,26 @@
 .workspace-panel .task-item.selected .task-prompt,
 .workspace-panel .task-item.selected .task-name {
     color: var(--text-primary);
+}
+
+/* Unread activity highlight - task completed or needs input but user hasn't clicked on it */
+.workspace-panel .task-item.unread {
+    border-left-color: var(--accent-green);
+    background: rgba(63, 185, 80, 0.08);
+}
+
+.workspace-panel .task-item.unread .task-prompt {
+    color: var(--accent-green);
+    font-weight: 600;
+}
+
+.workspace-panel .task-item.unread.has-question {
+    border-left-color: var(--accent-yellow, #ffab40);
+    background: rgba(255, 171, 64, 0.08);
+}
+
+.workspace-panel .task-item.unread.has-question .task-prompt {
+    color: var(--accent-yellow, #ffab40);
 }
 
 /* Subtle highlight for the last-selected task in each workspace (when not globally active) */
@@ -1549,8 +1586,11 @@
     .workspace-panel-content {
         padding: 6px 6px;
         gap: 6px;
-        /* Force single column on mobile */
-        grid-template-columns: 1fr;
+        /* Force single column on mobile.
+           minmax(0, 1fr) instead of 1fr: `1fr` has an implicit minimum of `auto`
+           (the item's min-content width), which causes grid blowout when items
+           contain white-space:nowrap text wider than the viewport. */
+        grid-template-columns: minmax(0, 1fr);
     }
 
     .workspace-section {
@@ -1571,6 +1611,7 @@
 
     .workspace-panel .task-item .task-prompt {
         font-size: 0.8125rem;
+        -webkit-line-clamp: 2;
     }
 
     /* On mobile, hide time-ago since action buttons are always visible */
@@ -1591,6 +1632,13 @@
     /* Workspace header */
     .workspace-header {
         padding: 12px 14px;
+        overflow: hidden; /* Prevent header row from exceeding card width */
+    }
+
+    /* Hide branch label and ref indicator on mobile — saves ~170px in the header row */
+    .workspace-branch-label,
+    .workspace-ref-indicator {
+        display: none;
     }
 
     .workspace-rename-button {

@@ -9,6 +9,7 @@ import { execSync } from 'child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { randomBytes } from 'crypto';
 import { TaskState, WaitingInputType, TaskGitState } from '@claudia/shared';
 import {
     CodeBackend,
@@ -178,7 +179,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
     }
 
     async createTask(config: TaskConfig, environment: TaskEnvironment): Promise<BackendTask> {
-        const id = `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        const id = `task-${Date.now()}-${randomBytes(5).toString('hex')}`;
 
         const customArgs = process.env['CC_CLAUDE_ARGS']
             ? process.env['CC_CLAUDE_ARGS'].split(' ')
@@ -483,7 +484,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
             // Clear decoded history from all other tasks to free memory
             for (const task of this.tasks.values()) {
                 task.isActive = false;
-                if (task.id !== taskId && task.previousHistory) {
+                if (task.id !== taskId && (task.previousHistory || task.lazyHistoryBase64)) {
                     task.previousHistory = undefined;
                     task.lazyHistoryBase64 = undefined;
                     logger.debug('Freed memory for inactive task', { taskId: task.id });
@@ -1000,7 +1001,8 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
                     if (fileSize > maxBase64Size) {
                         const fd = openSync(historyPath, 'r');
                         const buffer = Buffer.alloc(maxBase64Size);
-                        const offset = fileSize - maxBase64Size;
+                        // Align to base64 group boundary (4 bytes) to avoid corrupting the first decoded bytes
+                        const offset = Math.floor((fileSize - maxBase64Size) / 4) * 4;
                         readSync(fd, buffer, 0, maxBase64Size, offset);
                         closeSync(fd);
                         base64Content = buffer.toString('utf-8');

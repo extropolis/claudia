@@ -15,10 +15,11 @@
 
 import { EventEmitter } from 'events';
 import { ScheduledTask } from '@claudia/shared';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { createLogger } from './logger.js';
+import { loadVersioned, saveVersioned } from './utils/schema-version.js';
 
 const logger = createLogger('[CronScheduler]');
 
@@ -30,6 +31,9 @@ const MAX_SCHEDULED_TASKS_PER_TASK = 50;
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 const CHECK_INTERVAL_MS = 1000; // Check every second
 const PERSISTENCE_PATH = join(__dirname, '..', 'scheduled-tasks.json');
+
+/** Schema version for scheduled-tasks.json. Bump when ScheduledTask shape changes. */
+const CRON_SCHEMA_VERSION = 1;
 
 /**
  * Generate an 8-character random ID for scheduled tasks
@@ -309,6 +313,7 @@ export class CronScheduler extends EventEmitter {
             cronExpression,
             prompt,
             isRecurring,
+            isPaused: false,
             createdAt: now.toISOString(),
             expiresAt,
             nextFireAt: nextFire?.toISOString(),
@@ -352,7 +357,7 @@ export class CronScheduler extends EventEmitter {
     /**
      * Update an existing scheduled task. Supports changing cronExpression, prompt, and isRecurring.
      */
-    update(id: string, updates: { cronExpression?: string; prompt?: string; isRecurring?: boolean }): ScheduledTask | null {
+    update(id: string, updates: { cronExpression?: string; prompt?: string; isRecurring?: boolean; isPaused?: boolean }): ScheduledTask | null {
         const task = this.scheduledTasks.get(id);
         if (!task) return null;
 
@@ -381,6 +386,17 @@ export class CronScheduler extends EventEmitter {
             task.expiresAt = updates.isRecurring
                 ? new Date(new Date(task.createdAt).getTime() + THREE_DAYS_MS).toISOString()
                 : new Date(new Date(task.createdAt).getTime() + 24 * 60 * 60 * 1000).toISOString();
+        }
+        if (updates.isPaused !== undefined) {
+            task.isPaused = updates.isPaused;
+            if (updates.isPaused) {
+                // Clear pending fires when pausing
+                this.pendingFires.delete(id);
+            } else {
+                // Recalculate next fire time when resuming
+                const nextFire = getNextFireTime(task.cronExpression, now);
+                task.nextFireAt = nextFire?.toISOString();
+            }
         }
 
         // Clear any pending fire if prompt changed
@@ -481,6 +497,11 @@ export class CronScheduler extends EventEmitter {
         for (const [scheduledId, prompt] of this.pendingFires.entries()) {
             const scheduled = this.scheduledTasks.get(scheduledId);
             if (scheduled && scheduled.taskId === taskId) {
+                // Don't fire pending prompts for paused tasks
+                if (scheduled.isPaused) {
+                    this.pendingFires.delete(scheduledId);
+                    continue;
+                }
                 logger.info('Firing pending scheduled prompt (task now idle)', { scheduledId, taskId });
                 this.pendingFires.delete(scheduledId);
                 this.fireCallback(taskId, prompt, scheduledId);
@@ -526,6 +547,11 @@ export class CronScheduler extends EventEmitter {
             // Skip this cycle if task state is unknown (may be reconnecting)
             if (taskState === 'unknown') {
                 logger.debug('Skipping scheduled task check (task state unknown, may be reconnecting)', { id, taskId: scheduled.taskId });
+                continue;
+            }
+
+            // Skip paused tasks
+            if (scheduled.isPaused) {
                 continue;
             }
 
@@ -588,7 +614,7 @@ export class CronScheduler extends EventEmitter {
     private save(): void {
         try {
             const data = Array.from(this.scheduledTasks.values());
-            writeFileSync(PERSISTENCE_PATH, JSON.stringify(data, null, 2), 'utf8');
+            saveVersioned(PERSISTENCE_PATH, data, CRON_SCHEMA_VERSION);
             logger.debug('Saved scheduled tasks', { count: data.length });
         } catch (error) {
             logger.error('Failed to save scheduled tasks', { error });
@@ -602,12 +628,20 @@ export class CronScheduler extends EventEmitter {
         try {
             if (!existsSync(PERSISTENCE_PATH)) return;
 
-            const raw = readFileSync(PERSISTENCE_PATH, 'utf8');
-            const data: ScheduledTask[] = JSON.parse(raw);
+            const data = loadVersioned<ScheduledTask[]>(PERSISTENCE_PATH, {
+                currentVersion: CRON_SCHEMA_VERSION,
+                defaultData: [],
+                // Legacy format was a bare ScheduledTask[] — pass through.
+                legacyLoader: (raw) => (Array.isArray(raw) ? (raw as ScheduledTask[]) : []),
+            });
 
             for (const task of data) {
                 try {
                     const cron = parseCronExpression(task.cronExpression);
+                    // Default isPaused for tasks persisted before this field existed
+                    if (task.isPaused === undefined) {
+                        task.isPaused = false;
+                    }
                     this.scheduledTasks.set(task.id, task);
                     this.parsedCrons.set(task.id, cron);
                 } catch (e) {

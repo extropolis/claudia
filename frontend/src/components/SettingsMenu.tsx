@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, Zap, Bell } from 'lucide-react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, Zap, Bell, Palette } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
 import { hasBrowserNotifications, getNotificationPermission, requestNotificationPermission, sendBrowserNotification } from '../utils/browserCapabilities';
@@ -75,9 +75,10 @@ function CollapsiblePanel({ title, icon, isExpanded, onToggle, children }: Colla
 }
 
 export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProps) {
-    const { showSystemStats, setShowSystemStats, browserNotificationsEnabled, setBrowserNotificationsEnabled, notifyOnCompletion, setNotifyOnCompletion, notifyOnWaitingInput, setNotifyOnWaitingInput } = useTaskStore();
+    const { showSystemStats, setShowSystemStats, browserNotificationsEnabled, setBrowserNotificationsEnabled, notifyOnCompletion, setNotifyOnCompletion, notifyOnWaitingInput, setNotifyOnWaitingInput, themePreference, setThemePreference } = useTaskStore();
     const { showWarning } = useNotification();
     const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
+        appearance: false,
         sound: false,
         notifications: false,
         behavior: false,
@@ -133,7 +134,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         disallowedTools: '',
         appendSystemPrompt: '',
         effortLevel: 'high',
-        defaultModel: 'claude-opus-latest'
+        defaultModel: 'claude-opus-latest',
+        model: '',
     });
     const cliSwitchesTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -351,7 +353,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                         disallowedTools: config.claudeCodeSwitches.disallowedTools || '',
                         appendSystemPrompt: config.claudeCodeSwitches.appendSystemPrompt || '',
                         effortLevel: config.claudeCodeSwitches.effortLevel || 'high',
-                        defaultModel: config.claudeCodeSwitches.defaultModel || 'claude-opus-latest'
+                        defaultModel: config.claudeCodeSwitches.defaultModel || 'claude-opus-latest',
+                        model: config.claudeCodeSwitches.model || '',
                     });
                 }
             }
@@ -1256,6 +1259,28 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 </div>
 
                 <div className="settings-menu-content">
+                    <CollapsiblePanel
+                        title="Appearance"
+                        icon={<Palette size={16} />}
+                        isExpanded={expandedPanels.appearance}
+                        onToggle={() => togglePanel('appearance')}
+                    >
+                        <div className="settings-field" style={{ padding: '16px 20px' }}>
+                            <label className="settings-label">Theme</label>
+                            <div className="theme-selector">
+                                {(['system', 'light', 'dark'] as const).map((option) => (
+                                    <button
+                                        key={option}
+                                        className={`theme-option ${themePreference === option ? 'active' : ''}`}
+                                        onClick={() => setThemePreference(option)}
+                                    >
+                                        {option === 'system' ? '\u2699 System' : option === 'light' ? '\u2600 Light' : '\uD83C\uDF19 Dark'}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </CollapsiblePanel>
+
                     <CollapsiblePanel
                         title="Sound"
                         icon={<Volume2 size={18} />}
@@ -2331,6 +2356,25 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 />
                             </div>
 
+                            {/* Default Model */}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Default Model</span>
+                                    <span className="permission-description">
+                                        Model to use for new sessions (e.g. claude-opus-4-5, claude-sonnet-4-5). Leave empty to use Claude's default. Custom model IDs (e.g. Claude-Opus-4.6[1m]) are supported.
+                                    </span>
+                                </div>
+                            </div>
+                            <div className="cli-switch-text-row">
+                                <input
+                                    type="text"
+                                    className="cli-switch-text-input"
+                                    value={cliSwitches.model}
+                                    placeholder="e.g. claude-opus-4-5 (leave empty for default)"
+                                    onChange={(e) => handleCliSwitchChange({ model: e.target.value })}
+                                />
+                            </div>
+
                             {/* Append System Prompt */}
                             <div className="permission-item">
                                 <div className="permission-info">
@@ -2455,7 +2499,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                     </CollapsiblePanel>
 
                     <CollapsiblePanel
-                        title={<>Claudia MCP Server <span className="settings-badge settings-badge-experimental">Experimental</span></>}
+                        title="Claudia MCP Server"
                         icon={<Zap size={18} />}
                         isExpanded={expandedPanels.claudiaMcp}
                         onToggle={() => togglePanel('claudiaMcp')}
@@ -2484,7 +2528,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 Tools available: <code>claudia_list_tasks</code>,
                                 <code>claudia_get_task_status</code>, <code>claudia_get_task_output</code>,
                                 <code>claudia_create_task</code>,
-                                <code>claudia_send_input</code>, <code>claudia_archive_task</code>.
+                                <code>claudia_send_input</code>, <code>claudia_continue_task</code>,
+                                <code>claudia_stop_task</code>, <code>claudia_rename_task</code>.
                                 Tasks are scoped to the current workspace.
                                 Requires server restart for running tasks to pick up the change.
                             </p>

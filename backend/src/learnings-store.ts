@@ -5,14 +5,18 @@
  * Stores learnings with title, content, and embeddings for semantic search.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { ConfigStore } from './config-store.js';
 import { PORTS } from '@claudia/shared';
+import { loadVersioned, saveVersioned } from './utils/schema-version.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+/** Schema version for learnings.json. Bump when LearningsData shape changes. */
+const LEARNINGS_SCHEMA_VERSION = 1;
 
 /**
  * A single learning entry
@@ -70,14 +74,17 @@ export class LearningsStore {
 
     private loadData(): LearningsData {
         try {
-            if (existsSync(this.storagePath)) {
-                const raw = readFileSync(this.storagePath, 'utf-8');
-                return JSON.parse(raw);
-            }
+            return loadVersioned<LearningsData>(this.storagePath, {
+                currentVersion: LEARNINGS_SCHEMA_VERSION,
+                defaultData: { learnings: [], version: 1 },
+                // Legacy format (pre-envelope) was already { learnings, version }.
+                // Pass through unchanged.
+                legacyLoader: (raw) => (raw as LearningsData) ?? { learnings: [], version: 1 },
+            });
         } catch (error) {
             console.error('[LearningsStore] Failed to load data:', error);
+            return { learnings: [], version: 1 };
         }
-        return { learnings: [], version: 1 };
     }
 
     private saveData(): void {
@@ -86,7 +93,7 @@ export class LearningsStore {
             if (!existsSync(dir)) {
                 mkdirSync(dir, { recursive: true });
             }
-            writeFileSync(this.storagePath, JSON.stringify(this.data, null, 2));
+            saveVersioned(this.storagePath, this.data, LEARNINGS_SCHEMA_VERSION);
         } catch (error) {
             console.error('[LearningsStore] Failed to save data:', error);
         }
@@ -133,8 +140,10 @@ export class LearningsStore {
      */
     private cosineSimilarity(a: number[], b: number[]): number {
         if (a.length !== b.length) {
-            // Handle dimension mismatch by padding shorter array
+            // Handle dimension mismatch by padding shorter array (without mutating originals)
             const maxLen = Math.max(a.length, b.length);
+            a = [...a];
+            b = [...b];
             while (a.length < maxLen) a.push(0);
             while (b.length < maxLen) b.push(0);
         }

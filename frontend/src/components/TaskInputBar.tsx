@@ -72,6 +72,24 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
         };
     }, [task.id]);
 
+    // Allow input for disconnected/exited/interrupted tasks — the backend auto-reconnects
+    // with --resume when input is sent, preserving the session context.
+    // Previously these states disabled the input bar, but writeToTask/reconnectTask handle them.
+    const isDisabled = false; // All states accept input; backend handles reconnection as needed
+
+    // Re-focus the textarea when the browser window regains focus.
+    // Without this, focus can land on the xterm terminal and the first
+    // keypress goes to the PTY instead of the input bar.
+    useEffect(() => {
+        const handleWindowFocus = () => {
+            if (inputRef.current && !isDisabled) {
+                inputRef.current.focus();
+            }
+        };
+        window.addEventListener('focus', handleWindowFocus);
+        return () => window.removeEventListener('focus', handleWindowFocus);
+    }, [isDisabled]);
+
     // Append voice transcript to message when this input is focused
     // We use a ref to track processed transcripts to prevent duplicate appending
     const lastProcessedTranscriptRef = useRef<string>('');
@@ -307,8 +325,6 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
             imagesRef.current.forEach(img => URL.revokeObjectURL(img.previewUrl));
         };
     }, []);
-
-    const isDisabled = task.state === 'exited' || task.state === 'disconnected' || task.state === 'interrupted';
 
     // Show interim transcript when focused and listening
     const showInterim = globalVoiceEnabled && isFocused && voiceInterimTranscript;
