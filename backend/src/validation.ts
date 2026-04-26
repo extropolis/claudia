@@ -239,7 +239,7 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
         if (payload.defaultBaseDirectory !== null && typeof payload.defaultBaseDirectory !== 'string') {
             return { valid: false, error: 'defaultBaseDirectory must be a string' };
         }
-        result.defaultBaseDirectory = payload.defaultBaseDirectory;
+        result.defaultBaseDirectory = payload.defaultBaseDirectory ?? undefined;
     }
 
     // Validate backend (optional enum)
