@@ -55,7 +55,7 @@ describe('WorkspaceStore', () => {
         it('should throw error for non-existent directory', () => {
             expect(() => {
                 store.addWorkspace('/non/existent/path');
-            }).toThrow('Directory does not exist');
+            }).toThrow('Failed to create directory');
         });
 
         it('should throw error for file path (not directory)', () => {
