@@ -1684,6 +1684,8 @@ export class TaskSpawner extends EventEmitter {
     private isReadyForInitialInput(str: string): boolean {
         return str.includes('Try "') ||
             str.includes('? for shortcuts') ||
+            str.includes('bypass permissions') ||
+            str.includes('shift+tab') ||
             (str.includes('───') && str.includes('❯'));
     }
 
@@ -1906,7 +1908,7 @@ export class TaskSpawner extends EventEmitter {
             console.log(`[TaskSpawner] Aborting prompt write: task ${task.id} is no longer alive`);
             return;
         }
-        console.log(`[TaskSpawner] Writing prompt to PTY: "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}"`);
+        console.log(`[TaskSpawner] Writing prompt to PTY: "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}" (${prompt.length} chars, retries left: ${maxRetries})`);
 
         // For small messages (≤200 chars), type character by character
         // This gives the TUI time to process and makes Enter more reliable
@@ -1927,13 +1929,44 @@ export class TaskSpawner extends EventEmitter {
             };
             writeNextChar();
         } else {
+            // Record output size BEFORE writing prompt so we can verify TUI accepted it
+            const outputBeforeWrite = task.totalOutputSize;
+
             // Paste the entire prompt at once, then use retry mechanism to ensure Enter is accepted
             task.process.write(prompt);
             task.promptSubmitAttempts = 0;
-            // Give more time for longer prompts to be written before sending Enter
-            const delayMs = Math.min(500 + Math.floor(prompt.length / 100) * 50, 1000);
-            console.log(`[TaskSpawner] Waiting ${delayMs}ms before sending Enter for prompt of ${prompt.length} chars`);
-            setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), delayMs);
+            // Give more time for longer prompts to be written before sending Enter.
+            // Scale: base 500ms + 50ms per 100 chars, capped at 2500ms (aligned with writeToTask).
+            const delayMs = Math.min(500 + Math.floor(prompt.length / 100) * 50, 2500);
+            console.log(`[TaskSpawner] Waiting ${delayMs}ms before verifying prompt write for ${prompt.length} chars`);
+
+            setTimeout(() => {
+                if (task.state === 'exited' || !this.tasks.has(task.id)) return;
+
+                // Verify the TUI actually accepted the prompt by checking for output growth.
+                // When text is typed/pasted into Claude Code's TUI, it re-renders the input
+                // area which produces output. If output didn't grow, the TUI likely wasn't
+                // ready (e.g., MCP servers loading, notification blocking input) and we need
+                // to retry the entire write.
+                const outputAfterWrite = task.totalOutputSize;
+                const outputGrew = outputAfterWrite > outputBeforeWrite + 20;
+
+                if (!outputGrew && maxRetries > 0) {
+                    console.log(`[TaskSpawner] Prompt write NOT accepted by TUI (outputDelta=${outputAfterWrite - outputBeforeWrite}), retrying in 1500ms (retries left: ${maxRetries - 1})`);
+                    // Clear whatever partial state might be in the input and retry
+                    // Send Ctrl+U to clear the input line before retrying
+                    task.process.write('\x15'); // Ctrl+U: kill line
+                    setTimeout(() => this.sendPromptWithRetry(task, prompt, maxRetries - 1), 1500);
+                    return;
+                }
+
+                if (!outputGrew) {
+                    console.log(`[TaskSpawner] WARNING: Prompt write may not have been accepted (outputDelta=${outputAfterWrite - outputBeforeWrite}), but no retries left. Proceeding with Enter anyway.`);
+                }
+
+                console.log(`[TaskSpawner] Prompt write verified (outputDelta=${outputAfterWrite - outputBeforeWrite}), sending Enter`);
+                this.sendEnterWithRetry(task, 5, { isInitialPrompt: true });
+            }, delayMs);
         }
     }
 
