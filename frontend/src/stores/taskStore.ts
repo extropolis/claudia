@@ -98,6 +98,7 @@ interface TaskStore {
     notifyOnCompletion: boolean;
     notifyOnWaitingInput: boolean;
     themePreference: ThemePreference;
+    tokenCostEnabled: boolean;
 
     // Actions
     setConnected: (connected: boolean) => void;
@@ -186,6 +187,7 @@ interface TaskStore {
     setNotifyOnCompletion: (enabled: boolean) => void;
     setNotifyOnWaitingInput: (enabled: boolean) => void;
     setThemePreference: (pref: ThemePreference) => void;
+    setTokenCostEnabled: (enabled: boolean) => void;
 }
 
 // Storage key for localStorage
@@ -290,6 +292,7 @@ export const useTaskStore = create<TaskStore>()(
             notifyOnCompletion: true,
             notifyOnWaitingInput: true,
             themePreference: 'system' as ThemePreference,
+            tokenCostEnabled: false,
 
             // Actions
             setConnected: (connected) => {
@@ -743,7 +746,8 @@ export const useTaskStore = create<TaskStore>()(
             setBrowserNotificationsEnabled: (enabled) => set({ browserNotificationsEnabled: enabled }),
             setNotifyOnCompletion: (enabled) => set({ notifyOnCompletion: enabled }),
             setNotifyOnWaitingInput: (enabled) => set({ notifyOnWaitingInput: enabled }),
-            setThemePreference: (pref) => set({ themePreference: pref })
+            setThemePreference: (pref) => set({ themePreference: pref }),
+            setTokenCostEnabled: (enabled) => set({ tokenCostEnabled: enabled })
         }),
         {
             name: STORAGE_KEY,

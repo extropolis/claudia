@@ -199,6 +199,11 @@ export function useWebSocket() {
                                 );
                                 useTaskStore.getState().setAiCoreConfigured(aiCoreConfigured);
 
+                                // Sync token cost display setting
+                                if (config.tokenCostEnabled !== undefined) {
+                                    useTaskStore.getState().setTokenCostEnabled(config.tokenCostEnabled);
+                                }
+
                                 // Sync Deepgram API key from backend (for mobile/tunnel clients)
                                 if (config.deepgramApiKey && !useTaskStore.getState().deepgramApiKey) {
                                     useTaskStore.setState({ deepgramApiKey: config.deepgramApiKey });

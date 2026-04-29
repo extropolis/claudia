@@ -1,7 +1,5 @@
-import { useState } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { ModelTokenUsage } from '@claudia/shared';
-import { ChevronDown, ChevronRight } from 'lucide-react';
 import './TaskTokenStats.css';
 
 interface TaskTokenStatsProps {
@@ -60,7 +58,7 @@ export function formatCost(cost: number): string {
 
 export function TaskTokenStats({ taskId }: TaskTokenStatsProps) {
     const task = useTaskStore(s => s.tasks.get(taskId));
-    const [expanded, setExpanded] = useState(false);
+    const tokenCostEnabled = useTaskStore(s => s.tokenCostEnabled);
 
     if (!task?.tokenUsage) {
         return null;
@@ -80,11 +78,7 @@ export function TaskTokenStats({ taskId }: TaskTokenStatsProps) {
 
     return (
         <div className="task-token-stats">
-            <button
-                className="task-token-stats-bar"
-                onClick={() => setExpanded(!expanded)}
-                title="Click to expand token usage details"
-            >
+            <div className="task-token-stats-bar">
                 <span className="token-stat">
                     <span className="token-value">{formatTokenCount(inputTokens)} in</span>
                     <span className="token-sep token-sep-section">|</span>
@@ -102,7 +96,7 @@ export function TaskTokenStats({ taskId }: TaskTokenStatsProps) {
                         </>
                     )}
                 </span>
-                {totalCostUsd > 0 && (
+                {tokenCostEnabled && totalCostUsd > 0 && (
                     <>
                         <span className="token-sep token-sep-section">|</span>
                         <span className="token-cost">Cost: {formatCost(totalCostUsd)}</span>
@@ -114,38 +108,7 @@ export function TaskTokenStats({ taskId }: TaskTokenStatsProps) {
                         <span className="token-model">{formatModelName(primaryModelName)}</span>
                     </>
                 )}
-                <span className="token-expand-icon">
-                    {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                </span>
-            </button>
-            {expanded && models.length > 0 && (
-                <div className="task-token-stats-detail">
-                    <table className="token-breakdown-table">
-                        <thead>
-                            <tr>
-                                <th>Model</th>
-                                <th>Input</th>
-                                <th>Output</th>
-                                <th>Cache Write</th>
-                                <th>Cache Read</th>
-                                <th>Cost</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {models.map(([name, usage]) => (
-                                <tr key={name}>
-                                    <td className="model-name">{formatModelName(name)}</td>
-                                    <td>{formatTokenCount(usage.inputTokens)}</td>
-                                    <td>{formatTokenCount(usage.outputTokens)}</td>
-                                    <td>{formatTokenCount(usage.cacheCreationTokens)}</td>
-                                    <td>{formatTokenCount(usage.cacheReadTokens)}</td>
-                                    <td>{formatCost(usage.costUsd)}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            )}
+            </div>
         </div>
     );
 }

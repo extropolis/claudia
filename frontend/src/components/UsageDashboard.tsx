@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { X, RefreshCw, DollarSign, Hash, BarChart3, Settings, ChevronDown, ChevronRight, Save } from 'lucide-react';
 import { UsageDashboardData, ModelPricing, ModelTokenUsage } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
+import { useTaskStore } from '../stores/taskStore';
 import { formatTokenCount, formatModelName, formatCost } from './TaskTokenStats';
 import './UsageDashboard.css';
 
@@ -25,6 +26,7 @@ export function UsageDashboard({ isOpen, onClose }: UsageDashboardProps) {
     const [savingPricing, setSavingPricing] = useState(false);
 
     const apiBase = getApiBaseUrl();
+    const tokenCostEnabled = useTaskStore(s => s.tokenCostEnabled);
 
     const fetchDashboard = useCallback(async () => {
         setLoading(true);
@@ -130,6 +132,7 @@ export function UsageDashboard({ isOpen, onClose }: UsageDashboardProps) {
                 {data && (
                     <>
                         <div className="usage-summary-cards">
+                            {tokenCostEnabled && (
                             <div className="usage-card">
                                 <div className="usage-card-icon">
                                     <DollarSign size={20} />
@@ -139,6 +142,7 @@ export function UsageDashboard({ isOpen, onClose }: UsageDashboardProps) {
                                     <span className="usage-card-label">Total Cost</span>
                                 </div>
                             </div>
+                            )}
                             <div className="usage-card">
                                 <div className="usage-card-icon input-icon">
                                     <BarChart3 size={20} />
@@ -179,7 +183,7 @@ export function UsageDashboard({ isOpen, onClose }: UsageDashboardProps) {
                                                 <th>Tasks</th>
                                                 <th>Input</th>
                                                 <th>Output</th>
-                                                <th>Cost</th>
+                                                {tokenCostEnabled && <th>Cost</th>}
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -191,7 +195,7 @@ export function UsageDashboard({ isOpen, onClose }: UsageDashboardProps) {
                                                     <td>{ws.taskCount}</td>
                                                     <td>{formatTokenCount(ws.inputTokens)}</td>
                                                     <td>{formatTokenCount(ws.outputTokens)}</td>
-                                                    <td className="cost-cell">{formatCost(ws.costUsd)}</td>
+                                                    {tokenCostEnabled && <td className="cost-cell">{formatCost(ws.costUsd)}</td>}
                                                 </tr>
                                             ))}
                                         </tbody>
@@ -211,7 +215,7 @@ export function UsageDashboard({ isOpen, onClose }: UsageDashboardProps) {
                                                 <th>Tasks</th>
                                                 <th>Input</th>
                                                 <th>Output</th>
-                                                <th>Cost</th>
+                                                {tokenCostEnabled && <th>Cost</th>}
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -221,7 +225,7 @@ export function UsageDashboard({ isOpen, onClose }: UsageDashboardProps) {
                                                     <td>-</td>
                                                     <td>{formatTokenCount(usage.inputTokens)}</td>
                                                     <td>{formatTokenCount(usage.outputTokens)}</td>
-                                                    <td className="cost-cell">{formatCost(usage.costUsd)}</td>
+                                                    {tokenCostEnabled && <td className="cost-cell">{formatCost(usage.costUsd)}</td>}
                                                 </tr>
                                             ))}
                                         </tbody>
