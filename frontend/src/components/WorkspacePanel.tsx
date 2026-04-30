@@ -953,6 +953,26 @@ function WorkspaceSection({
                                     el.style.marginBottom = '4px';
                                 }
                             }
+                        }}
+                        onMouseOver={(e) => {
+                            // Close the references submenu when the user hovers over a sibling menu item.
+                            // mouseover bubbles (unlike mouseenter), so we get all hover transitions on this single handler.
+                            // We deliberately do NOT use a mouseleave timer on the submenu/References item itself —
+                            // that scheme is fragile because diagonal mouse motion creates "dead zones" geographically
+                            // outside both the References item bbox and the submenu bbox, where the timer can fire
+                            // while the user is still trying to interact with the submenu (e.g. clicking a reference).
+                            const target = e.target as HTMLElement;
+                            if (
+                                showReferencesSubmenu &&
+                                !target.closest('.has-submenu') &&
+                                !target.closest('.workspace-submenu')
+                            ) {
+                                if (submenuCloseTimeoutRef.current) {
+                                    clearTimeout(submenuCloseTimeoutRef.current);
+                                    submenuCloseTimeoutRef.current = null;
+                                }
+                                setShowReferencesSubmenu(false);
+                            }
                         }}>
                             <button
                                 className="workspace-dropdown-item"
@@ -1047,12 +1067,6 @@ function WorkspaceSection({
                                         setSubmenuPosition({ top: rect.top, left: rect.right - 8 });
                                     }
                                 }}
-                                onMouseLeave={() => {
-                                    submenuCloseTimeoutRef.current = setTimeout(() => {
-                                        setShowReferencesSubmenu(false);
-                                        submenuCloseTimeoutRef.current = null;
-                                    }, 150);
-                                }}
                                 onClick={(e) => e.stopPropagation()}
                             >
                                 <Link2 size={14} />
@@ -1074,18 +1088,6 @@ function WorkspaceSection({
                                             }
                                         }}
                                         onClick={(e) => e.stopPropagation()}
-                                        onMouseEnter={() => {
-                                            if (submenuCloseTimeoutRef.current) {
-                                                clearTimeout(submenuCloseTimeoutRef.current);
-                                                submenuCloseTimeoutRef.current = null;
-                                            }
-                                        }}
-                                        onMouseLeave={() => {
-                                            submenuCloseTimeoutRef.current = setTimeout(() => {
-                                                setShowReferencesSubmenu(false);
-                                                submenuCloseTimeoutRef.current = null;
-                                            }, 150);
-                                        }}
                                     >
                                         {allWorkspaces.filter(w => w.id !== workspace.id).length > 0 && (
                                             <>
