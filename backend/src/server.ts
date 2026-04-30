@@ -1461,7 +1461,9 @@ export async function createApp(basePath?: string) {
                             const workspace = workspaceStore.addWorkspace(path);
                             broadcast({ type: 'workspace:created' as WSMessageType, payload: { workspace } });
                         } catch (error) {
-                            console.error('[Server] Failed to create workspace:', error);
+                            const errorMessage = error instanceof Error ? error.message : 'Failed to create workspace';
+                            logger.error('Failed to create workspace', { error: errorMessage, path });
+                            sendWSError(ws, errorMessage, message.type, 'WORKSPACE_CREATE_FAILED');
                         }
                         break;
                     }
@@ -1510,7 +1512,7 @@ export async function createApp(basePath?: string) {
 
                         try {
                             if (platform === 'darwin') {
-                                // Build osascript args as an array — no shell interpolation
+                            // Build osascript args as an array — no shell interpolation
                                 const scriptParts = ['POSIX path of (choose folder with prompt "Select a workspace folder"'];
                                 if (lastBrowsed) {
                                     // Escape backslashes and quotes inside the AppleScript string
@@ -1561,9 +1563,13 @@ export async function createApp(basePath?: string) {
                             }
                         } catch (err: any) {
                             // User cancelled the dialog (exit code != 0) - not an error
-                            if (err.status !== 0) {
-                                logger.debug('Folder browse dialog cancelled or failed', { error: err.message });
-                            }
+                            logger.warn('Folder browse dialog error', {
+                                status: err.status,
+                                code: err.code,
+                                message: err.message,
+                                stderr: err.stderr?.toString(),
+                                stdout: err.stdout?.toString()
+                            });
                         }
 
                         // Remember the selected path for next time
@@ -2305,6 +2311,110 @@ export async function createApp(basePath?: string) {
             const message = error instanceof Error ? error.message : String(error);
             logger.error('Failed to fetch HAI proxy models', { error: message });
             res.status(500).json({ success: false, error: message });
+        }
+    });
+
+    // SAP AI Core Plugin API routes (for frontend Settings)
+    app.post('/api/sap-ai-core/test', async (req, res) => {
+        try {
+            const { clientId, clientSecret, authUrl, baseUrl, resourceGroup, timeoutMs } = req.body;
+
+            if (!clientId || !clientSecret || !authUrl) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Missing required credentials (clientId, clientSecret, authUrl)'
+                });
+            }
+
+            logger.info('Testing SAP AI Core connection', { authUrl, baseUrl: baseUrl || 'not provided' });
+
+            // Test by obtaining an access token
+            const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+            const tokenUrl = `${authUrl}/oauth/token?grant_type=client_credentials`;
+
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), timeoutMs || 30000);
+
+            try {
+                const tokenResponse = await fetch(tokenUrl, {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Basic ${credentials}`,
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    signal: controller.signal
+                });
+
+                clearTimeout(timeout);
+
+                if (!tokenResponse.ok) {
+                    const errorText = await tokenResponse.text();
+                    logger.error('SAP AI Core auth failed', { status: tokenResponse.status, error: errorText });
+                    return res.json({
+                        success: false,
+                        error: `Authentication failed: ${tokenResponse.status} - ${errorText}`
+                    });
+                }
+
+                const tokenData = await tokenResponse.json();
+                if (!tokenData.access_token) {
+                    logger.error('Invalid token response from SAP AI Core');
+                    return res.json({
+                        success: false,
+                        error: 'Invalid token response from auth server'
+                    });
+                }
+
+                // If baseUrl is provided, also test the AI Core API endpoint
+                if (baseUrl) {
+                    const apiUrl = `${baseUrl}/v2/lm/deployments?$top=1`;
+                    const apiResponse = await fetch(apiUrl, {
+                        headers: {
+                            Authorization: `Bearer ${tokenData.access_token}`,
+                            'AI-Resource-Group': resourceGroup || 'default'
+                        }
+                    });
+
+                    if (!apiResponse.ok) {
+                        logger.error('SAP AI Core API access failed', { status: apiResponse.status });
+                        return res.json({
+                            success: false,
+                            error: `API access failed: ${apiResponse.status} - Unable to access AI Core API`
+                        });
+                    }
+                }
+
+                logger.info('SAP AI Core connection test successful');
+                res.json({
+                    success: true,
+                    message: baseUrl
+                        ? 'Successfully authenticated and connected to AI Core API'
+                        : 'Successfully authenticated with SAP AI Core'
+                });
+
+            } catch (fetchError: unknown) {
+                clearTimeout(timeout);
+                if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+                    logger.error('SAP AI Core connection timeout');
+                    return res.json({
+                        success: false,
+                        error: 'Connection timeout - unable to reach auth server'
+                    });
+                }
+                const message = fetchError instanceof Error ? fetchError.message : String(fetchError);
+                logger.error('SAP AI Core connection error', { error: message });
+                return res.json({
+                    success: false,
+                    error: `Connection error: ${message}`
+                });
+            }
+        } catch (error: unknown) {
+            logger.error('Error testing SAP AI Core credentials', { error });
+            const message = error instanceof Error ? error.message : String(error);
+            res.status(500).json({
+                success: false,
+                error: `Server error: ${message}`
+            });
         }
     });
 
@@ -3347,6 +3457,46 @@ export async function createApp(basePath?: string) {
         }
     });
 
+    app.post('/api/workspaces/files/copy', async (req, res) => {
+        const { workspace, sourcePath, destinationPath } = req.body;
+
+        if (!workspace || !sourcePath || !destinationPath) {
+            return res.status(400).json({ error: 'workspace, sourcePath, and destinationPath are required' });
+        }
+
+        const resolvedWorkspace = resolve(workspace);
+        const resolvedSource = resolve(workspace, sourcePath);
+        const resolvedDest = resolve(workspace, destinationPath);
+
+        // Security: ensure paths are within workspace
+        if (!resolvedSource.startsWith(resolvedWorkspace) || !resolvedDest.startsWith(resolvedWorkspace)) {
+            return res.status(403).json({ error: 'Path traversal not allowed' });
+        }
+
+        if (!existsSync(resolvedSource)) {
+            return res.status(404).json({ error: 'Source file not found' });
+        }
+
+        try {
+            const fs = await import('fs/promises');
+            const stat = await fs.stat(resolvedSource);
+
+            if (stat.isDirectory()) {
+                // Copy directory recursively
+                await fs.cp(resolvedSource, resolvedDest, { recursive: true });
+            } else {
+                // Copy file
+                await fs.copyFile(resolvedSource, resolvedDest);
+            }
+
+            logger.info('File/directory copied', { source: sourcePath, destination: destinationPath });
+            res.json({ success: true, message: 'File/directory copied successfully' });
+        } catch (err) {
+            logger.error('Failed to copy file/directory', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Failed to copy file/directory' });
+        }
+    });
+
     app.delete('/api/workspaces/files', async (req, res) => {
         const { workspace, path } = req.body;
 
@@ -4329,13 +4479,34 @@ export async function createApp(basePath?: string) {
             const currentBackend = configStore.getBackend();
             const newBackend = validation.data!.backend;
 
+            // Convert sapAiCore to aiCoreCredentials if present
+            const configUpdate = { ...validation.data! };
+            if (configUpdate.sapAiCore) {
+                configUpdate.aiCoreCredentials = configUpdate.sapAiCore;
+                delete configUpdate.sapAiCore;
+            }
+
             // Cast is needed because ConfigUpdatePayload has optional fields but AppConfig requires them
-            const updatedConfig = configStore.updateConfig(validation.data! as Parameters<typeof configStore.updateConfig>[0]);
+            const updatedConfig = configStore.updateConfig(configUpdate as Parameters<typeof configStore.updateConfig>[0]);
 
             // If backend was changed, switch the task spawner's backend
             if (newBackend && newBackend !== currentBackend) {
                 logger.info('Backend config changed, switching task spawner backend', { from: currentBackend, to: newBackend });
                 await taskSpawner.switchBackend(newBackend);
+            }
+
+            // If apiMode was changed, notify the relevant plugin
+            if (configUpdate.apiMode !== undefined) {
+                logger.info('[Config] API mode changed, notifying plugin', {
+                    apiMode: configUpdate.apiMode,
+                    previousMode: currentBackend
+                });
+                try {
+                    await pluginManager.notifyConfigChange(configUpdate.apiMode, updatedConfig);
+                    logger.info('[Config] Plugin notified successfully', { apiMode: configUpdate.apiMode });
+                } catch (error) {
+                    logger.error('[Config] Failed to notify plugin of config change', { error });
+                }
             }
 
             // If rules were updated, sync to all workspace CLAUDE.md files

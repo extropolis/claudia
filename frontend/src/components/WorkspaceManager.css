@@ -1,0 +1,383 @@
+.workspace-manager-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 20px;
+    animation: fadeIn 0.2s ease-out;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+.workspace-manager-modal {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    width: 100%;
+    max-width: 800px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    animation: slideUp 0.2s ease-out;
+}
+
+@keyframes slideUp {
+    from {
+        transform: translateY(20px);
+        opacity: 0;
+    }
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+
+.workspace-manager-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.workspace-manager-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.workspace-manager-title h2 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.workspace-manager-close {
+    background: transparent;
+    border: none;
+    padding: 6px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+}
+
+.workspace-manager-close:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.workspace-manager-toolbar {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+}
+
+.workspace-manager-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: var(--text-secondary);
+    transition: border-color 0.15s ease;
+}
+
+.workspace-manager-search:focus-within {
+    border-color: var(--accent-color);
+}
+
+.workspace-manager-search input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text-primary);
+    font-size: 14px;
+}
+
+.workspace-manager-search input::placeholder {
+    color: var(--text-tertiary);
+}
+
+.workspace-manager-search .clear-search {
+    background: transparent;
+    border: none;
+    padding: 4px;
+    cursor: pointer;
+    color: var(--text-tertiary);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+}
+
+.workspace-manager-search .clear-search:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.workspace-manager-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.workspace-action-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.workspace-action-btn:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: var(--accent-color);
+}
+
+.workspace-action-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.workspace-action-btn.delete-selected {
+    color: var(--danger-color);
+    border-color: var(--danger-color);
+}
+
+.workspace-action-btn.delete-selected:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.1);
+    border-color: var(--danger-color);
+}
+
+.workspace-action-btn.add-workspace {
+    background: var(--accent-color);
+    color: white;
+    border-color: var(--accent-color);
+}
+
+.workspace-action-btn.add-workspace:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+}
+
+.workspace-manager-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 24px;
+    min-height: 300px;
+}
+
+.workspace-manager-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 60px 20px;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+.workspace-manager-empty p {
+    margin: 0;
+    font-size: 15px;
+}
+
+.workspace-manager-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.workspace-manager-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    transition: all 0.15s ease;
+    cursor: move;
+}
+
+.workspace-manager-item:hover {
+    background: var(--bg-hover);
+    border-color: var(--accent-color);
+}
+
+.workspace-manager-item.selected {
+    background: rgba(59, 130, 246, 0.1);
+    border-color: var(--accent-color);
+}
+
+.workspace-manager-item.dragging {
+    opacity: 0.5;
+}
+
+.workspace-manager-item.drop-target {
+    border-color: var(--accent-color);
+    border-style: dashed;
+}
+
+.workspace-item-drag-handle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-tertiary);
+    cursor: move;
+    padding: 4px;
+}
+
+.workspace-item-checkbox {
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.15s ease;
+}
+
+.workspace-item-checkbox:hover {
+    color: var(--accent-color);
+}
+
+.workspace-item-checkbox .checked {
+    color: var(--accent-color);
+}
+
+.workspace-item-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.workspace-item-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.workspace-item-name span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.workspace-item-path {
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.workspace-item-delete {
+    background: transparent;
+    border: none;
+    padding: 6px;
+    cursor: pointer;
+    color: var(--text-tertiary);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+}
+
+.workspace-item-delete:hover {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--danger-color);
+}
+
+.workspace-manager-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    border-top: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+}
+
+.workspace-manager-stats {
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.workspace-manager-done {
+    padding: 8px 20px;
+    background: var(--accent-color);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.workspace-manager-done:hover {
+    background: var(--accent-hover);
+}
+
+/* Scrollbar styling */
+.workspace-manager-content::-webkit-scrollbar {
+    width: 8px;
+}
+
+.workspace-manager-content::-webkit-scrollbar-track {
+    background: var(--bg-primary);
+}
+
+.workspace-manager-content::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 4px;
+}
+
+.workspace-manager-content::-webkit-scrollbar-thumb:hover {
+    background: var(--text-tertiary);
+}

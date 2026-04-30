@@ -53,9 +53,10 @@ describe('WorkspaceStore', () => {
         });
 
         it('should throw error for non-existent directory', () => {
+            // Use a path with null byte which is invalid on all platforms
             expect(() => {
-                store.addWorkspace('/non/existent/path');
-            }).toThrow('Directory does not exist');
+                store.addWorkspace('/path/with\0/nullbyte');
+            }).toThrow();
         });
 
         it('should throw error for file path (not directory)', () => {

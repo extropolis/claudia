@@ -248,6 +248,55 @@
     color: var(--accent-secondary);
 }
 
+/* Task Sort Selector */
+.task-sort-selector {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 18px;
+    padding: 0 3px 0 4px;
+    border: 1px solid rgba(0, 212, 255, 0.25);
+    border-radius: 8px;
+    background: rgba(0, 212, 255, 0.08);
+    color: var(--accent-secondary);
+    transition: all 0.2s ease;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.task-sort-selector:hover {
+    background: rgba(0, 212, 255, 0.15);
+    border-color: rgba(0, 212, 255, 0.4);
+}
+
+.task-sort-icon {
+    flex-shrink: 0;
+    opacity: 0.8;
+}
+
+.task-sort-select {
+    background: transparent;
+    border: none;
+    color: inherit;
+    font-size: 0.625rem;
+    font-family: inherit;
+    cursor: pointer;
+    outline: none;
+    padding: 0;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    padding-right: 10px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='7' height='7' viewBox='0 0 24 24' fill='none' stroke='%2300d4ff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0 center;
+}
+
+.task-sort-select option {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
 .workspace-branch-label {
     display: inline-flex;
     align-items: center;
@@ -1208,6 +1257,27 @@
     background: var(--accent-primary);
     border-color: var(--accent-secondary);
     color: var(--accent-secondary);
+}
+
+/* Workspace Manager Button */
+.workspace-manager-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.workspace-manager-button:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--text-muted);
+    color: var(--text-primary);
 }
 
 /* Column Selector */

@@ -4,6 +4,7 @@ import { selectDirectory } from '../services/filePickerService';
 import { getBrowserCapabilities } from '../utils/browserCapabilities';
 import { PathInputModal } from './PathInputModal';
 import { RecentWorkspace } from '@claudia/shared';
+import { getApiBaseUrl } from '../config/api-config';
 
 interface ProjectPickerProps {
     onSelect: (path: string) => void;
@@ -17,6 +18,26 @@ export function ProjectPicker({ onSelect, wsRef, requestRecentWorkspaces, clearR
     const [showPathInput, setShowPathInput] = useState(false);
     const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspace[]>([]);
     const [isBrowsing, setIsBrowsing] = useState(false);
+    const [defaultBaseDirectory, setDefaultBaseDirectory] = useState<string | undefined>(undefined);
+
+    // Fetch default base directory from config when modal opens
+    useEffect(() => {
+        if (!showPathInput) return;
+
+        const fetchConfig = async () => {
+            try {
+                const response = await fetch(`${getApiBaseUrl()}/api/config`);
+                if (response.ok) {
+                    const config = await response.json();
+                    setDefaultBaseDirectory(config.defaultBaseDirectory);
+                }
+            } catch (err) {
+                console.error('[ProjectPicker] Failed to fetch config:', err);
+            }
+        };
+
+        fetchConfig();
+    }, [showPathInput]);
 
     // Listen for recent workspaces and browse folder responses on the shared WebSocket
     useEffect(() => {
@@ -67,9 +88,11 @@ export function ProjectPicker({ onSelect, wsRef, requestRecentWorkspaces, clearR
             console.log('[ProjectPicker] Opening folder selection dialog...');
 
             const capabilities = getBrowserCapabilities();
+            const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-            // In Electron mode, use native dialog directly
+            // In Electron mode, always use native dialog
             if (capabilities.directorySelectionMethod === 'electron') {
+                console.log('[ProjectPicker] Using Electron native picker');
                 const result = await selectDirectory();
                 if (result.success && result.path) {
                     console.log('[ProjectPicker] Selected path:', result.path);
@@ -81,9 +104,31 @@ export function ProjectPicker({ onSelect, wsRef, requestRecentWorkspaces, clearR
                 return;
             }
 
-            // In browser mode, show path input modal with browse button
-            // The browse button uses the backend to open native OS folder picker
-            console.log('[ProjectPicker] Browser mode detected, showing path input modal');
+            // On localhost, use path input modal with backend browse button
+            // (File System Access API doesn't work for localhost because it only returns directory names, not full paths)
+            if (isLocalhost) {
+                console.log('[ProjectPicker] Localhost detected, showing path input modal with backend browse option');
+                setShowPathInput(true);
+                setShowProjectPicker(false);
+                return;
+            }
+
+            // For remote/tunnel access in modern browsers, use File System Access API
+            if (capabilities.directorySelectionMethod === 'filesystem-api') {
+                console.log('[ProjectPicker] Using File System Access API for remote browser');
+                const result = await selectDirectory();
+                if (result.success && result.path) {
+                    console.log('[ProjectPicker] Selected directory:', result.path);
+                    onSelect(result.path);
+                } else if (result.error && result.error.type !== 'cancelled') {
+                    alert(result.error.message || 'Failed to select directory');
+                }
+                setShowProjectPicker(false);
+                return;
+            }
+
+            // Fallback: show path input modal (for unsupported browsers)
+            console.log('[ProjectPicker] No native picker available, showing path input modal');
             setShowPathInput(true);
             setShowProjectPicker(false);
         } catch (error) {
@@ -140,6 +185,8 @@ export function ProjectPicker({ onSelect, wsRef, requestRecentWorkspaces, clearR
                     onRemoveRecent={handleRemoveRecent}
                     onBrowse={handleBrowse}
                     isBrowsing={isBrowsing}
+                    showBrowseButton={false}
+                    defaultBaseDirectory={defaultBaseDirectory}
                 />
             )}
         </>

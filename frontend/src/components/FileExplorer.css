@@ -279,6 +279,14 @@
 .file-tree-item:hover { background: rgba(255, 255, 255, 0.04); }
 .file-tree-item.directory:hover { background: rgba(255, 255, 255, 0.06); }
 .file-tree-item.file.clickable:hover { background: rgba(255, 255, 255, 0.06); }
+.file-tree-item.selected {
+    background: rgba(0, 212, 255, 0.15) !important;
+    border-left: 2px solid var(--accent-secondary, #00d4ff);
+    padding-left: 6px;
+}
+.file-tree-item.selected:hover {
+    background: rgba(0, 212, 255, 0.2) !important;
+}
 
 .file-tree-chevron {
     width: 16px; height: 16px;

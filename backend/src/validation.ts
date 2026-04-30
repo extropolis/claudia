@@ -62,7 +62,17 @@ export interface ConfigUpdatePayload {
         model?: string;
         alwaysThinkingEnabled?: boolean;
     };
+    defaultBaseDirectory?: string;
     sapAiCore?: {
+        clientId?: string;
+        clientSecret?: string;
+        authUrl?: string;
+        baseUrl?: string;
+        resourceGroup?: string;
+        model?: string;
+        timeoutMs?: number;
+    };
+    aiCoreCredentials?: {  // Alias for sapAiCore (for backwards compatibility)
         clientId?: string;
         clientSecret?: string;
         authUrl?: string;
@@ -222,6 +232,14 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
             return { valid: false, error: 'deepgramApiKey must be a string' };
         }
         result.deepgramApiKey = payload.deepgramApiKey;
+    }
+
+    // Validate defaultBaseDirectory (optional string)
+    if (payload.defaultBaseDirectory !== undefined) {
+        if (payload.defaultBaseDirectory !== null && typeof payload.defaultBaseDirectory !== 'string') {
+            return { valid: false, error: 'defaultBaseDirectory must be a string' };
+        }
+        result.defaultBaseDirectory = payload.defaultBaseDirectory ?? undefined;
     }
 
     // Validate backend (optional enum)

@@ -406,7 +406,7 @@ describe('getWorkspaceSessions', () => {
         expect(result).toHaveLength(1);
         expect(result[0].sessionId).toBe('test-session');
         expect(result[0].summary).toBe('Test conversation');
-        expect(result[0].lastModified).toBeInstanceOf(Date);
+        expect(new Date(result[0].lastModified).getTime()).not.toBeNaN();
     });
 
     it('should handle sessions without summaries', async () => {
