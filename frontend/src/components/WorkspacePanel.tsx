@@ -1527,6 +1527,9 @@ export function WorkspacePanel({
     // Workspace manager modal state
     const [showWorkspaceManager, setShowWorkspaceManager] = useState(false);
 
+    // Workspace filter state
+    const [workspaceFilter, setWorkspaceFilter] = useState('');
+
     // Close menu when clicking outside (capture phase so stopPropagation on child elements doesn't block it)
     useEffect(() => {
         if (!openMenuId) return;
@@ -1658,10 +1661,37 @@ export function WorkspacePanel({
         }
     });
 
+    // Filter workspaces by name
+    const filteredWorkspaces = workspaceFilter
+        ? sortedWorkspaces.filter(w => {
+            const name = (w.displayName || w.name).toLowerCase();
+            return name.startsWith(workspaceFilter.toLowerCase());
+        })
+        : sortedWorkspaces;
+
     return (
         <div className="workspace-panel">
             <div className="workspace-panel-header">
                 <h2>Workspaces</h2>
+                <div className="workspace-filter-container">
+                    <Search size={12} className="workspace-filter-icon" />
+                    <input
+                        type="text"
+                        className="workspace-filter-input"
+                        placeholder="Filter..."
+                        value={workspaceFilter}
+                        onChange={(e) => setWorkspaceFilter(e.target.value)}
+                    />
+                    {workspaceFilter && (
+                        <button
+                            className="workspace-filter-clear"
+                            onClick={() => setWorkspaceFilter('')}
+                            title="Clear filter"
+                        >
+                            <X size={12} />
+                        </button>
+                    )}
+                </div>
                 <div className="workspace-panel-header-actions">
                     <button
                         className={`archived-toggle-button ${showArchivedTasks ? 'active' : ''}`}
@@ -1748,18 +1778,24 @@ export function WorkspacePanel({
                 className="workspace-panel-content"
                 style={workspaceColumns > 0 ? { gridTemplateColumns: `repeat(${workspaceColumns}, 1fr)` } : undefined}
             >
-                {sortedWorkspaces.length === 0 ? (
+                {filteredWorkspaces.length === 0 ? (
                     <div className="empty-state">
-                        <p>No workspaces yet.</p>
-                        <button
-                            className="create-first-workspace-btn"
-                            onClick={handleAddWorkspace}
-                        >
-                            <FolderOpen size={14} /> Add Workspace
-                        </button>
+                        {workspaceFilter ? (
+                            <p>No workspaces matching "{workspaceFilter}"</p>
+                        ) : (
+                            <>
+                                <p>No workspaces yet.</p>
+                                <button
+                                    className="create-first-workspace-btn"
+                                    onClick={handleAddWorkspace}
+                                >
+                                    <FolderOpen size={14} /> Add Workspace
+                                </button>
+                            </>
+                        )}
                     </div>
                 ) : (
-                    sortedWorkspaces.map((workspace, index) => (
+                    filteredWorkspaces.map((workspace, index) => (
                         <WorkspaceSection
                             key={workspace.id}
                             workspace={workspace}

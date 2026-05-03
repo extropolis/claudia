@@ -93,6 +93,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'cron:update',
     'cron:list',
     'cron:run',
+    'voice:input',
 ]);
 
 // WebSocket message validation
@@ -338,7 +339,7 @@ export async function createApp(basePath?: string) {
     const wss = new WebSocketServer({ noServer: true });
 
     // Middleware
-    // Restrict CORS to localhost origins only — Claudia is a local-first app
+    // Restrict CORS to localhost and active tunnel origins
     app.use(cors({
         origin: (origin, callback) => {
             // Allow requests with no origin (same-origin, curl, native apps)
@@ -346,6 +347,9 @@ export async function createApp(basePath?: string) {
             try {
                 const url = new URL(origin);
                 if (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1') {
+                    return callback(null, true);
+                }
+                if (isTunnelHost(url.hostname)) {
                     return callback(null, true);
                 }
             } catch { /* invalid origin */ }
@@ -396,6 +400,14 @@ export async function createApp(basePath?: string) {
 
         // Let API routes pass through
         if (req.path.startsWith('/api/')) {
+            return next();
+        }
+
+        // Let /assets/ requests fall through to static file server directly.
+        // These are hashed production build files that Vite dev server won't
+        // know about — proxying them to Vite results in HTML error pages
+        // being served with wrong MIME types (causing white-screen on mobile).
+        if (req.path.startsWith('/assets/')) {
             return next();
         }
 
@@ -575,6 +587,7 @@ export async function createApp(basePath?: string) {
 
     // Track connected clients with their alive status for heartbeat
     const clients = new Set<WebSocket>();
+    const voiceClients = new Set<WebSocket>(); // Voice agent clients - don't send task:output
     const clientAliveMap = new WeakMap<WebSocket, boolean>();
 
     // Heartbeat interval to keep WebSocket connections alive
@@ -616,14 +629,15 @@ export async function createApp(basePath?: string) {
     // Broadcast to all connected clients
     function broadcast(message: WSMessage): void {
         const data = JSON.stringify(message);
+        const isTaskOutput = message.type === 'task:output';
         for (const client of clients) {
             try {
                 if (client.readyState === WebSocket.OPEN) {
+                    if (isTaskOutput && voiceClients.has(client)) continue;
                     client.send(data);
                 }
             } catch (err) {
                 console.error('[Server] Error sending to client:', err);
-                // Remove broken client from set
                 clients.delete(client);
             }
         }
@@ -989,6 +1003,7 @@ export async function createApp(basePath?: string) {
         const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
         const mobileToken = url.searchParams.get('token');
         const isMobile = url.searchParams.get('mobile') === '1';
+        const isVoice = url.searchParams.get('voice') === '1';
 
         if (isMobile) {
             if (!mobileToken || !tunnelManager.validateToken(mobileToken)) {
@@ -999,8 +1014,9 @@ export async function createApp(basePath?: string) {
             logger.info('Mobile client connected via tunnel');
         }
 
-        console.log('[Server] Client connected' + (isMobile ? ' (mobile)' : ''));
+        console.log('[Server] Client connected' + (isMobile ? ' (mobile)' : '') + (isVoice ? ' (voice)' : ''));
         clients.add(ws);
+        if (isVoice) voiceClients.add(ws);
         clientAliveMap.set(ws, true); // Mark as alive on connection
 
         // Handle pong responses to keep connection alive
@@ -1505,82 +1521,72 @@ export async function createApp(basePath?: string) {
 
                     case 'workspace:browseFolder': {
                         // Open native OS folder picker dialog and return selected path
-                        const { execFileSync } = await import('child_process');
+                        // Use async spawn to avoid blocking the event loop during dialog
+                        const { spawn: spawnChild } = await import('child_process');
                         const platform = process.platform;
-                        let selectedPath: string | null = null;
                         const lastBrowsed = workspaceStore.getLastBrowsedPath();
 
-                        try {
-                            if (platform === 'darwin') {
-                            // Build osascript args as an array — no shell interpolation
-                                const scriptParts = ['POSIX path of (choose folder with prompt "Select a workspace folder"'];
-                                if (lastBrowsed) {
-                                    // Escape backslashes and quotes inside the AppleScript string
-                                    const safe = lastBrowsed.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                                    scriptParts.push(` default location POSIX file "${safe}"`);
-                                }
-                                scriptParts.push(')');
-                                const result = execFileSync(
-                                    'osascript', ['-e', scriptParts.join('')],
-                                    { encoding: 'utf-8', timeout: 120000 }
-                                ).trim();
-                                if (result) selectedPath = result.replace(/\/$/, ''); // remove trailing slash
-                            } else if (platform === 'win32') {
-                                // Pass the PowerShell script via -EncodedCommand to avoid any shell quoting issues
-                                const initialDirLine = lastBrowsed
-                                    ? `$dialog.SelectedPath = [System.IO.Path]::GetFullPath("${lastBrowsed.replace(/"/g, '')}")`
-                                    : '';
-                                const psScript = [
-                                    'Add-Type -AssemblyName System.Windows.Forms',
-                                    '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
-                                    '$dialog.Description = "Select a workspace folder"',
-                                    '$dialog.ShowNewFolderButton = $true',
-                                    ...(initialDirLine ? [initialDirLine] : []),
-                                    'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }',
-                                ].join('\n');
-                                const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
-                                const result = execFileSync(
-                                    'powershell', ['-NoProfile', '-EncodedCommand', encoded],
-                                    { encoding: 'utf-8', timeout: 120000 }
-                                ).trim();
-                                if (result) selectedPath = result;
-                            } else {
-                                // Linux - try zenity first, then kdialog — use execFileSync with arg arrays
-                                try {
-                                    const zenityArgs = ['--file-selection', '--directory', '--title=Select a workspace folder'];
-                                    if (lastBrowsed) zenityArgs.push(`--filename=${lastBrowsed}/`);
-                                    const result = execFileSync('zenity', zenityArgs, { encoding: 'utf-8', timeout: 120000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-                                    if (result) selectedPath = result;
-                                } catch {
-                                    try {
-                                        const kdialogArgs = ['--getexistingdirectory', lastBrowsed || process.env['HOME'] || '/', '--title', 'Select a workspace folder'];
-                                        const result = execFileSync('kdialog', kdialogArgs, { encoding: 'utf-8', timeout: 120000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-                                        if (result) selectedPath = result;
-                                    } catch {
-                                        logger.warn('No folder dialog available (install zenity or kdialog)');
-                                    }
-                                }
+                        let cmd: string;
+                        let args: string[];
+
+                        if (platform === 'darwin') {
+                            cmd = 'osascript';
+                            const scriptParts = ['POSIX path of (choose folder with prompt "Select a workspace folder"'];
+                            if (lastBrowsed) {
+                                const safe = lastBrowsed.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                                scriptParts.push(` default location POSIX file "${safe}"`);
                             }
-                        } catch (err: any) {
-                            // User cancelled the dialog (exit code != 0) - not an error
-                            logger.warn('Folder browse dialog error', {
-                                status: err.status,
-                                code: err.code,
-                                message: err.message,
-                                stderr: err.stderr?.toString(),
-                                stdout: err.stdout?.toString()
-                            });
+                            scriptParts.push(')');
+                            args = ['-e', scriptParts.join('')];
+                        } else if (platform === 'win32') {
+                            cmd = 'powershell';
+                            const initialDirLine = lastBrowsed
+                                ? `$dialog.SelectedPath = [System.IO.Path]::GetFullPath("${lastBrowsed.replace(/"/g, '')}")`
+                                : '';
+                            const psScript = [
+                                'Add-Type -AssemblyName System.Windows.Forms',
+                                '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
+                                '$dialog.Description = "Select a workspace folder"',
+                                '$dialog.ShowNewFolderButton = $true',
+                                ...(initialDirLine ? [initialDirLine] : []),
+                                'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }',
+                            ].join('\n');
+                            const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+                            args = ['-NoProfile', '-EncodedCommand', encoded];
+                        } else {
+                            // Linux - try zenity
+                            cmd = 'zenity';
+                            args = ['--file-selection', '--directory', '--title=Select a workspace folder'];
+                            if (lastBrowsed) args.push(`--filename=${lastBrowsed}/`);
                         }
 
-                        // Remember the selected path for next time
-                        if (selectedPath) {
-                            workspaceStore.setLastBrowsedPath(selectedPath);
-                        }
+                        logger.info('Opening folder browse dialog', { cmd, platform });
 
-                        ws.send(JSON.stringify({
-                            type: 'workspace:browseFolder',
-                            payload: { path: selectedPath }
-                        }));
+                        const child = spawnChild(cmd, args);
+                        let stdout = '';
+                        let stderr = '';
+                        child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
+                        child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+                        child.on('close', (code: number | null) => {
+                            const selectedPath = stdout.trim().replace(/\/$/, '') || null;
+                            logger.info('Folder browse dialog closed', { code, selectedPath, stderr: stderr.trim() });
+
+                            if (code === 0 && selectedPath) {
+                                workspaceStore.setLastBrowsedPath(selectedPath);
+                            }
+
+                            ws.send(JSON.stringify({
+                                type: 'workspace:browseFolder',
+                                payload: { path: selectedPath }
+                            }));
+                        });
+                        child.on('error', (err: Error) => {
+                            logger.error('Failed to open folder browse dialog', { error: err.message });
+                            ws.send(JSON.stringify({
+                                type: 'workspace:browseFolder',
+                                payload: { path: null }
+                            }));
+                        });
                         break;
                     }
 
@@ -2098,6 +2104,69 @@ export async function createApp(basePath?: string) {
                         }
                         break;
                     }
+
+                    // ===== Voice Agent =====
+
+                    case 'voice:input': {
+                        const { text, workspaceId } = payload as { text?: string; workspaceId?: string };
+                        if (!text) {
+                            sendWSError(ws, 'voice:input requires text', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+
+                        logger.info('[Voice WS] Processing voice input', { text, workspaceId });
+
+                        // Send processing status
+                        ws.send(JSON.stringify({
+                            type: 'voice:status',
+                            payload: { status: 'processing' }
+                        }));
+
+                        // Process via voice supervisor with streaming callbacks
+                        voiceSupervisor.processVoiceMessageStreaming(
+                            text,
+                            workspaceId,
+                            undefined,
+                            {
+                                onTextChunk: (chunk: string) => {
+                                    logger.info('[Voice WS] Text chunk', { chunk });
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({
+                                            type: 'voice:text_chunk',
+                                            payload: { text: chunk }
+                                        }));
+                                    }
+                                },
+                                onComplete: (response: any) => {
+                                    logger.info('[Voice WS] Response complete', { text: response.text });
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({
+                                            type: 'voice:response',
+                                            payload: { text: response.text, action: response.action }
+                                        }));
+                                    }
+                                },
+                                onError: (error: Error) => {
+                                    logger.error('[Voice WS] Error processing voice input', { error: error.message });
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({
+                                            type: 'voice:response',
+                                            payload: { text: "Sorry, I couldn't process that. Can you try again?", action: 'error' }
+                                        }));
+                                    }
+                                }
+                            }
+                        ).catch((err) => {
+                            logger.error('[Voice WS] Unhandled error', { error: err instanceof Error ? err.message : String(err) });
+                            if (ws.readyState === WebSocket.OPEN) {
+                                ws.send(JSON.stringify({
+                                    type: 'voice:response',
+                                    payload: { text: "Sorry, something went wrong.", action: 'error' }
+                                }));
+                            }
+                        });
+                        break;
+                    }
                 }
             } catch (err) {
                 logger.error('Error handling message', {
@@ -2113,6 +2182,7 @@ export async function createApp(basePath?: string) {
             const reasonStr = reason.toString() || 'no reason';
             console.log(`[Server] Client disconnected - code: ${code}, reason: ${reasonStr}`);
             clients.delete(ws);
+            voiceClients.delete(ws);
         });
 
         ws.on('error', (error: Error) => {
@@ -5486,3 +5556,4 @@ Guidelines:
 
     return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, tunnelManager };
 }
+

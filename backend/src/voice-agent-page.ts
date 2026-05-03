@@ -332,6 +332,9 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
             <div class="transcript">
                 <div class="transcript-text empty" id="transcript">Your speech will appear here...</div>
             </div>
+            <div class="transcript" id="responseArea" style="margin-top: 1rem; display: none;">
+                <div class="transcript-text" id="responseText" style="color: var(--success);"></div>
+            </div>
         </div>
     </div>
 
@@ -350,7 +353,9 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
     </div>
 
     <script>
-        const WS_URL = '${wsUrl}';
+        // Determine WebSocket URL client-side to handle tunnel/HTTPS correctly
+        const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const WS_URL = WS_PROTOCOL + '//' + window.location.host;
         const TOKEN = '${token}';
         const DEEPGRAM_API_KEY = '${deepgramApiKey}';
 
@@ -362,7 +367,7 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
 
         // Initialize WebSocket connection
         function initWebSocket() {
-            ws = new WebSocket(\`\${WS_URL}/ws?token=\${TOKEN}\`);
+            ws = new WebSocket(\`\${WS_URL}/ws?token=\${TOKEN}&voice=1\`);
 
             ws.onopen = () => {
                 console.log('WebSocket connected');
@@ -385,14 +390,69 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
         }
 
         function handleWSMessage(message) {
+            console.log('[Voice WS] Received message:', message.type, message.payload);
             if (message.type === 'voice:announce') {
                 playAnnouncement(message.payload.text);
+            } else if (message.type === 'voice:status') {
+                if (message.payload.status === 'processing') {
+                    updateStatus('Thinking...', true);
+                    // Clear previous response and show area
+                    const responseArea = document.getElementById('responseArea');
+                    const responseText = document.getElementById('responseText');
+                    responseText.textContent = '';
+                    responseArea.style.display = 'block';
+                }
+            } else if (message.type === 'voice:text_chunk') {
+                // Append streaming text chunks
+                const responseText = document.getElementById('responseText');
+                responseText.textContent += message.payload.text;
+            } else if (message.type === 'voice:response') {
+                // Final response - show full text and play TTS
+                const responseText = document.getElementById('responseText');
+                responseText.textContent = message.payload.text;
+                updateStatus('Click to start recording', false);
+                // Play TTS audio
+                if (message.payload.text && message.payload.action !== 'error') {
+                    playTTS(message.payload.text);
+                }
             }
         }
 
         function playAnnouncement(text) {
             console.log('Playing announcement:', text);
-            // Audio will be played via voice supervisor
+            playTTS(text);
+        }
+
+        async function playTTS(text) {
+            if (!text || text.trim().length === 0) return;
+            try {
+                const voiceId = localStorage.getItem('elevenLabsVoiceId') || '';
+                const voiceName = localStorage.getItem('elevenLabsVoiceName') || 'charlotte';
+                console.log('[Voice TTS] Speaking:', text, 'voice:', voiceName);
+
+                const response = await fetch('/api/tts', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text, voice: voiceName })
+                });
+
+                if (!response.ok) {
+                    console.error('[Voice TTS] TTS request failed:', response.status, response.statusText);
+                    return;
+                }
+
+                const audioBlob = await response.blob();
+                const audioUrl = URL.createObjectURL(audioBlob);
+                const audio = new Audio(audioUrl);
+                audio.onended = () => URL.revokeObjectURL(audioUrl);
+                audio.onerror = (e) => {
+                    console.error('[Voice TTS] Audio playback error:', e);
+                    URL.revokeObjectURL(audioUrl);
+                };
+                await audio.play();
+            } catch (error) {
+                console.error('[Voice TTS] Failed to play TTS:', error);
+            }
         }
 
         async function toggleRecording() {
@@ -403,15 +463,42 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
             }
         }
 
+        function getSupportedMimeType() {
+            const types = [
+                'audio/webm;codecs=opus',
+                'audio/webm',
+                'audio/mp4',
+                'audio/ogg;codecs=opus',
+            ];
+            for (const t of types) {
+                if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t)) {
+                    console.log('[Voice] Using mimeType:', t);
+                    return t;
+                }
+            }
+            console.warn('[Voice] No preferred mimeType supported, falling back to default');
+            return '';
+        }
+
         async function startRecording() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-                // Initialize Deepgram WebSocket
-                deepgramSocket = new WebSocket(
-                    'wss://api.deepgram.com/v1/listen?model=nova-3&language=en&smart_format=true',
-                    ['token', DEEPGRAM_API_KEY]
-                );
+                // Detect best encoding for this browser
+                const mimeType = getSupportedMimeType();
+                let encoding = 'linear16';
+                if (mimeType.includes('opus')) {
+                    encoding = 'opus';
+                } else if (mimeType.includes('webm')) {
+                    encoding = 'webm';
+                } else if (mimeType.includes('mp4')) {
+                    encoding = 'mp4';
+                }
+
+                // Initialize Deepgram WebSocket with correct encoding
+                const dgUrl = 'wss://api.deepgram.com/v1/listen?model=nova-3&language=en&smart_format=true&punctuate=true&interim_results=true&encoding=' + encoding;
+                console.log('[Voice] Connecting to Deepgram with encoding:', encoding);
+                deepgramSocket = new WebSocket(dgUrl, ['token', DEEPGRAM_API_KEY]);
 
                 deepgramSocket.onopen = () => {
                     console.log('Deepgram connected');
@@ -420,16 +507,21 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
 
                 deepgramSocket.onmessage = (event) => {
                     const data = JSON.parse(event.data);
-                    if (data.channel?.alternatives?.[0]?.transcript) {
-                        const transcript = data.channel.alternatives[0].transcript;
-                        if (transcript.trim()) {
-                            updateTranscript(transcript);
+                    if (data.type === 'Results') {
+                        const alt = data.channel?.alternatives?.[0];
+                        if (!alt) return;
+                        const transcript = alt.transcript || '';
+                        if (!transcript.trim()) return;
 
-                            // Send to backend if final
-                            if (data.is_final) {
-                                sendVoiceInput(transcript);
-                            }
+                        const isFinal = data.is_final === true;
+                        updateTranscript(transcript);
+
+                        if (isFinal) {
+                            sendVoiceInput(transcript);
                         }
+                    } else if (data.type === 'Error') {
+                        console.error('[Voice] Deepgram error:', data);
+                        updateStatus('Recognition error', false);
                     }
                 };
 
@@ -438,10 +530,14 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
                     updateStatus('Recognition error', false);
                 };
 
-                // Setup MediaRecorder
-                mediaRecorder = new MediaRecorder(stream, {
-                    mimeType: 'audio/webm;codecs=opus'
-                });
+                deepgramSocket.onclose = () => {
+                    console.log('[Voice] Deepgram WebSocket closed');
+                };
+
+                // Setup MediaRecorder with detected mimeType
+                const recorderOptions = {};
+                if (mimeType) recorderOptions.mimeType = mimeType;
+                mediaRecorder = new MediaRecorder(stream, recorderOptions);
 
                 mediaRecorder.ondataavailable = (event) => {
                     if (event.data.size > 0 && deepgramSocket?.readyState === WebSocket.OPEN) {

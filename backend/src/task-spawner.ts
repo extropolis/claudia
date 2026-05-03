@@ -3738,6 +3738,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 console.log(`[TaskSpawner] Reconnecting Claude Code task ${taskId} (fresh start)`);
             }
 
+            // Add -- to terminate argument parsing (workaround for Claude CLI bug with --mcp-config)
+            // See: https://github.com/anthropics/claude-code/issues/22404
+            claudeArgs.push('--');
+
             const { command: claudeCmd2, prefixArgs: claudePrefix2 } = resolveClaudeSpawn();
             ptyProcess = spawn(claudeCmd2, [...claudePrefix2, ...claudeArgs], {
                 name: 'xterm-256color',

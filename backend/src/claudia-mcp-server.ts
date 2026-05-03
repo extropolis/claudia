@@ -913,6 +913,373 @@ server.tool(
 );
 
 // ============================================================================
+// Settings & MCP Server Management Tools
+// ============================================================================
+
+server.tool(
+    'claudia_get_settings',
+    'Get current Claudia settings including MCP servers, rules, CLI switches, and feature flags. Sensitive fields (API keys, credentials) are omitted.',
+    {},
+    async () => {
+        try {
+            const response = await backendFetch('/api/config');
+            if (!response.ok) {
+                return { content: [{ type: 'text', text: `Error: Failed to fetch config (HTTP ${response.status})` }] };
+            }
+            const config = await response.json();
+
+            // Return a filtered view - omit sensitive fields
+            const safeConfig = {
+                mcpServers: config.mcpServers?.map((s: Record<string, unknown>) => ({
+                    name: s.name,
+                    type: s.type || 'stdio',
+                    command: s.command,
+                    args: s.args,
+                    url: s.url,
+                    enabled: s.enabled,
+                    description: s.description,
+                })) || [],
+                rules: config.rules || '',
+                skipPermissions: config.skipPermissions ?? false,
+                supervisorEnabled: config.supervisorEnabled ?? false,
+                supervisorSystemPrompt: config.supervisorSystemPrompt || '',
+                autoFocusOnInput: config.autoFocusOnInput ?? false,
+                claudiaMcpServerEnabled: config.claudiaMcpServerEnabled ?? false,
+                useLearnings: config.useLearnings ?? false,
+                claudeCodeSwitches: config.claudeCodeSwitches || {},
+                defaultBaseDirectory: config.defaultBaseDirectory || null,
+            };
+
+            return { content: [{ type: 'text', text: JSON.stringify(safeConfig, null, 2) }] };
+        } catch (error) {
+            log.error('Failed to get settings:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+server.tool(
+    'claudia_update_settings',
+    'Update Claudia settings. Accepts a partial settings object — only provided fields are updated. Use this to change rules, CLI switches, feature flags, etc. Do NOT use this to manage MCP servers (use the dedicated MCP tools instead).',
+    {
+        settings: z.string().describe('JSON string of settings to update. Allowed fields: rules (string), skipPermissions (boolean), supervisorEnabled (boolean), supervisorSystemPrompt (string), autoFocusOnInput (boolean), claudiaMcpServerEnabled (boolean), claudeCodeSwitches (object with: verbose, maxTurns, maxBudgetUsd, permissionMode, allowedTools, disallowedTools, appendSystemPrompt, defaultModel, effortLevel)')
+    },
+    async ({ settings }) => {
+        try {
+            let parsed: Record<string, unknown>;
+            try {
+                parsed = JSON.parse(settings);
+            } catch {
+                return { content: [{ type: 'text', text: 'Error: Invalid JSON in settings parameter' }] };
+            }
+
+            // Whitelist allowed fields - block sensitive fields
+            const allowedFields = [
+                'rules', 'skipPermissions', 'supervisorEnabled', 'supervisorSystemPrompt',
+                'autoFocusOnInput', 'claudiaMcpServerEnabled', 'claudeCodeSwitches',
+                'defaultBaseDirectory'
+            ];
+            const filtered: Record<string, unknown> = {};
+            for (const key of allowedFields) {
+                if (key in parsed) {
+                    filtered[key] = parsed[key];
+                }
+            }
+
+            if (Object.keys(filtered).length === 0) {
+                return { content: [{ type: 'text', text: `Error: No valid fields provided. Allowed fields: ${allowedFields.join(', ')}` }] };
+            }
+
+            // Block mcpServers from being set via this tool
+            if ('mcpServers' in parsed) {
+                return { content: [{ type: 'text', text: 'Error: Use claudia_add_mcp_server, claudia_update_mcp_server, or claudia_remove_mcp_server to manage MCP servers.' }] };
+            }
+
+            const response = await backendFetch('/api/config', {
+                method: 'PUT',
+                body: JSON.stringify(filtered),
+            });
+
+            if (!response.ok) {
+                const errorBody = await response.json().catch(() => ({}));
+                return { content: [{ type: 'text', text: `Error: Failed to update settings (HTTP ${response.status}): ${errorBody.error || 'Unknown error'}` }] };
+            }
+
+            const updatedConfig = await response.json();
+            log.info('Settings updated via MCP:', Object.keys(filtered));
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        message: `Settings updated successfully.`,
+                        updatedFields: Object.keys(filtered),
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to update settings:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+server.tool(
+    'claudia_list_mcp_servers',
+    'List all configured MCP servers with their enabled/disabled status, type, and description.',
+    {},
+    async () => {
+        try {
+            const response = await backendFetch('/api/config');
+            if (!response.ok) {
+                return { content: [{ type: 'text', text: `Error: Failed to fetch config (HTTP ${response.status})` }] };
+            }
+            const config = await response.json();
+            const servers = (config.mcpServers || []).map((s: Record<string, unknown>) => ({
+                name: s.name,
+                type: s.type || 'stdio',
+                enabled: s.enabled ?? true,
+                command: s.command || undefined,
+                args: s.args || undefined,
+                url: s.url || undefined,
+                description: s.description || undefined,
+            }));
+
+            return { content: [{ type: 'text', text: JSON.stringify(servers, null, 2) }] };
+        } catch (error) {
+            log.error('Failed to list MCP servers:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+server.tool(
+    'claudia_add_mcp_server',
+    'Add a new MCP server to Claudia. Supports stdio servers (command + args) and HTTP servers (url). The server will be synced to all workspaces and running tasks will be notified.',
+    {
+        name: z.string().describe('Unique name for the MCP server (e.g. "my-tool-server")'),
+        type: z.enum(['stdio', 'http', 'streamableHttp']).optional().describe('Server type (default: "stdio")'),
+        command: z.string().optional().describe('Command to run (required for stdio type, e.g. "npx")'),
+        args: z.string().optional().describe('JSON array of command arguments (e.g. \'["@playwright/mcp"]\')'),
+        env: z.string().optional().describe('JSON object of environment variables (e.g. \'{"API_KEY":"xxx"}\')'),
+        url: z.string().optional().describe('Server URL (required for http/streamableHttp type)'),
+        enabled: z.boolean().optional().describe('Whether the server is enabled (default: true)'),
+        description: z.string().optional().describe('Human-readable description of what this server does'),
+        headers: z.string().optional().describe('JSON object of HTTP headers (for http/streamableHttp type)'),
+    },
+    async ({ name, type, command, args, env, url, enabled, description, headers }) => {
+        try {
+            // Fetch current config
+            const response = await backendFetch('/api/config');
+            if (!response.ok) {
+                return { content: [{ type: 'text', text: `Error: Failed to fetch config (HTTP ${response.status})` }] };
+            }
+            const config = await response.json();
+            const servers = config.mcpServers || [];
+
+            // Check for duplicate name
+            if (servers.some((s: Record<string, unknown>) => s.name === name)) {
+                return { content: [{ type: 'text', text: `Error: MCP server '${name}' already exists. Use claudia_update_mcp_server to modify it.` }] };
+            }
+
+            // Build new server config
+            const serverType = type || 'stdio';
+            const newServer: Record<string, unknown> = {
+                name,
+                type: serverType,
+                enabled: enabled ?? true,
+            };
+
+            if (serverType === 'stdio') {
+                if (!command) {
+                    return { content: [{ type: 'text', text: 'Error: "command" is required for stdio-type MCP servers.' }] };
+                }
+                newServer.command = command;
+                if (args) {
+                    try { newServer.args = JSON.parse(args); } catch { return { content: [{ type: 'text', text: 'Error: "args" must be a valid JSON array.' }] }; }
+                }
+                if (env) {
+                    try { newServer.env = JSON.parse(env); } catch { return { content: [{ type: 'text', text: 'Error: "env" must be a valid JSON object.' }] }; }
+                }
+            } else {
+                // http or streamableHttp
+                if (!url) {
+                    return { content: [{ type: 'text', text: `Error: "url" is required for ${serverType}-type MCP servers.` }] };
+                }
+                newServer.url = url;
+                if (headers) {
+                    try { newServer.headers = JSON.parse(headers); } catch { return { content: [{ type: 'text', text: 'Error: "headers" must be a valid JSON object.' }] }; }
+                }
+            }
+
+            if (description) newServer.description = description;
+
+            // Update config with new server added
+            servers.push(newServer);
+            const putResponse = await backendFetch('/api/config', {
+                method: 'PUT',
+                body: JSON.stringify({ mcpServers: servers }),
+            });
+
+            if (!putResponse.ok) {
+                const errorBody = await putResponse.json().catch(() => ({}));
+                return { content: [{ type: 'text', text: `Error: Failed to save config (HTTP ${putResponse.status}): ${errorBody.error || 'Unknown error'}` }] };
+            }
+
+            log.info(`MCP server added via MCP: ${name} (${serverType})`);
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        message: `MCP server '${name}' added successfully. It will be synced to all workspaces.`,
+                        server: newServer,
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to add MCP server:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+server.tool(
+    'claudia_remove_mcp_server',
+    'Remove an MCP server from Claudia by name. The change will be synced to all workspaces.',
+    {
+        name: z.string().describe('Name of the MCP server to remove'),
+    },
+    async ({ name }) => {
+        try {
+            // Fetch current config
+            const response = await backendFetch('/api/config');
+            if (!response.ok) {
+                return { content: [{ type: 'text', text: `Error: Failed to fetch config (HTTP ${response.status})` }] };
+            }
+            const config = await response.json();
+            const servers = config.mcpServers || [];
+
+            // Find server
+            const serverIndex = servers.findIndex((s: Record<string, unknown>) => s.name === name);
+            if (serverIndex === -1) {
+                return { content: [{ type: 'text', text: `Error: MCP server '${name}' not found.` }] };
+            }
+
+            // Remove it
+            servers.splice(serverIndex, 1);
+            const putResponse = await backendFetch('/api/config', {
+                method: 'PUT',
+                body: JSON.stringify({ mcpServers: servers }),
+            });
+
+            if (!putResponse.ok) {
+                const errorBody = await putResponse.json().catch(() => ({}));
+                return { content: [{ type: 'text', text: `Error: Failed to save config (HTTP ${putResponse.status}): ${errorBody.error || 'Unknown error'}` }] };
+            }
+
+            log.info(`MCP server removed via MCP: ${name}`);
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        message: `MCP server '${name}' removed successfully. Change will be synced to all workspaces.`,
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to remove MCP server:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+server.tool(
+    'claudia_update_mcp_server',
+    'Update an existing MCP server configuration. Use this to enable/disable a server, change its command/args, or update other settings.',
+    {
+        name: z.string().describe('Name of the MCP server to update'),
+        enabled: z.boolean().optional().describe('Enable or disable the server'),
+        command: z.string().optional().describe('New command (stdio type only)'),
+        args: z.string().optional().describe('New args as JSON array (stdio type only)'),
+        env: z.string().optional().describe('New env as JSON object (stdio type only)'),
+        url: z.string().optional().describe('New URL (http/streamableHttp type only)'),
+        description: z.string().optional().describe('New description'),
+        headers: z.string().optional().describe('New headers as JSON object (http/streamableHttp type only)'),
+        newName: z.string().optional().describe('Rename the server to this name'),
+    },
+    async ({ name, enabled, command, args, env, url, description, headers, newName }) => {
+        try {
+            // Fetch current config
+            const response = await backendFetch('/api/config');
+            if (!response.ok) {
+                return { content: [{ type: 'text', text: `Error: Failed to fetch config (HTTP ${response.status})` }] };
+            }
+            const config = await response.json();
+            const servers = config.mcpServers || [];
+
+            // Find server
+            const server_config = servers.find((s: Record<string, unknown>) => s.name === name);
+            if (!server_config) {
+                return { content: [{ type: 'text', text: `Error: MCP server '${name}' not found.` }] };
+            }
+
+            // Check rename doesn't conflict
+            if (newName && newName !== name) {
+                if (servers.some((s: Record<string, unknown>) => s.name === newName)) {
+                    return { content: [{ type: 'text', text: `Error: Cannot rename to '${newName}' — a server with that name already exists.` }] };
+                }
+                server_config.name = newName;
+            }
+
+            // Apply updates
+            if (enabled !== undefined) server_config.enabled = enabled;
+            if (command !== undefined) server_config.command = command;
+            if (url !== undefined) server_config.url = url;
+            if (description !== undefined) server_config.description = description;
+
+            if (args !== undefined) {
+                try { server_config.args = JSON.parse(args); } catch { return { content: [{ type: 'text', text: 'Error: "args" must be a valid JSON array.' }] }; }
+            }
+            if (env !== undefined) {
+                try { server_config.env = JSON.parse(env); } catch { return { content: [{ type: 'text', text: 'Error: "env" must be a valid JSON object.' }] }; }
+            }
+            if (headers !== undefined) {
+                try { server_config.headers = JSON.parse(headers); } catch { return { content: [{ type: 'text', text: 'Error: "headers" must be a valid JSON object.' }] }; }
+            }
+
+            // Save
+            const putResponse = await backendFetch('/api/config', {
+                method: 'PUT',
+                body: JSON.stringify({ mcpServers: servers }),
+            });
+
+            if (!putResponse.ok) {
+                const errorBody = await putResponse.json().catch(() => ({}));
+                return { content: [{ type: 'text', text: `Error: Failed to save config (HTTP ${putResponse.status}): ${errorBody.error || 'Unknown error'}` }] };
+            }
+
+            log.info(`MCP server updated via MCP: ${name}`, { enabled, command, newName });
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        message: `MCP server '${name}' updated successfully.${newName ? ` Renamed to '${newName}'.` : ''} Change will be synced to all workspaces.`,
+                        server: server_config,
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to update MCP server:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
 // Start the server
 // ============================================================================
 async function main() {

@@ -1890,3 +1890,56 @@
     color: var(--text-secondary);
 }
 
+/* Workspace Filter */
+.workspace-filter-container {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    flex: 1;
+    max-width: 160px;
+    min-width: 80px;
+}
+
+.workspace-filter-container:focus-within {
+    border-color: var(--accent-secondary);
+}
+
+.workspace-filter-icon {
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.workspace-filter-input {
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 0.75rem;
+    width: 100%;
+    outline: none;
+    padding: 2px 0;
+}
+
+.workspace-filter-input::placeholder {
+    color: var(--text-muted);
+}
+
+.workspace-filter-clear {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+}
+
+.workspace-filter-clear:hover {
+    color: var(--text-primary);
+}
+
