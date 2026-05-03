@@ -121,6 +121,23 @@ export interface ScheduledTask {
     fireCount: number;             // How many times it has fired
 }
 
+// Checkpoint/Timeline types
+export interface Checkpoint {
+    id: string;                    // Unique identifier
+    taskId: string;                // Which task this checkpoint belongs to
+    workspaceId: string;           // Which workspace
+    name: string;                  // User-provided or auto-generated name
+    description?: string;          // Optional description
+    timestamp: string;             // ISO timestamp when created
+    gitRef?: string;               // Git commit SHA at checkpoint time
+    gitBranch?: string;            // Current branch at checkpoint time
+    gitDiff?: string;              // Uncommitted changes (unified diff) at checkpoint time
+    metadata?: {
+        filesModified?: number;    // Number of uncommitted modified files
+        isCurrent?: boolean;       // Whether this is the "current" position
+    };
+}
+
 // WebSocket message types
 export type WSMessageType =
     // Task lifecycle
@@ -171,6 +188,16 @@ export type WSMessageType =
     | 'cron:fired'
     | 'cron:ran'
     | 'cron:updated'
+    // Checkpoints/Timeline
+    | 'checkpoint:created'
+    | 'checkpoint:list'
+    | 'checkpoint:restored'
+    | 'checkpoint:deleted'
+    | 'checkpoint:forked'
+    | 'checkpoint:error'
+    // Usage/Cost tracking
+    | 'usage:summary'
+    | 'usage:recorded'
     // Server status
     | 'server:reloading'
     | 'server:reconnecting'
@@ -183,6 +210,35 @@ export type WSMessageType =
 export interface WSMessage {
     type: WSMessageType;
     payload: unknown;
+}
+
+// Usage/Cost tracking types
+export interface UsageEntry {
+    id: string;
+    taskId: string;
+    workspaceId: string;
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+    cost: number;
+    timestamp: string;
+}
+
+export interface UsageSummary {
+    totalCost: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCacheCreationTokens: number;
+    totalCacheReadTokens: number;
+    byModel: Record<string, { cost: number; inputTokens: number; outputTokens: number }>;
+    byTask: Record<string, { cost: number; totalTokens: number; taskPrompt?: string }>;
+    byWorkspace: Record<string, { cost: number; totalTokens: number }>;
+    entryCount: number;
+    totalEntryCount: number;      // Total entries across all time (for comparison)
+    oldestEntryDate?: string;     // ISO timestamp of oldest entry in the filtered set
+    newestEntryDate?: string;     // ISO timestamp of newest entry in the filtered set
 }
 
 /**

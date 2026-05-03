@@ -8,6 +8,13 @@
     /* Never exceed viewport width — ensures header spans exactly the screen width */
     max-width: 100vw;
     overflow-x: hidden;
+    container-type: inline-size;
+}
+
+@container (max-width: 350px) {
+    .workspace-branch-label {
+        display: none;
+    }
 }
 
 .workspace-panel-header {

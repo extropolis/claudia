@@ -1,0 +1,318 @@
+.tw-container {
+    padding: 12px;
+    overflow-y: auto;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.tw-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.tw-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary, #666);
+}
+
+.tw-empty-state p {
+    margin: 0;
+    font-size: 13px;
+}
+
+/* Widget base */
+.tw-widget {
+    border: 1px solid var(--border-color, #2a2a2a);
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--bg-tertiary, #141414);
+}
+
+.tw-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 12px;
+}
+
+.tw-header:hover {
+    background: var(--bg-hover, #1a1a1a);
+}
+
+.tw-icon {
+    color: var(--text-secondary, #666);
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.tw-tool-icon {
+    flex-shrink: 0;
+}
+
+.tw-label {
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary, #888);
+    flex-shrink: 0;
+}
+
+.tw-meta {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-secondary, #666);
+}
+
+.tw-body {
+    border-top: 1px solid var(--border-color, #2a2a2a);
+    padding: 8px 10px;
+    font-size: 12px;
+}
+
+/* Bash widget */
+.tw-bash { border-left: 3px solid #4a9eff; }
+.tw-bash-header .tw-tool-icon { color: #4a9eff; }
+
+.tw-bash-command {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    color: var(--text-primary, #eee);
+    background: var(--bg-primary, #0d0d0d);
+    padding: 2px 6px;
+    border-radius: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+
+.tw-copy-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary, #666);
+    cursor: pointer;
+    padding: 2px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.tw-copy-btn:hover { color: var(--text-primary, #fff); }
+
+.tw-bash-output {
+    background: #0a0a0a;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.tw-bash-output pre {
+    margin: 0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text-primary, #ccc);
+}
+
+/* Read widget */
+.tw-read { border-left: 3px solid #888; }
+.tw-read-icon { color: #888; }
+.tw-read .tw-header { cursor: default; }
+
+/* Write widget */
+.tw-write { border-left: 3px solid #a855f7; }
+.tw-write-icon { color: #a855f7; }
+
+.tw-write-content {
+    background: #0a0a0a;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.tw-write-content pre {
+    margin: 0;
+}
+
+.tw-write-content code {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-primary, #ccc);
+}
+
+/* Edit widget */
+.tw-edit { border-left: 3px solid #f59e0b; }
+.tw-edit-icon { color: #f59e0b; }
+
+.tw-edit-content {
+    background: #0a0a0a;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.tw-diff {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    line-height: 1.6;
+}
+
+.tw-diff-line {
+    display: flex;
+    padding: 0 4px;
+}
+
+.tw-diff-line-removed {
+    background: rgba(248, 81, 73, 0.1);
+}
+
+.tw-diff-line-added {
+    background: rgba(63, 185, 80, 0.1);
+}
+
+.tw-diff-marker {
+    width: 16px;
+    flex-shrink: 0;
+    color: var(--text-secondary, #666);
+    user-select: none;
+}
+
+.tw-diff-line-removed .tw-diff-marker { color: #f85149; }
+.tw-diff-line-added .tw-diff-marker { color: #3fb950; }
+
+.tw-diff-text {
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.tw-diff-line-removed .tw-diff-text { color: #ffa7a3; }
+.tw-diff-line-added .tw-diff-text { color: #7ee787; }
+
+/* Search widget */
+.tw-search { border-left: 3px solid #06b6d4; }
+.tw-search-icon { color: #06b6d4; }
+
+.tw-search-query {
+    font-size: 12px;
+    color: var(--text-primary, #eee);
+    font-style: italic;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+
+.tw-search-output {
+    background: #0a0a0a;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.tw-search-output pre {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    color: var(--text-primary, #ccc);
+}
+
+/* Thinking widget */
+.tw-thinking { border-left: 3px solid #8b5cf6; }
+.tw-thinking-icon { color: #8b5cf6; }
+
+.tw-thinking-preview {
+    font-size: 11px;
+    color: var(--text-secondary, #888);
+    font-style: italic;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+
+.tw-thinking-content {
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.tw-thinking-content p {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-secondary, #aaa);
+    white-space: pre-wrap;
+}
+
+/* Result widget */
+.tw-result { border-left: 3px solid #4adf8a; }
+.tw-result-icon { color: #4adf8a; }
+.tw-result .tw-header { cursor: default; }
+
+.tw-result-text {
+    font-size: 12px;
+    color: var(--text-primary, #ccc);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+
+/* Text segments between tool calls */
+.tw-text-segment {
+    padding: 4px 0;
+}
+
+.tw-text-segment pre {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    color: var(--text-primary, #ddd);
+}
+
+/* File path styling */
+.tw-file-path {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    color: var(--text-primary, #eee);
+    background: var(--bg-primary, #0d0d0d);
+    padding: 1px 5px;
+    border-radius: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+
+/* Show more button */
+.tw-show-more {
+    background: none;
+    border: none;
+    color: var(--accent-color, #4a9eff);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 4px 0;
+    margin-top: 4px;
+}
+
+.tw-show-more:hover {
+    text-decoration: underline;
+}

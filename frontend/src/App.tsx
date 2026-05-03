@@ -18,7 +18,7 @@ import { ActivityPanel } from './components/ActivityPanel';
 import { useTheme } from './hooks/useTheme';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff, AudioLines } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Bell, BellOff, AudioLines } from 'lucide-react';
 import { getApiBaseUrl } from './config/api-config';
 import { isSoundEnabled, setSoundEnabled } from './utils/browserCapabilities';
 
@@ -785,7 +785,7 @@ function App() {
             </main>
 
             <ProjectPicker onSelect={handleProjectSelect} wsRef={wsRef} requestRecentWorkspaces={requestRecentWorkspaces} clearRecentWorkspace={clearRecentWorkspace} />
-            <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
+            <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} wsRef={wsRef} />
             {!isMobile && <MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} error={tunnelError} tunnelActive={tunnelActive} tunnelLoading={tunnelLoading} onStopTunnel={handleStopTunnel} onStartTunnel={startTunnel} />}
             {previewState && (
                 <PreviewPanel

@@ -177,19 +177,23 @@ export function ShellTerminalView({ workspaceId, workspaceName, wsRef, onClose, 
 
         // ResizeObserver
         let resizeTimeout: number;
+        const fitAndRefresh = () => {
+            if (!fitAddonRef.current || !xtermRef.current || !terminalRef.current) return;
+            if (terminalRef.current.clientWidth === 0 || terminalRef.current.clientHeight === 0) return;
+            try {
+                fitAddonRef.current.fit();
+                xtermRef.current.refresh(0, xtermRef.current.rows - 1);
+            } catch {}
+        };
         const resizeObserver = new ResizeObserver(() => {
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
-            resizeTimeout = window.setTimeout(() => {
-                try { fitAddonRef.current?.fit(); } catch {}
-            }, 50);
+            resizeTimeout = window.setTimeout(fitAndRefresh, 50);
         });
         resizeObserver.observe(terminalRef.current);
 
         const handleWindowResize = () => {
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
-            resizeTimeout = window.setTimeout(() => {
-                fitAddonRef.current?.fit();
-            }, 50);
+            resizeTimeout = window.setTimeout(fitAndRefresh, 50);
         };
         window.addEventListener('resize', handleWindowResize);
 
@@ -242,6 +246,9 @@ export function ShellTerminalView({ workspaceId, workspaceName, wsRef, onClose, 
             const timer = setTimeout(() => {
                 try {
                     fitAddonRef.current?.fit();
+                    if (xtermRef.current) {
+                        xtermRef.current.refresh(0, xtermRef.current.rows - 1);
+                    }
                     xtermRef.current?.scrollToBottom();
                 } catch {}
             }, 50);

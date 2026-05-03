@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, Zap, Bell, Palette } from 'lucide-react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, Zap, Bell, Palette, DollarSign } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
+import { UsageDashboard } from './UsageDashboard';
 import { getApiBaseUrl } from '../config/api-config';
 import { hasBrowserNotifications, getNotificationPermission, requestNotificationPermission, sendBrowserNotification } from '../utils/browserCapabilities';
 import { useTaskStore } from '../stores/taskStore';
@@ -11,6 +12,7 @@ interface SettingsMenuProps {
     isOpen: boolean;
     onClose: () => void;
     initialPanel?: string;
+    wsRef: React.RefObject<WebSocket | null>;
 }
 
 interface MCPServerListItem {
@@ -74,7 +76,7 @@ function CollapsiblePanel({ title, icon, isExpanded, onToggle, children }: Colla
     );
 }
 
-export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProps) {
+export function SettingsMenu({ isOpen, onClose, initialPanel, wsRef }: SettingsMenuProps) {
     const { showSystemStats, setShowSystemStats, browserNotificationsEnabled, setBrowserNotificationsEnabled, notifyOnCompletion, setNotifyOnCompletion, notifyOnWaitingInput, setNotifyOnWaitingInput, themePreference, setThemePreference } = useTaskStore();
     const { showWarning } = useNotification();
     const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
@@ -91,7 +93,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         rules: false,
         supervisor: false,
         learnings: false,
-        claudiaMcp: false
+        claudiaMcp: false,
+        usage: false
     });
 
     const [notificationTestStatus, setNotificationTestStatus] = useState<'idle' | 'sent' | 'failed'>('idle');
@@ -1259,6 +1262,17 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 </div>
 
                 <div className="settings-menu-content">
+                    <CollapsiblePanel
+                        title="Usage & Cost"
+                        icon={<DollarSign size={16} />}
+                        isExpanded={expandedPanels.usage}
+                        onToggle={() => togglePanel('usage')}
+                    >
+                        <div style={{ padding: '8px 0' }}>
+                            <UsageDashboard wsRef={wsRef} />
+                        </div>
+                    </CollapsiblePanel>
+
                     <CollapsiblePanel
                         title="Appearance"
                         icon={<Palette size={16} />}

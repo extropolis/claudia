@@ -1,0 +1,323 @@
+.cp-timeline {
+    border: 1px solid var(--border-color, #2a2a2a);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-tertiary, #141414);
+}
+
+.cp-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 13px;
+}
+
+.cp-header:hover {
+    background: var(--bg-hover, #1a1a1a);
+}
+
+.cp-toggle {
+    display: flex;
+    align-items: center;
+    color: var(--text-secondary, #888);
+}
+
+.cp-title {
+    font-weight: 600;
+    color: var(--text-primary, #eee);
+}
+
+.cp-count {
+    font-size: 11px;
+    background: var(--bg-primary, #0d0d0d);
+    color: var(--text-secondary, #888);
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-family: 'SF Mono', monospace;
+}
+
+.cp-create-btn {
+    margin-left: auto;
+    background: none;
+    border: 1px solid var(--border-color, #333);
+    border-radius: 4px;
+    padding: 3px 5px;
+    cursor: pointer;
+    color: var(--text-secondary, #888);
+    display: flex;
+    align-items: center;
+}
+
+.cp-create-btn:hover {
+    color: var(--accent-color, #4a9eff);
+    border-color: var(--accent-color, #4a9eff);
+}
+
+.cp-body {
+    border-top: 1px solid var(--border-color, #2a2a2a);
+    padding: 8px 10px;
+}
+
+.cp-create-form {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.cp-create-form input {
+    flex: 1;
+    background: var(--bg-primary, #0d0d0d);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 4px;
+    padding: 5px 8px;
+    color: var(--text-primary, #eee);
+    font-size: 12px;
+    outline: none;
+}
+
+.cp-create-form input:focus {
+    border-color: var(--accent-color, #4a9eff);
+}
+
+.cp-save-btn {
+    background: var(--accent-color, #4a9eff);
+    border: none;
+    border-radius: 4px;
+    padding: 5px 10px;
+    color: #fff;
+    font-size: 12px;
+    cursor: pointer;
+    font-weight: 500;
+}
+
+.cp-save-btn:hover {
+    opacity: 0.9;
+}
+
+.cp-empty {
+    color: var(--text-secondary, #666);
+    font-size: 12px;
+    text-align: center;
+    padding: 12px 0;
+}
+
+.cp-list {
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    padding-left: 12px;
+}
+
+.cp-list::before {
+    content: '';
+    position: absolute;
+    left: 5px;
+    top: 8px;
+    bottom: 8px;
+    width: 1px;
+    background: var(--border-color, #333);
+}
+
+.cp-node {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 6px 0;
+    position: relative;
+}
+
+.cp-node-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--border-color, #555);
+    flex-shrink: 0;
+    margin-top: 4px;
+    position: relative;
+    z-index: 1;
+    margin-left: -9px;
+}
+
+.cp-node-latest .cp-node-dot {
+    background: var(--accent-color, #4a9eff);
+    box-shadow: 0 0 6px rgba(74, 158, 255, 0.4);
+}
+
+.cp-node-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.cp-node-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary, #eee);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cp-node-meta {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--text-secondary, #888);
+}
+
+.cp-node-meta svg {
+    flex-shrink: 0;
+}
+
+.cp-node-sha {
+    font-family: 'SF Mono', monospace;
+    font-size: 10px;
+    background: var(--bg-primary, #0d0d0d);
+    padding: 0 4px;
+    border-radius: 3px;
+}
+
+.cp-node-desc {
+    font-size: 11px;
+    color: var(--text-secondary, #888);
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cp-node-actions {
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+
+.cp-node:hover .cp-node-actions {
+    opacity: 1;
+}
+
+.cp-node-actions button {
+    background: none;
+    border: none;
+    color: var(--text-secondary, #888);
+    cursor: pointer;
+    padding: 3px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+}
+
+.cp-node-actions button:hover {
+    color: var(--text-primary, #fff);
+    background: var(--bg-hover, #222);
+}
+
+.cp-delete-btn:hover {
+    color: #e55 !important;
+}
+
+/* Conflict Resolution Dialog */
+.cp-conflict-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+}
+
+.cp-conflict-dialog {
+    background: var(--bg-secondary, #1a1a1a);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 10px;
+    padding: 16px 20px;
+    width: min(400px, 90vw);
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+.cp-conflict-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #f0a030;
+    margin-bottom: 8px;
+}
+
+.cp-conflict-desc {
+    font-size: 12px;
+    color: var(--text-secondary, #aaa);
+    margin: 0 0 12px;
+    line-height: 1.4;
+}
+
+.cp-conflict-files {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 14px;
+}
+
+.cp-conflict-file {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-primary, #eee);
+    font-family: 'SF Mono', monospace;
+    cursor: pointer;
+    padding: 4px 6px;
+    border-radius: 4px;
+}
+
+.cp-conflict-file:hover {
+    background: var(--bg-hover, #222);
+}
+
+.cp-conflict-file input[type="checkbox"] {
+    accent-color: var(--accent-color, #4a9eff);
+}
+
+.cp-conflict-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.cp-conflict-skip {
+    background: none;
+    border: 1px solid var(--border-color, #444);
+    border-radius: 6px;
+    padding: 6px 14px;
+    color: var(--text-secondary, #aaa);
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.cp-conflict-skip:hover {
+    border-color: var(--text-secondary, #888);
+    color: var(--text-primary, #eee);
+}
+
+.cp-conflict-force {
+    background: #c04020;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 14px;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.cp-conflict-force:hover {
+    background: #d04828;
+}

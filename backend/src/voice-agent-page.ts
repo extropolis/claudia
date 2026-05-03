@@ -71,6 +71,39 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
             background: rgba(88, 166, 255, 0.1);
         }
 
+        .header-controls {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .toggle-btn {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            width: 36px;
+            height: 36px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1.1rem;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0.5;
+        }
+
+        .toggle-btn.active {
+            opacity: 1;
+            border-color: var(--accent);
+            color: var(--text);
+            background: rgba(88, 166, 255, 0.1);
+        }
+
+        .toggle-btn:hover {
+            border-color: var(--accent);
+        }
+
         .content {
             flex: 1;
             display: flex;
@@ -78,6 +111,7 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
             align-items: center;
             justify-content: center;
             padding: 2rem;
+            padding-bottom: 60px;
             overflow-y: auto;
         }
 
@@ -152,6 +186,67 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
         .transcript-text.empty {
             color: var(--text-muted);
             font-style: italic;
+        }
+
+        .text-input-container {
+            display: flex;
+            align-items: flex-end;
+            gap: 0.5rem;
+            max-width: 600px;
+            width: 100%;
+        }
+
+        .text-input {
+            flex: 1;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            color: var(--text);
+            font-size: 1rem;
+            font-family: inherit;
+            resize: none;
+            overflow-y: hidden;
+            line-height: 1.4;
+            max-height: 120px;
+        }
+
+        .text-input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        .text-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .send-btn {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            border: 1px solid var(--accent);
+            background: var(--accent);
+            color: var(--bg);
+            font-size: 1.2rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            flex-shrink: 0;
+        }
+
+        .send-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 10px var(--accent-glow);
+        }
+
+        .send-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
         }
 
         .modal {
@@ -315,12 +410,168 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
             font-weight: 500;
             color: var(--success);
         }
+
+        /* Task Panel Styles */
+        .task-panel {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: var(--surface);
+            border-top: 1px solid var(--border);
+            z-index: 100;
+            transition: transform 0.3s ease;
+            max-height: 50vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .task-panel.collapsed {
+            transform: translateY(calc(100% - 40px));
+        }
+
+        .task-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            border-bottom: 1px solid var(--border);
+            min-height: 40px;
+            flex-shrink: 0;
+            user-select: none;
+        }
+
+        .task-panel-header:hover {
+            background: rgba(88, 166, 255, 0.05);
+        }
+
+        .task-panel-title {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .task-count-badge {
+            background: var(--accent);
+            color: var(--bg);
+            font-size: 0.7rem;
+            padding: 0.1rem 0.4rem;
+            border-radius: 10px;
+            font-weight: 700;
+        }
+
+        .task-panel-toggle {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            transition: transform 0.3s;
+        }
+
+        .task-panel.collapsed .task-panel-toggle {
+            transform: rotate(180deg);
+        }
+
+        .task-panel-workspace {
+            padding: 0.4rem 1rem;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            flex-shrink: 0;
+        }
+
+        .task-panel-workspace .ws-name {
+            color: var(--accent);
+            font-weight: 500;
+        }
+
+        .task-list-scroll {
+            overflow-y: auto;
+            flex: 1;
+            padding: 0.5rem;
+        }
+
+        .task-item {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            padding: 0.5rem 0.75rem;
+            border-radius: 6px;
+            margin-bottom: 0.25rem;
+            transition: background 0.15s;
+        }
+
+        .task-item:hover {
+            background: rgba(88, 166, 255, 0.05);
+        }
+
+        .task-state-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .task-state-dot.busy { background: var(--accent); animation: dot-pulse 1.5s infinite; }
+        .task-state-dot.starting { background: var(--warning); animation: dot-pulse 1s infinite; }
+        .task-state-dot.waiting_input { background: var(--warning); }
+        .task-state-dot.idle { background: var(--success); }
+        .task-state-dot.exited { background: var(--text-muted); }
+        .task-state-dot.disconnected { background: var(--text-muted); opacity: 0.5; }
+        .task-state-dot.interrupted { background: var(--error); }
+
+        @keyframes dot-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .task-item-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .task-item-name {
+            font-size: 0.8rem;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .task-item-state {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+
+        .task-item-time {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            flex-shrink: 0;
+        }
+
+        .task-empty {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            padding: 1rem;
+            font-style: italic;
+        }
     </style>
 </head>
 <body>
     <div class="header">
         <h1>🎤 Claudia Voice Agent</h1>
-        <button class="settings-btn" onclick="showSettings()">⚙️ Settings</button>
+        <div class="header-controls">
+            <button class="toggle-btn active" id="micToggle" onclick="toggleMicEnabled()" title="Microphone">🎙️</button>
+            <button class="toggle-btn active" id="ttsToggle" onclick="toggleTtsEnabled()" title="Voice output">🔊</button>
+            <button class="settings-btn" onclick="showSettings()">⚙️ Settings</button>
+        </div>
     </div>
 
     <div class="content">
@@ -335,6 +586,26 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
             <div class="transcript" id="responseArea" style="margin-top: 1rem; display: none;">
                 <div class="transcript-text" id="responseText" style="color: var(--success);"></div>
             </div>
+            <div class="text-input-container">
+                <textarea id="textInput" class="text-input" placeholder="Type a message..." rows="1"></textarea>
+                <button id="sendButton" class="send-btn" onclick="sendTextMessage()">➤</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Task Panel -->
+    <div class="task-panel collapsed" id="taskPanel">
+        <div class="task-panel-header" onclick="toggleTaskPanel()">
+            <div class="task-panel-title">
+                Tasks <span class="task-count-badge" id="taskCountBadge">0</span>
+            </div>
+            <div class="task-panel-toggle">▼</div>
+        </div>
+        <div class="task-panel-workspace" id="taskPanelWorkspace" style="display:none;">
+            <span>Workspace:</span> <span class="ws-name" id="workspaceName">—</span>
+        </div>
+        <div class="task-list-scroll" id="taskListScroll">
+            <div class="task-empty">No tasks</div>
         </div>
     </div>
 
@@ -364,6 +635,35 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
         let deepgramSocket = null;
         let isRecording = false;
         let audioContext = null;
+        let micEnabled = localStorage.getItem('voiceMicEnabled') !== 'false';
+        let ttsEnabled = localStorage.getItem('voiceTtsEnabled') !== 'false';
+
+        function toggleMicEnabled() {
+            micEnabled = !micEnabled;
+            localStorage.setItem('voiceMicEnabled', micEnabled);
+            document.getElementById('micToggle').classList.toggle('active', micEnabled);
+            if (!micEnabled && isRecording) {
+                toggleRecording();
+            }
+            document.getElementById('micButton').style.display = micEnabled ? '' : 'none';
+            document.getElementById('status').textContent = micEnabled ? 'Click to start recording' : 'Mic disabled';
+        }
+
+        function toggleTtsEnabled() {
+            ttsEnabled = !ttsEnabled;
+            localStorage.setItem('voiceTtsEnabled', ttsEnabled);
+            document.getElementById('ttsToggle').classList.toggle('active', ttsEnabled);
+        }
+
+        // Apply initial toggle state
+        (function initToggles() {
+            document.getElementById('micToggle').classList.toggle('active', micEnabled);
+            document.getElementById('ttsToggle').classList.toggle('active', ttsEnabled);
+            if (!micEnabled) {
+                document.getElementById('micButton').style.display = 'none';
+                document.getElementById('status').textContent = 'Mic disabled';
+            }
+        })();
 
         // Initialize WebSocket connection
         function initWebSocket() {
@@ -391,6 +691,9 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
 
         function handleWSMessage(message) {
             console.log('[Voice WS] Received message:', message.type, message.payload);
+            // Route task/workspace messages to panel
+            handleTaskMessages(message);
+
             if (message.type === 'voice:announce') {
                 playAnnouncement(message.payload.text);
             } else if (message.type === 'voice:status') {
@@ -424,6 +727,7 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
         }
 
         async function playTTS(text) {
+            if (!ttsEnabled) return;
             if (!text || text.trim().length === 0) return;
             try {
                 const voiceId = localStorage.getItem('elevenLabsVoiceId') || '';
@@ -456,6 +760,7 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
         }
 
         async function toggleRecording() {
+            if (!micEnabled) return;
             if (isRecording) {
                 stopRecording();
             } else {
@@ -612,6 +917,31 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
             }
         }
 
+        function sendTextMessage() {
+            const input = document.getElementById('textInput');
+            const text = input.value.trim();
+            if (!text) return;
+            updateTranscript(text);
+            sendVoiceInput(text);
+            input.value = '';
+            input.style.height = 'auto';
+        }
+
+        // Auto-resize textarea and handle Enter to send
+        (function initTextInput() {
+            const input = document.getElementById('textInput');
+            input.addEventListener('input', function() {
+                this.style.height = 'auto';
+                this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+            });
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendTextMessage();
+                }
+            });
+        })();
+
         function showSettings() {
             document.getElementById('settingsModal').classList.add('show');
             loadVoices();
@@ -738,6 +1068,124 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
 
             closeSettings();
             alert(\`Voice changed to: \${voiceName}\`);
+        }
+
+        // ===== Task Panel =====
+        let allTasks = [];
+        let allWorkspaces = [];
+
+        function toggleTaskPanel() {
+            document.getElementById('taskPanel').classList.toggle('collapsed');
+        }
+
+        function getTaskDisplayName(task) {
+            return task.displayName || (task.prompt && task.prompt.length > 60
+                ? task.prompt.substring(0, 60) + '...'
+                : task.prompt) || 'Untitled';
+        }
+
+        function getWorkspaceName(workspaceId) {
+            const ws = allWorkspaces.find(w => w.id === workspaceId);
+            if (ws) return ws.displayName || ws.name;
+            if (!workspaceId) return '—';
+            const parts = workspaceId.replace(/\\\\/g, '/').split('/');
+            return parts[parts.length - 1] || workspaceId;
+        }
+
+        function timeAgo(dateStr) {
+            if (!dateStr) return '';
+            const d = new Date(dateStr);
+            const now = Date.now();
+            const diff = Math.floor((now - d.getTime()) / 1000);
+            if (diff < 60) return 'just now';
+            if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+            if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+            return Math.floor(diff / 86400) + 'd ago';
+        }
+
+        function renderTaskList() {
+            const scroll = document.getElementById('taskListScroll');
+            const badge = document.getElementById('taskCountBadge');
+            const wsEl = document.getElementById('taskPanelWorkspace');
+            const wsNameEl = document.getElementById('workspaceName');
+
+            // Filter to recent/active tasks: running or active in last 24h
+            const now = Date.now();
+            const DAY = 24 * 60 * 60 * 1000;
+            const activeTasks = allTasks.filter(t => {
+                if (['busy', 'starting', 'waiting_input'].includes(t.state)) return true;
+                const lastAct = new Date(t.lastActivity || t.createdAt).getTime();
+                return (now - lastAct) < DAY && t.state !== 'archived';
+            });
+
+            // Sort: running first, then by last activity
+            const stateOrder = { busy: 0, starting: 1, waiting_input: 2, idle: 3, exited: 4, interrupted: 5, disconnected: 6 };
+            activeTasks.sort((a, b) => {
+                const sa = stateOrder[a.state] ?? 9;
+                const sb = stateOrder[b.state] ?? 9;
+                if (sa !== sb) return sa - sb;
+                const ta = new Date(b.lastActivity || b.createdAt).getTime();
+                const tb = new Date(a.lastActivity || a.createdAt).getTime();
+                return ta - tb;
+            });
+
+            const runningCount = activeTasks.filter(t => ['busy', 'starting', 'waiting_input'].includes(t.state)).length;
+            badge.textContent = runningCount > 0 ? runningCount : activeTasks.length;
+            badge.style.background = runningCount > 0 ? 'var(--accent)' : 'var(--text-muted)';
+
+            // Show workspace if tasks exist
+            if (activeTasks.length > 0) {
+                const primaryWs = activeTasks[0].workspaceId;
+                wsNameEl.textContent = getWorkspaceName(primaryWs);
+                wsEl.style.display = '';
+            } else {
+                wsEl.style.display = 'none';
+            }
+
+            if (activeTasks.length === 0) {
+                scroll.innerHTML = '<div class="task-empty">No recent tasks</div>';
+                return;
+            }
+
+            scroll.innerHTML = activeTasks.map(t => \`
+                <div class="task-item">
+                    <div class="task-state-dot \${t.state}"></div>
+                    <div class="task-item-info">
+                        <div class="task-item-name">\${escapeHtml(getTaskDisplayName(t))}</div>
+                        <div class="task-item-state">\${t.state}\${t.workspaceId ? ' · ' + escapeHtml(getWorkspaceName(t.workspaceId)) : ''}</div>
+                    </div>
+                    <div class="task-item-time">\${timeAgo(t.lastActivity || t.createdAt)}</div>
+                </div>
+            \`).join('');
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        function handleTaskMessages(message) {
+            if (message.type === 'init') {
+                allTasks = message.payload.tasks || [];
+                allWorkspaces = message.payload.workspaces || [];
+                renderTaskList();
+            } else if (message.type === 'tasks:updated') {
+                allTasks = message.payload.tasks || [];
+                renderTaskList();
+            } else if (message.type === 'task:stateChanged') {
+                const updated = message.payload.task;
+                if (updated) {
+                    const idx = allTasks.findIndex(t => t.id === updated.id);
+                    if (idx >= 0) allTasks[idx] = updated;
+                    else allTasks.push(updated);
+                    renderTaskList();
+                }
+            } else if (message.type === 'workspace:created') {
+                const ws = message.payload.workspace;
+                if (ws && !allWorkspaces.find(w => w.id === ws.id)) {
+                    allWorkspaces.push(ws);
+                }
+            }
         }
 
         // Initialize on load

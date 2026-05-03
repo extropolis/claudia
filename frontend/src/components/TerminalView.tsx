@@ -3,8 +3,11 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Task, Workspace } from '@claudia/shared';
-import { Copy, Check, Play, BookOpen, ArrowDown } from 'lucide-react';
+import { Copy, Check, Play, BookOpen, ArrowDown, Layers } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
+import { ToolWidgets } from './ToolWidgets';
+import { CheckpointTimeline } from './CheckpointTimeline';
+import { parseToolCalls, ParsedSegment } from '../utils/parseToolCalls';
 import { useEffectiveTheme } from '../hooks/useTheme';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
 import '@xterm/xterm/css/xterm.css';
@@ -55,6 +58,9 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     const [isLoadingHistory, setIsLoadingHistory] = useState(true);
     const [showSpinner, setShowSpinner] = useState(false);
     const historyLoadedRef = useRef(false);
+    const [viewMode, setViewMode] = useState<'raw' | 'rich'>('raw');
+    const [richSegments, setRichSegments] = useState<ParsedSegment[]>([]);
+    const rawBufferRef = useRef('');
 
     // Show spinner after a short delay to avoid flash for fast loads
     useEffect(() => {
@@ -243,10 +249,18 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
         // Handle input BEFORE open
         term.onData((data) => {
+            // Filter out terminal device attribute responses (DA1/DA2/DA3) that xterm.js
+            // auto-generates. If sent to the PTY, Claude Code echoes them as visible garbage.
+            // DA1: \x1b[?1;2c  DA2: \x1b[>...c  DA3: \x1b[=...c
+            const filtered = data
+                .replace(/\x1b\[\?[\d;]*c/g, '')
+                .replace(/\x1b\[>[\d;]*c/g, '')
+                .replace(/\x1b\[=[\d;]*c/g, '');
+            if (!filtered) return;
             if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({
                     type: 'task:input',
-                    payload: { taskId: task.id, input: data }
+                    payload: { taskId: task.id, input: filtered }
                 }));
             }
         });
@@ -389,13 +403,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             // Debounce resize
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
             resizeTimeout = window.setTimeout(() => {
-                if (fitAddonRef.current) {
-                    try {
-                        fitAddonRef.current.fit();
-                    } catch (e) {
-                        console.warn('[TerminalView] Resize fit failed:', e);
-                    }
-                }
+                fitTerminal();
             }, 50);
         });
 
@@ -405,12 +413,32 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         const handleWindowResize = () => {
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
             resizeTimeout = window.setTimeout(() => {
-                fitAddonRef.current?.fit();
+                fitTerminal();
             }, 50);
         };
         window.addEventListener('resize', handleWindowResize);
 
+        // Refit when tab becomes visible (xterm can accumulate render artifacts while hidden)
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'visible') {
+                setTimeout(fitTerminal, 100);
+            }
+        };
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+
         // Message handler
+        let refreshTimer: number | undefined;
+        const scheduleRefresh = () => {
+            // Debounced refresh: after output stops for 150ms, force a full re-render
+            // to fix any rendering artifacts from rapid cursor-positioned TUI output.
+            if (refreshTimer) window.clearTimeout(refreshTimer);
+            refreshTimer = window.setTimeout(() => {
+                if (xtermRef.current) {
+                    xtermRef.current.refresh(0, xtermRef.current.rows - 1);
+                }
+            }, 150);
+        };
+
         const handleMessage = (event: MessageEvent) => {
             try {
                 const message = JSON.parse(event.data);
@@ -422,14 +450,16 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
                     // Update userHasScrolledRef based on current position
                     if (!wasAtBottom && !userHasScrolledRef.current) {
-                        console.log(`[TerminalView] User has scrolled up, disabling auto-scroll for ${task.id}`);
                         userHasScrolledRef.current = true;
                     }
 
-                    console.log(`[TerminalView] Writing output, wasAtBottom: ${wasAtBottom}, userHasScrolled: ${userHasScrolledRef.current}, viewport: ${viewport}`);
-
                     term.write(message.payload.data);
 
+                    // Accumulate raw output for rich view
+                    rawBufferRef.current += message.payload.data;
+                    if (viewMode === 'rich') {
+                        setRichSegments(parseToolCalls(rawBufferRef.current));
+                    }
                     // Only auto-scroll if user was at bottom
                     if (wasAtBottom) {
                         programmaticScrollRef.current = true;
@@ -441,39 +471,40 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                                 programmaticScrollRef.current = false;
                             }, 100);
                         });
-                    } else {
-                        // User was scrolled up - maintain their position
-                        programmaticScrollRef.current = true;
-                        term.scrollToLine(viewport);
-                        setTimeout(() => {
-                            programmaticScrollRef.current = false;
-                        }, 100);
                     }
+                    // When user has scrolled up, don't manipulate scroll position at all —
+                    // xterm.js preserves viewport position naturally when new content
+                    // is appended below the visible area.
+
+                    // Schedule a debounced refresh to fix rendering artifacts
+                    scheduleRefresh();
 
                     // Clear loading state on first output (task is live)
                     if (!historyLoadedRef.current) {
-                        console.log(`[TerminalView] First output received, clearing loading state for ${task.id}`);
                         historyLoadedRef.current = true;
                         setIsLoadingHistory(false);
                     }
                 } else if (message.type === 'task:restore' && message.payload.taskId === task.id) {
                     const { history } = message.payload;
-                    console.log(`[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}, alreadyLoaded: ${historyLoadedRef.current}`);
                     if (history && history.length > 0) {
                         term.reset();
                         const cleaned = stripScreenClears(history);
+                        rawBufferRef.current = cleaned;
+                        if (viewMode === 'rich') {
+                            setRichSegments(parseToolCalls(cleaned));
+                        }
                         programmaticScrollRef.current = true;
                         term.write(cleaned, () => {
                             term.scrollToBottom();
+                            // Refresh after history write to fix any artifacts
+                            term.refresh(0, term.rows - 1);
                             setTimeout(() => {
                                 programmaticScrollRef.current = false;
                             }, 50);
                         });
-                        console.log(`[TerminalView] History written for ${task.id} (original: ${history.length}, cleaned: ${cleaned.length})`);
                     } else {
                         term.reset();
                         term.write('\x1b[90m── Session history not available ──\x1b[0m\r\n');
-                        console.log(`[TerminalView] Empty history for ${task.id}`);
                     }
                     // Clear loading state - history has been restored
                     historyLoadedRef.current = true;
@@ -493,8 +524,10 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
         return () => {
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
+            if (refreshTimer) window.clearTimeout(refreshTimer);
             resizeObserver.disconnect();
             window.removeEventListener('resize', handleWindowResize);
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
             if (viewport) {
                 viewport.removeEventListener('scroll', handleViewportScroll);
             }
@@ -536,6 +569,20 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         }
     };
 
+    const handleToggleViewMode = () => {
+        const next = viewMode === 'raw' ? 'rich' : 'raw';
+        if (next === 'rich') {
+            setRichSegments(parseToolCalls(rawBufferRef.current));
+        }
+        setViewMode(next);
+        // When switching back to raw terminal, refit after it becomes visible
+        if (next === 'raw') {
+            requestAnimationFrame(() => {
+                fitTerminal();
+            });
+        }
+    };
+
     return (
         <div className="terminal-view">
             <div className="terminal-header">
@@ -557,6 +604,14 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                         Learn
                     </button>
                 )}
+                <button
+                    className={`learn-button ${viewMode === 'rich' ? 'active' : ''}`}
+                    onClick={handleToggleViewMode}
+                    title={viewMode === 'raw' ? 'Switch to Rich View' : 'Switch to Raw Terminal'}
+                >
+                    <Layers size={14} />
+                    {viewMode === 'raw' ? 'Rich' : 'Raw'}
+                </button>
                 {showResumeButton && (
                     <button
                         className="terminal-resume-button"
@@ -570,7 +625,12 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 <span className={`terminal-state ${task.state}`}>{stateLabel}</span>
             </div>
             <div className="terminal-container-wrapper">
-                <div ref={terminalRef} className="terminal-container" />
+                <div ref={terminalRef} className="terminal-container" style={{ display: viewMode === 'raw' ? 'block' : 'none' }} />
+                {viewMode === 'rich' && (
+                    <div className="terminal-container">
+                        <ToolWidgets segments={richSegments} />
+                    </div>
+                )}
                 {showSpinner && (
                     <div className="terminal-loading-overlay">
                         <div className="terminal-loading-spinner" />
@@ -604,6 +664,9 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 )}
             </div>
             <TaskInputBar task={task} wsRef={wsRef} />
+            {workspace && (
+                <CheckpointTimeline taskId={task.id} workspaceId={workspace.id} wsRef={wsRef} />
+            )}
 
         </div>
     );

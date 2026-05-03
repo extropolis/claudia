@@ -18,6 +18,8 @@ import { getConversationHistory, getWorkspaceSessions } from './conversation-par
 import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
+import { UsageStore } from './usage-store.js';
+import { CheckpointStore } from './checkpoint-store.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch } from './git-utils.js';
 import { LearningsStore } from './learnings-store.js';
@@ -94,6 +96,15 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'cron:update',
     'cron:list',
     'cron:run',
+    'usage:get',
+    'usage:clear',
+    'checkpoint:create',
+    'checkpoint:list',
+    'checkpoint:restore',
+    'checkpoint:restore-selective',
+    'checkpoint:restore-force',
+    'checkpoint:delete',
+    'checkpoint:fork',
     'voice:input',
 ]);
 
@@ -240,6 +251,9 @@ const ctxUpdateInFlight = new Set<string>();
 // result is garbled display. Instead we discard the entire input-echo buffer for
 // inline injections; Claude Code's response comes through cleanly afterwards.
 const ctxInlineInFlight = new Set<string>();
+
+// Buffer for terminal keystrokes per task (for auto-checkpoint on Enter)
+const terminalInputBuffer = new Map<string, string>();
 
 /**
  * Notify running tasks in a workspace that references have changed.
@@ -505,6 +519,10 @@ export async function createApp(basePath?: string) {
         }
     );
     cronScheduler.start();
+
+    // Usage and Checkpoint stores
+    const usageStore = new UsageStore(basePath);
+    const checkpointStore = new CheckpointStore(basePath);
 
     // Wire up tunnel events for broadcasting
     tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
@@ -911,6 +929,17 @@ export async function createApp(basePath?: string) {
             // No context update, pass through
             broadcast({ type: 'task:output', payload: { taskId, data } });
         }
+
+        // Try to parse usage/token info from output for cost tracking
+        const task = taskSpawner.getAllTasks().find(t => t.id === taskId);
+        if (task) {
+            const lines = data.split('\n');
+            for (const line of lines) {
+                if (/token|input|output|cost/i.test(line)) {
+                    usageStore.parseAndRecord(taskId, task.workspaceId, line);
+                }
+            }
+        }
     });
 
     taskSpawner.on('taskRestore', (taskId: string, history: string) => {
@@ -1180,10 +1209,62 @@ export async function createApp(basePath?: string) {
                         const { taskId, input } = payload as { taskId?: string; input?: string };
                         if (!taskId || !input) break;
                         // Filter out focus events (ESC [ I and ESC [ O) that confuse Claude's TUI
+                        // Also filter device attribute responses (DA1/DA2/DA3) that xterm.js
+                        // auto-generates — if echoed back they appear as garbled text
                         let filteredInput = input
                             .replace(/\x1b\[I/g, '')  // Focus in
-                            .replace(/\x1b\[O/g, ''); // Focus out
+                            .replace(/\x1b\[O/g, '')  // Focus out
+                            .replace(/\x1b\[\?[\d;]*c/g, '')  // DA1 response
+                            .replace(/\x1b\[>[\d;]*c/g, '')   // DA2 response
+                            .replace(/\x1b\[=[\d;]*c/g, '');  // DA3 response
                         if (filteredInput) {
+                            // Auto-create checkpoint on each new user input (works for active and disconnected tasks)
+                            const endsWithEnterForCp = filteredInput.endsWith('\r') || filteredInput.endsWith('\n');
+                            if (filteredInput.length > 1 && endsWithEnterForCp) {
+                                // Full message sent at once (e.g. from TaskInputBar)
+                                const cpWorkspaceId = taskSpawner.getTaskWorkspaceId(taskId);
+                                const checkpointName = filteredInput.slice(0, -1).trim();
+                                if (checkpointName && cpWorkspaceId) {
+                                    terminalInputBuffer.delete(taskId);
+                                    checkpointStore.createCheckpoint(taskId, cpWorkspaceId, checkpointName)
+                                        .then(cp => {
+                                            logger.info('Auto-checkpoint created on input', { taskId, checkpointId: cp.id, name: checkpointName.slice(0, 60) });
+                                            broadcast({ type: 'checkpoint:created', payload: cp });
+                                        })
+                                        .catch(err => {
+                                            logger.warn('Auto-checkpoint failed', { taskId, error: String(err) });
+                                        });
+                                }
+                            } else if (endsWithEnterForCp && filteredInput.length === 1) {
+                                // Enter pressed alone (terminal keystroke mode) — flush buffer
+                                const buffered = (terminalInputBuffer.get(taskId) || '').trim();
+                                terminalInputBuffer.delete(taskId);
+                                if (buffered) {
+                                    const cpWorkspaceId = taskSpawner.getTaskWorkspaceId(taskId);
+                                    if (cpWorkspaceId) {
+                                        checkpointStore.createCheckpoint(taskId, cpWorkspaceId, buffered)
+                                            .then(cp => {
+                                                logger.info('Auto-checkpoint created on terminal input', { taskId, checkpointId: cp.id, name: buffered.slice(0, 60) });
+                                                broadcast({ type: 'checkpoint:created', payload: cp });
+                                            })
+                                            .catch(err => {
+                                                logger.warn('Auto-checkpoint failed', { taskId, error: String(err) });
+                                            });
+                                    }
+                                }
+                            } else if (!endsWithEnterForCp && filteredInput.length > 0) {
+                                // Regular keystroke — accumulate in buffer (ignore control sequences)
+                                const isPrintable = !filteredInput.startsWith('\x1b') && filteredInput.charCodeAt(0) >= 32;
+                                if (filteredInput === '\x7f' || filteredInput === '\b') {
+                                    // Backspace — remove last char from buffer
+                                    const current = terminalInputBuffer.get(taskId) || '';
+                                    terminalInputBuffer.set(taskId, current.slice(0, -1));
+                                } else if (isPrintable) {
+                                    const current = terminalInputBuffer.get(taskId) || '';
+                                    terminalInputBuffer.set(taskId, current + filteredInput);
+                                }
+                            }
+
                             // Check if workspace references changed since last injection
                             // If so, prepend updated reference context to the user's message
                             const inputTask = taskSpawner.getTask(taskId);
@@ -2118,6 +2199,134 @@ export async function createApp(basePath?: string) {
                             broadcast({ type: 'cron:updated' as WSMessageType, payload: { cronId, taskId: scheduled.taskId } });
                         } else {
                             sendWSError(ws, `Failed to fire scheduled task '${cronId}'`, message.type, 'CRON_FIRE_FAILED');
+                        }
+                        break;
+                    }
+
+                    // ===== Usage Tracking =====
+
+                    case 'usage:get': {
+                        const { period, workspaceId: usageWsId } = payload as { period?: 'today' | '7d' | '30d' | 'all'; workspaceId?: string };
+                        const summary = usageStore.getSummary(period || 'all', usageWsId);
+                        ws.send(JSON.stringify({ type: 'usage:summary', payload: summary }));
+                        break;
+                    }
+
+                    case 'usage:clear': {
+                        usageStore.clearAll();
+                        ws.send(JSON.stringify({ type: 'usage:summary', payload: usageStore.getSummary() }));
+                        break;
+                    }
+
+                    // ===== Checkpoints/Timeline =====
+
+                    case 'checkpoint:create': {
+                        const { taskId: cpTaskId, workspaceId: cpWsId, name: cpName, description: cpDesc } = payload as { taskId?: string; workspaceId?: string; name?: string; description?: string };
+                        if (!cpTaskId || !cpWsId) {
+                            sendWSError(ws, 'checkpoint:create requires taskId and workspaceId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        try {
+                            const checkpoint = await checkpointStore.createCheckpoint(cpTaskId, cpWsId, cpName, cpDesc);
+                            ws.send(JSON.stringify({ type: 'checkpoint:created', payload: checkpoint }));
+                        } catch (err) {
+                            sendWSError(ws, `Failed to create checkpoint: ${err}`, message.type, 'CHECKPOINT_ERROR');
+                        }
+                        break;
+                    }
+
+                    case 'checkpoint:list': {
+                        const { taskId: cpListTaskId, workspaceId: cpListWsId } = payload as { taskId?: string; workspaceId?: string };
+                        let checkpoints: import('@claudia/shared').Checkpoint[] = [];
+                        if (cpListTaskId) {
+                            checkpoints = checkpointStore.listCheckpoints(cpListTaskId);
+                        } else if (cpListWsId) {
+                            checkpoints = checkpointStore.listCheckpointsByWorkspace(cpListWsId);
+                        }
+                        ws.send(JSON.stringify({ type: 'checkpoint:list', payload: { checkpoints } }));
+                        break;
+                    }
+
+                    case 'checkpoint:restore': {
+                        const { checkpointId: restoreId } = payload as { checkpointId?: string };
+                        if (!restoreId) {
+                            sendWSError(ws, 'checkpoint:restore requires checkpointId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const result = await checkpointStore.restoreCheckpoint(restoreId);
+                        if (result.success) {
+                            ws.send(JSON.stringify({ type: 'checkpoint:restored', payload: { checkpointId: restoreId } }));
+                        } else {
+                            ws.send(JSON.stringify({ type: 'checkpoint:error', payload: { error: result.error, checkpointId: restoreId } }));
+                        }
+                        break;
+                    }
+
+                    case 'checkpoint:restore-selective': {
+                        const { checkpointId: selRestoreId } = payload as { checkpointId?: string };
+                        if (!selRestoreId) {
+                            sendWSError(ws, 'checkpoint:restore-selective requires checkpointId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const selResult = await checkpointStore.restoreCheckpointSelective(selRestoreId);
+                        ws.send(JSON.stringify({
+                            type: 'checkpoint:restore-selective-result',
+                            payload: {
+                                checkpointId: selRestoreId,
+                                success: selResult.success,
+                                restoredFiles: selResult.restoredFiles,
+                                conflictingFiles: selResult.conflictingFiles,
+                                error: selResult.error,
+                            }
+                        }));
+                        break;
+                    }
+
+                    case 'checkpoint:restore-force': {
+                        const { checkpointId: forceId, files: forceFiles } = payload as { checkpointId?: string; files?: string[] };
+                        if (!forceId || !forceFiles || forceFiles.length === 0) {
+                            sendWSError(ws, 'checkpoint:restore-force requires checkpointId and files[]', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const forceResult = await checkpointStore.forceRestoreFiles(forceId, forceFiles);
+                        ws.send(JSON.stringify({
+                            type: 'checkpoint:restore-force-result',
+                            payload: {
+                                checkpointId: forceId,
+                                success: forceResult.success,
+                                restoredFiles: forceResult.restoredFiles,
+                                error: forceResult.error,
+                            }
+                        }));
+                        break;
+                    }
+
+                    case 'checkpoint:delete': {
+                        const { checkpointId: deleteId } = payload as { checkpointId?: string };
+                        if (!deleteId) {
+                            sendWSError(ws, 'checkpoint:delete requires checkpointId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const deleted = checkpointStore.deleteCheckpoint(deleteId);
+                        if (deleted) {
+                            ws.send(JSON.stringify({ type: 'checkpoint:deleted', payload: { checkpointId: deleteId } }));
+                        } else {
+                            sendWSError(ws, 'Checkpoint not found', message.type, 'CHECKPOINT_NOT_FOUND');
+                        }
+                        break;
+                    }
+
+                    case 'checkpoint:fork': {
+                        const { checkpointId: forkId, branchName } = payload as { checkpointId?: string; branchName?: string };
+                        if (!forkId) {
+                            sendWSError(ws, 'checkpoint:fork requires checkpointId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const forkResult = await checkpointStore.forkFromCheckpoint(forkId, branchName);
+                        if (forkResult.success) {
+                            ws.send(JSON.stringify({ type: 'checkpoint:forked', payload: { checkpointId: forkId, branch: forkResult.branch } }));
+                        } else {
+                            ws.send(JSON.stringify({ type: 'checkpoint:error', payload: { error: forkResult.error, checkpointId: forkId } }));
                         }
                         break;
                     }

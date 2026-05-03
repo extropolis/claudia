@@ -1887,6 +1887,13 @@ export class TaskSpawner extends EventEmitter {
         return task.state;
     }
 
+    getTaskWorkspaceId(taskId: string): string | null {
+        const task = this.tasks.get(taskId);
+        if (task) return task.workspaceId;
+        const disconnected = this.disconnectedTasks.get(taskId);
+        return disconnected ? disconnected.workspaceId : null;
+    }
+
     private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 5): void {
         // Guard: abort if PTY has exited — writing to a dead native handle causes segfaults
         if (task.state === 'exited' || !this.tasks.has(task.id)) {
