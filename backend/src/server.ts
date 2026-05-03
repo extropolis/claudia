@@ -72,6 +72,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:references:add',
     'workspace:references:remove',
     'workspace:references:toggle',
+    'workspace:previewPort:set',
     'workspace:recent:list',
     'workspace:recent:clear',
     'workspace:reset',
@@ -400,6 +401,11 @@ export async function createApp(basePath?: string) {
 
         // Let API routes pass through
         if (req.path.startsWith('/api/')) {
+            return next();
+        }
+
+        // Let /voice route pass through to Express handler
+        if (req.path === '/voice') {
             return next();
         }
 
@@ -1724,6 +1730,17 @@ export async function createApp(basePath?: string) {
                         } catch (error) {
                             const errorMessage = error instanceof Error ? error.message : String(error);
                             logger.error('Failed to toggle reference', { workspaceId, referencePath, error: errorMessage });
+                        }
+                        break;
+                    }
+
+                    case 'workspace:previewPort:set': {
+                        const { workspaceId, port } = payload as { workspaceId?: string; port?: number };
+                        if (!workspaceId) break;
+                        const parsedPort = port ? Number(port) : undefined;
+                        if (workspaceStore.setPreviewPort(workspaceId, parsedPort)) {
+                            const workspaces = workspaceStore.getWorkspaces();
+                            broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces } });
                         }
                         break;
                     }
@@ -3341,6 +3358,38 @@ export async function createApp(basePath?: string) {
         } catch (error) {
             res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
         }
+    });
+
+    // Preview proxy — forward requests to a workspace's dev server port
+    app.use('/api/preview/:port', (req, res) => {
+        const port = parseInt(req.params.port, 10);
+        if (isNaN(port) || port < 1 || port > 65535) {
+            return res.status(400).send('Invalid port');
+        }
+        if (port === PORTS.BACKEND) {
+            return res.status(403).send('Cannot proxy to Claudia backend port');
+        }
+
+        const targetPath = req.url || '/';
+        const proxyReq = httpRequest({
+            hostname: 'localhost',
+            port,
+            path: targetPath,
+            method: req.method,
+            headers: { ...req.headers, host: `localhost:${port}` },
+        }, (proxyRes) => {
+            res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+            proxyRes.pipe(res);
+        });
+        proxyReq.on('error', (err) => {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code === 'ECONNREFUSED') {
+                return res.status(502).send(`Dev server not running on port ${port}`);
+            }
+            logger.error('Preview proxy error', { error: err.message, port, path: targetPath });
+            res.status(502).send('Preview proxy error');
+        });
+        req.pipe(proxyReq);
     });
 
     app.get('/api/workspaces', (_req, res) => {

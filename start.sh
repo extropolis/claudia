@@ -78,23 +78,21 @@ for helper in node_modules/node-pty/prebuilds/*/spawn-helper; do
     [ -f "$helper" ] && chmod +x "$helper"
 done
 
-# Check if ports are available
+# Kill any processes on our ports before starting
 echo "🔍 Checking ports..."
-ports_busy=0
 for port in $BACKEND_PORT $FRONTEND_PORT $OPENCODE_PORT; do
-    if lsof -ti:$port >/dev/null 2>&1; then
-        echo "❌ Port $port is already in use:"
-        lsof -i:$port
-        ports_busy=1
+    pids=$(lsof -ti:$port 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo "⚠️  Killing process(es) on port $port: $pids"
+        kill $pids 2>/dev/null || true
+        sleep 0.5
+        # Force kill if still running
+        pids=$(lsof -ti:$port 2>/dev/null || true)
+        if [ -n "$pids" ]; then
+            kill -9 $pids 2>/dev/null || true
+        fi
     fi
 done
-
-if [ $ports_busy -eq 1 ]; then
-    echo ""
-    echo "Please free the ports above and try again."
-    echo "You can kill processes on a port with: kill \$(lsof -ti:<port>)"
-    exit 1
-fi
 
 echo "✅ Ports are free"
 echo ""

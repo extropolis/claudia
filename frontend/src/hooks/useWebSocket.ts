@@ -695,6 +695,10 @@ export function useWebSocket() {
         sendMessage('workspace:systemPrompt:set', { workspaceId, systemPrompt });
     }, [sendMessage]);
 
+    const setPreviewPort = useCallback((workspaceId: string, port: number | undefined) => {
+        sendMessage('workspace:previewPort:set', { workspaceId, port });
+    }, [sendMessage]);
+
     const requestRecentWorkspaces = useCallback(() => {
         sendMessage('workspace:recent:list', {});
     }, [sendMessage]);
@@ -808,6 +812,7 @@ export function useWebSocket() {
         openFolder,
         openTerminal,
         setSystemPrompt,
+        setPreviewPort,
         requestRecentWorkspaces,
         clearRecentWorkspace,
         executeSupervisorAction,

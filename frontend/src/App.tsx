@@ -13,11 +13,12 @@ import { SystemStats } from './components/SystemStats';
 import { MobileAccessModal } from './components/MobileAccessModal';
 import { FileExplorer } from './components/FileExplorer';
 import { ShellTerminalView } from './components/ShellTerminalView';
+import { PreviewPanel } from './components/PreviewPanel';
 import { ActivityPanel } from './components/ActivityPanel';
 import { useTheme } from './hooks/useTheme';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff, AudioLines } from 'lucide-react';
 import { getApiBaseUrl } from './config/api-config';
 import { isSoundEnabled, setSoundEnabled } from './utils/browserCapabilities';
 
@@ -53,6 +54,7 @@ function App() {
         openFolder,
         openTerminal,
         setSystemPrompt,
+        setPreviewPort,
         sendChatMessage,
         clearChatHistory,
         requestArchivedTasks,
@@ -92,6 +94,9 @@ function App() {
     const [activeShellWorkspaceId, setActiveShellWorkspaceId] = useState<string | null>(null);
     const [showingShell, setShowingShell] = useState(false);
     const activeShellWorkspace = activeShellWorkspaceId ? workspaces.find(w => w.id === activeShellWorkspaceId) : undefined;
+
+    // Preview panel state
+    const [previewState, setPreviewState] = useState<{ workspaceId: string; name: string; port: number } | null>(null);
 
     // Count tasks that have running processes (not disconnected or archived)
     const activeTasks = Array.from(tasks.values()).filter(t =>
@@ -277,6 +282,38 @@ function App() {
         setActiveShellWorkspaceId(null);
         setShowingShell(false);
     }, []);
+
+    const handleOpenPreview = useCallback((workspaceId: string) => {
+        const ws = workspaces.find(w => w.id === workspaceId);
+        if (!ws) return;
+        const name = ws.displayName || ws.name;
+        if (ws.previewPort) {
+            setPreviewState({ workspaceId, name, port: ws.previewPort });
+        } else {
+            const input = window.prompt(`Enter the dev server port for "${name}":`);
+            if (!input) return;
+            const port = parseInt(input, 10);
+            if (isNaN(port) || port < 1 || port > 65535) {
+                window.alert('Invalid port number');
+                return;
+            }
+            setPreviewPort(workspaceId, port);
+            setPreviewState({ workspaceId, name, port });
+        }
+    }, [workspaces, setPreviewPort]);
+
+    const handleChangePreviewPort = useCallback(() => {
+        if (!previewState) return;
+        const input = window.prompt('Enter new port:', String(previewState.port));
+        if (!input) return;
+        const port = parseInt(input, 10);
+        if (isNaN(port) || port < 1 || port > 65535) {
+            window.alert('Invalid port number');
+            return;
+        }
+        setPreviewPort(previewState.workspaceId, port);
+        setPreviewState({ ...previewState, port });
+    }, [previewState, setPreviewPort]);
 
     const handleShowShell = useCallback(() => {
         setShowingShell(true);
@@ -530,16 +567,14 @@ function App() {
                             {tunnelActive && <span className="tunnel-active-dot" />}
                         </button>
                     )}
-                    {!isMobile && (
-                        <button
-                            className="chat-toggle-button voice-agent-button"
-                            onClick={handleOpenVoiceAgent}
-                            title="Open Voice Agent"
-                        >
-                            <Mic size={18} />
-                            <span className="btn-label">Voice Agent</span>
-                        </button>
-                    )}
+                    <button
+                        className="chat-toggle-button voice-agent-button"
+                        onClick={handleOpenVoiceAgent}
+                        title="Open Voice Agent"
+                    >
+                        <AudioLines size={18} />
+                        <span className="btn-label">Voice Agent</span>
+                    </button>
                     <GlobalVoiceToggle />
                     <button
                         className={`notification-toggle-button ${soundMuted ? 'muted' : ''}`}
@@ -604,6 +639,7 @@ function App() {
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
                                 onOpenShell={handleOpenShell}
+                                onOpenPreview={handleOpenPreview}
                                 onPushToGithub={pushToGithub}
                                 onSetSystemPrompt={setSystemPrompt}
                                 onCreateTask={createTask}
@@ -641,6 +677,7 @@ function App() {
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
                                 onOpenShell={handleOpenShell}
+                                onOpenPreview={handleOpenPreview}
                                 onPushToGithub={pushToGithub}
                                 onSetSystemPrompt={setSystemPrompt}
                                 onCreateTask={createTask}
@@ -750,6 +787,14 @@ function App() {
             <ProjectPicker onSelect={handleProjectSelect} wsRef={wsRef} requestRecentWorkspaces={requestRecentWorkspaces} clearRecentWorkspace={clearRecentWorkspace} />
             <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
             {!isMobile && <MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} error={tunnelError} tunnelActive={tunnelActive} tunnelLoading={tunnelLoading} onStopTunnel={handleStopTunnel} onStartTunnel={startTunnel} />}
+            {previewState && (
+                <PreviewPanel
+                    workspaceName={previewState.name}
+                    port={previewState.port}
+                    onClose={() => setPreviewState(null)}
+                    onChangePort={handleChangePreviewPort}
+                />
+            )}
             <GlobalVoiceManager />
             <ThinkingSoundManager />
             <TaskCompletionVoiceManager />

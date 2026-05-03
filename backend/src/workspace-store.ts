@@ -227,6 +227,21 @@ export class WorkspaceStore {
         return true;
     }
 
+    getPreviewPort(workspaceId: string): number | undefined {
+        const workspace = this.config.workspaces.find(w => w.id === workspaceId);
+        return workspace?.previewPort;
+    }
+
+    setPreviewPort(workspaceId: string, port: number | undefined): boolean {
+        const workspace = this.config.workspaces.find(w => w.id === workspaceId);
+        if (!workspace) return false;
+
+        workspace.previewPort = port;
+        this.saveConfig();
+        console.log(`[WorkspaceStore] Updated preview port for ${workspaceId} to ${port}`);
+        return true;
+    }
+
     // Get recent workspaces (ones that were removed but still exist on disk)
     // Filters out any that are currently in the active workspaces list
     getRecentWorkspaces(): RecentWorkspace[] {

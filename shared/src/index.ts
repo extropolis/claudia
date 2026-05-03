@@ -60,6 +60,7 @@ export interface Workspace {
     systemPrompt?: string;   // Custom system prompt for this workspace
     displayName?: string;    // User-editable display name (shown instead of folder name when set)
     references?: WorkspaceReference[];  // Referenced workspaces/folders for cross-workspace context
+    previewPort?: number;    // Dev server port for live preview
 }
 
 export interface RecentWorkspace {

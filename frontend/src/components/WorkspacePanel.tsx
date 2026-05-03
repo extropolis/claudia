@@ -3,7 +3,7 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
     Loader2, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp, Eye
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
@@ -360,6 +360,7 @@ interface WorkspaceSectionProps {
     onOpenFolder: () => void;
     onOpenTerminal: () => void;
     onOpenShell: () => void;
+    onOpenPreview: () => void;
     onPushToGithub: () => void;
     onSystemPrompt: () => void;
     onToggleMenu: () => void;
@@ -406,6 +407,7 @@ function WorkspaceSection({
     onOpenFolder,
     onOpenTerminal,
     onOpenShell,
+    onOpenPreview,
     onPushToGithub,
     onSystemPrompt,
     onToggleMenu,
@@ -931,6 +933,16 @@ function WorkspaceSection({
                         </span>
                     )}
                 </div>
+                <button
+                    className="workspace-action-button preview"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenPreview();
+                    }}
+                    title="Preview app"
+                >
+                    <Eye size={14} />
+                </button>
                 <div className="workspace-menu-container">
                     <button
                         className={`workspace-action-button menu ${isMenuOpen ? 'active' : ''}`}
@@ -1446,6 +1458,7 @@ interface WorkspacePanelProps {
     onOpenFolder: (workspaceId: string) => void;
     onOpenTerminal: (workspaceId: string) => void;
     onOpenShell: (workspaceId: string) => void;
+    onOpenPreview: (workspaceId: string) => void;
     onPushToGithub: (workspaceId: string) => void;
     onSetSystemPrompt: (workspaceId: string, systemPrompt: string) => void;
     onCreateTask: (prompt: string, workspaceId: string, initialCols?: number, initialRows?: number) => void;
@@ -1474,6 +1487,7 @@ export function WorkspacePanel({
     onOpenFolder,
     onOpenTerminal,
     onOpenShell,
+    onOpenPreview,
     onPushToGithub,
     onSetSystemPrompt,
     onCreateTask,
@@ -1819,6 +1833,7 @@ export function WorkspacePanel({
                             onOpenFolder={() => onOpenFolder(workspace.id)}
                             onOpenTerminal={() => onOpenTerminal(workspace.id)}
                             onOpenShell={() => onOpenShell(workspace.id)}
+                            onOpenPreview={() => onOpenPreview(workspace.id)}
                             onPushToGithub={() => onPushToGithub(workspace.id)}
                             onSystemPrompt={() => setSystemPromptWorkspace(workspace)}
                             onToggleMenu={() => setOpenMenuId(openMenuId === workspace.id ? null : workspace.id)}

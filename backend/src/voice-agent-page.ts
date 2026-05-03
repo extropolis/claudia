@@ -484,20 +484,18 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-                // Detect best encoding for this browser
+                // Detect best mimeType for this browser
                 const mimeType = getSupportedMimeType();
-                let encoding = 'linear16';
-                if (mimeType.includes('opus')) {
-                    encoding = 'opus';
-                } else if (mimeType.includes('webm')) {
-                    encoding = 'webm';
-                } else if (mimeType.includes('mp4')) {
-                    encoding = 'mp4';
-                }
 
-                // Initialize Deepgram WebSocket with correct encoding
-                const dgUrl = 'wss://api.deepgram.com/v1/listen?model=nova-3&language=en&smart_format=true&punctuate=true&interim_results=true&encoding=' + encoding;
-                console.log('[Voice] Connecting to Deepgram with encoding:', encoding);
+                // When MediaRecorder produces containerized audio (WebM, MP4, Ogg),
+                // do NOT pass the encoding param — Deepgram auto-detects from the
+                // container metadata. Only pass encoding for raw/headerless audio.
+                const isContainerized = mimeType.includes('webm') || mimeType.includes('mp4') || mimeType.includes('ogg');
+                const dgParams = 'model=nova-3&language=en&smart_format=true&punctuate=true&interim_results=true';
+                const dgUrl = isContainerized
+                    ? 'wss://api.deepgram.com/v1/listen?' + dgParams
+                    : 'wss://api.deepgram.com/v1/listen?' + dgParams + '&encoding=linear16&sample_rate=48000';
+                console.log('[Voice] Connecting to Deepgram, containerized:', isContainerized, 'mimeType:', mimeType);
                 deepgramSocket = new WebSocket(dgUrl, ['token', DEEPGRAM_API_KEY]);
 
                 deepgramSocket.onopen = () => {
@@ -507,6 +505,7 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
 
                 deepgramSocket.onmessage = (event) => {
                     const data = JSON.parse(event.data);
+                    console.log('[Voice] Deepgram msg:', data.type, JSON.stringify(data).substring(0, 200));
                     if (data.type === 'Results') {
                         const alt = data.channel?.alternatives?.[0];
                         if (!alt) return;
@@ -514,6 +513,7 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
                         if (!transcript.trim()) return;
 
                         const isFinal = data.is_final === true;
+                        console.log('[Voice] Transcript:', transcript, 'isFinal:', isFinal);
                         updateTranscript(transcript);
 
                         if (isFinal) {
@@ -534,14 +534,31 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
                     console.log('[Voice] Deepgram WebSocket closed');
                 };
 
+                // Buffer chunks that arrive before Deepgram is ready.
+                // The first chunk contains the WebM header — losing it means
+                // Deepgram can't detect the container format.
+                let pendingChunks = [];
+
                 // Setup MediaRecorder with detected mimeType
                 const recorderOptions = {};
                 if (mimeType) recorderOptions.mimeType = mimeType;
                 mediaRecorder = new MediaRecorder(stream, recorderOptions);
 
                 mediaRecorder.ondataavailable = (event) => {
-                    if (event.data.size > 0 && deepgramSocket?.readyState === WebSocket.OPEN) {
+                    if (event.data.size === 0) return;
+                    if (deepgramSocket?.readyState === WebSocket.OPEN) {
+                        // Flush any buffered chunks first
+                        if (pendingChunks.length > 0) {
+                            console.log('[Voice] Flushing', pendingChunks.length, 'buffered chunks');
+                            for (const chunk of pendingChunks) {
+                                deepgramSocket.send(chunk);
+                            }
+                            pendingChunks = [];
+                        }
                         deepgramSocket.send(event.data);
+                    } else if (deepgramSocket?.readyState === WebSocket.CONNECTING) {
+                        console.log('[Voice] Buffering chunk:', event.data.size, 'bytes (DG still connecting)');
+                        pendingChunks.push(event.data);
                     }
                 };
 

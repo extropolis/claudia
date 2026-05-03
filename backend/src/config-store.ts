@@ -153,7 +153,7 @@ const DEFAULT_CONFIG: AppConfig = {
     claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
     hyperspaceProxy: DEFAULT_HYPERSPACE_PROXY,
     enabledPlugins: [],  // All plugins disabled by default
-    claudiaMcpServerEnabled: false,  // [Experimental] Disabled by default
+    claudiaMcpServerEnabled: true,  // Enabled by default - provides task orchestration tools to Claude Code sessions
     defaultBaseDirectory: undefined  // No default base directory set
 };
 
