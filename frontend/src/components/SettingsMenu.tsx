@@ -134,7 +134,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         disallowedTools: '',
         appendSystemPrompt: '',
         effortLevel: 'high',
-        defaultModel: 'claude-opus-latest',
+        defaultModel: '',
         model: '',
     });
     const cliSwitchesTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -353,7 +353,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                         disallowedTools: config.claudeCodeSwitches.disallowedTools || '',
                         appendSystemPrompt: config.claudeCodeSwitches.appendSystemPrompt || '',
                         effortLevel: config.claudeCodeSwitches.effortLevel || 'high',
-                        defaultModel: config.claudeCodeSwitches.defaultModel || 'claude-opus-latest',
+                        defaultModel: config.claudeCodeSwitches.defaultModel || '',
                         model: config.claudeCodeSwitches.model || '',
                     });
                 }
@@ -2214,10 +2214,11 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 </div>
                                 <select
                                     className="cli-switch-select"
-                                    value={cliSwitches.defaultModel || 'claude-opus-latest'}
+                                    value={cliSwitches.defaultModel || ''}
                                     onChange={(e) => handleCliSwitchToggle({ defaultModel: e.target.value })}
                                 >
-                                    <option value="claude-opus-latest">Opus 4.7 (default)</option>
+                                    <option value="">Let Claude decide (default)</option>
+                                    <option value="claude-opus-latest">Opus 4.7</option>
                                     <option value="claude-sonnet-4-6">Sonnet 4.6</option>
                                     <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
                                     <option value="opus">Opus (latest alias)</option>

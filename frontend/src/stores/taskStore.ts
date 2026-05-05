@@ -240,6 +240,7 @@ interface PersistedState {
     voiceProgressUpdatesEnabled: boolean;
     voiceProgressUpdateInterval: number;
     themePreference: ThemePreference;
+    tokenCostEnabled: boolean;
     taskSummaries: [string, TaskSummary][];  // Stored as entries array
     chatMessages: ChatMessage[];
 }
@@ -822,6 +823,7 @@ export const useTaskStore = create<TaskStore>()(
                 voiceProgressUpdatesEnabled: state.voiceProgressUpdatesEnabled,
                 voiceProgressUpdateInterval: state.voiceProgressUpdateInterval,
                 themePreference: state.themePreference,
+                tokenCostEnabled: state.tokenCostEnabled,
                 taskSummaries: Array.from(state.taskSummaries.entries()),
                 chatMessages: state.chatMessages,
             }),
@@ -875,6 +877,7 @@ export const useTaskStore = create<TaskStore>()(
                     voiceProgressUpdatesEnabled: persisted.voiceProgressUpdatesEnabled ?? currentState.voiceProgressUpdatesEnabled,
                     voiceProgressUpdateInterval: persisted.voiceProgressUpdateInterval ?? currentState.voiceProgressUpdateInterval,
                     themePreference: persisted.themePreference ?? currentState.themePreference,
+                    tokenCostEnabled: persisted.tokenCostEnabled ?? currentState.tokenCostEnabled,
                     taskSummaries: persisted.taskSummaries
                         ? new Map(persisted.taskSummaries)
                         : currentState.taskSummaries,
