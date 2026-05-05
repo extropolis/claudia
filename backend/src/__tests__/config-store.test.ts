@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import { ConfigStore, AppConfig, MCPServerConfig } from '../config-store.js';
+import { ConfigStore, AppConfig, MCPServerConfig, DEFAULT_TOKEN_PRICING } from '../config-store.js';
 
 describe('ConfigStore', () => {
     let testBaseDir: string;
@@ -291,6 +291,202 @@ describe('ConfigStore', () => {
             // Defaults applied
             expect(config.skipPermissions).toBe(false);
             expect(config.apiMode).toBe('default');
+        });
+    });
+
+    describe('token tracking methods', () => {
+        it('should default tokenTrackingEnabled to true', () => {
+            expect(store.getTokenTrackingEnabled()).toBe(true);
+        });
+
+        it('should get and set tokenTrackingEnabled', () => {
+            store.setTokenTrackingEnabled(false);
+            expect(store.getTokenTrackingEnabled()).toBe(false);
+
+            store.setTokenTrackingEnabled(true);
+            expect(store.getTokenTrackingEnabled()).toBe(true);
+        });
+
+        it('should persist tokenTrackingEnabled', () => {
+            store.setTokenTrackingEnabled(false);
+            const newStore = new ConfigStore(testBaseDir);
+            expect(newStore.getTokenTrackingEnabled()).toBe(false);
+        });
+
+        it('should update tokenTrackingEnabled via updateConfig', () => {
+            store.updateConfig({ tokenTrackingEnabled: false });
+            expect(store.getTokenTrackingEnabled()).toBe(false);
+        });
+
+        it('should default tokenCostEnabled to false', () => {
+            expect(store.getTokenCostEnabled()).toBe(false);
+        });
+
+        it('should get and set tokenCostEnabled', () => {
+            store.setTokenCostEnabled(true);
+            expect(store.getTokenCostEnabled()).toBe(true);
+        });
+
+        it('should persist tokenCostEnabled', () => {
+            store.setTokenCostEnabled(true);
+            const newStore = new ConfigStore(testBaseDir);
+            expect(newStore.getTokenCostEnabled()).toBe(true);
+        });
+
+        it('should update tokenCostEnabled via updateConfig', () => {
+            store.updateConfig({ tokenCostEnabled: true });
+            expect(store.getTokenCostEnabled()).toBe(true);
+        });
+
+        it('should return DEFAULT_TOKEN_PRICING when no custom pricing set', () => {
+            const pricing = store.getTokenPricing();
+            expect(pricing).toEqual(DEFAULT_TOKEN_PRICING);
+        });
+
+        it('should get and set token pricing', () => {
+            const customPricing = {
+                'my-model': {
+                    inputPer1MTokens: 1.00,
+                    outputPer1MTokens: 5.00,
+                    cacheCreatePer1MTokens: 1.25,
+                    cacheReadPer1MTokens: 0.10,
+                },
+            };
+            store.setTokenPricing(customPricing);
+            expect(store.getTokenPricing()).toEqual(customPricing);
+        });
+
+        it('should persist token pricing', () => {
+            const customPricing = {
+                'my-model': {
+                    inputPer1MTokens: 2.00,
+                    outputPer1MTokens: 8.00,
+                    cacheCreatePer1MTokens: 2.50,
+                    cacheReadPer1MTokens: 0.20,
+                },
+            };
+            store.setTokenPricing(customPricing);
+            const newStore = new ConfigStore(testBaseDir);
+            expect(newStore.getTokenPricing()).toEqual(customPricing);
+        });
+
+        it('should update tokenPricing via updateConfig', () => {
+            const p = { 'x': { inputPer1MTokens: 1, outputPer1MTokens: 1, cacheCreatePer1MTokens: 1, cacheReadPer1MTokens: 1 } };
+            store.updateConfig({ tokenPricing: p });
+            expect(store.getTokenPricing()).toEqual(p);
+        });
+
+        it('should include token fields in resetToDefaults', () => {
+            store.setTokenTrackingEnabled(false);
+            store.setTokenCostEnabled(true);
+            store.setTokenPricing({ 'x': { inputPer1MTokens: 99, outputPer1MTokens: 99, cacheCreatePer1MTokens: 99, cacheReadPer1MTokens: 99 } });
+
+            store.resetToDefaults();
+
+            expect(store.getTokenTrackingEnabled()).toBe(true);
+            expect(store.getTokenCostEnabled()).toBe(false);
+            expect(store.getTokenPricing()).toEqual(DEFAULT_TOKEN_PRICING);
+        });
+    });
+
+    describe('defaultBaseDirectory methods', () => {
+        it('should default to undefined', () => {
+            expect(store.getDefaultBaseDirectory()).toBeUndefined();
+        });
+
+        it('should get and set defaultBaseDirectory', () => {
+            store.setDefaultBaseDirectory('/home/user/projects');
+            expect(store.getDefaultBaseDirectory()).toBe('/home/user/projects');
+        });
+
+        it('should persist defaultBaseDirectory', () => {
+            store.setDefaultBaseDirectory('/my/workspace');
+            const newStore = new ConfigStore(testBaseDir);
+            expect(newStore.getDefaultBaseDirectory()).toBe('/my/workspace');
+        });
+
+        it('should allow clearing defaultBaseDirectory to undefined', () => {
+            store.setDefaultBaseDirectory('/some/path');
+            store.setDefaultBaseDirectory(undefined);
+            expect(store.getDefaultBaseDirectory()).toBeUndefined();
+        });
+
+        it('should update defaultBaseDirectory via updateConfig', () => {
+            store.updateConfig({ defaultBaseDirectory: '/updated/path' });
+            expect(store.getDefaultBaseDirectory()).toBe('/updated/path');
+        });
+    });
+
+    describe('defaultModel migration', () => {
+        it('should migrate old "model" field to "defaultModel" on load', () => {
+            // Simulate a legacy (unversioned) config saved before the model→defaultModel rename.
+            // The schema-version loader treats files without schemaVersion as legacy.
+            const configPath = join(testBaseDir, 'config.json');
+            const legacyConfig = {
+                // No schemaVersion field → treated as legacy by loadVersioned
+                claudeCodeSwitches: {
+                    verbose: false,
+                    maxTurns: null,
+                    maxBudgetUsd: null,
+                    permissionMode: null,
+                    allowedTools: '',
+                    disallowedTools: '',
+                    appendSystemPrompt: '',
+                    effortLevel: 'high',
+                    model: 'claude-opus-4-6',   // old field name
+                    // defaultModel intentionally absent
+                },
+            };
+            writeFileSync(configPath, JSON.stringify(legacyConfig));
+
+            const newStore = new ConfigStore(testBaseDir);
+            const switches = newStore.getClaudeCodeSwitches();
+            expect(switches.defaultModel).toBe('claude-opus-4-6');
+        });
+
+        it('should prefer defaultModel over legacy model field if both present', () => {
+            const configPath = join(testBaseDir, 'config.json');
+            const config = {
+                // No schemaVersion → legacy
+                claudeCodeSwitches: {
+                    model: 'old-model',
+                    defaultModel: 'new-model',
+                },
+            };
+            writeFileSync(configPath, JSON.stringify(config));
+
+            const newStore = new ConfigStore(testBaseDir);
+            expect(newStore.getClaudeCodeSwitches().defaultModel).toBe('new-model');
+        });
+
+        it('should default defaultModel to empty string when neither field present', () => {
+            const newStore = new ConfigStore(testBaseDir);
+            expect(newStore.getClaudeCodeSwitches().defaultModel).toBe('');
+        });
+    });
+
+    describe('claudiaMcpServerEnabled methods', () => {
+        it('should default to true', () => {
+            expect(store.getClaudioMcpServerEnabled()).toBe(true);
+        });
+
+        it('should get and set claudiaMcpServerEnabled', () => {
+            store.setClaudioMcpServerEnabled(false);
+            expect(store.getClaudioMcpServerEnabled()).toBe(false);
+
+            store.setClaudioMcpServerEnabled(true);
+            expect(store.getClaudioMcpServerEnabled()).toBe(true);
+        });
+
+        it('should persist claudiaMcpServerEnabled', () => {
+            store.setClaudioMcpServerEnabled(false);
+            const newStore = new ConfigStore(testBaseDir);
+            expect(newStore.getClaudioMcpServerEnabled()).toBe(false);
+        });
+
+        it('should update via updateConfig', () => {
+            store.updateConfig({ claudiaMcpServerEnabled: false });
+            expect(store.getClaudioMcpServerEnabled()).toBe(false);
         });
     });
 });

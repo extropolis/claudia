@@ -4344,7 +4344,22 @@ export async function createApp(basePath?: string) {
                 return res.status(400).json({ error: 'Path is not a file' });
             }
 
-            // Read file contents
+            // For binary image files, return base64-encoded content
+            const imageExtensions = /\.(png|jpg|jpeg|gif|webp|bmp|ico|svg)$/i;
+            if (imageExtensions.test(resolvedPath)) {
+                const buffer = await readFile(resolvedPath);
+                const base64 = buffer.toString('base64');
+                const ext = resolvedPath.split('.').pop()!.toLowerCase();
+                const mimeType = ext === 'svg' ? 'image/svg+xml' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : `image/${ext}`;
+                return res.json({
+                    path: filePath,
+                    content: `data:${mimeType};base64,${base64}`,
+                    isImage: true,
+                    size: stats.size
+                });
+            }
+
+            // Read file contents as text
             const content = await readFile(resolvedPath, 'utf-8');
             res.json({
                 path: filePath,
@@ -5440,11 +5455,11 @@ Guidelines:
                 dashboard.taskCount++;
 
                 const usage = task.tokenUsage;
-                dashboard.totalCostUsd += usage.totalCostUsd;
-                dashboard.totalInputTokens += usage.inputTokens;
-                dashboard.totalOutputTokens += usage.outputTokens;
-                dashboard.totalCacheCreationTokens += usage.cacheCreationTokens;
-                dashboard.totalCacheReadTokens += usage.cacheReadTokens;
+                dashboard.totalCostUsd += usage.totalCostUsd || 0;
+                dashboard.totalInputTokens += usage.inputTokens || 0;
+                dashboard.totalOutputTokens += usage.outputTokens || 0;
+                dashboard.totalCacheCreationTokens += usage.cacheCreationTokens || 0;
+                dashboard.totalCacheReadTokens += usage.cacheReadTokens || 0;
 
                 // Group by workspace
                 if (!dashboard.byWorkspace[task.workspaceId]) {
@@ -5459,11 +5474,11 @@ Guidelines:
                     };
                 }
                 const wsData = dashboard.byWorkspace[task.workspaceId];
-                wsData.costUsd += usage.totalCostUsd;
-                wsData.inputTokens += usage.inputTokens;
-                wsData.outputTokens += usage.outputTokens;
-                wsData.cacheCreationTokens += usage.cacheCreationTokens;
-                wsData.cacheReadTokens += usage.cacheReadTokens;
+                wsData.costUsd += usage.totalCostUsd || 0;
+                wsData.inputTokens += usage.inputTokens || 0;
+                wsData.outputTokens += usage.outputTokens || 0;
+                wsData.cacheCreationTokens += usage.cacheCreationTokens || 0;
+                wsData.cacheReadTokens += usage.cacheReadTokens || 0;
                 wsData.taskCount++;
 
                 // Group by model
@@ -5478,11 +5493,11 @@ Guidelines:
                         };
                     }
                     const m = dashboard.byModel[model];
-                    m.inputTokens += modelUsage.inputTokens;
-                    m.outputTokens += modelUsage.outputTokens;
-                    m.cacheCreationTokens += modelUsage.cacheCreationTokens;
-                    m.cacheReadTokens += modelUsage.cacheReadTokens;
-                    m.costUsd += modelUsage.costUsd;
+                    m.inputTokens += modelUsage.inputTokens || 0;
+                    m.outputTokens += modelUsage.outputTokens || 0;
+                    m.cacheCreationTokens += modelUsage.cacheCreationTokens || 0;
+                    m.cacheReadTokens += modelUsage.cacheReadTokens || 0;
+                    m.costUsd += modelUsage.costUsd || 0;
                 }
             }
 

@@ -41,7 +41,7 @@ const PERMISSION_MODE_MAP: Record<string, string> = {
  * Build CLI args from ClaudeCodeSwitches config.
  * Returns args to push into the claudeArgs array.
  */
-function buildClaudeCodeSwitchArgs(switches: ClaudeCodeSwitches): string[] {
+export function buildClaudeCodeSwitchArgs(switches: ClaudeCodeSwitches): string[] {
     const args: string[] = [];
 
     if (switches.verbose) {
@@ -2584,6 +2584,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     }
 
     private async captureTokenUsage(taskId: string): Promise<void> {
+        if (!this.configStore?.getTokenTrackingEnabled()) return;
         const task = this.tasks.get(taskId);
         if (!task?.sessionId) return;
 
