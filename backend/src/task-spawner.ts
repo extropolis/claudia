@@ -74,8 +74,8 @@ function buildClaudeCodeSwitchArgs(switches: ClaudeCodeSwitches): string[] {
         args.push('--append-system-prompt', switches.appendSystemPrompt.trim());
     }
 
-    if (switches.model && switches.model.trim()) {
-        args.push('--model', switches.model.trim());
+    if (switches.defaultModel && switches.defaultModel.trim()) {
+        args.push('--model', switches.defaultModel.trim());
     }
 
     return args;
@@ -1735,6 +1735,20 @@ export class TaskSpawner extends EventEmitter {
                 taskEnv['ANTHROPIC_API_KEY'] = apiKey;
                 console.log(`[TaskSpawner] Using custom Anthropic API key`);
             }
+        } else if (apiMode === 'sap-ai-core') {
+            // For SAP AI Core, route requests through the local proxy
+            const proxyUrl = 'http://localhost:4001/anthropic';
+            taskEnv['ANTHROPIC_BASE_URL'] = proxyUrl;
+            // Set a placeholder API key (required by SDK but not used by proxy)
+            taskEnv['ANTHROPIC_API_KEY'] = 'sap-ai-core-proxy';
+            console.log(`[TaskSpawner] Using SAP AI Core proxy at ${proxyUrl}`);
+        } else if (apiMode === 'hyperspace-proxy') {
+            // For Hyperspace proxy, route through local proxy
+            const proxyUrl = 'http://localhost:4001/anthropic';
+            taskEnv['ANTHROPIC_BASE_URL'] = proxyUrl;
+            // Set a placeholder API key (required by SDK but not used by proxy)
+            taskEnv['ANTHROPIC_API_KEY'] = 'hyperspace-proxy';
+            console.log(`[TaskSpawner] Using Hyperspace proxy at ${proxyUrl}`);
         }
         // 'default' mode: don't set any env vars, let the backend use its own settings
 

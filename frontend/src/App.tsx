@@ -5,6 +5,9 @@ import { SupervisorChat } from './components/SupervisorChat';
 import { ProjectPicker } from './components/ProjectPicker';
 import { SettingsMenu } from './components/SettingsMenu';
 import { GlobalVoiceManager } from './components/GlobalVoiceManager';
+import { ThinkingSoundManager } from './components/ThinkingSoundManager';
+import { TaskCompletionVoiceManager } from './components/TaskCompletionVoiceManager';
+import { TaskProgressVoiceManager } from './components/TaskProgressVoiceManager';
 import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
 import { SystemStats } from './components/SystemStats';
 import { MobileAccessModal } from './components/MobileAccessModal';
@@ -758,6 +761,9 @@ function App() {
             <UsageDashboard isOpen={showUsageDashboard} onClose={() => setShowUsageDashboard(false)} />
             {!isMobile && <MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} error={tunnelError} tunnelActive={tunnelActive} tunnelLoading={tunnelLoading} onStopTunnel={handleStopTunnel} onStartTunnel={startTunnel} />}
             <GlobalVoiceManager />
+            <ThinkingSoundManager />
+            <TaskCompletionVoiceManager />
+            <TaskProgressVoiceManager />
 
             {/* Offline warning overlay */}
             {isOffline && (

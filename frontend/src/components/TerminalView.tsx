@@ -51,6 +51,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
     const userHasScrolledRef = useRef(false); // Track if user manually scrolled up
+    const programmaticScrollRef = useRef(false); // Track programmatic scrolls to ignore in scroll handler
     const [copied, setCopied] = useState(false);
     const [isLoadingHistory, setIsLoadingHistory] = useState(true);
     const [showSpinner, setShowSpinner] = useState(false);
@@ -89,7 +90,13 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             userHasScrolledRef.current = false;
         }
         if (xtermRef.current) {
+            // Mark as programmatic scroll
+            programmaticScrollRef.current = true;
             xtermRef.current.scrollToBottom();
+            // Reset flag after a short delay
+            setTimeout(() => {
+                programmaticScrollRef.current = false;
+            }, 50);
         }
     };
 
@@ -175,6 +182,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             fontFamily: '"SF Mono", "Monaco", "Inconsolata", "Fira Code", monospace',
             scrollback: 10000,
             allowProposedApi: true,
+            scrollOnUserInput: false, // Disable automatic scroll on user input - we'll control it manually
             theme: effectiveTheme === 'light' ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME,
         });
 
@@ -264,7 +272,36 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         xtermRef.current = term;
         fitAddonRef.current = fitAddon;
 
-        // Track whether user has scrolled up (away from bottom)
+        // Track user scroll position to prevent auto-scroll when user has scrolled up
+        // We need to distinguish between programmatic scrolls and user scrolls
+        const isAtBottom = () => {
+            if (!term) return true;
+            const bufViewport = term.buffer.active.viewportY;
+            const totalRows = term.buffer.active.length;
+            // Consider "at bottom" if within 2 rows of the bottom
+            return bufViewport + term.rows >= totalRows - 2;
+        };
+
+        const handleScroll = () => {
+            // Ignore programmatic scrolls (ones we triggered)
+            if (programmaticScrollRef.current) {
+                return;
+            }
+
+            // This is a user-initiated scroll - check if they scrolled back to bottom
+            const atBottom = isAtBottom();
+
+            if (atBottom && userHasScrolledRef.current) {
+                // User scrolled back to bottom, re-enable auto-scroll
+                console.log(`[TerminalView] User scrolled to bottom, enabling auto-scroll for ${task.id}`);
+                userHasScrolledRef.current = false;
+            }
+        };
+
+        // Attach xterm scroll listener
+        term.onScroll(handleScroll);
+
+        // Track whether user has scrolled up (away from bottom) via DOM viewport
         // xterm native auto-scroll only works when viewport is exactly at bottom;
         // fitAddon.fit() can shift scrollTop slightly and break it.
         const viewport = terminalRef.current.querySelector('.xterm-viewport') as HTMLElement | null;
@@ -393,10 +430,27 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     console.log(`[TerminalView] Writing output, wasAtBottom: ${wasAtBottom}, userHasScrolled: ${userHasScrolledRef.current}, viewport: ${viewport}`);
 
                     term.write(message.payload.data);
-                    // Scroll to bottom only if user hasn't scrolled up.
-                    if (!userHasScrolledRef.current) {
-                        term.scrollToBottom();
+
+                    // Only auto-scroll if user was at bottom
+                    if (wasAtBottom) {
+                        programmaticScrollRef.current = true;
+                        requestAnimationFrame(() => {
+                            if (xtermRef.current) {
+                                xtermRef.current.scrollToBottom();
+                            }
+                            setTimeout(() => {
+                                programmaticScrollRef.current = false;
+                            }, 100);
+                        });
+                    } else {
+                        // User was scrolled up - maintain their position
+                        programmaticScrollRef.current = true;
+                        term.scrollToLine(viewport);
+                        setTimeout(() => {
+                            programmaticScrollRef.current = false;
+                        }, 100);
                     }
+
                     // Clear loading state on first output (task is live)
                     if (!historyLoadedRef.current) {
                         console.log(`[TerminalView] First output received, clearing loading state for ${task.id}`);
@@ -409,8 +463,12 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     if (history && history.length > 0) {
                         term.reset();
                         const cleaned = stripScreenClears(history);
+                        programmaticScrollRef.current = true;
                         term.write(cleaned, () => {
                             term.scrollToBottom();
+                            setTimeout(() => {
+                                programmaticScrollRef.current = false;
+                            }, 50);
                         });
                         console.log(`[TerminalView] History written for ${task.id} (original: ${history.length}, cleaned: ${cleaned.length})`);
                     } else {

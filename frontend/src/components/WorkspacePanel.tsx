@@ -3,12 +3,13 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
     Loader2, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
 import { ConfirmModal } from './ConfirmModal';
 import { ScheduledTasksModal } from './ScheduledTasksModal';
+import { WorkspaceManager } from './WorkspaceManager';
 import './WorkspacePanel.css';
 
 // Simple notification sound using Web Audio API
@@ -538,7 +539,9 @@ function WorkspaceSection({
         voiceInterimTranscript,
         setFocusedInputId,
         consumeVoiceTranscript,
-        clearVoiceTranscript
+        clearVoiceTranscript,
+        taskSortBy,
+        setTaskSortBy
     } = useTaskStore();
 
     const inputId = `new-task-${workspace.id}`;
@@ -888,7 +891,29 @@ function WorkspaceSection({
                         </span>
                     )}
                     {tasks.length > 0 && (
-                        <span className="workspace-task-count">{tasks.length}</span>
+                        <>
+                            <span className="workspace-task-count">{tasks.length}</span>
+                            {tasks.length > 1 && (
+                                <div
+                                    className="task-sort-selector"
+                                    title="Sort tasks by"
+                                    onClick={(e) => e.stopPropagation()}
+                                >
+                                    <ArrowDownUp size={11} className="task-sort-icon" />
+                                    <select
+                                        className="task-sort-select"
+                                        value={taskSortBy}
+                                        onChange={(e) => {
+                                            e.stopPropagation();
+                                            setTaskSortBy(e.target.value as 'date-created' | 'last-modified');
+                                        }}
+                                    >
+                                        <option value="date-created">Newest</option>
+                                        <option value="last-modified">Recent</option>
+                                    </select>
+                                </div>
+                            )}
+                        </>
                     )}
                     {workspace.references && workspace.references.length > 0 && (
                         <span
@@ -927,6 +952,26 @@ function WorkspaceSection({
                                     el.style.marginTop = '0';
                                     el.style.marginBottom = '4px';
                                 }
+                            }
+                        }}
+                        onMouseOver={(e) => {
+                            // Close the references submenu when the user hovers over a sibling menu item.
+                            // mouseover bubbles (unlike mouseenter), so we get all hover transitions on this single handler.
+                            // We deliberately do NOT use a mouseleave timer on the submenu/References item itself —
+                            // that scheme is fragile because diagonal mouse motion creates "dead zones" geographically
+                            // outside both the References item bbox and the submenu bbox, where the timer can fire
+                            // while the user is still trying to interact with the submenu (e.g. clicking a reference).
+                            const target = e.target as HTMLElement;
+                            if (
+                                showReferencesSubmenu &&
+                                !target.closest('.has-submenu') &&
+                                !target.closest('.workspace-submenu')
+                            ) {
+                                if (submenuCloseTimeoutRef.current) {
+                                    clearTimeout(submenuCloseTimeoutRef.current);
+                                    submenuCloseTimeoutRef.current = null;
+                                }
+                                setShowReferencesSubmenu(false);
                             }
                         }}>
                             <button
@@ -1022,12 +1067,6 @@ function WorkspaceSection({
                                         setSubmenuPosition({ top: rect.top, left: rect.right - 8 });
                                     }
                                 }}
-                                onMouseLeave={() => {
-                                    submenuCloseTimeoutRef.current = setTimeout(() => {
-                                        setShowReferencesSubmenu(false);
-                                        submenuCloseTimeoutRef.current = null;
-                                    }, 150);
-                                }}
                                 onClick={(e) => e.stopPropagation()}
                             >
                                 <Link2 size={14} />
@@ -1049,18 +1088,6 @@ function WorkspaceSection({
                                             }
                                         }}
                                         onClick={(e) => e.stopPropagation()}
-                                        onMouseEnter={() => {
-                                            if (submenuCloseTimeoutRef.current) {
-                                                clearTimeout(submenuCloseTimeoutRef.current);
-                                                submenuCloseTimeoutRef.current = null;
-                                            }
-                                        }}
-                                        onMouseLeave={() => {
-                                            submenuCloseTimeoutRef.current = setTimeout(() => {
-                                                setShowReferencesSubmenu(false);
-                                                submenuCloseTimeoutRef.current = null;
-                                            }, 150);
-                                        }}
                                     >
                                         {allWorkspaces.filter(w => w.id !== workspace.id).length > 0 && (
                                             <>
@@ -1232,6 +1259,7 @@ function WorkspaceSection({
                                     onFocus={handleFocus}
                                     onBlur={handleBlur}
                                     rows={1}
+                                    data-input-type="new-task-input"
                                 />
                                 {showInterim && (
                                     <span className="interim-indicator">{voiceInterimTranscript}</span>
@@ -1439,6 +1467,7 @@ export function WorkspacePanel({
     onInterruptTask,
     onArchiveTask,
     onRevertTask,
+    onCreateWorkspace,
     onDeleteWorkspace,
     onReorderWorkspaces,
     onReorderTasksOnServer,
@@ -1475,6 +1504,9 @@ export function WorkspacePanel({
         reorderTasks,
         workspaceColumns,
         setWorkspaceColumns,
+        workspaceSortBy,
+        setWorkspaceSortBy,
+        taskSortBy,
         lastSelectedTaskByWorkspace
     } = useTaskStore();
 
@@ -1491,6 +1523,9 @@ export function WorkspacePanel({
     // Scheduled tasks modal state
     const [scheduledTasksForTaskId, setScheduledTasksForTaskId] = useState<string | null>(null);
     const scheduledTasksTask = scheduledTasksForTaskId ? tasks.get(scheduledTasksForTaskId) : null;
+
+    // Workspace manager modal state
+    const [showWorkspaceManager, setShowWorkspaceManager] = useState(false);
 
     // Close menu when clicking outside (capture phase so stopPropagation on child elements doesn't block it)
     useEffect(() => {
@@ -1561,22 +1596,67 @@ export function WorkspacePanel({
     // Get task IDs that have active questions
     const waitingInputTaskIds = new Set(waitingInputNotifications.keys());
 
-    // Group tasks by workspace, sorted by order (if set) then by creation time (newest first)
+    // Group tasks by workspace, sorted by user preference
     const getTasksForWorkspace = (workspaceId: string): Task[] => {
-        return Array.from(tasks.values())
-            .filter(t => t.workspaceId === workspaceId)
-            .sort((a, b) => {
-                // If both have order, sort by order (ascending)
-                if (a.order !== undefined && b.order !== undefined) {
-                    return a.order - b.order;
-                }
-                // If only one has order, it comes first
-                if (a.order !== undefined) return -1;
-                if (b.order !== undefined) return 1;
-                // Neither has order, sort by creation time (newest first)
-                return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-            });
+        const workspaceTasks = Array.from(tasks.values()).filter(t => t.workspaceId === workspaceId);
+
+        return workspaceTasks.sort((a, b) => {
+            // If both have manual order, sort by order (ascending)
+            if (a.order !== undefined && b.order !== undefined) {
+                return a.order - b.order;
+            }
+            // If only one has order, it comes first (manual order takes precedence)
+            if (a.order !== undefined) return -1;
+            if (b.order !== undefined) return 1;
+
+            // Neither has manual order, apply user's sort preference
+            switch (taskSortBy) {
+                case 'last-modified':
+                    // Sort by most recent activity
+                    const timeA = new Date(a.lastActivity || a.createdAt).getTime();
+                    const timeB = new Date(b.lastActivity || b.createdAt).getTime();
+                    return timeB - timeA; // Most recent first
+                case 'date-created':
+                default:
+                    // Sort by creation time (newest first)
+                    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+            }
+        });
     };
+
+    // Get last modified time for a workspace (most recent task activity)
+    const getWorkspaceLastModified = (workspaceId: string): Date => {
+        const workspaceTasks = Array.from(tasks.values()).filter(t => t.workspaceId === workspaceId);
+        if (workspaceTasks.length === 0) {
+            // No tasks, use workspace createdAt
+            const workspace = workspaces.find(w => w.id === workspaceId);
+            return workspace ? new Date(workspace.createdAt) : new Date(0);
+        }
+        // Find most recent task activity
+        const mostRecent = workspaceTasks.reduce((latest, task) => {
+            const taskTime = new Date(task.lastActivity || task.createdAt).getTime();
+            return taskTime > latest ? taskTime : latest;
+        }, 0);
+        return new Date(mostRecent);
+    };
+
+    // Sort workspaces based on user preference
+    const sortedWorkspaces = [...workspaces].sort((a, b) => {
+        switch (workspaceSortBy) {
+            case 'alphabetical':
+                const nameA = (a.displayName || a.name).toLowerCase();
+                const nameB = (b.displayName || b.name).toLowerCase();
+                return nameA.localeCompare(nameB);
+            case 'last-modified':
+                const timeA = getWorkspaceLastModified(a.id).getTime();
+                const timeB = getWorkspaceLastModified(b.id).getTime();
+                return timeB - timeA; // Most recent first
+            case 'date-created':
+            default:
+                // Most recently created first
+                return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        }
+    });
 
     return (
         <div className="workspace-panel">
@@ -1590,6 +1670,18 @@ export function WorkspacePanel({
                     >
                         <Archive size={16} />
                     </button>
+                    <div className="column-selector" title="Sort workspaces by">
+                        <ArrowDownAZ size={14} className="column-selector-icon" />
+                        <select
+                            className="column-selector-select"
+                            value={workspaceSortBy}
+                            onChange={(e) => setWorkspaceSortBy(e.target.value as 'date-created' | 'last-modified' | 'alphabetical')}
+                        >
+                            <option value="date-created">Date Created</option>
+                            <option value="last-modified">Last Modified</option>
+                            <option value="alphabetical">Alphabetical</option>
+                        </select>
+                    </div>
                     <div className="column-selector" title="Workspace columns">
                         <Columns2 size={14} className="column-selector-icon" />
                         <select
@@ -1604,6 +1696,13 @@ export function WorkspacePanel({
                             <option value={4}>4 col</option>
                         </select>
                     </div>
+                    <button
+                        className="workspace-manager-button"
+                        onClick={() => setShowWorkspaceManager(true)}
+                        title="Manage workspaces"
+                    >
+                        <Settings size={16} />
+                    </button>
                     <button
                         className="add-workspace-button"
                         onClick={handleAddWorkspace}
@@ -1649,7 +1748,7 @@ export function WorkspacePanel({
                 className="workspace-panel-content"
                 style={workspaceColumns > 0 ? { gridTemplateColumns: `repeat(${workspaceColumns}, 1fr)` } : undefined}
             >
-                {workspaces.length === 0 ? (
+                {sortedWorkspaces.length === 0 ? (
                     <div className="empty-state">
                         <p>No workspaces yet.</p>
                         <button
@@ -1660,7 +1759,7 @@ export function WorkspacePanel({
                         </button>
                     </div>
                 ) : (
-                    workspaces.map((workspace, index) => (
+                    sortedWorkspaces.map((workspace, index) => (
                         <WorkspaceSection
                             key={workspace.id}
                             workspace={workspace}
@@ -1730,6 +1829,16 @@ export function WorkspacePanel({
                     taskId={scheduledTasksForTaskId}
                     taskName={scheduledTasksTask.displayName || scheduledTasksTask.prompt?.substring(0, 60) || scheduledTasksForTaskId}
                     onClose={() => setScheduledTasksForTaskId(null)}
+                />
+            )}
+
+            {showWorkspaceManager && (
+                <WorkspaceManager
+                    workspaces={workspaces}
+                    onClose={() => setShowWorkspaceManager(false)}
+                    onCreateWorkspace={onCreateWorkspace}
+                    onDeleteWorkspace={onDeleteWorkspace}
+                    onReorderWorkspaces={onReorderWorkspaces}
                 />
             )}
         </div>

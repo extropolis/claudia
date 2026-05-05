@@ -55,6 +55,7 @@ interface TestConfig {
     waitForIdle: boolean;         // Wait for task to become idle before exiting
     listMcpServers: boolean;      // List available MCP servers (no WebSocket needed)
     testMcpServer: string | null; // Test a specific MCP server by name
+    checkApiConfig: boolean;      // Check API configuration (mode, credentials, plugin status)
     disconnectTask: boolean;      // Disconnect a task
     reconnectTask: boolean;       // Reconnect a task
     renameTask: boolean;          // Rename a task
@@ -1327,6 +1328,7 @@ function parseArgs(): TestConfig {
     let waitForIdle = false;
     let listMcpServers = false;
     let testMcpServer: string | null = null;
+    let checkApiConfig = false;
     let disconnectTask = false;
     let reconnectTask = false;
     let renameTask = false;
@@ -1486,6 +1488,9 @@ function parseArgs(): TestConfig {
             case '--list-mcp-servers':
                 listMcpServers = true;
                 break;
+            case '--check-api-config':
+                checkApiConfig = true;
+                break;
             case '--test-mcp-server':
                 testMcpServer = args[++i];
                 break;
@@ -1623,6 +1628,7 @@ BACKEND OPERATIONS:
 MCP SERVER OPERATIONS:
   --list-mcp-servers       List all available MCP servers (global and project-specific)
   --test-mcp-server <name> Test a specific MCP server by calling its tools
+  --check-api-config       Check API configuration (mode, credentials, enabled plugins)
 
 SCHEDULED TASK (CRON) OPERATIONS:
   --cron-create            Create a scheduled task (requires --task-id, --cron-expression, and --message)
@@ -1795,6 +1801,7 @@ Examples:
         waitForIdle,
         listMcpServers,
         testMcpServer,
+        checkApiConfig,
         disconnectTask,
         reconnectTask,
         renameTask,
@@ -2124,6 +2131,132 @@ async function testMcpServer(serverName: string): Promise<void> {
     console.log('');
 }
 
+async function checkApiConfig(baseHttpUrl: string): Promise<void> {
+    console.log('🔍 Checking API Configuration...');
+    console.log('');
+
+    try {
+        // Get the full config
+        const response = await fetch(`${baseHttpUrl}/api/config`);
+        if (!response.ok) {
+            console.error(`Failed to fetch config: ${response.statusText}`);
+            return;
+        }
+
+        const config = await response.json();
+
+        console.log('🔐 API CONFIGURATION');
+        console.log('='.repeat(80));
+        console.log(`  API Mode:           ${config.apiMode}`);
+        console.log(`  Backend:            ${config.backend}`);
+        console.log('');
+
+        // Show API mode specific details
+        if (config.apiMode === 'sap-ai-core') {
+            console.log('📡 SAP AI CORE CREDENTIALS');
+            console.log('-'.repeat(80));
+            if (config.aiCoreCredentials) {
+                const creds = config.aiCoreCredentials;
+                console.log(`  Client ID:          ${creds.clientId?.substring(0, 20)}...`);
+                console.log(`  Client Secret:      ${creds.clientSecret ? '[REDACTED]' : '[NOT SET]'}`);
+                console.log(`  Auth URL:           ${creds.authUrl}`);
+                console.log(`  Base URL:           ${creds.baseUrl}`);
+                console.log(`  Resource Group:     ${creds.resourceGroup || 'default'}`);
+                console.log(`  Model:              ${creds.model || '[NOT SET]'}`);
+                console.log(`  Timeout:            ${creds.timeoutMs || 120000}ms`);
+            } else {
+                console.log('  ❌ No credentials configured');
+            }
+            console.log('');
+        } else if (config.apiMode === 'custom-anthropic') {
+            console.log('📡 CUSTOM ANTHROPIC API');
+            console.log('-'.repeat(80));
+            console.log(`  API Key:            ${config.customAnthropicApiKey ? '[REDACTED]' : '[NOT SET]'}`);
+            console.log('');
+        } else if (config.apiMode === 'hyperspace-proxy') {
+            console.log('📡 HYPERSPACE PROXY');
+            console.log('-'.repeat(80));
+            if (config.hyperspaceProxy) {
+                console.log(`  Proxy URL:          ${config.hyperspaceProxy.proxyUrl}`);
+                console.log(`  API Key:            ${config.hyperspaceProxy.apiKey ? '[REDACTED]' : '[NOT SET]'}`);
+                console.log(`  Model:              ${config.hyperspaceProxy.model}`);
+                console.log(`  Always Thinking:    ${config.hyperspaceProxy.alwaysThinkingEnabled}`);
+            } else {
+                console.log('  ❌ No proxy configured');
+            }
+            console.log('');
+        } else {
+            console.log('📡 DEFAULT (Anthropic API)');
+            console.log('-'.repeat(80));
+            console.log('  Using default Anthropic API endpoint');
+            console.log('  API key from ANTHROPIC_API_KEY environment variable');
+            console.log('');
+        }
+
+        // Show enabled plugins
+        console.log('🔌 ENABLED PLUGINS');
+        console.log('-'.repeat(80));
+        if (config.enabledPlugins && config.enabledPlugins.length > 0) {
+            for (const plugin of config.enabledPlugins) {
+                console.log(`  ✅ ${plugin}`);
+            }
+        } else {
+            console.log('  (No plugins enabled)');
+        }
+        console.log('');
+
+        // Check if SAP AI Core plugin is enabled when in sap-ai-core mode
+        if (config.apiMode === 'sap-ai-core') {
+            const pluginEnabled = config.enabledPlugins?.includes('sap-ai-core-plugin');
+            if (pluginEnabled) {
+                console.log('✅ SAP AI Core plugin is enabled (proxy will be used)');
+            } else {
+                console.log('⚠️  WARNING: SAP AI Core plugin is NOT enabled!');
+                console.log('   The plugin must be enabled for SAP AI Core to work.');
+            }
+            console.log('');
+        }
+
+        // Show environment info that will be used for tasks
+        console.log('🔧 TASK ENVIRONMENT');
+        console.log('-'.repeat(80));
+        console.log(`  Skip Permissions:   ${config.skipPermissions}`);
+        console.log(`  Use Learnings:      ${config.useLearnings}`);
+        console.log(`  Supervisor:         ${config.supervisorEnabled ? 'Enabled' : 'Disabled'}`);
+        console.log('');
+
+        // Show what environment variables will be set for Claude Code tasks
+        console.log('🌍 ENVIRONMENT VARIABLES FOR TASKS');
+        console.log('-'.repeat(80));
+        if (config.apiMode === 'sap-ai-core') {
+            console.log(`  ANTHROPIC_BASE_URL: http://localhost:4001/anthropic`);
+            console.log(`  ANTHROPIC_API_KEY:  sap-ai-core-proxy (placeholder)`);
+        } else if (config.apiMode === 'hyperspace-proxy') {
+            console.log(`  ANTHROPIC_BASE_URL: http://localhost:4001/anthropic`);
+            console.log(`  ANTHROPIC_API_KEY:  hyperspace-proxy (placeholder)`);
+        } else if (config.apiMode === 'custom-anthropic') {
+            console.log(`  ANTHROPIC_API_KEY:  [CUSTOM KEY]`);
+        } else {
+            console.log(`  (Using default Claude Code configuration)`);
+        }
+        console.log('');
+        console.log('💡 HOW TO VERIFY THE PROXY IS WORKING');
+        console.log('-'.repeat(80));
+        console.log('  1. Create a test task:');
+        console.log('     npx tsx test-cli.ts --task -m "what is 2+2?"');
+        console.log('');
+        console.log('  2. Watch the backend console output for these logs:');
+        console.log('     "[AnthropicProxy] ✅ REQUEST INTERCEPTED"');
+        console.log('     "[AnthropicProxy] 🔵 SAP AI CORE REQUEST"');
+        console.log('');
+        console.log('  3. If you see these logs, the proxy is working correctly!');
+        console.log('');
+
+    } catch (error) {
+        console.error('Failed to check API config:', error);
+    }
+}
+
 // Main execution
 async function main() {
     const config = parseArgs();
@@ -2152,6 +2285,11 @@ async function main() {
 
     if (config.testMcpServer) {
         await testMcpServer(config.testMcpServer);
+        process.exit(0);
+    }
+
+    if (config.checkApiConfig) {
+        await checkApiConfig(baseHttpUrl);
         process.exit(0);
     }
 

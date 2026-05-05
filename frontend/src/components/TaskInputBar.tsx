@@ -389,6 +389,7 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
                         disabled={isDisabled}
                         rows={1}
                         className="task-input-textarea"
+                        data-input-type="task-input"
                     />
                     {showInterim && (
                         <span className="interim-indicator">{voiceInterimTranscript}</span>

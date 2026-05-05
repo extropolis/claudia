@@ -47,6 +47,8 @@ interface TaskStore {
     expandedWorkspacesInitialized: boolean;  // True once persisted state is loaded or first workspaces set
     showProjectPicker: boolean;
     workspaceColumns: number; // 0 = auto, 1-4 = fixed column count
+    workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical'; // How to sort workspaces
+    taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
 
     // Voice state
     voiceEnabled: boolean;
@@ -97,6 +99,11 @@ interface TaskStore {
     browserNotificationsEnabled: boolean;
     notifyOnCompletion: boolean;
     notifyOnWaitingInput: boolean;
+    thinkingSoundEnabled: boolean;
+    thinkingSoundInterval: number; // milliseconds between sounds
+    voiceSummaryOnCompletion: boolean; // Announce task summaries when tasks complete
+    voiceProgressUpdatesEnabled: boolean; // Announce periodic progress for long-running tasks
+    voiceProgressUpdateInterval: number; // milliseconds between progress updates
     themePreference: ThemePreference;
     tokenCostEnabled: boolean;
 
@@ -177,6 +184,8 @@ interface TaskStore {
 
     // Layout actions
     setWorkspaceColumns: (columns: number) => void;
+    setWorkspaceSortBy: (sortBy: 'date-created' | 'last-modified' | 'alphabetical') => void;
+    setTaskSortBy: (sortBy: 'date-created' | 'last-modified') => void;
 
     // Settings actions
     setAutoFocusOnInput: (enabled: boolean) => void;
@@ -186,6 +195,11 @@ interface TaskStore {
     setBrowserNotificationsEnabled: (enabled: boolean) => void;
     setNotifyOnCompletion: (enabled: boolean) => void;
     setNotifyOnWaitingInput: (enabled: boolean) => void;
+    setThinkingSoundEnabled: (enabled: boolean) => void;
+    setThinkingSoundInterval: (interval: number) => void;
+    setVoiceSummaryOnCompletion: (enabled: boolean) => void;
+    setVoiceProgressUpdatesEnabled: (enabled: boolean) => void;
+    setVoiceProgressUpdateInterval: (interval: number) => void;
     setThemePreference: (pref: ThemePreference) => void;
     setTokenCostEnabled: (enabled: boolean) => void;
 }
@@ -200,6 +214,8 @@ interface PersistedState {
     expandedWorkspaces: string[];  // Stored as array, converted to Set
     expandedWorkspacesInitialized: boolean;  // Track if user has interacted with workspaces
     workspaceColumns: number; // 0 = auto, 1-4 = fixed
+    workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical'; // How to sort workspaces
+    taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
     voiceEnabled: boolean;
     autoSpeakResponses: boolean;
     selectedVoiceName: string | null;
@@ -218,6 +234,11 @@ interface PersistedState {
     browserNotificationsEnabled: boolean;
     notifyOnCompletion: boolean;
     notifyOnWaitingInput: boolean;
+    thinkingSoundEnabled: boolean;
+    thinkingSoundInterval: number;
+    voiceSummaryOnCompletion: boolean;
+    voiceProgressUpdatesEnabled: boolean;
+    voiceProgressUpdateInterval: number;
     themePreference: ThemePreference;
     taskSummaries: [string, TaskSummary][];  // Stored as entries array
     chatMessages: ChatMessage[];
@@ -241,6 +262,8 @@ export const useTaskStore = create<TaskStore>()(
             expandedWorkspacesInitialized: false,
             showProjectPicker: false,
             workspaceColumns: 0, // 0 = auto
+            workspaceSortBy: 'date-created', // Default to date created
+            taskSortBy: 'date-created', // Default to date created for tasks
 
             // Voice initial state
             voiceEnabled: false,
@@ -291,6 +314,11 @@ export const useTaskStore = create<TaskStore>()(
             browserNotificationsEnabled: false,
             notifyOnCompletion: true,
             notifyOnWaitingInput: true,
+            thinkingSoundEnabled: false,
+            thinkingSoundInterval: 5000, // 5 seconds
+            voiceSummaryOnCompletion: false,
+            voiceProgressUpdatesEnabled: false,
+            voiceProgressUpdateInterval: 180000, // 3 minutes (180 seconds)
             themePreference: 'system' as ThemePreference,
             tokenCostEnabled: false,
 
@@ -545,6 +573,10 @@ export const useTaskStore = create<TaskStore>()(
 
             setWorkspaceColumns: (columns) => set({ workspaceColumns: columns }),
 
+            setWorkspaceSortBy: (sortBy) => set({ workspaceSortBy: sortBy }),
+
+            setTaskSortBy: (sortBy) => set({ taskSortBy: sortBy }),
+
             // Scheduled tasks actions
             setScheduledTasks: (tasks) => {
                 const map = new Map<string, ScheduledTask>();
@@ -746,6 +778,11 @@ export const useTaskStore = create<TaskStore>()(
             setBrowserNotificationsEnabled: (enabled) => set({ browserNotificationsEnabled: enabled }),
             setNotifyOnCompletion: (enabled) => set({ notifyOnCompletion: enabled }),
             setNotifyOnWaitingInput: (enabled) => set({ notifyOnWaitingInput: enabled }),
+            setThinkingSoundEnabled: (enabled) => set({ thinkingSoundEnabled: enabled }),
+            setThinkingSoundInterval: (interval) => set({ thinkingSoundInterval: interval }),
+            setVoiceSummaryOnCompletion: (enabled) => set({ voiceSummaryOnCompletion: enabled }),
+            setVoiceProgressUpdatesEnabled: (enabled) => set({ voiceProgressUpdatesEnabled: enabled }),
+            setVoiceProgressUpdateInterval: (interval) => set({ voiceProgressUpdateInterval: interval }),
             setThemePreference: (pref) => set({ themePreference: pref }),
             setTokenCostEnabled: (enabled) => set({ tokenCostEnabled: enabled })
         }),
@@ -759,6 +796,8 @@ export const useTaskStore = create<TaskStore>()(
                 expandedWorkspaces: Array.from(state.expandedWorkspaces),
                 expandedWorkspacesInitialized: state.expandedWorkspacesInitialized,
                 workspaceColumns: state.workspaceColumns,
+                workspaceSortBy: state.workspaceSortBy,
+                taskSortBy: state.taskSortBy,
                 voiceEnabled: state.voiceEnabled,
                 autoSpeakResponses: state.autoSpeakResponses,
                 selectedVoiceName: state.selectedVoiceName,
@@ -777,6 +816,11 @@ export const useTaskStore = create<TaskStore>()(
                 browserNotificationsEnabled: state.browserNotificationsEnabled,
                 notifyOnCompletion: state.notifyOnCompletion,
                 notifyOnWaitingInput: state.notifyOnWaitingInput,
+                thinkingSoundEnabled: state.thinkingSoundEnabled,
+                thinkingSoundInterval: state.thinkingSoundInterval,
+                voiceSummaryOnCompletion: state.voiceSummaryOnCompletion,
+                voiceProgressUpdatesEnabled: state.voiceProgressUpdatesEnabled,
+                voiceProgressUpdateInterval: state.voiceProgressUpdateInterval,
                 themePreference: state.themePreference,
                 taskSummaries: Array.from(state.taskSummaries.entries()),
                 chatMessages: state.chatMessages,
@@ -805,6 +849,8 @@ export const useTaskStore = create<TaskStore>()(
                     expandedWorkspacesInitialized: persisted.expandedWorkspacesInitialized ??
                         (persisted.expandedWorkspaces !== undefined),
                     workspaceColumns: persisted.workspaceColumns ?? currentState.workspaceColumns,
+                    workspaceSortBy: persisted.workspaceSortBy ?? currentState.workspaceSortBy,
+                    taskSortBy: persisted.taskSortBy ?? currentState.taskSortBy,
                     voiceEnabled: persisted.voiceEnabled ?? currentState.voiceEnabled,
                     autoSpeakResponses: persisted.autoSpeakResponses ?? currentState.autoSpeakResponses,
                     selectedVoiceName: persisted.selectedVoiceName ?? currentState.selectedVoiceName,
@@ -823,6 +869,11 @@ export const useTaskStore = create<TaskStore>()(
                     browserNotificationsEnabled: persisted.browserNotificationsEnabled ?? currentState.browserNotificationsEnabled,
                     notifyOnCompletion: persisted.notifyOnCompletion ?? currentState.notifyOnCompletion,
                     notifyOnWaitingInput: persisted.notifyOnWaitingInput ?? currentState.notifyOnWaitingInput,
+                    thinkingSoundEnabled: persisted.thinkingSoundEnabled ?? currentState.thinkingSoundEnabled,
+                    thinkingSoundInterval: persisted.thinkingSoundInterval ?? currentState.thinkingSoundInterval,
+                    voiceSummaryOnCompletion: persisted.voiceSummaryOnCompletion ?? currentState.voiceSummaryOnCompletion,
+                    voiceProgressUpdatesEnabled: persisted.voiceProgressUpdatesEnabled ?? currentState.voiceProgressUpdatesEnabled,
+                    voiceProgressUpdateInterval: persisted.voiceProgressUpdateInterval ?? currentState.voiceProgressUpdateInterval,
                     themePreference: persisted.themePreference ?? currentState.themePreference,
                     taskSummaries: persisted.taskSummaries
                         ? new Map(persisted.taskSummaries)

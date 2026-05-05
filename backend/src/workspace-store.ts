@@ -98,9 +98,14 @@ export class WorkspaceStore {
     addWorkspace(path: string): Workspace {
         const resolvedPath = resolve(path);
 
-        // Validate directory exists
+        // Create directory if it doesn't exist
         if (!existsSync(resolvedPath)) {
-            throw new Error(`Directory does not exist: ${resolvedPath}`);
+            try {
+                mkdirSync(resolvedPath, { recursive: true });
+                console.log(`[WorkspaceStore] Created directory: ${resolvedPath}`);
+            } catch (error) {
+                throw new Error(`Failed to create directory: ${resolvedPath}. ${error}`);
+            }
         }
 
         // Validate it's a directory

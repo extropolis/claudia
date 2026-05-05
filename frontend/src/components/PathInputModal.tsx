@@ -9,15 +9,22 @@ interface PathInputModalProps {
     onRemoveRecent?: (workspaceId: string) => void;
     onBrowse?: () => void;
     isBrowsing?: boolean;
+    showBrowseButton?: boolean; // Only show browse button when it will work
+    defaultBaseDirectory?: string; // Default base directory for relative paths
 }
 
-export function PathInputModal({ onSubmit, onCancel, recentWorkspaces = [], onRemoveRecent, onBrowse, isBrowsing = false }: PathInputModalProps) {
+export function PathInputModal({ onSubmit, onCancel, recentWorkspaces = [], onRemoveRecent, onBrowse, isBrowsing = false, showBrowseButton = true, defaultBaseDirectory }: PathInputModalProps) {
     const [path, setPath] = useState('');
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
         if (path.trim()) {
-            onSubmit(path.trim());
+            let finalPath = path.trim();
+            // If defaultBaseDirectory is set and the path doesn't start with / or ~, prepend the base directory
+            if (defaultBaseDirectory && !finalPath.startsWith('/') && !finalPath.startsWith('~')) {
+                finalPath = `${defaultBaseDirectory}/${finalPath}`;
+            }
+            onSubmit(finalPath);
         }
     };
 
@@ -88,17 +95,22 @@ export function PathInputModal({ onSubmit, onCancel, recentWorkspaces = [], onRe
                             <label htmlFor="path-input">
                                 {recentWorkspaces.length > 0 ? 'Or add a new folder:' : 'Folder path'}
                             </label>
+                            {defaultBaseDirectory && (
+                                <div style={{ fontSize: '0.85em', color: '#888', marginBottom: '0.5em' }}>
+                                    Base directory: {defaultBaseDirectory}
+                                </div>
+                            )}
                             <div className="path-input-row">
                                 <input
                                     id="path-input"
                                     type="text"
                                     value={path}
                                     onChange={(e) => setPath(e.target.value)}
-                                    placeholder="/path/to/your/project"
+                                    placeholder={defaultBaseDirectory ? "project-name or /full/path" : "/path/to/your/project"}
                                     autoFocus
                                     className="path-input"
                                 />
-                                {onBrowse && (
+                                {showBrowseButton && onBrowse && (
                                     <button
                                         type="button"
                                         onClick={onBrowse}

@@ -77,6 +77,21 @@
     color: var(--accent-red);
 }
 
+.hands-free-badge {
+    margin-left: 4px;
+    font-size: 0.75rem;
+    opacity: 0.9;
+}
+
+.global-voice-toggle.hands-free {
+    border-color: var(--accent-green, #10b981);
+}
+
+.global-voice-toggle.hands-free .voice-target-indicator {
+    background: rgba(16, 185, 129, 0.2);
+    color: var(--accent-green, #10b981);
+}
+
 /* Mobile: icon-only compact button */
 @media (max-width: 768px) {
     .global-voice-toggle {
