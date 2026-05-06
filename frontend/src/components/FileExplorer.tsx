@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
     ChevronRight, ChevronDown, ChevronLeft, File, Folder, FolderOpen,
-    PanelRightClose, RefreshCw,
+    RefreshCw,
     GitBranch, CircleDot, Plus, Trash2, Pencil, FileQuestion,
     CheckCircle2, XCircle, Clock, Loader2, SkipForward, ExternalLink,
     ArrowUp, ArrowDown, GitPullRequest, MessageSquare, Tag, User,
@@ -1714,7 +1714,7 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
                             <span>{workspaceName || 'Project'}</span>
                         </div>
                         <button className="file-explorer-collapse" onClick={() => setIsExpanded(false)} title="Collapse">
-                            <PanelRightClose size={14} />
+                            <ChevronRight size={14} />
                         </button>
                     </div>
 
