@@ -650,6 +650,7 @@ function App() {
                                     title="Show workspaces"
                                 >
                                     <ChevronRight size={14} />
+                                    <span className="sidebar-expand-label">Workspaces</span>
                                 </button>
                             </aside>
                         ) : (
