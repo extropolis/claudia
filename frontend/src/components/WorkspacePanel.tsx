@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
-    Loader2, Circle, ChevronRight, ChevronDown,
+    Loader2, Circle, ChevronRight, ChevronDown, ChevronLeft,
     Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
@@ -1459,6 +1459,7 @@ interface WorkspacePanelProps {
     onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
     onResetWorkspace?: (workspaceId: string) => void;
+    onCollapse?: () => void;
 }
 
 export function WorkspacePanel({
@@ -1486,7 +1487,8 @@ export function WorkspacePanel({
     onToggleReference,
     onAddCustomReference,
     onRemoveReference,
-    onResetWorkspace
+    onResetWorkspace,
+    onCollapse
 }: WorkspacePanelProps) {
     const {
         tasks,
@@ -1709,6 +1711,15 @@ export function WorkspacePanel({
                     >
                         <Plus size={16} />
                     </button>
+                    {onCollapse && (
+                        <button
+                            className="archived-toggle-button"
+                            onClick={onCollapse}
+                            title="Hide workspaces"
+                        >
+                            <ChevronLeft size={16} />
+                        </button>
+                    )}
                 </div>
             </div>
 

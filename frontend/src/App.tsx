@@ -17,7 +17,7 @@ import { ActivityPanel } from './components/ActivityPanel';
 import { useTheme } from './hooks/useTheme';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff, BarChart3, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff, BarChart3, ChevronRight } from 'lucide-react';
 import { UsageDashboard } from './components/UsageDashboard';
 import { getApiBaseUrl } from './config/api-config';
 import { isSoundEnabled, setSoundEnabled } from './utils/browserCapabilities';
@@ -486,15 +486,6 @@ function App() {
                         <ArrowLeft size={20} />
                     </button>
                 )}
-                {!isMobile && (
-                    <button
-                        className="sidebar-toggle-btn"
-                        onClick={toggleSidebar}
-                        title={sidebarCollapsed ? 'Show workspaces' : 'Hide workspaces'}
-                    >
-                        {sidebarCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
-                    </button>
-                )}
                 <div className="logo">
                     <Terminal size={isMobile ? 20 : 24} />
                     <h1>Claudia</h1>
@@ -651,10 +642,21 @@ function App() {
                 ) : (
                     /* ===== DESKTOP LAYOUT (unchanged) ===== */
                     <>
+                        {sidebarCollapsed ? (
+                            <aside className="sidebar collapsed">
+                                <button
+                                    className="sidebar-expand-btn"
+                                    onClick={toggleSidebar}
+                                    title="Show workspaces"
+                                >
+                                    <ChevronRight size={14} />
+                                </button>
+                            </aside>
+                        ) : (
                         <aside
-                            className={`sidebar${sidebarCollapsed ? ' collapsed' : ''}`}
+                            className="sidebar"
                             ref={sidebarRef}
-                            style={sidebarCollapsed ? { width: 0, minWidth: 0 } : { width: `${sidebarWidth}px`, minWidth: `${sidebarWidth}px` }}
+                            style={{ width: `${sidebarWidth}px`, minWidth: `${sidebarWidth}px` }}
                         >
                             <WorkspacePanel
                                 onDeleteTask={archiveTask}
@@ -682,8 +684,10 @@ function App() {
                                 onAddCustomReference={addCustomReference}
                                 onRemoveReference={removeReference}
                                 onResetWorkspace={resetWorkspace}
+                                onCollapse={toggleSidebar}
                             />
                         </aside>
+                        )}
 
                         {!sidebarCollapsed && (
                             <div

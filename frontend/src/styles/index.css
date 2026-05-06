@@ -365,15 +365,16 @@ body {
   z-index: 10;
   /* Never let the sidebar exceed the viewport width (handles narrow mobile viewports) */
   max-width: 100vw;
-  overflow: hidden;
-  transition: width 0.2s ease, min-width 0.2s ease;
 }
 
 .sidebar.collapsed {
-  border-right: none;
+  width: 36px;
+  min-width: 36px;
+  align-items: center;
+  padding-top: 10px;
 }
 
-.sidebar-toggle-btn {
+.sidebar-expand-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -384,16 +385,15 @@ body {
   border-radius: 6px;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-  flex-shrink: 0;
-  margin-right: 4px;
   padding: 0;
+  transition: background 0.15s, color 0.15s;
 }
 
-.sidebar-toggle-btn:hover {
-  background: var(--bg-tertiary, rgba(255,255,255,0.08));
+.sidebar-expand-btn:hover {
+  background: rgba(255,255,255,0.08);
   color: var(--text-primary);
 }
+
 
 /* Resize Handle */
 .resize-handle {
