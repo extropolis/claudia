@@ -17,7 +17,7 @@ import { ActivityPanel } from './components/ActivityPanel';
 import { useTheme } from './hooks/useTheme';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff, BarChart3 } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff, BarChart3, ChevronLeft, ChevronRight } from 'lucide-react';
 import { UsageDashboard } from './components/UsageDashboard';
 import { getApiBaseUrl } from './config/api-config';
 import { isSoundEnabled, setSoundEnabled } from './utils/browserCapabilities';
@@ -35,6 +35,7 @@ function useIsMobile(breakpoint = 768) {
 }
 
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
+const SIDEBAR_COLLAPSED_KEY = 'claudia-sidebar-collapsed';
 const DEFAULT_SIDEBAR_WIDTH = 640;
 const CHAT_PANEL_WIDTH_KEY = 'claudia-chat-panel-width';
 const DEFAULT_CHAT_PANEL_WIDTH = 380;
@@ -129,6 +130,14 @@ function App() {
         } catch {
             return DEFAULT_CHAT_PANEL_WIDTH;
         }
+    });
+    const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+        try { return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true'; } catch { return false; }
+    });
+    const toggleSidebar = () => setSidebarCollapsed(c => {
+        const next = !c;
+        try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next)); } catch {}
+        return next;
     });
     const [isResizing, setIsResizing] = useState(false);
     const [isResizingChat, setIsResizingChat] = useState(false);
@@ -634,9 +643,9 @@ function App() {
                     /* ===== DESKTOP LAYOUT (unchanged) ===== */
                     <>
                         <aside
-                            className="sidebar"
+                            className={`sidebar${sidebarCollapsed ? ' collapsed' : ''}`}
                             ref={sidebarRef}
-                            style={{ width: `${sidebarWidth}px`, minWidth: `${sidebarWidth}px` }}
+                            style={sidebarCollapsed ? { width: 0, minWidth: 0 } : { width: `${sidebarWidth}px`, minWidth: `${sidebarWidth}px` }}
                         >
                             <WorkspacePanel
                                 onDeleteTask={archiveTask}
@@ -667,10 +676,21 @@ function App() {
                             />
                         </aside>
 
-                        <div
-                            className={`resize-handle ${isResizing ? 'resizing' : ''}`}
-                            onMouseDown={handleMouseDown}
-                        />
+                        <div className="sidebar-edge">
+                            {!sidebarCollapsed && (
+                                <div
+                                    className={`resize-handle ${isResizing ? 'resizing' : ''}`}
+                                    onMouseDown={handleMouseDown}
+                                />
+                            )}
+                            <button
+                                className="sidebar-collapse-btn"
+                                onClick={toggleSidebar}
+                                title={sidebarCollapsed ? 'Show workspaces' : 'Hide workspaces'}
+                            >
+                                {sidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+                            </button>
+                        </div>
 
                         <section className="main-panel">
                             {/* Shell terminal - always mounted when active, hidden via CSS to preserve xterm state */}
