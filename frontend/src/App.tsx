@@ -486,6 +486,15 @@ function App() {
                         <ArrowLeft size={20} />
                     </button>
                 )}
+                {!isMobile && (
+                    <button
+                        className="sidebar-toggle-btn"
+                        onClick={toggleSidebar}
+                        title={sidebarCollapsed ? 'Show workspaces' : 'Hide workspaces'}
+                    >
+                        {sidebarCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+                    </button>
+                )}
                 <div className="logo">
                     <Terminal size={isMobile ? 20 : 24} />
                     <h1>Claudia</h1>
@@ -682,13 +691,6 @@ function App() {
                                 onMouseDown={handleMouseDown}
                             />
                         )}
-                        <button
-                            className="sidebar-collapse-btn"
-                            onClick={toggleSidebar}
-                            title={sidebarCollapsed ? 'Show workspaces' : 'Hide workspaces'}
-                        >
-                            {sidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
-                        </button>
 
                         <section className="main-panel">
                             {/* Shell terminal - always mounted when active, hidden via CSS to preserve xterm state */}

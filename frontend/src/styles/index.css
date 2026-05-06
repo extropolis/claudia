@@ -373,28 +373,26 @@ body {
   border-right: none;
 }
 
-.sidebar-collapse-btn {
+.sidebar-toggle-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  align-self: center;
-  width: 14px;
-  height: 48px;
-  background: var(--bg-secondary);
+  width: 28px;
+  height: 28px;
+  background: transparent;
   border: 1px solid var(--border-color);
-  border-left: none;
-  border-radius: 0 6px 6px 0;
+  border-radius: 6px;
   color: var(--text-secondary);
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
   flex-shrink: 0;
-  z-index: 11;
+  margin-right: 4px;
   padding: 0;
 }
 
-.sidebar-collapse-btn:hover {
-  background: var(--bg-tertiary, var(--bg-secondary));
-  color: var(--accent-secondary);
+.sidebar-toggle-btn:hover {
+  background: var(--bg-tertiary, rgba(255,255,255,0.08));
+  color: var(--text-primary);
 }
 
 /* Resize Handle */
