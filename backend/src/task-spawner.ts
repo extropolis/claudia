@@ -842,6 +842,9 @@ export class TaskSpawner extends EventEmitter {
 
         const keep = this.historyFileKeepBytes;
         try {
+            // Read into memory then close the fd before renaming — on Windows
+            // a file cannot be renamed while it has an open file descriptor.
+            let payload: Buffer;
             const fd = openSync(historyPath, 'r');
             try {
                 const start = Math.max(0, stat.size - keep);
@@ -851,21 +854,21 @@ export class TaskSpawner extends EventEmitter {
                 // Align to first newline within the first 1KB if possible, to
                 // drop a likely-partial opening line. Fall back to raw cut.
                 let offset = 0;
-                const scan = Math.min(1024, buf.length);
                 const nl = buf.indexOf(0x0a, 0);
-                if (nl >= 0 && nl < scan) offset = nl + 1;
+                if (nl >= 0 && nl < Math.min(1024, buf.length)) offset = nl + 1;
 
                 const marker = Buffer.from(`\x1b[90m── history trimmed (${Math.round((stat.size - start) / 1024)} KB shown of ${Math.round(stat.size / 1024)} KB) ──\x1b[0m\r\n`);
-                const payload = Buffer.concat([marker, buf.subarray(offset)]);
-                this.atomicWriteHistorySync(historyPath, payload.toString('utf8'));
-                logger.info('Rotated history file', {
-                    file: historyPath,
-                    originalBytes: stat.size,
-                    newBytes: payload.length,
-                });
+                payload = Buffer.concat([marker, buf.subarray(offset)]);
             } finally {
-                closeSync(fd);
+                closeSync(fd);  // Close before rename — critical on Windows
             }
+
+            this.atomicWriteHistorySync(historyPath, payload.toString('utf8'));
+            logger.info('Rotated history file', {
+                file: historyPath,
+                originalBytes: stat.size,
+                newBytes: payload.length,
+            });
         } catch (e) {
             logger.warn('Failed to rotate history file', { file: historyPath, error: (e as Error).message });
         }
