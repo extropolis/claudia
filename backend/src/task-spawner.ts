@@ -1106,13 +1106,15 @@ export class TaskSpawner extends EventEmitter {
             return;
         }
 
-        // Only auto-reconnect tasks that were recently interrupted (busy) or have shouldContinue set.
-        // Skip tasks that were last active more than 1 hour ago — they're stale.
+        // Only auto-reconnect tasks that were mid-turn (shouldContinue=true) when the server
+        // restarted. Idle tasks still have wasInterrupted=true for display purposes but
+        // reconnect on-demand (when the user clicks them) to avoid spawning too many PTY
+        // processes and MCP servers on startup.
         const MAX_STALE_AGE_MS = 60 * 60 * 1000; // 1 hour
         const now = Date.now();
         const tasksToReconnect = disconnectedIds.filter(id => {
             const task = this.disconnectedTasks.get(id);
-            if (!task || (!task.wasInterrupted && !task.shouldContinue)) return false;
+            if (!task || !task.shouldContinue) return false;
             // Skip stale tasks — they were interrupted long ago and should reconnect on-demand
             const lastActive = task.lastActivity ? new Date(task.lastActivity).getTime() : 0;
             if (now - lastActive > MAX_STALE_AGE_MS) {
