@@ -676,21 +676,19 @@ function App() {
                             />
                         </aside>
 
-                        <div className="sidebar-edge">
-                            {!sidebarCollapsed && (
-                                <div
-                                    className={`resize-handle ${isResizing ? 'resizing' : ''}`}
-                                    onMouseDown={handleMouseDown}
-                                />
-                            )}
-                            <button
-                                className="sidebar-collapse-btn"
-                                onClick={toggleSidebar}
-                                title={sidebarCollapsed ? 'Show workspaces' : 'Hide workspaces'}
-                            >
-                                {sidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
-                            </button>
-                        </div>
+                        {!sidebarCollapsed && (
+                            <div
+                                className={`resize-handle ${isResizing ? 'resizing' : ''}`}
+                                onMouseDown={handleMouseDown}
+                            />
+                        )}
+                        <button
+                            className="sidebar-collapse-btn"
+                            onClick={toggleSidebar}
+                            title={sidebarCollapsed ? 'Show workspaces' : 'Hide workspaces'}
+                        >
+                            {sidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+                        </button>
 
                         <section className="main-panel">
                             {/* Shell terminal - always mounted when active, hidden via CSS to preserve xterm state */}
