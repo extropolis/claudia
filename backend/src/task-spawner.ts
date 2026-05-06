@@ -1017,12 +1017,16 @@ export class TaskSpawner extends EventEmitter {
                     } else {
                         // Capture token usage before transitioning to idle so the save
                         // triggered by transitionTaskState includes the latest costs.
+                        // Guard: only transition to idle if the task is still in 'busy' state when
+                        // captureTokenUsage resolves — a new user turn may have started in the meantime.
                         this.captureTokenUsage(task.id)
                             .catch(err => {
                                 logger.error('Unhandled error in captureTokenUsage', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
                             })
                             .finally(() => {
-                                this.transitionTaskState(task, 'idle', undefined, 'polling: output stable');
+                                if (task.state === 'busy') {
+                                    this.transitionTaskState(task, 'idle', undefined, 'polling: output stable');
+                                }
                             });
                         this.captureGitStateAfterTask(task.id).catch(err => {
                             logger.error('Unhandled error in captureGitStateAfterTask', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
@@ -2914,8 +2918,9 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
      * decoded only when the task is actually selected.
      */
     private getCombinedHistory(task: InternalTask): string | null {
-        // Limit history sent to frontend to prevent memory exhaustion
-        const MAX_HISTORY_TO_SEND = 2 * 1024 * 1024; // 2MB max
+        // Limit history sent to frontend. Smaller = faster xterm rendering.
+        // 512KB is ~128 full terminal screens, well beyond what's visually useful.
+        const MAX_HISTORY_TO_SEND = 512 * 1024; // 512KB max
 
         // Handle lazy loading from file
         if (!task.previousHistory && !task.lazyHistoryBase64) {
@@ -2984,7 +2989,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
                     // Add truncation message if we only loaded partial history
                     if (fileSize > maxBase64Size) {
-                        const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n');
+                        const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 512KB] ───\x1b[0m\r\n');
                         task.previousHistory = Buffer.concat([truncationMessage, decoded]);
                     } else {
                         task.previousHistory = decoded;
@@ -3001,7 +3006,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 const fullHistory = Buffer.from(task.lazyHistoryBase64, 'base64');
                 if (fullHistory.length > MAX_HISTORY_TO_SEND) {
                     // Only keep the last 2MB
-                    const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n');
+                    const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 512KB] ───\x1b[0m\r\n');
                     task.previousHistory = Buffer.concat([
                         truncationMessage,
                         fullHistory.slice(fullHistory.length - MAX_HISTORY_TO_SEND)
@@ -3037,7 +3042,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             if (task.previousHistory.length <= MAX_HISTORY_TO_SEND) {
                 parts.push(task.previousHistory);
             } else {
-                const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n');
+                const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 512KB] ───\x1b[0m\r\n');
                 parts.push(truncationMessage);
                 parts.push(task.previousHistory.slice(task.previousHistory.length - MAX_HISTORY_TO_SEND));
             }

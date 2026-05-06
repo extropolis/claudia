@@ -218,10 +218,12 @@ export class ConfigStore {
             backend: loaded.backend ?? 'claude-code',
             opencodePort: loaded.opencodePort ?? 4096,
             useLearnings: loaded.useLearnings ?? false,
-            claudeCodeSwitches: {
-                ...DEFAULT_CLAUDE_CODE_SWITCHES,
-                ...(loaded.claudeCodeSwitches || {})
-            },
+            claudeCodeSwitches: (() => {
+                const sw = loaded.claudeCodeSwitches || {} as any;
+                // Migrate old 'model' field to 'defaultModel' if present
+                const defaultModel = sw.defaultModel || (sw as any).model || DEFAULT_CLAUDE_CODE_SWITCHES.defaultModel;
+                return { ...DEFAULT_CLAUDE_CODE_SWITCHES, ...sw, defaultModel };
+            })(),
             hyperspaceProxy: loaded.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY,
             aiCoreCredentials: loaded.aiCoreCredentials,
             enabledPlugins: loaded.enabledPlugins ?? [],
