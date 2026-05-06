@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
-    ChevronRight, ChevronDown, File, Folder, FolderOpen,
-    PanelRightClose, PanelRightOpen, RefreshCw,
+    ChevronRight, ChevronDown, ChevronLeft, File, Folder, FolderOpen,
+    PanelRightClose, RefreshCw,
     GitBranch, CircleDot, Plus, Trash2, Pencil, FileQuestion,
     CheckCircle2, XCircle, Clock, Loader2, SkipForward, ExternalLink,
     ArrowUp, ArrowDown, GitPullRequest, MessageSquare, Tag, User,
@@ -1699,7 +1699,7 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
             {!isExpanded && (
                 <button className="file-explorer-toggle" onClick={() => setIsExpanded(true)}
                     title="Expand file explorer">
-                    <PanelRightOpen size={16} />
+                    <ChevronLeft size={14} />
                     <span className="file-explorer-toggle-label">Files</span>
                 </button>
             )}
