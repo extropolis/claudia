@@ -1,18 +1,19 @@
 # Complexity-Based Model Selection for Spawned Tasks
 
-**Status:** Design
+**Status:** Design (revised after code-aligned audit)
 **Date:** 2026-05-01
 **Owner:** Kalin Ovtcharov
+**Scope:** v1 — global config only, `claude-code` backend only.
 
 ## Goal
 
 Let a parent Claude agent reduce token cost when spawning child tasks via the
 Claudia MCP server by tagging each spawned task with a *complexity tier*
 (`low` / `medium` / `high`). The tier is mapped server-side to a configured
-model — typically Haiku for `low`, Sonnet for `medium`, Opus for `high` — so
-the parent agent reasons about task difficulty, not about model SKUs.
+model — defaults `haiku` / `sonnet` / `opus` — so the parent agent reasons
+about task difficulty, not about model SKUs.
 
-The feature is gated behind an opt-in mode toggle and is disabled by default.
+The feature is gated behind an opt-in toggle and is disabled by default.
 
 ## Motivation
 
@@ -20,43 +21,35 @@ The feature is gated behind an opt-in mode toggle and is disabled by default.
   Routing all of them through the workspace's default model (often Opus or
   Sonnet) leaves easy money on the table.
 - Today, `claudia_create_task` accepts only `prompt` and `displayName`. The
-  spawning agent has no way to express that a subtask is cheap, so it gets the
-  same model as everything else.
-- Letting the agent pass a model name directly couples agent prompting to
-  model SKUs, which rotate. A complexity hint that the operator maps to a
-  model is more durable.
+  spawning agent has no way to express that a subtask is cheap, so it gets
+  the same model as everything else.
+- A complexity hint that the operator maps to a model is more durable than
+  having the agent pass a raw model SKU, since SKUs rotate.
 
-## Non-goals
+## Non-goals (v1)
 
-- Auto-classifying prompts in the backend. The spawning agent has the context;
-  forcing a classifier call would add latency and cost.
-- Changing how the user's *interactive* (non-spawned) tasks pick a model.
-  This feature only affects tasks created via the `claudia_create_task` MCP
-  tool.
-- Per-tier prompt caching policies, per-tier tool restrictions, or any other
-  behavior beyond model selection. Future work.
-- Migrating existing tasks. The feature applies to tasks created after the
-  toggle is enabled.
+- Auto-classifying prompts in the backend.
+- Per-workspace overrides (global config only). Adding workspace-level
+  override later is straightforward but doubles UI scope and there is no
+  existing precedent for global+workspace field-level merge in the codebase.
+- `opencode` backend support. The override is plumbed through the
+  `claude-code` path only; if `opencode` is the active backend, the
+  complexity hint is ignored.
+- Per-tier prompt caching policies, per-tier tool restrictions, etc.
+- Migrations for existing tasks. Applies to tasks created after the toggle
+  is enabled.
 
 ## Configuration
 
-### Global config (`AppConfig` in `backend/src/config-store.ts`)
-
-Add one new field to `AppConfig`:
-
-```ts
-modelTiering: ModelTieringConfig;
-```
-
-Where:
+Add one new field to `AppConfig` in `backend/src/config-store.ts`:
 
 ```ts
 export interface ModelTieringConfig {
-    enabled: boolean;            // master toggle, default: false
+    enabled: boolean;
     tiers: {
-        low: string;             // default: "haiku"
-        medium: string;          // default: "sonnet"
-        high: string;            // default: "opus"
+        low: string;
+        medium: string;
+        high: string;
     };
 }
 
@@ -66,205 +59,257 @@ export const DEFAULT_MODEL_TIERING: ModelTieringConfig = {
 };
 ```
 
-The model strings are passed verbatim to Claude Code as `--model <value>`,
-matching the existing `claudeCodeSwitches.defaultModel` convention. Any
-string Claude Code accepts (`haiku`, `sonnet`, `opus`, full
+```ts
+// AppConfig
+modelTiering: ModelTieringConfig;
+```
+
+The model strings are passed verbatim to Claude Code as `--model <value>`.
+Any value Claude Code accepts (`haiku`, `sonnet`, `opus`, full
 `claude-*-latest` IDs, custom aliases) is valid.
 
-### Per-workspace override (`Workspace` in `shared/src/index.ts`)
+### apiMode caveat
 
-Add an optional override field to `Workspace`, mirroring the existing
-optional `systemPrompt`:
+The defaults (`haiku` / `sonnet` / `opus`) work for `apiMode ∈ {'default',
+'custom-anthropic'}`. They do **not** work for proxy modes:
 
-```ts
-modelTiering?: Partial<ModelTieringConfig>;
-```
+- `sap-ai-core` and `hyperspace-proxy` route through a local proxy
+  (`http://localhost:4001/anthropic`) that requires fully-qualified Anthropic
+  IDs (e.g., `claude-3-5-haiku-20241022`) — see
+  `backend/plugins/sap-ai-core-plugin/anthropic-proxy/deployment-catalog.ts`.
+- Operators on those modes must edit the tier mappings to use IDs valid
+  for their proxy.
 
-Resolution rules at task-creation time:
+The Settings UI calls this out in helper text.
 
-1. Start with the global `modelTiering` config.
-2. If the workspace has `modelTiering.enabled` set, that overrides the global
-   `enabled`.
-3. If the workspace has any `modelTiering.tiers.*` field set, that overrides
-   the corresponding global tier mapping. Other tiers fall through to the
-   global value.
-4. Empty string in a tier field means *unset* — fall through to the next
-   level (workspace empty → global → built-in default).
+### Migration
 
-This matches the existing pattern used by `Workspace.systemPrompt`: the
-workspace value is optional and falls back to global when absent.
-
-## MCP tool surface (`claudia_create_task`)
-
-The MCP server (`backend/src/claudia-mcp-server.ts`) reads the resolved
-`modelTiering` config for its `WORKSPACE_ID` at startup.
-
-### Mode disabled (default)
-
-Tool schema and description are exactly what they are today. No `complexity`
-parameter is registered. Zero behavior change.
-
-### Mode enabled
-
-The tool gains an optional `complexity` parameter:
+No schema bump needed. Reads spread the default into the loaded config:
 
 ```ts
-complexity: z.enum(['low', 'medium', 'high']).optional()
-    .describe(
-        'Cost/capability tier for the spawned task. ' +
-        'Use "low" for trivial lookups, formatting, or single-file reads. ' +
-        'Use "medium" for normal coding, refactors, or test writing. ' +
-        'Use "high" for tricky architecture, gnarly debugging, or work ' +
-        'requiring careful multi-step reasoning. Omit to use the workspace default.'
-    )
+// in getModelTiering(), mirroring getClaudeCodeSwitches() at config-store.ts:430
+return {
+    enabled: this.config.modelTiering?.enabled ?? DEFAULT_MODEL_TIERING.enabled,
+    tiers: { ...DEFAULT_MODEL_TIERING.tiers, ...(this.config.modelTiering?.tiers || {}) }
+};
 ```
 
-The tool's top-level description gains one short paragraph pointing at the
-`complexity` parameter and explaining that it controls cost.
+Existing config files keep working; on first save after upgrade, the field
+is persisted with defaults.
 
-When the agent invokes the tool with `complexity: "low"`, the MCP server
-forwards `complexity` to the backend's `task:create` WebSocket handler
-alongside `prompt` and `workspaceId`.
+## Backend resolution
 
-### Mid-session toggle changes
+`ConfigStore` gains a helper:
 
-Each spawned task launches a fresh Claude Code subprocess, which spawns a
-fresh `claudia-mcp-server.ts` subprocess. So toggle changes take effect on
-the *next* spawn — no manual restart needed. The currently running parent's
-MCP server keeps its old schema until the parent itself is restarted, but
-that's acceptable since the toggle is rarely flipped.
+```ts
+resolveModelForComplexity(complexity: 'low' | 'medium' | 'high' | undefined): string | undefined {
+    if (!complexity) return undefined;
+    const cfg = this.getModelTiering();
+    if (!cfg.enabled) return undefined;
+    const model = cfg.tiers[complexity];
+    if (!model || !model.trim()) return undefined; // fall through to default
+    return model.trim();
+}
+```
 
-## Backend resolution & spawn flow
+Returning `undefined` means *use the workspace default model* — the
+spawn path treats `undefined` as no override.
 
-The mapping happens in the WebSocket `task:create` handler in
-`backend/src/server.ts` (the layer reached by `sendWSMessage('task:create',
-...)`), before the task is handed to `task-spawner.ts`:
+## Per-task plumbing (the lowest-risk change)
 
-1. Receive `task:create` message. Payload may now include an optional
-   `complexity: 'low' | 'medium' | 'high'` field.
-2. Resolve the effective `ModelTieringConfig` for the target workspace
-   (workspace override layered on global).
-3. If `enabled === false`: ignore `complexity` silently. Fall through to the
-   normal model resolution (workspace switches → global default).
-4. If `enabled === true` and `complexity` is provided:
-   - Look up `tiers[complexity]`.
-   - If non-empty, set `claudeCodeSwitches.model` to that string for the
-     task being spawned (overriding the workspace's
-     `claudeCodeSwitches.defaultModel`).
-   - If the looked-up value is empty string, log a warning and fall through
-     to the default model (don't crash, don't reject).
-5. If `enabled === true` and `complexity` is not provided: use the default
-   model. The agent simply didn't opt into a tier.
+Today, `task-spawner.ts:2351-2353` pulls switches fresh from `ConfigStore`
+inside the spawn function:
 
-`task-spawner.ts` already passes `switches.model` to `--model` (lines
-76–78). No spawner changes are needed once the resolved model lands in the
-switches object.
+```ts
+const switches = this.configStore.getClaudeCodeSwitches();
+const switchArgs = buildClaudeCodeSwitchArgs(switches);
+```
 
-### Validation
+There is no per-task switches override path. v1 introduces one in three
+small steps:
 
-- The MCP layer enforces `complexity ∈ {'low', 'medium', 'high'}` via
-  `z.enum`. Invalid values are rejected by the SDK before the handler runs.
-- The `task:create` handler additionally validates `complexity` if present
-  (defense in depth, since the WS endpoint is reachable by sources other
-  than the MCP server). Invalid value → reject with a clear error message
-  so a misbehaving caller learns.
+1. **Add a parameter** to `TaskSpawner.createTask`:
 
-### Conflicts with explicit model
+   ```ts
+   async createTask(
+       prompt: string,
+       workspaceId: string,
+       systemPrompt?: string,
+       initialCols?: number,
+       initialRows?: number,
+       modelOverride?: string,   // NEW
+   ): Promise<Task>
+   ```
 
-If a `task:create` payload somehow contains both `complexity` and an
-explicit `claudeCodeSwitches.model` override, `complexity` wins. The MCP
-server is the only documented producer of `complexity` and it never sets
-`model` directly, so this conflict should be rare.
+   Forward it to `createTaskWithClaudeCode` (same signature suffix). The
+   `createTaskWithOpenCode` path ignores it for v1 (logs a debug line).
+
+2. **Apply the override** inside `createTaskWithClaudeCode`, replacing the
+   existing block at line 2351:
+
+   ```ts
+   if (this.configStore) {
+       let switches = this.configStore.getClaudeCodeSwitches();
+       if (modelOverride && modelOverride.trim()) {
+           switches = { ...switches, defaultModel: modelOverride.trim() };
+           logger.info('Per-task model override', { taskId: id, model: modelOverride.trim() });
+       }
+       const switchArgs = buildClaudeCodeSwitchArgs(switches);
+       ...
+   }
+   ```
+
+   `buildClaudeCodeSwitchArgs` already pushes `--model switches.defaultModel`
+   at `task-spawner.ts:77-78` — no change there.
+
+3. **Resolve at the WS handler** (`server.ts` task:create case at line 1068).
+   Accept optional `complexity` in the payload, resolve via
+   `configStore.resolveModelForComplexity(complexity)`, and pass the result
+   as the new `modelOverride` argument.
+
+## MCP server changes
+
+The MCP server is a separate process spawned by Claude Code. Its env is
+constructed in `task-spawner.ts:539-544`:
+
+```ts
+const mcpEnv: Record<string, string> = {};
+if (workspaceId) mcpEnv.CLAUDIA_WORKSPACE_ID = workspaceId;
+if (taskId) mcpEnv.CLAUDIA_TASK_ID = taskId;
+```
+
+Add one line: when `configStore.getModelTiering().enabled` is true, set
+`mcpEnv.CLAUDIA_MODEL_TIERING_ENABLED = '1'`.
+
+In `claudia-mcp-server.ts`, read the env var at startup:
+
+```ts
+const MODEL_TIERING_ENABLED = process.env.CLAUDIA_MODEL_TIERING_ENABLED === '1';
+```
+
+`claudia_create_task` registration becomes conditional on that flag:
+
+- **Disabled (default):** schema unchanged. No `complexity` parameter.
+- **Enabled:** add an optional `complexity: z.enum(['low', 'medium', 'high'])`
+  with a description explaining the tiers. Append a short paragraph to the
+  tool's top-level description so the agent knows it can pass complexity to
+  control cost.
+
+When the agent passes `complexity`, the MCP server forwards it in the
+`task:create` WS payload alongside `prompt` and `workspaceId`.
+
+### Mid-session toggle behavior
+
+Each top-level task spawns one Claude Code subprocess, which spawns one
+`claudia-mcp-server` subprocess (`task-spawner.ts:529-547`). So:
+
+- Tasks created **after** the toggle flips get the new env var → MCP
+  schema reflects the new state.
+- Tasks already running (and any sub-tasks they spawn through their child
+  MCP server) keep the old schema until they're stopped/restarted.
+
+This is acceptable — the toggle is rarely flipped.
 
 ## UI
 
-In the Settings dialog, add a new section: **Model tiering**.
+In Settings, add a new section under the existing "Claude Code Switches"
+area. One toggle and three text inputs:
 
-- One checkbox: "Allow agents to select model by task complexity"
-  (off by default).
-- When checked, three rows appear, each labeled `Low`, `Medium`, `High`,
-  with a single text input pre-filled with `haiku`, `sonnet`, `opus`. (Text
-  input rather than dropdown to match the existing `defaultModel` field's
-  style and accept arbitrary aliases.)
-- A short helper line: *"Spawned tasks tagged with a complexity tier will
-  use the corresponding model. Leave a field empty to use the workspace
-  default for that tier."*
+- Checkbox: **"Enable model tiering for spawned tasks"** (off by default).
+- When checked, three rows appear: `Low`, `Medium`, `High`, each with a
+  text input. Pre-filled with `haiku` / `sonnet` / `opus`.
+- Helper text:
 
-The same section appears in workspace settings, with one extra control per
-field: an "Inherit from global" checkbox. When inherited, the field is
-disabled and shows the global value greyed-out.
+  > *Spawned tasks (via the Claudia MCP) can pass a complexity hint that
+  > maps to one of these models. Use values your current API mode accepts —
+  > for SAP AI Core or Hyperspace proxies, use fully-qualified Anthropic
+  > model IDs (e.g., `claude-3-5-haiku-20241022`).*
 
-No new screens, modals, or routes. One section in an existing dialog.
+Note for operators: the existing `claudeCodeSwitches.effortLevel` field
+(`low` / `medium` / `high`) sits in the same Settings tab and may visually
+sit close to this section. Label this section clearly as
+**"Model tiering"** to keep them distinct.
+
+## Validation
+
+- MCP layer enforces `complexity ∈ {'low','medium','high'}` via `z.enum`.
+- The `task:create` WS handler validates `complexity` if present (defense in
+  depth, since the WS is reachable by sources other than the MCP server).
+  Invalid values get rejected with a clear error.
+- Tier strings written from the UI go through trim + length cap; no
+  shell-meta validation needed since `--model` argv is passed without shell
+  interpretation.
 
 ## Logging
 
-- When a task is spawned with a tier, log:
+- Spawned with override:
   `[task:create] complexity=high → model="opus" (workspace=<id>)`
-- When mode is disabled and the agent passes `complexity` anyway, log a
-  single line at debug level so the operator can spot agents trying to use
-  the feature: `[task:create] complexity ignored (mode disabled)`
-- When a tier maps to an empty string and we fall through, log a warning:
+- Mode disabled but `complexity` passed:
+  `[task:create] complexity ignored (mode disabled)`
+- Tier mapping empty:
   `[task:create] complexity=low has empty mapping; using default model`
+- OpenCode + override (rare):
+  `[opencode] modelOverride ignored (not yet supported)`
+
+## Cost tracking interaction
+
+The token-usage dashboard (current branch: `feat/token-usage-dashboard`)
+attributes cost based on the spawned process's actual usage events, not on
+the configured `defaultModel`. Tier-based spawns surface in cost reports
+under their *actual* model, which is exactly the desired behavior — cheaper
+tasks show up cheaper.
 
 ## Testing
 
-### Backend (test-cli)
+### Unit (existing test infra)
 
-Add `--complexity <low|medium|high>` to `backend/test-cli.ts`. The flag is
-passed through to the `task:create` request alongside the prompt.
+Pure-function tests are realistic; there is no `task-spawner.test.ts` and
+no `node-pty.spawn` mock infrastructure today.
 
-Cases to verify (in `backend/src/__tests__/`):
+In `config-store.test.ts`:
+1. `getModelTiering()` returns defaults on a fresh config.
+2. `resolveModelForComplexity` returns `undefined` when disabled.
+3. `resolveModelForComplexity('high')` returns `'opus'` with default config
+   when enabled.
+4. `resolveModelForComplexity('low')` returns `undefined` when
+   `tiers.low === ''` (fall-through behavior).
+5. Custom mappings persist through save → load.
 
-1. **Mode disabled, complexity passed** — task spawns with the default
-   model; complexity is ignored; debug log emitted.
-2. **Mode enabled, complexity = "high"** — task spawns with `--model opus`
-   on its argv (or whatever `tiers.high` is configured to).
-3. **Mode enabled, complexity omitted** — task spawns with the default
-   model.
-4. **Mode enabled, invalid complexity (`"medium-rare"`)** — `task:create`
-   rejected with a clear error.
-5. **Mode enabled at global, disabled at workspace** — workspace override
-   wins; complexity is ignored.
-6. **Mode enabled, tier mapping empty (`tiers.low = ""`)** — falls through
-   to default model with a warning logged.
+### End-to-end (test-cli)
 
-Where feasible, assert on the spawned process's argv (the existing
-`task-spawner.ts` test patterns already do this).
+Add a `--complexity <low|medium|high>` flag to `backend/test-cli.ts`. The
+flag is passed in the `task:create` payload.
 
-### MCP layer
-
-Unit-test the schema-shape decision in `claudia-mcp-server.ts`:
-
-- When `enabled === false`, the registered tool's input schema does NOT
-  include `complexity`.
-- When `enabled === true`, the schema includes `complexity` with the three
-  valid enum values.
+Manual matrix:
+- Tiering disabled + `--complexity high` → log shows complexity ignored;
+  task spawns with default model.
+- Tiering enabled + `--complexity high` → log shows
+  `complexity=high → model="opus"`; spawned argv contains `--model opus`.
+- Tiering enabled + no flag → log shows no override; default model used.
+- Tiering enabled + `--complexity bogus` → CLI rejects (z.enum on the WS
+  side will reject too).
 
 ### UI
 
-Manual visual check only — one checkbox, three text inputs, one helper
-line. Verify the inputs hide/show with the toggle and that workspace
-inherit behavior matches the existing `systemPrompt` pattern.
+Manual visual check: toggle reveals/hides the three fields, helper text
+visible, save persists.
 
 ## Risks & rollback
 
-- **Risk:** An agent passes `complexity: "low"` for a task that genuinely
-  needs reasoning power, leading to a poor result. *Mitigation:* The
-  feature is opt-in. Operators who don't trust their agents' judgment leave
-  it off. The tool description steers the agent toward conservative use.
-- **Risk:** A misconfigured tier (e.g., `high` mapped to a deprecated model
-  ID) breaks all `complexity: "high"` spawns. *Mitigation:* Logging plus
-  the empty-string fall-through. The operator can flip the toggle off to
-  immediately revert to today's behavior.
-- **Rollback:** Set `modelTiering.enabled = false` in global config. All
-  spawned tasks revert to today's model resolution. No data migration
-  needed.
+- **Risk:** Agent picks a too-cheap tier for a hard task. *Mitigation:*
+  feature is opt-in; the tool description steers conservatively.
+- **Risk:** Tier mapping invalid for the user's `apiMode`. *Mitigation:*
+  helper text + empty-string fall-through; flipping the toggle off
+  immediately reverts.
+- **Risk:** OpenCode user enables tiering and is surprised the hint is
+  ignored. *Mitigation:* debug log; documented as a v1 limitation.
+- **Rollback:** `modelTiering.enabled = false` reverts behavior. No
+  migration to undo.
 
-## Open questions
+## Future work
 
-- Should the per-workspace UI initially ship as "inherit only" (no override
-  surface), with override added in a follow-up? Probably not — the override
-  is cheap to build and the spec is cleaner with it included from v1.
-- Future work: surface the spawning agent's `complexity` choice in the task
-  list UI (small badge next to the task name) so operators can see at a
-  glance which tasks are running cheap vs. expensive. Out of scope for v1.
+- Per-workspace overrides.
+- OpenCode backend support.
+- Surface the spawning agent's complexity choice in the task list UI.
+- Per-`apiMode` default tier mappings (so SAP AI Core / Hyperspace users
+  get sensible defaults out of the box).

@@ -539,6 +539,11 @@ export class TaskSpawner extends EventEmitter {
             const mcpEnv: Record<string, string> = {};
             if (workspaceId) mcpEnv.CLAUDIA_WORKSPACE_ID = workspaceId;
             if (taskId) mcpEnv.CLAUDIA_TASK_ID = taskId;
+            // Signal to the MCP server whether the complexity-tiering parameter
+            // should be exposed on claudia_create_task.
+            if (this.configStore?.getModelTiering().enabled) {
+                mcpEnv.CLAUDIA_MODEL_TIERING_ENABLED = '1';
+            }
             if (Object.keys(mcpEnv).length > 0) {
                 claudiaConfig.env = mcpEnv;
             }
@@ -2090,7 +2095,7 @@ export class TaskSpawner extends EventEmitter {
      * @param systemPrompt - Optional system prompt override
      * @returns The created task object
      */
-    async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number): Promise<Task> {
+    async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number, modelOverride?: string): Promise<Task> {
         // Sanitize prompt to prevent command injection and other issues
         const sanitizedPrompt = sanitizePrompt(prompt);
         let sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
@@ -2133,6 +2138,9 @@ export class TaskSpawner extends EventEmitter {
         let task: Task;
         if (this.backendType === 'opencode' && this.backend) {
             logger.info('Using OpenCode backend for task creation');
+            if (modelOverride) {
+                logger.debug('modelOverride ignored on opencode backend', { modelOverride });
+            }
             // OpenCode needs git state synchronously — await here since it uses HTTP not PTY
             const gitStateBefore = await gitStatePromise;
             task = await this.createTaskWithOpenCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore);
@@ -2141,7 +2149,7 @@ export class TaskSpawner extends EventEmitter {
             // Pass the git state promise — the PTY spawns immediately, git result is stored
             // on the task once resolved (non-blocking).
             logger.info('Using Claude Code backend for task creation');
-            task = await this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStatePromise, initialCols, initialRows);
+            task = await this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStatePromise, initialCols, initialRows, modelOverride);
         }
 
         // Resolve learnings and inject into system prompt / track after task is created
@@ -2248,7 +2256,8 @@ export class TaskSpawner extends EventEmitter {
         systemPrompt: string | undefined,
         gitStatePromise: Promise<Partial<TaskGitState> | null>,
         initialCols?: number,
-        initialRows?: number
+        initialRows?: number,
+        modelOverride?: string
     ): Promise<Task> {
         console.log(`[TaskSpawner] createTaskWithClaudeCode called with workspaceId: "${workspaceId}"`);
         const id = `task-${Date.now()}-${randomBytes(5).toString('hex')}`;
@@ -2358,7 +2367,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
         // Add Claude Code CLI switches from settings
         if (this.configStore) {
-            const switches = this.configStore.getClaudeCodeSwitches();
+            let switches = this.configStore.getClaudeCodeSwitches();
+            if (modelOverride && modelOverride.trim()) {
+                switches = { ...switches, defaultModel: modelOverride.trim() };
+                logger.info('Per-task model override applied', { taskId: id, model: modelOverride.trim() });
+            }
             const switchArgs = buildClaudeCodeSwitchArgs(switches);
             if (switchArgs.length > 0) {
                 claudeArgs.push(...switchArgs);
