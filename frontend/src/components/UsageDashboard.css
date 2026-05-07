@@ -1,0 +1,444 @@
+/* Usage Dashboard Modal */
+
+.usage-dashboard-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    animation: usageFadeIn 0.2s ease;
+}
+
+@keyframes usageFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.usage-dashboard {
+    width: 90%;
+    max-width: 800px;
+    max-height: 85vh;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.usage-dashboard-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.usage-dashboard-header h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.usage-dashboard-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.usage-refresh-btn,
+.usage-close-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    transition: color 0.15s ease, background 0.15s ease;
+}
+
+.usage-refresh-btn:hover,
+.usage-close-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.usage-refresh-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.spinning {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* Error state */
+.usage-error {
+    padding: 12px 20px;
+    background: rgba(248, 81, 73, 0.1);
+    border-bottom: 1px solid rgba(248, 81, 73, 0.3);
+    color: var(--accent-red);
+    font-size: 0.85rem;
+}
+
+/* Loading state */
+.usage-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 60px 20px;
+    color: var(--text-muted);
+}
+
+/* Empty state */
+.usage-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 60px 20px;
+    color: var(--text-muted);
+}
+
+.usage-empty p {
+    margin: 0;
+}
+
+.usage-empty-hint {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    opacity: 0.7;
+}
+
+/* Scrollable content area */
+.usage-dashboard-body {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+/* Summary cards */
+.usage-summary-cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    padding: 16px 20px;
+}
+
+.usage-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    transition: border-color 0.15s ease;
+}
+
+.usage-card:hover {
+    border-color: var(--text-muted);
+}
+
+.usage-card-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--accent-green);
+    flex-shrink: 0;
+}
+
+.usage-card-icon.input-icon {
+    background: rgba(0, 212, 255, 0.1);
+    color: var(--accent-secondary);
+}
+
+.usage-card-icon.output-icon {
+    background: rgba(210, 153, 34, 0.15);
+    color: var(--accent-yellow);
+}
+
+.usage-card-icon.task-icon {
+    background: rgba(139, 148, 158, 0.15);
+    color: var(--text-secondary);
+}
+
+.usage-card-content {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.usage-card-value {
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, monospace;
+    line-height: 1.2;
+}
+
+.usage-card-label {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* Sections */
+.usage-section {
+    padding: 0 20px 16px;
+}
+
+.usage-section-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin: 0 0 8px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* Tables */
+.usage-table-wrapper {
+    overflow-x: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.usage-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, monospace;
+}
+
+.usage-table th {
+    text-align: left;
+    color: var(--text-muted);
+    font-weight: 500;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    text-transform: uppercase;
+    font-size: 0.65rem;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+}
+
+.usage-table td {
+    padding: 8px 12px;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.usage-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.usage-table tbody tr:hover {
+    background: var(--bg-tertiary);
+}
+
+.workspace-name-cell {
+    color: var(--text-primary) !important;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.model-name-cell {
+    color: var(--accent-secondary) !important;
+    white-space: nowrap;
+}
+
+.cost-cell {
+    color: var(--accent-green) !important;
+}
+
+/* Pricing configuration */
+.usage-pricing-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    width: 100%;
+    text-align: left;
+    font-size: 0.8rem;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.usage-pricing-toggle:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.usage-pricing-content {
+    margin-top: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 16px;
+    background: var(--bg-primary);
+}
+
+.usage-pricing-toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+.usage-pricing-table-wrapper {
+    overflow-x: auto;
+    margin-bottom: 12px;
+}
+
+.usage-pricing-table td {
+    padding: 6px 8px;
+}
+
+.pricing-input {
+    width: 80px;
+    padding: 4px 6px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    color: var(--text-primary);
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, monospace;
+    font-size: 0.75rem;
+}
+
+.pricing-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.pricing-input:focus {
+    outline: none;
+    border-color: var(--accent-secondary);
+}
+
+.usage-pricing-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.usage-save-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    background: var(--accent-green);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+}
+
+.usage-save-btn:hover {
+    opacity: 0.9;
+}
+
+.usage-save-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Responsive: stack cards on small screens */
+@media (max-width: 700px) {
+    .usage-summary-cards {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 500px) {
+    .usage-summary-cards {
+        grid-template-columns: 1fr;
+    }
+
+    .usage-dashboard {
+        width: 98%;
+        max-height: 95vh;
+    }
+}
+
+/* Toggle switch - reuse from SettingsMenu */
+.usage-pricing-content .toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 40px;
+    height: 20px;
+    flex-shrink: 0;
+}
+
+.usage-pricing-content .toggle-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.usage-pricing-content .toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 20px;
+    transition: background 0.2s ease;
+}
+
+.usage-pricing-content .toggle-slider:before {
+    content: '';
+    position: absolute;
+    height: 14px;
+    width: 14px;
+    left: 2px;
+    bottom: 2px;
+    background: var(--text-muted);
+    border-radius: 50%;
+    transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.usage-pricing-content .toggle-switch input:checked + .toggle-slider {
+    background: rgba(63, 185, 80, 0.3);
+    border-color: var(--accent-green);
+}
+
+.usage-pricing-content .toggle-switch input:checked + .toggle-slider:before {
+    transform: translateX(20px);
+    background: var(--accent-green);
+}

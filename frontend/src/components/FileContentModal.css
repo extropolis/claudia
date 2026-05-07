@@ -208,6 +208,22 @@
     font-style: italic;
 }
 
+.file-content-image-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    height: 100%;
+    overflow: auto;
+}
+
+.file-content-image {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: 4px;
+}
+
 .file-content-editor {
     width: 100%;
     height: 100%;

@@ -16,7 +16,7 @@ import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS } from '@claudia/shared';
+import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch } from './git-utils.js';
@@ -932,6 +932,10 @@ export async function createApp(basePath?: string) {
         console.log(`[Server] Reconnection complete: ${result.total - result.failed}/${result.total} tasks`);
         // Send updated task list after reconnection (immediate, not batched - important for startup)
         broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+    });
+
+    taskSpawner.on('taskTokenUsage', (taskId: string, tokenUsage: TaskTokenUsage) => {
+        broadcast({ type: 'task:tokenUsage' as WSMessageType, payload: { taskId, tokenUsage } });
     });
 
     // Wire up SupervisorChat events (handles both auto-analysis and user chat)
@@ -4340,7 +4344,22 @@ export async function createApp(basePath?: string) {
                 return res.status(400).json({ error: 'Path is not a file' });
             }
 
-            // Read file contents
+            // For binary image files, return base64-encoded content
+            const imageExtensions = /\.(png|jpg|jpeg|gif|webp|bmp|ico|svg)$/i;
+            if (imageExtensions.test(resolvedPath)) {
+                const buffer = await readFile(resolvedPath);
+                const base64 = buffer.toString('base64');
+                const ext = resolvedPath.split('.').pop()!.toLowerCase();
+                const mimeType = ext === 'svg' ? 'image/svg+xml' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : `image/${ext}`;
+                return res.json({
+                    path: filePath,
+                    content: `data:${mimeType};base64,${base64}`,
+                    isImage: true,
+                    size: stats.size
+                });
+            }
+
+            // Read file contents as text
             const content = await readFile(resolvedPath, 'utf-8');
             res.json({
                 path: filePath,
@@ -5405,6 +5424,112 @@ Guidelines:
         } catch (error) {
             console.error('[Server] Failed to save learnings:', error);
             res.status(500).json({ error: 'Failed to save learnings' });
+        }
+    });
+
+    // ===== Token Usage / Dashboard Endpoints =====
+
+    app.get('/api/usage/dashboard', (_req, res) => {
+        try {
+            const allTasks = taskSpawner.getAllTasks();
+            const workspaces = workspaceStore.getWorkspaces();
+            const workspaceNames: Record<string, string> = {};
+            for (const ws of workspaces) {
+                workspaceNames[ws.id] = ws.displayName || ws.name;
+            }
+
+            const dashboard: UsageDashboardData = {
+                totalCostUsd: 0,
+                totalInputTokens: 0,
+                totalOutputTokens: 0,
+                totalCacheCreationTokens: 0,
+                totalCacheReadTokens: 0,
+                byWorkspace: {},
+                byModel: {},
+                taskCount: 0,
+                lastUpdated: new Date().toISOString(),
+            };
+
+            for (const task of allTasks) {
+                if (!task.tokenUsage) continue;
+                dashboard.taskCount++;
+
+                const usage = task.tokenUsage;
+                dashboard.totalCostUsd += usage.totalCostUsd || 0;
+                dashboard.totalInputTokens += usage.inputTokens || 0;
+                dashboard.totalOutputTokens += usage.outputTokens || 0;
+                dashboard.totalCacheCreationTokens += usage.cacheCreationTokens || 0;
+                dashboard.totalCacheReadTokens += usage.cacheReadTokens || 0;
+
+                // Group by workspace
+                if (!dashboard.byWorkspace[task.workspaceId]) {
+                    dashboard.byWorkspace[task.workspaceId] = {
+                        name: workspaceNames[task.workspaceId] || task.workspaceId,
+                        costUsd: 0,
+                        inputTokens: 0,
+                        outputTokens: 0,
+                        cacheCreationTokens: 0,
+                        cacheReadTokens: 0,
+                        taskCount: 0,
+                    };
+                }
+                const wsData = dashboard.byWorkspace[task.workspaceId];
+                wsData.costUsd += usage.totalCostUsd || 0;
+                wsData.inputTokens += usage.inputTokens || 0;
+                wsData.outputTokens += usage.outputTokens || 0;
+                wsData.cacheCreationTokens += usage.cacheCreationTokens || 0;
+                wsData.cacheReadTokens += usage.cacheReadTokens || 0;
+                wsData.taskCount++;
+
+                // Group by model
+                for (const [model, modelUsage] of Object.entries(usage.modelBreakdown)) {
+                    if (!dashboard.byModel[model]) {
+                        dashboard.byModel[model] = {
+                            inputTokens: 0,
+                            outputTokens: 0,
+                            cacheCreationTokens: 0,
+                            cacheReadTokens: 0,
+                            costUsd: 0,
+                        };
+                    }
+                    const m = dashboard.byModel[model];
+                    m.inputTokens += modelUsage.inputTokens || 0;
+                    m.outputTokens += modelUsage.outputTokens || 0;
+                    m.cacheCreationTokens += modelUsage.cacheCreationTokens || 0;
+                    m.cacheReadTokens += modelUsage.cacheReadTokens || 0;
+                    m.costUsd += modelUsage.costUsd || 0;
+                }
+            }
+
+            res.json(dashboard);
+        } catch (error) {
+            logger.error('Failed to get usage dashboard', { error });
+            res.status(500).json({ error: 'Failed to get usage dashboard' });
+        }
+    });
+
+    app.get('/api/usage/config', (_req, res) => {
+        try {
+            res.json({
+                pricing: configStore.getTokenPricing(),
+                enabled: configStore.getTokenTrackingEnabled(),
+            });
+        } catch (error) {
+            logger.error('Failed to get usage config', { error });
+            res.status(500).json({ error: 'Failed to get usage config' });
+        }
+    });
+
+    app.put('/api/usage/config', (req, res) => {
+        try {
+            const { pricing } = req.body;
+            if (pricing) {
+                configStore.setTokenPricing(pricing);
+            }
+            res.json({ ok: true });
+        } catch (error) {
+            logger.error('Failed to update usage config', { error });
+            res.status(500).json({ error: 'Failed to update usage config' });
         }
     });
 

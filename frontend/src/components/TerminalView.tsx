@@ -5,6 +5,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Task, Workspace } from '@claudia/shared';
 import { Copy, Check, Play, BookOpen, ArrowDown } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
+import { TaskTokenStats } from './TaskTokenStats';
 import { useEffectiveTheme } from '../hooks/useTheme';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
 import '@xterm/xterm/css/xterm.css';
@@ -68,14 +69,14 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             }
         }, 300); // 300ms delay before showing spinner
 
-        // Safety timeout - hide spinner after 10s even if no restore received
+        // Safety timeout - hide spinner after 5s even if no restore received
         const safetyTimeout = setTimeout(() => {
             if (!historyLoadedRef.current) {
                 console.log(`[TerminalView] Safety timeout: hiding loading spinner for ${task.id}`);
                 historyLoadedRef.current = true;
                 setIsLoadingHistory(false);
             }
-        }, 10000);
+        }, 5000);
 
         return () => {
             clearTimeout(spinnerDelay);
@@ -604,6 +605,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 )}
             </div>
             <TaskInputBar task={task} wsRef={wsRef} />
+            <TaskTokenStats taskId={task.id} />
 
         </div>
     );

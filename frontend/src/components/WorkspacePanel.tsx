@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
-    Loader2, Circle, ChevronRight, ChevronDown,
+    Loader2, Circle, ChevronRight, ChevronDown, ChevronLeft,
     Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
@@ -893,26 +893,6 @@ function WorkspaceSection({
                     {tasks.length > 0 && (
                         <>
                             <span className="workspace-task-count">{tasks.length}</span>
-                            {tasks.length > 1 && (
-                                <div
-                                    className="task-sort-selector"
-                                    title="Sort tasks by"
-                                    onClick={(e) => e.stopPropagation()}
-                                >
-                                    <ArrowDownUp size={11} className="task-sort-icon" />
-                                    <select
-                                        className="task-sort-select"
-                                        value={taskSortBy}
-                                        onChange={(e) => {
-                                            e.stopPropagation();
-                                            setTaskSortBy(e.target.value as 'date-created' | 'last-modified');
-                                        }}
-                                    >
-                                        <option value="date-created">Newest</option>
-                                        <option value="last-modified">Recent</option>
-                                    </select>
-                                </div>
-                            )}
                         </>
                     )}
                     {workspace.references && workspace.references.length > 0 && (
@@ -1170,6 +1150,25 @@ function WorkspaceSection({
                                 <Search size={14} />
                                 <span>Code Review</span>
                             </button>
+                            {tasks.length > 1 && (
+                                <>
+                                    <div className="workspace-dropdown-divider" />
+                                    <div className="workspace-dropdown-item sort-row" onClick={(e) => e.stopPropagation()}>
+                                        <ArrowDownUp size={14} />
+                                        <span>Sort by</span>
+                                        <div className="sort-toggle">
+                                            <button
+                                                className={`sort-toggle-btn${taskSortBy === 'date-created' ? ' active' : ''}`}
+                                                onClick={(e) => { e.stopPropagation(); setTaskSortBy('date-created'); }}
+                                            >Newest</button>
+                                            <button
+                                                className={`sort-toggle-btn${taskSortBy === 'last-modified' ? ' active' : ''}`}
+                                                onClick={(e) => { e.stopPropagation(); setTaskSortBy('last-modified'); }}
+                                            >Recent</button>
+                                        </div>
+                                    </div>
+                                </>
+                            )}
                             <div className="workspace-dropdown-divider" />
                             <button
                                 className="workspace-dropdown-item reset"
@@ -1460,6 +1459,7 @@ interface WorkspacePanelProps {
     onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
     onResetWorkspace?: (workspaceId: string) => void;
+    onCollapse?: () => void;
 }
 
 export function WorkspacePanel({
@@ -1487,7 +1487,8 @@ export function WorkspacePanel({
     onToggleReference,
     onAddCustomReference,
     onRemoveReference,
-    onResetWorkspace
+    onResetWorkspace,
+    onCollapse
 }: WorkspacePanelProps) {
     const {
         tasks,
@@ -1710,6 +1711,15 @@ export function WorkspacePanel({
                     >
                         <Plus size={16} />
                     </button>
+                    {onCollapse && (
+                        <button
+                            className="archived-toggle-button"
+                            onClick={onCollapse}
+                            title="Hide workspaces"
+                        >
+                            <ChevronLeft size={16} />
+                        </button>
+                    )}
                 </div>
             </div>
 

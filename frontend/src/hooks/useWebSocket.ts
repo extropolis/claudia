@@ -199,6 +199,11 @@ export function useWebSocket() {
                                 );
                                 useTaskStore.getState().setAiCoreConfigured(aiCoreConfigured);
 
+                                // Sync token cost display setting
+                                if (config.tokenCostEnabled !== undefined) {
+                                    useTaskStore.getState().setTokenCostEnabled(config.tokenCostEnabled);
+                                }
+
                                 // Sync Deepgram API key from backend (for mobile/tunnel clients)
                                 if (config.deepgramApiKey && !useTaskStore.getState().deepgramApiKey) {
                                     useTaskStore.setState({ deepgramApiKey: config.deepgramApiKey });
@@ -450,6 +455,11 @@ export function useWebSocket() {
                         console.log('[WebSocket] 🔄 SERVER RECONNECTING TASKS:', payload.message);
                         // Show reconnecting state in UI (reuse reloading state for now)
                         setServerReloading(true);
+                        break;
+                    }
+                    case 'task:tokenUsage': {
+                        const payload = message.payload as { taskId: string; tokenUsage: import('@claudia/shared').TaskTokenUsage };
+                        useTaskStore.getState().updateTaskTokenUsage(payload.taskId, payload.tokenUsage);
                         break;
                     }
                     case 'task:archived:list': {

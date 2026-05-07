@@ -1,0 +1,41 @@
+.task-token-stats {
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, monospace;
+    font-size: 0.7rem;
+}
+
+.task-token-stats-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 4px 12px;
+    background: transparent;
+    color: #6b7280;
+    text-align: left;
+}
+
+.token-value {
+    color: #6b7280;
+}
+
+.token-cache {
+    color: #6b7280;
+}
+
+.token-sep {
+    color: #555;
+    opacity: 0.5;
+}
+
+.token-sep-section {
+    margin: 0 6px;
+}
+
+.token-cost {
+    color: #6b7280;
+}
+
+.token-model {
+    color: #6b7280;
+}
+

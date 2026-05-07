@@ -17,7 +17,8 @@ import { ActivityPanel } from './components/ActivityPanel';
 import { useTheme } from './hooks/useTheme';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff, BarChart3, ChevronRight } from 'lucide-react';
+import { UsageDashboard } from './components/UsageDashboard';
 import { getApiBaseUrl } from './config/api-config';
 import { isSoundEnabled, setSoundEnabled } from './utils/browserCapabilities';
 
@@ -34,6 +35,7 @@ function useIsMobile(breakpoint = 768) {
 }
 
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
+const SIDEBAR_COLLAPSED_KEY = 'claudia-sidebar-collapsed';
 const DEFAULT_SIDEBAR_WIDTH = 640;
 const CHAT_PANEL_WIDTH_KEY = 'claudia-chat-panel-width';
 const DEFAULT_CHAT_PANEL_WIDTH = 380;
@@ -129,10 +131,19 @@ function App() {
             return DEFAULT_CHAT_PANEL_WIDTH;
         }
     });
+    const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+        try { return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true'; } catch { return false; }
+    });
+    const toggleSidebar = () => setSidebarCollapsed(c => {
+        const next = !c;
+        try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next)); } catch {}
+        return next;
+    });
     const [isResizing, setIsResizing] = useState(false);
     const [isResizingChat, setIsResizingChat] = useState(false);
     const [terminalRefreshCounter, setTerminalRefreshCounter] = useState(0);
     const [showSettings, setShowSettings] = useState(false);
+    const [showUsageDashboard, setShowUsageDashboard] = useState(false);
     const [settingsInitialPanel, setSettingsInitialPanel] = useState<string | undefined>(undefined);
     const [showChatPanel, setShowChatPanel] = useState(false);
     const [showMobileAccess, setShowMobileAccess] = useState(false);
@@ -561,6 +572,13 @@ function App() {
                     </button>
                     <button
                         className="settings-button"
+                        onClick={() => setShowUsageDashboard(true)}
+                        title="Token Usage"
+                    >
+                        <BarChart3 size={isMobile ? 18 : 20} />
+                    </button>
+                    <button
+                        className="settings-button"
                         onClick={handleSettingsOpen}
                         title="Settings"
                     >
@@ -624,6 +642,18 @@ function App() {
                 ) : (
                     /* ===== DESKTOP LAYOUT (unchanged) ===== */
                     <>
+                        {sidebarCollapsed ? (
+                            <aside className="sidebar collapsed">
+                                <button
+                                    className="sidebar-expand-btn"
+                                    onClick={toggleSidebar}
+                                    title="Show workspaces"
+                                >
+                                    <ChevronRight size={14} />
+                                    <span className="sidebar-expand-label">Workspaces</span>
+                                </button>
+                            </aside>
+                        ) : (
                         <aside
                             className="sidebar"
                             ref={sidebarRef}
@@ -655,13 +685,17 @@ function App() {
                                 onAddCustomReference={addCustomReference}
                                 onRemoveReference={removeReference}
                                 onResetWorkspace={resetWorkspace}
+                                onCollapse={toggleSidebar}
                             />
                         </aside>
+                        )}
 
-                        <div
-                            className={`resize-handle ${isResizing ? 'resizing' : ''}`}
-                            onMouseDown={handleMouseDown}
-                        />
+                        {!sidebarCollapsed && (
+                            <div
+                                className={`resize-handle ${isResizing ? 'resizing' : ''}`}
+                                onMouseDown={handleMouseDown}
+                            />
+                        )}
 
                         <section className="main-panel">
                             {/* Shell terminal - always mounted when active, hidden via CSS to preserve xterm state */}
@@ -749,6 +783,7 @@ function App() {
 
             <ProjectPicker onSelect={handleProjectSelect} wsRef={wsRef} requestRecentWorkspaces={requestRecentWorkspaces} clearRecentWorkspace={clearRecentWorkspace} />
             <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
+            <UsageDashboard isOpen={showUsageDashboard} onClose={() => setShowUsageDashboard(false)} />
             {!isMobile && <MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} error={tunnelError} tunnelActive={tunnelActive} tunnelLoading={tunnelLoading} onStopTunnel={handleStopTunnel} onStartTunnel={startTunnel} />}
             <GlobalVoiceManager />
             <ThinkingSoundManager />

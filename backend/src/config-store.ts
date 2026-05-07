@@ -6,6 +6,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { BackendType } from './backends/types.js';
 import { loadVersioned, saveVersioned } from './utils/schema-version.js';
+import { ModelPricing } from '@claudia/shared';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -40,7 +41,7 @@ export interface ClaudeCodeSwitches {
     disallowedTools: string;       // --disallowedTools TOOLS (empty = not set)
     appendSystemPrompt: string;    // --append-system-prompt TEXT (empty = not set)
     effortLevel: string;           // CLAUDE_CODE_EFFORT_LEVEL env var ('low' | 'medium' | 'high')
-    defaultModel: string;          // --model MODEL (e.g. 'claude-opus-latest')
+    defaultModel: string;          // --model MODEL (empty = use Claude's default)
 }
 
 // Hyperspace AI Proxy configuration
@@ -60,7 +61,7 @@ export const DEFAULT_CLAUDE_CODE_SWITCHES: ClaudeCodeSwitches = {
     disallowedTools: '',
     appendSystemPrompt: '',
     effortLevel: 'high',
-    defaultModel: 'claude-opus-latest'
+    defaultModel: ''
 };
 
 const DEFAULT_HYPERSPACE_PROXY: HyperspaceProxyConfig = {
@@ -94,7 +95,10 @@ export interface AppConfig {
         timeoutMs?: number;
     };
     enabledPlugins?: string[];  // List of enabled plugin names (all disabled by default)
-    claudiaMcpServerEnabled: boolean;  // [Experimental] Enable Claudia MCP server for Claude Code sessions
+    claudiaMcpServerEnabled: boolean;  // Enable Claudia MCP server for Claude Code sessions
+    tokenPricing?: Record<string, ModelPricing>;  // Custom token pricing per model
+    tokenTrackingEnabled?: boolean;  // Enable token usage tracking
+    tokenCostEnabled?: boolean;  // Enable cost calculation display (default: false)
     defaultBaseDirectory?: string;  // Default base directory for new workspaces (optional)
 }
 
@@ -139,6 +143,30 @@ const DEFAULT_MCP_SERVERS: MCPServerConfig[] = [
     }
 ];
 
+// Default pricing per Anthropic's current (2026) API rates:
+// https://platform.claude.com/docs/en/about-claude/pricing
+// Cache write = 1.25x input, Cache read = 0.1x input
+export const DEFAULT_TOKEN_PRICING: Record<string, ModelPricing> = {
+    'claude-sonnet-4-6': {
+        inputPer1MTokens: 3.00,
+        outputPer1MTokens: 15.00,
+        cacheCreatePer1MTokens: 3.75,
+        cacheReadPer1MTokens: 0.30,
+    },
+    'claude-opus-4-6': {
+        inputPer1MTokens: 5.00,
+        outputPer1MTokens: 25.00,
+        cacheCreatePer1MTokens: 6.25,
+        cacheReadPer1MTokens: 0.50,
+    },
+    'claude-haiku-4-5': {
+        inputPer1MTokens: 1.00,
+        outputPer1MTokens: 5.00,
+        cacheCreatePer1MTokens: 1.25,
+        cacheReadPer1MTokens: 0.10,
+    },
+};
+
 const DEFAULT_CONFIG: AppConfig = {
     mcpServers: DEFAULT_MCP_SERVERS,
     skipPermissions: false,
@@ -153,7 +181,8 @@ const DEFAULT_CONFIG: AppConfig = {
     claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
     hyperspaceProxy: DEFAULT_HYPERSPACE_PROXY,
     enabledPlugins: [],  // All plugins disabled by default
-    claudiaMcpServerEnabled: false,  // [Experimental] Disabled by default
+    claudiaMcpServerEnabled: true,  // Enabled by default
+    tokenTrackingEnabled: true,  // Token usage tracking enabled by default
     defaultBaseDirectory: undefined  // No default base directory set
 };
 
@@ -189,14 +218,19 @@ export class ConfigStore {
             backend: loaded.backend ?? 'claude-code',
             opencodePort: loaded.opencodePort ?? 4096,
             useLearnings: loaded.useLearnings ?? false,
-            claudeCodeSwitches: {
-                ...DEFAULT_CLAUDE_CODE_SWITCHES,
-                ...(loaded.claudeCodeSwitches || {})
-            },
+            claudeCodeSwitches: (() => {
+                const sw = loaded.claudeCodeSwitches || {} as any;
+                // Migrate old 'model' field to 'defaultModel' if present
+                const defaultModel = sw.defaultModel || (sw as any).model || DEFAULT_CLAUDE_CODE_SWITCHES.defaultModel;
+                return { ...DEFAULT_CLAUDE_CODE_SWITCHES, ...sw, defaultModel };
+            })(),
             hyperspaceProxy: loaded.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY,
             aiCoreCredentials: loaded.aiCoreCredentials,
             enabledPlugins: loaded.enabledPlugins ?? [],
-            claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? false,
+            claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? true,
+            tokenTrackingEnabled: loaded.tokenTrackingEnabled ?? true,
+            tokenCostEnabled: loaded.tokenCostEnabled ?? false,
+            tokenPricing: loaded.tokenPricing,
             defaultBaseDirectory: loaded.defaultBaseDirectory
         };
     }
@@ -289,6 +323,15 @@ export class ConfigStore {
         if (updates.claudiaMcpServerEnabled !== undefined) {
             this.config.claudiaMcpServerEnabled = updates.claudiaMcpServerEnabled;
         }
+        if (updates.tokenTrackingEnabled !== undefined) {
+            this.config.tokenTrackingEnabled = updates.tokenTrackingEnabled;
+        }
+        if (updates.tokenCostEnabled !== undefined) {
+            this.config.tokenCostEnabled = updates.tokenCostEnabled;
+        }
+        if (updates.tokenPricing !== undefined) {
+            this.config.tokenPricing = updates.tokenPricing;
+        }
         if (updates.defaultBaseDirectory !== undefined) {
             this.config.defaultBaseDirectory = updates.defaultBaseDirectory;
         }
@@ -348,7 +391,10 @@ export class ConfigStore {
             useLearnings: false,
             claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
             hyperspaceProxy: { ...DEFAULT_HYPERSPACE_PROXY },
-            claudiaMcpServerEnabled: false,
+            claudiaMcpServerEnabled: true,
+            tokenTrackingEnabled: true,
+            tokenCostEnabled: false,
+            tokenPricing: { ...DEFAULT_TOKEN_PRICING },
             defaultBaseDirectory: undefined
         };
         this.saveConfig();
@@ -431,6 +477,33 @@ export class ConfigStore {
 
     setClaudioMcpServerEnabled(enabled: boolean): void {
         this.config.claudiaMcpServerEnabled = enabled;
+        this.saveConfig();
+    }
+
+    getTokenTrackingEnabled(): boolean {
+        return this.config.tokenTrackingEnabled ?? true;
+    }
+
+    setTokenTrackingEnabled(enabled: boolean): void {
+        this.config.tokenTrackingEnabled = enabled;
+        this.saveConfig();
+    }
+
+    getTokenCostEnabled(): boolean {
+        return this.config.tokenCostEnabled ?? false;
+    }
+
+    setTokenCostEnabled(enabled: boolean): void {
+        this.config.tokenCostEnabled = enabled;
+        this.saveConfig();
+    }
+
+    getTokenPricing(): Record<string, ModelPricing> {
+        return this.config.tokenPricing ?? DEFAULT_TOKEN_PRICING;
+    }
+
+    setTokenPricing(pricing: Record<string, ModelPricing>): void {
+        this.config.tokenPricing = pricing;
         this.saveConfig();
     }
 
