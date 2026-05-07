@@ -545,7 +545,8 @@ describe('ConfigStore', () => {
         });
 
         it('updateConfig accepts partial modelTiering and fills tier defaults', () => {
-            store.updateConfig({ modelTiering: { enabled: true, tiers: { high: 'claude-opus-4-7' } } });
+            // updateConfig merges partial tiers at runtime (validated upstream); cast to satisfy TS.
+            store.updateConfig({ modelTiering: { enabled: true, tiers: { high: 'claude-opus-4-7' } as any } });
             const cfg = store.getModelTiering();
             expect(cfg.enabled).toBe(true);
             expect(cfg.tiers.high).toBe('claude-opus-4-7');
@@ -558,7 +559,7 @@ describe('ConfigStore', () => {
             // Set custom mappings.
             store.updateConfig({ modelTiering: { enabled: true, tiers: { low: 'haiku-3', medium: 'sonnet-3', high: 'opus-3' } } });
             // Toggle only `enabled` off — tiers must survive.
-            store.updateConfig({ modelTiering: { enabled: false } });
+            store.updateConfig({ modelTiering: { enabled: false } as any });
             const cfg = store.getModelTiering();
             expect(cfg.enabled).toBe(false);
             expect(cfg.tiers.low).toBe('haiku-3');
