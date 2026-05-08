@@ -452,8 +452,12 @@ function WorkspaceSection({
         };
     }, [isMenuOpen]);
 
-    // Fetch current git branch for this workspace (and poll every 30s to stay fresh)
-    // Only fetch when WebSocket is connected to avoid ERR_CONNECTION_RESET during server restarts
+    // Fetch current git branch for this workspace.
+    // Only POLL (every 60s) for the workspace that has the selected task — other workspaces
+    // fetch once when mounted/expanded. This prevents a storm of git processes on enterprise
+    // machines with slow auth (Okta/GCM) where 7 workspaces × 4 git commands = 28 processes
+    // every polling interval.
+    const isActiveWorkspace = selectedTaskId != null && tasks.some(t => t.id === selectedTaskId);
     useEffect(() => {
         if (!isConnected) return;
         const fetchBranch = async () => {
@@ -469,9 +473,11 @@ function WorkspaceSection({
             }
         };
         fetchBranch();
-        const interval = setInterval(fetchBranch, 30_000);
-        return () => clearInterval(interval);
-    }, [workspace.id, isConnected]);
+        if (isActiveWorkspace) {
+            const interval = setInterval(fetchBranch, 60_000);
+            return () => clearInterval(interval);
+        }
+    }, [workspace.id, isConnected, isActiveWorkspace]);
 
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
