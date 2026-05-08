@@ -98,8 +98,29 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 process.on('uncaughtException', (err) => {
     console.error('[Index] Uncaught Exception:', err);
+    try {
+        const { appendFileSync } = require('fs');
+        const { join } = require('path');
+        appendFileSync(join(__dirname, '..', 'crash.log'),
+            `[${new Date().toISOString()}] UNCAUGHT EXCEPTION: ${err.stack || err.message}\n`);
+    } catch {}
 });
 
 process.on('unhandledRejection', (reason, promise) => {
     console.error('[Index] Unhandled Rejection at:', promise, 'reason:', reason);
+    try {
+        const { appendFileSync } = require('fs');
+        const { join } = require('path');
+        appendFileSync(join(__dirname, '..', 'crash.log'),
+            `[${new Date().toISOString()}] UNHANDLED REJECTION: ${reason instanceof Error ? reason.stack : String(reason)}\n`);
+    } catch {}
+});
+
+process.on('exit', (code) => {
+    try {
+        const { appendFileSync } = require('fs');
+        const { join } = require('path');
+        appendFileSync(join(__dirname, '..', 'crash.log'),
+            `[${new Date().toISOString()}] PROCESS EXIT code=${code}\n`);
+    } catch {}
 });
