@@ -1067,10 +1067,16 @@ export async function createApp(basePath?: string) {
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId, initialCols, initialRows, source } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string };
+                        const { prompt, workspaceId, initialCols, initialRows, source, complexity } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string; complexity?: string };
                         if (!prompt || !workspaceId) {
                             logger.error('task:create requires prompt and workspaceId');
                             sendWSError(ws, 'task:create requires prompt and workspaceId', message.type, 'MISSING_PARAMS');
+                            return;
+                        }
+                        // Validate complexity if provided (defense in depth — MCP layer also enforces).
+                        if (complexity !== undefined && !['low', 'medium', 'high'].includes(complexity)) {
+                            logger.error('task:create rejected: invalid complexity', { complexity });
+                            sendWSError(ws, `Invalid complexity '${complexity}'. Expected one of: low, medium, high.`, message.type, 'INVALID_COMPLEXITY');
                             return;
                         }
                         // Validate workspace path
@@ -1110,9 +1116,22 @@ export async function createApp(basePath?: string) {
 
                         logger.info(`Creating task with system prompt`, { hasSystemPrompt: !!systemPrompt, source: workspaceSystemPrompt ? 'workspace' : (rules ? 'rules' : 'none'), references: validRefs.length });
 
+                        // Resolve complexity → concrete model string (undefined if disabled or omitted).
+                        const modelOverride = configStore.resolveModelForComplexity(complexity as 'low' | 'medium' | 'high' | undefined);
+                        if (complexity && !modelOverride) {
+                            const cfg = configStore.getModelTiering();
+                            if (!cfg.enabled) {
+                                logger.debug('complexity ignored (model tiering disabled)', { complexity });
+                            } else {
+                                logger.warn('complexity has empty mapping; using default model', { complexity });
+                            }
+                        } else if (modelOverride) {
+                            logger.info('complexity → model resolved', { complexity, model: modelOverride, workspaceId: validatedPath });
+                        }
+
                         // Pass initial dimensions if provided
                         try {
-                            const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows);
+                            const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows, modelOverride);
                             // Broadcast task:created to all clients (UI sidebar update).
                             // Done here (not in the taskCreated event handler) so the source
                             // field is always correct even with concurrent creates.

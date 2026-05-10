@@ -138,6 +138,13 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     });
     const cliSwitchesTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+    // Model tiering: lets MCP-spawned tasks pick a model based on a complexity hint.
+    const [modelTiering, setModelTiering] = useState({
+        enabled: false,
+        tiers: { low: 'haiku', medium: 'sonnet', high: 'opus' },
+    });
+    const modelTieringTimerRef = useRef<NodeJS.Timeout | null>(null);
+
     // Debounce timers
     const rulesTimerRef = useRef<NodeJS.Timeout | null>(null);
     const supervisorPromptTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -353,6 +360,17 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                         appendSystemPrompt: config.claudeCodeSwitches.appendSystemPrompt || '',
                         effortLevel: config.claudeCodeSwitches.effortLevel || 'high',
                         defaultModel: config.claudeCodeSwitches.defaultModel || (config.claudeCodeSwitches as any).model || '',
+                    });
+                }
+
+                if (config.modelTiering) {
+                    setModelTiering({
+                        enabled: config.modelTiering.enabled || false,
+                        tiers: {
+                            low: config.modelTiering.tiers?.low || 'haiku',
+                            medium: config.modelTiering.tiers?.medium || 'sonnet',
+                            high: config.modelTiering.tiers?.high || 'opus',
+                        },
                     });
                 }
             }
@@ -749,6 +767,42 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             return updated;
         });
     }, [saveCliSwitches]);
+
+    const saveModelTiering = useCallback(async (cfg: typeof modelTiering) => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ modelTiering: cfg })
+            });
+            if (!response.ok) {
+                console.error('Failed to save model tiering');
+            }
+        } catch (error) {
+            console.error('Failed to save model tiering:', error);
+        }
+    }, []);
+
+    const handleModelTieringToggle = useCallback((enabled: boolean) => {
+        setModelTiering(prev => {
+            const updated = { ...prev, enabled };
+            saveModelTiering(updated);
+            return updated;
+        });
+    }, [saveModelTiering]);
+
+    const handleModelTieringTierChange = useCallback((tier: 'low' | 'medium' | 'high', value: string) => {
+        setModelTiering(prev => {
+            const updated = { ...prev, tiers: { ...prev.tiers, [tier]: value } };
+            if (modelTieringTimerRef.current) {
+                clearTimeout(modelTieringTimerRef.current);
+            }
+            modelTieringTimerRef.current = setTimeout(() => {
+                saveModelTiering(updated);
+            }, 500);
+            return updated;
+        });
+    }, [saveModelTiering]);
 
     const saveBackend = useCallback(async (backendType: BackendType) => {
         try {
@@ -2238,6 +2292,73 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     onChange={(e) => handleCliSwitchChange({ defaultModel: e.target.value })}
                                 />
                             </div>
+
+                            {/* Model Tiering */}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Model Tiering</span>
+                                    <span className="permission-description">
+                                        Let agents passing through the Claudia MCP tag spawned tasks with a complexity tier (low/medium/high) that maps to a cheaper or stronger model. Use values valid for your current API mode — for SAP AI Core or Hyperspace proxies, use full model IDs (e.g. claude-3-5-haiku-20251001).
+                                    </span>
+                                </div>
+                                <label className="toggle-switch">
+                                    <input
+                                        type="checkbox"
+                                        checked={modelTiering.enabled}
+                                        onChange={(e) => handleModelTieringToggle(e.target.checked)}
+                                    />
+                                    <span className="toggle-slider"></span>
+                                </label>
+                            </div>
+                            {modelTiering.enabled && (
+                                <>
+                                    <div className="permission-item">
+                                        <div className="permission-info">
+                                            <span className="permission-label">Low complexity</span>
+                                            <span className="permission-description">
+                                                Trivial lookups, formatting, single-file reads.
+                                            </span>
+                                        </div>
+                                        <input
+                                            type="text"
+                                            className="cli-switch-text-input"
+                                            value={modelTiering.tiers.low}
+                                            placeholder="haiku"
+                                            onChange={(e) => handleModelTieringTierChange('low', e.target.value)}
+                                        />
+                                    </div>
+                                    <div className="permission-item">
+                                        <div className="permission-info">
+                                            <span className="permission-label">Medium complexity</span>
+                                            <span className="permission-description">
+                                                Normal coding, refactors, writing tests.
+                                            </span>
+                                        </div>
+                                        <input
+                                            type="text"
+                                            className="cli-switch-text-input"
+                                            value={modelTiering.tiers.medium}
+                                            placeholder="sonnet"
+                                            onChange={(e) => handleModelTieringTierChange('medium', e.target.value)}
+                                        />
+                                    </div>
+                                    <div className="permission-item">
+                                        <div className="permission-info">
+                                            <span className="permission-label">High complexity</span>
+                                            <span className="permission-description">
+                                                Tricky architecture, gnarly debugging, careful reasoning.
+                                            </span>
+                                        </div>
+                                        <input
+                                            type="text"
+                                            className="cli-switch-text-input"
+                                            value={modelTiering.tiers.high}
+                                            placeholder="opus"
+                                            onChange={(e) => handleModelTieringTierChange('high', e.target.value)}
+                                        />
+                                    </div>
+                                </>
+                            )}
 
                             {/* Max Turns */}
                             <div className="permission-item">

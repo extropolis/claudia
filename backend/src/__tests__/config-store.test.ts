@@ -489,4 +489,82 @@ describe('ConfigStore', () => {
             expect(store.getClaudioMcpServerEnabled()).toBe(false);
         });
     });
+
+    describe('modelTiering', () => {
+        it('returns disabled defaults on a fresh config', () => {
+            const cfg = store.getModelTiering();
+            expect(cfg.enabled).toBe(false);
+            expect(cfg.tiers).toEqual({ low: 'haiku', medium: 'sonnet', high: 'opus' });
+        });
+
+        it('returns undefined when complexity is omitted', () => {
+            store.setModelTiering({ enabled: true, tiers: { low: 'haiku', medium: 'sonnet', high: 'opus' } });
+            expect(store.resolveModelForComplexity(undefined)).toBeUndefined();
+        });
+
+        it('returns undefined when tiering is disabled', () => {
+            // default is disabled
+            expect(store.resolveModelForComplexity('high')).toBeUndefined();
+        });
+
+        it('maps complexity to configured model when enabled', () => {
+            store.setModelTiering({ enabled: true, tiers: { low: 'haiku', medium: 'sonnet', high: 'opus' } });
+            expect(store.resolveModelForComplexity('low')).toBe('haiku');
+            expect(store.resolveModelForComplexity('medium')).toBe('sonnet');
+            expect(store.resolveModelForComplexity('high')).toBe('opus');
+        });
+
+        it('respects custom mappings', () => {
+            store.setModelTiering({
+                enabled: true,
+                tiers: { low: 'claude-haiku-4-5-20251001', medium: 'claude-sonnet-4-6', high: 'claude-opus-4-7' }
+            });
+            expect(store.resolveModelForComplexity('low')).toBe('claude-haiku-4-5-20251001');
+            expect(store.resolveModelForComplexity('high')).toBe('claude-opus-4-7');
+        });
+
+        it('falls through to undefined when a tier is empty (caller uses default)', () => {
+            store.setModelTiering({ enabled: true, tiers: { low: '', medium: 'sonnet', high: 'opus' } });
+            expect(store.resolveModelForComplexity('low')).toBeUndefined();
+            expect(store.resolveModelForComplexity('medium')).toBe('sonnet');
+        });
+
+        it('trims whitespace from tier strings', () => {
+            store.setModelTiering({ enabled: true, tiers: { low: '  haiku  ', medium: 'sonnet', high: 'opus' } });
+            expect(store.resolveModelForComplexity('low')).toBe('haiku');
+        });
+
+        it('persists across save/load', () => {
+            store.setModelTiering({ enabled: true, tiers: { low: 'haiku', medium: 'sonnet', high: 'claude-opus-4-7' } });
+
+            const reloaded = new ConfigStore(testBaseDir);
+            const cfg = reloaded.getModelTiering();
+            expect(cfg.enabled).toBe(true);
+            expect(cfg.tiers.high).toBe('claude-opus-4-7');
+            expect(reloaded.resolveModelForComplexity('high')).toBe('claude-opus-4-7');
+        });
+
+        it('updateConfig accepts partial modelTiering and fills tier defaults', () => {
+            // updateConfig merges partial tiers at runtime (validated upstream); cast to satisfy TS.
+            store.updateConfig({ modelTiering: { enabled: true, tiers: { high: 'claude-opus-4-7' } as any } });
+            const cfg = store.getModelTiering();
+            expect(cfg.enabled).toBe(true);
+            expect(cfg.tiers.high).toBe('claude-opus-4-7');
+            // Other tiers fall back to defaults
+            expect(cfg.tiers.low).toBe('haiku');
+            expect(cfg.tiers.medium).toBe('sonnet');
+        });
+
+        it('partial updateConfig does not blow away existing tier mappings', () => {
+            // Set custom mappings.
+            store.updateConfig({ modelTiering: { enabled: true, tiers: { low: 'haiku-3', medium: 'sonnet-3', high: 'opus-3' } } });
+            // Toggle only `enabled` off — tiers must survive.
+            store.updateConfig({ modelTiering: { enabled: false } as any });
+            const cfg = store.getModelTiering();
+            expect(cfg.enabled).toBe(false);
+            expect(cfg.tiers.low).toBe('haiku-3');
+            expect(cfg.tiers.medium).toBe('sonnet-3');
+            expect(cfg.tiers.high).toBe('opus-3');
+        });
+    });
 });

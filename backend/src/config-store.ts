@@ -52,6 +52,24 @@ export interface HyperspaceProxyConfig {
     alwaysThinkingEnabled: boolean;
 }
 
+// Model tiering: lets MCP-spawned tasks pick a cheaper model based on a
+// complexity hint passed by the spawning agent.
+export type ComplexityTier = 'low' | 'medium' | 'high';
+
+export interface ModelTieringConfig {
+    enabled: boolean;
+    tiers: {
+        low: string;
+        medium: string;
+        high: string;
+    };
+}
+
+export const DEFAULT_MODEL_TIERING: ModelTieringConfig = {
+    enabled: false,
+    tiers: { low: 'haiku', medium: 'sonnet', high: 'opus' },
+};
+
 export const DEFAULT_CLAUDE_CODE_SWITCHES: ClaudeCodeSwitches = {
     verbose: false,
     maxTurns: null,
@@ -100,6 +118,7 @@ export interface AppConfig {
     tokenTrackingEnabled?: boolean;  // Enable token usage tracking
     tokenCostEnabled?: boolean;  // Enable cost calculation display (default: false)
     defaultBaseDirectory?: string;  // Default base directory for new workspaces (optional)
+    modelTiering?: ModelTieringConfig;  // Complexity-based model selection for MCP-spawned tasks
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
@@ -183,7 +202,8 @@ const DEFAULT_CONFIG: AppConfig = {
     enabledPlugins: [],  // All plugins disabled by default
     claudiaMcpServerEnabled: true,  // Enabled by default
     tokenTrackingEnabled: true,  // Token usage tracking enabled by default
-    defaultBaseDirectory: undefined  // No default base directory set
+    defaultBaseDirectory: undefined,  // No default base directory set
+    modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } }
 };
 
 export class ConfigStore {
@@ -231,7 +251,11 @@ export class ConfigStore {
             tokenTrackingEnabled: loaded.tokenTrackingEnabled ?? true,
             tokenCostEnabled: loaded.tokenCostEnabled ?? false,
             tokenPricing: loaded.tokenPricing,
-            defaultBaseDirectory: loaded.defaultBaseDirectory
+            defaultBaseDirectory: loaded.defaultBaseDirectory,
+            modelTiering: {
+                enabled: loaded.modelTiering?.enabled ?? DEFAULT_MODEL_TIERING.enabled,
+                tiers: { ...DEFAULT_MODEL_TIERING.tiers, ...(loaded.modelTiering?.tiers || {}) }
+            }
         };
     }
 
@@ -335,6 +359,15 @@ export class ConfigStore {
         if (updates.defaultBaseDirectory !== undefined) {
             this.config.defaultBaseDirectory = updates.defaultBaseDirectory;
         }
+        if (updates.modelTiering !== undefined) {
+            // Merge against existing config (not just defaults) so partial updates
+            // — e.g., flipping only `enabled` — don't blow away custom tier mappings.
+            const existing = this.config.modelTiering ?? DEFAULT_MODEL_TIERING;
+            this.config.modelTiering = {
+                enabled: updates.modelTiering.enabled ?? existing.enabled,
+                tiers: { ...existing.tiers, ...(updates.modelTiering.tiers || {}) }
+            };
+        }
         this.saveConfig();
         return this.getConfig();
     }
@@ -395,7 +428,8 @@ export class ConfigStore {
             tokenTrackingEnabled: true,
             tokenCostEnabled: false,
             tokenPricing: { ...DEFAULT_TOKEN_PRICING },
-            defaultBaseDirectory: undefined
+            defaultBaseDirectory: undefined,
+            modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } }
         };
         this.saveConfig();
         return this.getConfig();
@@ -444,6 +478,35 @@ export class ConfigStore {
     setHyperspaceProxy(config: HyperspaceProxyConfig): void {
         this.config.hyperspaceProxy = config;
         this.saveConfig();
+    }
+
+    getModelTiering(): ModelTieringConfig {
+        return {
+            enabled: this.config.modelTiering?.enabled ?? DEFAULT_MODEL_TIERING.enabled,
+            tiers: { ...DEFAULT_MODEL_TIERING.tiers, ...(this.config.modelTiering?.tiers || {}) }
+        };
+    }
+
+    setModelTiering(config: ModelTieringConfig): void {
+        this.config.modelTiering = {
+            enabled: config.enabled,
+            tiers: { ...DEFAULT_MODEL_TIERING.tiers, ...config.tiers }
+        };
+        this.saveConfig();
+    }
+
+    /**
+     * Resolve a complexity tier to a concrete model string for `--model`.
+     * Returns undefined if tiering is disabled, no complexity was provided,
+     * or the configured tier maps to an empty string (caller falls back to default).
+     */
+    resolveModelForComplexity(complexity: ComplexityTier | undefined): string | undefined {
+        if (!complexity) return undefined;
+        const cfg = this.getModelTiering();
+        if (!cfg.enabled) return undefined;
+        const model = cfg.tiers[complexity];
+        if (!model || !model.trim()) return undefined;
+        return model.trim();
     }
 
     getEnabledPlugins(): string[] {
