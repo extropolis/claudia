@@ -199,6 +199,33 @@ export class WorkspaceStore {
         return true;
     }
 
+    // Replace the workspace order to match the given list of IDs.
+    // Used by drag-drop in non-manual sort modes: the client sends the
+    // visually-rendered order (which may differ from stored order) and we
+    // adopt it wholesale. IDs not in the input are preserved at the end in
+    // their existing relative order, so a stale client cannot lose workspaces.
+    setWorkspaceOrder(orderedIds: string[]): boolean {
+        const byId = new Map(this.config.workspaces.map(w => [w.id, w]));
+        const reordered: typeof this.config.workspaces = [];
+        const seen = new Set<string>();
+        for (const id of orderedIds) {
+            const ws = byId.get(id);
+            if (ws && !seen.has(id)) {
+                reordered.push(ws);
+                seen.add(id);
+            }
+        }
+        // Append any workspaces the client didn't know about (e.g. just-created on another client)
+        for (const ws of this.config.workspaces) {
+            if (!seen.has(ws.id)) reordered.push(ws);
+        }
+        if (reordered.length !== this.config.workspaces.length) return false;
+        this.config.workspaces = reordered;
+        this.saveConfig();
+        console.log(`[WorkspaceStore] Set explicit workspace order (${reordered.length} items)`);
+        return true;
+    }
+
     // Rename a workspace (set displayName)
     renameWorkspace(id: string, displayName: string): boolean {
         const workspace = this.config.workspaces.find(w => w.id === id);

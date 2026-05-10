@@ -63,6 +63,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:create',
     'workspace:delete',
     'workspace:reorder',
+    'workspace:setOrder',
     'workspace:rename',
     'workspace:browseFolder',
     'workspace:openFolder',
@@ -1509,6 +1510,23 @@ export async function createApp(basePath?: string) {
                         if (typeof fromIndex !== 'number' || typeof toIndex !== 'number') break;
                         if (workspaceStore.reorderWorkspaces(fromIndex, toIndex)) {
                             // Broadcast updated workspace list to all clients
+                            const workspaces = workspaceStore.getWorkspaces();
+                            broadcast({ type: 'workspace:reordered' as WSMessageType, payload: { workspaces } });
+                        }
+                        break;
+                    }
+
+                    case 'workspace:setOrder': {
+                        // Set explicit workspace order from a client's rendered (sorted) view.
+                        // Used when a user drags-to-reorder while in a non-manual sort mode —
+                        // the client sends the visible order, we adopt it, and the client
+                        // switches its local sort mode to 'manual' on receipt.
+                        const { orderedIds } = payload as { orderedIds?: unknown };
+                        if (!Array.isArray(orderedIds) || !orderedIds.every(id => typeof id === 'string')) {
+                            sendWSError(ws, 'workspace:setOrder requires orderedIds: string[]', message.type, 'INVALID_PARAMS');
+                            break;
+                        }
+                        if (workspaceStore.setWorkspaceOrder(orderedIds as string[])) {
                             const workspaces = workspaceStore.getWorkspaces();
                             broadcast({ type: 'workspace:reordered' as WSMessageType, payload: { workspaces } });
                         }

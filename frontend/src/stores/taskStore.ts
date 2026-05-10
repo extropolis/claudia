@@ -47,7 +47,7 @@ interface TaskStore {
     expandedWorkspacesInitialized: boolean;  // True once persisted state is loaded or first workspaces set
     showProjectPicker: boolean;
     workspaceColumns: number; // 0 = auto, 1-4 = fixed column count
-    workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical'; // How to sort workspaces
+    workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
     taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
 
     // Voice state
@@ -184,7 +184,7 @@ interface TaskStore {
 
     // Layout actions
     setWorkspaceColumns: (columns: number) => void;
-    setWorkspaceSortBy: (sortBy: 'date-created' | 'last-modified' | 'alphabetical') => void;
+    setWorkspaceSortBy: (sortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual') => void;
     setTaskSortBy: (sortBy: 'date-created' | 'last-modified') => void;
 
     // Settings actions
@@ -214,7 +214,7 @@ interface PersistedState {
     expandedWorkspaces: string[];  // Stored as array, converted to Set
     expandedWorkspacesInitialized: boolean;  // Track if user has interacted with workspaces
     workspaceColumns: number; // 0 = auto, 1-4 = fixed
-    workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical'; // How to sort workspaces
+    workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
     taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
     voiceEnabled: boolean;
     autoSpeakResponses: boolean;

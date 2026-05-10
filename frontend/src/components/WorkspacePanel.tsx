@@ -1447,6 +1447,7 @@ interface WorkspacePanelProps {
     onCreateWorkspace: (path: string) => void;
     onDeleteWorkspace: (workspaceId: string) => void;
     onReorderWorkspaces: (fromIndex: number, toIndex: number) => void;
+    onSetWorkspaceOrder: (orderedIds: string[]) => void;
     onReorderTasksOnServer: (taskOrders: { taskId: string; order: number }[]) => void;
     onOpenFolder: (workspaceId: string) => void;
     onOpenTerminal: (workspaceId: string) => void;
@@ -1476,6 +1477,7 @@ export function WorkspacePanel({
     onCreateWorkspace,
     onDeleteWorkspace,
     onReorderWorkspaces,
+    onSetWorkspaceOrder,
     onReorderTasksOnServer,
     onOpenFolder,
     onOpenTerminal,
@@ -1549,6 +1551,41 @@ export function WorkspacePanel({
         return () => document.removeEventListener('mousedown', handleClickOutside, true);
     }, [openMenuId]);
 
+    // Get last modified time for a workspace (most recent task activity).
+    // Defined here (above drag handlers) because handleDragEnd needs sortedWorkspaces.
+    const getWorkspaceLastModified = (workspaceId: string): Date => {
+        const workspaceTasks = Array.from(tasks.values()).filter(t => t.workspaceId === workspaceId);
+        if (workspaceTasks.length === 0) {
+            const workspace = workspaces.find(w => w.id === workspaceId);
+            return workspace ? new Date(workspace.createdAt) : new Date(0);
+        }
+        const mostRecent = workspaceTasks.reduce((latest, task) => {
+            const taskTime = new Date(task.lastActivity || task.createdAt).getTime();
+            return taskTime > latest ? taskTime : latest;
+        }, 0);
+        return new Date(mostRecent);
+    };
+
+    // Sort workspaces based on user preference. 'manual' preserves the
+    // backend-persisted order — drag-drop only has visible effect in this mode.
+    const sortedWorkspaces = workspaceSortBy === 'manual'
+        ? workspaces
+        : [...workspaces].sort((a, b) => {
+            switch (workspaceSortBy) {
+                case 'alphabetical':
+                    const nameA = (a.displayName || a.name).toLowerCase();
+                    const nameB = (b.displayName || b.name).toLowerCase();
+                    return nameA.localeCompare(nameB);
+                case 'last-modified':
+                    const timeA = getWorkspaceLastModified(a.id).getTime();
+                    const timeB = getWorkspaceLastModified(b.id).getTime();
+                    return timeB - timeA;
+                case 'date-created':
+                default:
+                    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+            }
+        });
+
     const handleDragStart = useCallback((index: number) => {
         setDragIndex(index);
         setDragOverIndex(index);
@@ -1562,12 +1599,24 @@ export function WorkspacePanel({
 
     const handleDragEnd = useCallback(() => {
         if (dragIndex !== null && dragOverIndex !== null && dragIndex !== dragOverIndex) {
-            // Send to backend - it will broadcast back to update local state
-            onReorderWorkspaces(dragIndex, dragOverIndex);
+            if (workspaceSortBy === 'manual') {
+                // Indices line up with the underlying stored array — use the cheap reorder.
+                onReorderWorkspaces(dragIndex, dragOverIndex);
+            } else {
+                // Indices are positions in the rendered (sorted) list, not the stored
+                // array. Send the rendered order verbatim so the backend adopts it,
+                // then auto-switch to manual so the user actually sees the result —
+                // otherwise the broadcast gets re-sorted away.
+                const reordered = [...sortedWorkspaces];
+                const [moved] = reordered.splice(dragIndex, 1);
+                reordered.splice(dragOverIndex, 0, moved);
+                onSetWorkspaceOrder(reordered.map(w => w.id));
+                setWorkspaceSortBy('manual');
+            }
         }
         setDragIndex(null);
         setDragOverIndex(null);
-    }, [dragIndex, dragOverIndex, onReorderWorkspaces]);
+    }, [dragIndex, dragOverIndex, onReorderWorkspaces, onSetWorkspaceOrder, workspaceSortBy, sortedWorkspaces, setWorkspaceSortBy]);
 
     const prevWaitingRef = useRef<Set<string>>(new Set());
 
@@ -1631,39 +1680,6 @@ export function WorkspacePanel({
         });
     };
 
-    // Get last modified time for a workspace (most recent task activity)
-    const getWorkspaceLastModified = (workspaceId: string): Date => {
-        const workspaceTasks = Array.from(tasks.values()).filter(t => t.workspaceId === workspaceId);
-        if (workspaceTasks.length === 0) {
-            // No tasks, use workspace createdAt
-            const workspace = workspaces.find(w => w.id === workspaceId);
-            return workspace ? new Date(workspace.createdAt) : new Date(0);
-        }
-        // Find most recent task activity
-        const mostRecent = workspaceTasks.reduce((latest, task) => {
-            const taskTime = new Date(task.lastActivity || task.createdAt).getTime();
-            return taskTime > latest ? taskTime : latest;
-        }, 0);
-        return new Date(mostRecent);
-    };
-
-    // Sort workspaces based on user preference
-    const sortedWorkspaces = [...workspaces].sort((a, b) => {
-        switch (workspaceSortBy) {
-            case 'alphabetical':
-                const nameA = (a.displayName || a.name).toLowerCase();
-                const nameB = (b.displayName || b.name).toLowerCase();
-                return nameA.localeCompare(nameB);
-            case 'last-modified':
-                const timeA = getWorkspaceLastModified(a.id).getTime();
-                const timeB = getWorkspaceLastModified(b.id).getTime();
-                return timeB - timeA; // Most recent first
-            case 'date-created':
-            default:
-                // Most recently created first
-                return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-        }
-    });
 
     return (
         <div className="workspace-panel">
@@ -1682,11 +1698,12 @@ export function WorkspacePanel({
                         <select
                             className="column-selector-select"
                             value={workspaceSortBy}
-                            onChange={(e) => setWorkspaceSortBy(e.target.value as 'date-created' | 'last-modified' | 'alphabetical')}
+                            onChange={(e) => setWorkspaceSortBy(e.target.value as 'date-created' | 'last-modified' | 'alphabetical' | 'manual')}
                         >
                             <option value="date-created">Date Created</option>
                             <option value="last-modified">Last Modified</option>
                             <option value="alphabetical">Alphabetical</option>
+                            <option value="manual">Manual (drag to reorder)</option>
                         </select>
                     </div>
                     <div className="column-selector" title="Workspace columns">

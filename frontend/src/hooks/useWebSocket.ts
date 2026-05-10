@@ -689,6 +689,10 @@ export function useWebSocket() {
         sendMessage('workspace:reorder', { fromIndex, toIndex });
     }, [sendMessage]);
 
+    const setWorkspaceOrder = useCallback((orderedIds: string[]) => {
+        sendMessage('workspace:setOrder', { orderedIds });
+    }, [sendMessage]);
+
     const reorderTasks = useCallback((taskOrders: { taskId: string; order: number }[]) => {
         sendMessage('task:reorder', { taskOrders });
     }, [sendMessage]);
@@ -814,6 +818,7 @@ export function useWebSocket() {
         createWorkspace,
         deleteWorkspace,
         reorderWorkspaces,
+        setWorkspaceOrder,
         reorderTasks,
         openFolder,
         openTerminal,
