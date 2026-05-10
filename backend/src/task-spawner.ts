@@ -290,6 +290,12 @@ export class TaskSpawner extends EventEmitter {
      *  server, so the 24h window would fire immediately on every restart. */
     private readonly startedAt: Date = new Date();
 
+    /** Timestamp of the last polling tick. Used to detect system sleep/wake —
+     *  if more than SLEEP_DETECTION_GAP_MS has elapsed between ticks, the OS
+     *  was likely suspended and PTY child processes may have died. */
+    private lastPollTime: number = Date.now();
+    private static readonly SLEEP_DETECTION_GAP_MS = 30_000; // 30 seconds
+
     // Backend abstraction for multi-backend support (Claude Code, OpenCode, etc.)
     private backend: CodeBackend | null = null;
     private backendType: BackendType = 'claude-code';
@@ -328,18 +334,18 @@ export class TaskSpawner extends EventEmitter {
             ? envReapInterval
             : 10 * 60 * 1000;
 
-        // History file cap config. Default: rotate at 5MB, keep last 2MB tail.
-        // The 2MB floor matches MAX_HISTORY_SIZE for in-memory outputHistory,
-        // so a reconnect that reads the file has roughly the same context as
-        // a task that never disconnected.
+        // History file cap config. Default: rotate at 2MB, keep last 512KB tail.
+        // The 512KB keep-tail matches MAX_HISTORY_TO_SEND (what clients see)
+        // and MAX_RECONNECT_HISTORY (what we load on reconnect), so no memory
+        // is wasted storing history that will never be displayed.
         const envMaxBytes = parseInt(process.env.HISTORY_FILE_MAX_BYTES || '', 10);
         this.historyFileMaxBytes = !isNaN(envMaxBytes) && envMaxBytes >= 0
             ? envMaxBytes
-            : 5 * 1024 * 1024;
+            : 2 * 1024 * 1024;
         const envKeepBytes = parseInt(process.env.HISTORY_FILE_KEEP_BYTES || '', 10);
         this.historyFileKeepBytes = !isNaN(envKeepBytes) && envKeepBytes > 0
             ? envKeepBytes
-            : 2 * 1024 * 1024;
+            : 512 * 1024;
 
         // Initialize backend based on config
         this.backendType = configStore?.getBackend() || 'claude-code';
@@ -946,6 +952,63 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * After detecting a system wake from sleep, reconnect tasks whose PTY
+     * processes died during the suspension. Only reconnects tasks that are
+     * now 'exited' but were alive (idle/busy/waiting_input) before sleep.
+     */
+    private async reconnectAfterSleep(): Promise<void> {
+        // Collect exited tasks that should be reconnected
+        const exitedTasks: string[] = [];
+        for (const task of this.tasks.values()) {
+            if (task.state === 'exited' && task.sessionId) {
+                exitedTasks.push(task.id);
+            }
+        }
+        // Also check disconnected tasks that were recently active
+        const disconnectedTasks: string[] = [];
+        for (const [id, task] of this.disconnectedTasks) {
+            if (task.sessionId && task.wasInterrupted) {
+                const lastActive = task.lastActivity ? new Date(task.lastActivity).getTime() : 0;
+                // Only reconnect tasks that were active in the last 2 hours
+                if (Date.now() - lastActive < 2 * 60 * 60 * 1000) {
+                    disconnectedTasks.push(id);
+                }
+            }
+        }
+
+        const total = exitedTasks.length + disconnectedTasks.length;
+        if (total === 0) return;
+
+        logger.info('Reconnecting tasks after system wake', {
+            exited: exitedTasks.length,
+            disconnected: disconnectedTasks.length,
+        });
+
+        // Disconnect exited tasks first (moves them to disconnectedTasks with session info)
+        for (const id of exitedTasks) {
+            try {
+                this.disconnectTask(id);
+            } catch (e) {
+                logger.warn('Failed to disconnect exited task for sleep reconnect', { taskId: id });
+            }
+        }
+
+        // Reconnect all in batches of 2
+        const allIds = [...exitedTasks, ...disconnectedTasks];
+        for (let i = 0; i < allIds.length; i++) {
+            try {
+                await this.reconnectTask(allIds[i]);
+                logger.info('Reconnected task after sleep', { taskId: allIds[i], index: i + 1, total: allIds.length });
+            } catch (e) {
+                logger.warn('Failed to reconnect task after sleep', { taskId: allIds[i], error: (e as Error).message });
+            }
+            if (i < allIds.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+        }
+    }
+
+    /**
      * Start polling to check task states at the configured interval
      */
     private startStatePolling(): void {
@@ -963,6 +1026,18 @@ export class TaskSpawner extends EventEmitter {
      * Uses a per-task lock to prevent race conditions from concurrent state transitions.
      */
     private checkTaskStates(): void {
+        // Detect system sleep/wake: if the gap since last poll is much larger than
+        // the polling interval, the OS was suspended. PTY child processes often die
+        // during sleep, so we schedule auto-reconnect for any exited tasks.
+        const now = Date.now();
+        const gap = now - this.lastPollTime;
+        this.lastPollTime = now;
+        if (gap > TaskSpawner.SLEEP_DETECTION_GAP_MS) {
+            logger.info('System wake detected', { gapMs: gap, gapMinutes: Math.round(gap / 60_000) });
+            // Give PTY processes a moment to report their exit, then reconnect
+            setTimeout(() => this.reconnectAfterSleep(), 3000);
+        }
+
         // Number of consecutive polls with output changes required to transition idle → busy
         // This prevents spurious transitions from one-time terminal redraws (resize, focus, etc.)
         const CONSECUTIVE_CHANGES_FOR_BUSY = 2;
@@ -3895,23 +3970,32 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         const now = new Date();
 
         // Preserve previous history so it can be shown when the task is selected.
-        // Load from disk file (primary) or in-memory persisted data (fallback).
+        // Only load the TAIL of the file (512KB max) since getCombinedHistory caps
+        // at 512KB when sending to clients anyway. Loading entire 5MB files wastes
+        // memory and can cause OOM with many active tasks.
+        const MAX_RECONNECT_HISTORY = 512 * 1024; // 512KB — matches MAX_HISTORY_TO_SEND
         let previousHistory: Buffer | undefined;
         try {
             const historyPath = this.getTaskHistoryPath(taskId);
             if (existsSync(historyPath)) {
-                const fileContent = readFileSync(historyPath, 'utf-8');
-                // Detect format (base64 vs raw text) using same heuristic as getCombinedHistory
-                const sample = fileContent.substring(0, 100);
-                const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
-                if (isRawText) {
-                    previousHistory = Buffer.from(fileContent, 'utf-8');
+                const stat = statSync(historyPath);
+                if (stat.size <= MAX_RECONNECT_HISTORY) {
+                    const fileContent = readFileSync(historyPath, 'utf-8');
+                    const sample = fileContent.substring(0, 100);
+                    const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
+                    previousHistory = isRawText
+                        ? Buffer.from(fileContent, 'utf-8')
+                        : Buffer.from(fileContent, 'base64');
                 } else {
-                    previousHistory = Buffer.from(fileContent, 'base64');
+                    // Large file — read only the tail
+                    const fd = openSync(historyPath, 'r');
+                    const buf = Buffer.alloc(MAX_RECONNECT_HISTORY);
+                    const offset = stat.size - MAX_RECONNECT_HISTORY;
+                    readSync(fd, buf, 0, MAX_RECONNECT_HISTORY, offset);
+                    closeSync(fd);
+                    previousHistory = buf;
+                    console.log(`[TaskSpawner] Large history file (${stat.size} bytes), loaded tail ${MAX_RECONNECT_HISTORY} bytes for ${taskId}`);
                 }
-                // Keep the file on disk until saveTasks() overwrites it.
-                // Deleting here creates a data loss window if the server crashes
-                // before saveTasks() runs.
                 console.log(`[TaskSpawner] Preserved ${previousHistory.length} bytes of history for ${taskId} on reconnect`);
             }
         } catch (e) {
