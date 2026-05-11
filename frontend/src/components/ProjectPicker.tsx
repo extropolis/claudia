@@ -156,16 +156,25 @@ export function ProjectPicker({ onSelect, wsRef, requestRecentWorkspaces, clearR
         setShowPathInput(false);
     };
 
-    const handleBrowse = useCallback(() => {
-        const ws = wsRef.current;
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-            console.warn('[ProjectPicker] WebSocket not ready for browse');
-            return;
-        }
-        console.log('[ProjectPicker] Requesting native folder picker via backend');
+    const handleBrowse = useCallback(async () => {
+        console.log('[ProjectPicker] Requesting native folder picker via REST endpoint');
         setIsBrowsing(true);
-        ws.send(JSON.stringify({ type: 'workspace:browseFolder', payload: {} }));
-    }, [wsRef]);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/browse-folder`, { method: 'POST' });
+            const data = await res.json();
+            if (data.success && data.path) {
+                console.log('[ProjectPicker] Browse selected path:', data.path);
+                onSelect(data.path);
+                setShowPathInput(false);
+            } else {
+                console.log('[ProjectPicker] Browse cancelled');
+            }
+        } catch (err) {
+            console.error('[ProjectPicker] Browse failed:', err);
+        } finally {
+            setIsBrowsing(false);
+        }
+    }, [onSelect]);
 
     const handleRemoveRecent = (workspaceId: string) => {
         console.log('[ProjectPicker] Removing recent workspace:', workspaceId);
@@ -185,7 +194,7 @@ export function ProjectPicker({ onSelect, wsRef, requestRecentWorkspaces, clearR
                     onRemoveRecent={handleRemoveRecent}
                     onBrowse={handleBrowse}
                     isBrowsing={isBrowsing}
-                    showBrowseButton={true}
+                    showBrowseButton={!!window.electronAPI}
                     defaultBaseDirectory={defaultBaseDirectory}
                 />
             )}

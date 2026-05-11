@@ -1681,8 +1681,48 @@ export function WorkspacePanel({
     };
 
 
+    const [isDragOver, setIsDragOver] = useState(false);
+    const handleDragOver = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragOver(true);
+    };
+    const handleDragLeave = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragOver(false);
+    };
+    const handleDrop = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragOver(false);
+        // Electron gives full paths via file.path
+        const files = e.dataTransfer.files;
+        if (files.length > 0) {
+            const file = files[0] as any;
+            const fullPath = file.path; // Electron only
+            if (fullPath) {
+                onCreateWorkspace(fullPath);
+                return;
+            }
+        }
+        // Browser fallback: open the path input modal
+        handleAddWorkspace();
+    };
+
     return (
-        <div className="workspace-panel">
+        <div
+            className={`workspace-panel${isDragOver ? ' drag-over' : ''}`}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+        >
+            {isDragOver && (
+                <div className="workspace-drop-overlay">
+                    <FolderPlus size={32} />
+                    <span>Drop folder to add workspace</span>
+                </div>
+            )}
             <div className="workspace-panel-header">
                 <h2>Workspaces</h2>
                 <div className="workspace-panel-header-actions">
