@@ -720,6 +720,57 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Read a byte range of a task's persisted history. Returns the slice
+     * `[max(0, endBefore - maxBytes), endBefore)` plus metadata so the frontend
+     * can lazy-load earlier content as the user scrolls up.
+     *
+     * Legacy histories were written as base64. For those, byte-range reads
+     * don't map cleanly to decoded characters, so we report
+     * `isBase64Legacy: true` and the caller should fall back to the full-load
+     * path (via `task:reconnect`/`task:restore`).
+     *
+     * Call with `maxBytes: 0` to fetch just the metadata (file size / format).
+     */
+    readTaskHistoryRange(
+        taskId: string,
+        endBefore: number,
+        maxBytes: number
+    ): { data: string; startOffset: number; totalSize: number; isBase64Legacy: boolean } {
+        const historyPath = this.getTaskHistoryPath(taskId);
+        if (!existsSync(historyPath)) {
+            return { data: '', startOffset: 0, totalSize: 0, isBase64Legacy: false };
+        }
+        const totalSize = statSync(historyPath).size;
+        const fd = openSync(historyPath, 'r');
+        try {
+            // Detect on-disk format from the first 100 bytes — same heuristic used
+            // in `reconnectDisconnectedTask`. base64 files contain neither ANSI
+            // escapes nor whitespace nor brackets.
+            const sampleLen = Math.min(100, totalSize);
+            const sampleBuf = Buffer.alloc(sampleLen);
+            readSync(fd, sampleBuf, 0, sampleLen, 0);
+            const sample = sampleBuf.toString('utf8');
+            const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
+            if (!isRawText) {
+                return { data: '', startOffset: 0, totalSize, isBase64Legacy: true };
+            }
+
+            const safeMax = Math.max(0, Math.min(maxBytes, totalSize));
+            const safeEnd = Math.max(0, Math.min(endBefore, totalSize));
+            const startOffset = Math.max(0, safeEnd - safeMax);
+            const length = safeEnd - startOffset;
+            if (length <= 0) {
+                return { data: '', startOffset, totalSize, isBase64Legacy: false };
+            }
+            const buf = Buffer.alloc(length);
+            readSync(fd, buf, 0, length, startOffset);
+            return { data: buf.toString('utf8'), startOffset, totalSize, isBase64Legacy: false };
+        } finally {
+            try { closeSync(fd); } catch { /* best effort */ }
+        }
+    }
+
+    /**
      * Atomically write history to disk via a per-process temp file + rename.
      * Mirrors the pattern used for tasks.json so a crash mid-write can't leave
      * a truncated history file. Per-process tmp name avoids races between

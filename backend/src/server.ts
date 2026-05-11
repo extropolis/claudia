@@ -2166,6 +2166,34 @@ export async function createApp(basePath?: string) {
         res.json({ status: 'ok' });
     });
 
+    // Byte-range read of a task's history file. Used by the terminal's
+    // scroll-up handler to lazy-load earlier output beyond the initial
+    // 512KB sent with `task:restore`. Returns { data, startOffset, totalSize,
+    // isBase64Legacy }. Pass `maxBytes=0` to fetch only the metadata.
+    app.get('/api/task/:taskId/history', (req, res) => {
+        const { taskId } = req.params;
+        const endBefore = parseInt(req.query.endBefore as string, 10);
+        const maxBytes = parseInt(req.query.maxBytes as string, 10);
+        // 2 MB hard cap so a misbehaving client can't request gigabytes per scroll
+        const MAX_CHUNK = 2 * 1024 * 1024;
+        if (!taskId || !Number.isFinite(endBefore) || !Number.isFinite(maxBytes)) {
+            res.status(400).json({ error: 'taskId, endBefore (int), maxBytes (int) required' });
+            return;
+        }
+        if (endBefore < 0 || maxBytes < 0 || maxBytes > MAX_CHUNK) {
+            res.status(400).json({ error: `maxBytes must be 0..${MAX_CHUNK}, endBefore >= 0` });
+            return;
+        }
+        try {
+            const result = taskSpawner.readTaskHistoryRange(taskId, endBefore, maxBytes);
+            res.json(result);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error('history read failed', { taskId, error: msg });
+            res.status(500).json({ error: msg });
+        }
+    });
+
     // Native folder picker dialog
     app.post('/api/browse-folder', async (_req, res) => {
         try {

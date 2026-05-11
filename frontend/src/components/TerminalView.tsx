@@ -8,6 +8,7 @@ import { TaskInputBar } from './TaskInputBar';
 import { TaskTokenStats } from './TaskTokenStats';
 import { useEffectiveTheme } from '../hooks/useTheme';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
+import { getApiBaseUrl } from '../config/api-config';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
 
@@ -56,6 +57,17 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     const [isLoadingHistory, setIsLoadingHistory] = useState(true);
     const [showSpinner, setShowSpinner] = useState(false);
     const historyLoadedRef = useRef(false);
+
+    // Chunked history scrollback: we keep the loaded portion of the on-disk
+    // history file as a string and lazy-load earlier chunks when the user
+    // scrolls within ~100px of the top. `topOffsetRef` is the byte offset
+    // where the currently-loaded content starts in the full history file.
+    // When `topOffsetRef.current === 0` we've loaded everything.
+    const loadedHistoryRef = useRef<string>('');
+    const topOffsetRef = useRef<number>(0);
+    const totalSizeRef = useRef<number>(0);
+    const isLoadingChunkRef = useRef<boolean>(false);
+    const historyChunkUnavailableRef = useRef<boolean>(false); // true for legacy base64 histories
 
     // Show spinner after a short delay to avoid flash for fast loads
     useEffect(() => {
@@ -305,10 +317,74 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // xterm native auto-scroll only works when viewport is exactly at bottom;
         // fitAddon.fit() can shift scrollTop slightly and break it.
         const viewport = terminalRef.current.querySelector('.xterm-viewport') as HTMLElement | null;
+
+        // Lazy-load earlier history when the user scrolls within 200px of the top.
+        // Re-entrancy guard: `isLoadingChunkRef` plus a no-op when we've already
+        // loaded everything (topOffsetRef === 0) or the on-disk file is legacy base64.
+        const loadEarlierChunkIfNeeded = async () => {
+            if (programmaticScrollRef.current) return;
+            if (isLoadingChunkRef.current) return;
+            if (historyChunkUnavailableRef.current) return;
+            if (topOffsetRef.current <= 0) return;
+            if (!viewport || viewport.scrollTop > 200) return;
+
+            const requestEndBefore = topOffsetRef.current;
+            const CHUNK_SIZE = 256 * 1024;
+            isLoadingChunkRef.current = true;
+            try {
+                const r = await fetch(
+                    `${getApiBaseUrl()}/api/task/${task.id}/history?endBefore=${requestEndBefore}&maxBytes=${CHUNK_SIZE}`
+                );
+                if (!r.ok) {
+                    console.warn('[TerminalView] history chunk fetch failed', r.status);
+                    return;
+                }
+                const { data, startOffset, totalSize, isBase64Legacy } = await r.json() as {
+                    data: string; startOffset: number; totalSize: number; isBase64Legacy: boolean;
+                };
+                if (isBase64Legacy) {
+                    historyChunkUnavailableRef.current = true;
+                    return;
+                }
+                if (!data) {
+                    // Reached the beginning of the file
+                    topOffsetRef.current = 0;
+                    return;
+                }
+                // Prepend the new chunk to the loaded buffer, then reset + rewrite.
+                // We must reset because xterm.write only appends — there's no insert API.
+                const cleanedChunk = stripScreenClears(data);
+                loadedHistoryRef.current = cleanedChunk + loadedHistoryRef.current;
+                topOffsetRef.current = startOffset;
+                totalSizeRef.current = totalSize;
+
+                // Capture viewport position relative to the bottom so we can restore
+                // it after rewrite (user expects to keep looking at the same content).
+                const oldTotalLines = term.buffer.active.length;
+                const oldViewportY = term.buffer.active.viewportY;
+                const linesFromBottom = oldTotalLines - oldViewportY;
+
+                programmaticScrollRef.current = true;
+                term.reset();
+                term.write(loadedHistoryRef.current, () => {
+                    const newTotal = term.buffer.active.length;
+                    const targetViewportY = Math.max(0, newTotal - linesFromBottom);
+                    term.scrollToLine(targetViewportY);
+                    setTimeout(() => { programmaticScrollRef.current = false; }, 50);
+                });
+            } catch (err) {
+                console.warn('[TerminalView] history chunk fetch error', err);
+            } finally {
+                isLoadingChunkRef.current = false;
+            }
+        };
+
         const handleViewportScroll = () => {
             if (!viewport) return;
             const atBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 50;
             userHasScrolledRef.current = !atBottom;
+            // Fire-and-forget; loadEarlierChunkIfNeeded guards re-entrancy itself.
+            loadEarlierChunkIfNeeded();
         };
         if (viewport) {
             viewport.addEventListener('scroll', handleViewportScroll, { passive: true });
@@ -430,6 +506,20 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     console.log(`[TerminalView] Writing output, wasAtBottom: ${wasAtBottom}, userHasScrolled: ${userHasScrolledRef.current}, viewport: ${viewport}`);
 
                     term.write(message.payload.data);
+                    // Keep our loaded-history snapshot current so a later
+                    // scroll-up rewrite (loadEarlierChunkIfNeeded) doesn't lose
+                    // live output that arrived after the initial restore.
+                    if (loadedHistoryRef.current !== '') {
+                        loadedHistoryRef.current += message.payload.data;
+                    }
+                    if (totalSizeRef.current > 0) {
+                        // Match the byte count the backend file is growing by so
+                        // future chunk requests use the right end-of-file anchor.
+                        const bytes = typeof message.payload.data === 'string'
+                            ? new TextEncoder().encode(message.payload.data).length
+                            : 0;
+                        totalSizeRef.current += bytes;
+                    }
 
                     // Only auto-scroll if user was at bottom
                     if (wasAtBottom) {
@@ -470,6 +560,24 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                                 programmaticScrollRef.current = false;
                             }, 50);
                         });
+                        // Seed the chunked-scrollback buffer with the cleaned tail we
+                        // just wrote. We can't fully reconstruct the original byte
+                        // offset (cleaned !== raw history due to stripScreenClears),
+                        // so we ask the backend for metadata and assume the
+                        // restored tail starts at `totalSize - rawHistory.length`.
+                        loadedHistoryRef.current = cleaned;
+                        fetch(`${getApiBaseUrl()}/api/task/${task.id}/history?endBefore=0&maxBytes=0`)
+                            .then(r => r.json())
+                            .then((meta: { totalSize: number; isBase64Legacy: boolean }) => {
+                                totalSizeRef.current = meta.totalSize;
+                                topOffsetRef.current = Math.max(0, meta.totalSize - history.length);
+                                historyChunkUnavailableRef.current = !!meta.isBase64Legacy;
+                                console.log(`[TerminalView] history metadata: total=${meta.totalSize} topOffset=${topOffsetRef.current} legacy=${meta.isBase64Legacy}`);
+                            })
+                            .catch(err => {
+                                console.warn('[TerminalView] failed to fetch history metadata', err);
+                                historyChunkUnavailableRef.current = true;
+                            });
                         console.log(`[TerminalView] History written for ${task.id} (original: ${history.length}, cleaned: ${cleaned.length})`);
                     } else {
                         term.reset();
