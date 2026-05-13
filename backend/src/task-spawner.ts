@@ -2,7 +2,7 @@ import { spawn, IPty } from 'node-pty';
 import { EventEmitter } from 'events';
 import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, TaskTokenUsage } from '@claudia/shared';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, resolve } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
@@ -334,18 +334,18 @@ export class TaskSpawner extends EventEmitter {
             ? envReapInterval
             : 10 * 60 * 1000;
 
-        // History file cap config. Default: rotate at 2MB, keep last 512KB tail.
-        // The 512KB keep-tail matches MAX_HISTORY_TO_SEND (what clients see)
-        // and MAX_RECONNECT_HISTORY (what we load on reconnect), so no memory
-        // is wasted storing history that will never be displayed.
+        // History file cap config. Default: rotate at 10MB, keep last 5MB tail.
+        // Files on disk are kept large to preserve full scrollback history.
+        // Memory loading on reconnect is capped separately (MAX_RECONNECT_HISTORY
+        // = 512KB) so large files don't cause OOM.
         const envMaxBytes = parseInt(process.env.HISTORY_FILE_MAX_BYTES || '', 10);
         this.historyFileMaxBytes = !isNaN(envMaxBytes) && envMaxBytes >= 0
             ? envMaxBytes
-            : 2 * 1024 * 1024;
+            : 10 * 1024 * 1024;
         const envKeepBytes = parseInt(process.env.HISTORY_FILE_KEEP_BYTES || '', 10);
         this.historyFileKeepBytes = !isNaN(envKeepBytes) && envKeepBytes > 0
             ? envKeepBytes
-            : 512 * 1024;
+            : 5 * 1024 * 1024;
 
         // Initialize backend based on config
         this.backendType = configStore?.getBackend() || 'claude-code';
@@ -625,9 +625,17 @@ export class TaskSpawner extends EventEmitter {
             enabledMcpjsonServers: serverNames
         };
 
+        // The Claudia project root — skip syncing to our own directory to avoid
+        // triggering tsx watch restarts from file writes in the project tree.
+        const selfRoot = resolve(join(__dirname, '..', '..'));
+
         for (const workspaceId of workspaceIds) {
             if (!existsSync(workspaceId)) {
                 logger.warn('Workspace does not exist, skipping MCP sync', { workspaceId });
+                continue;
+            }
+            if (resolve(workspaceId) === selfRoot) {
+                logger.info('Skipping MCP sync for Claudia\'s own workspace (prevents tsx watch restart)', { workspaceId });
                 continue;
             }
 
@@ -3061,7 +3069,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     private getCombinedHistory(task: InternalTask): string | null {
         // Limit history sent to frontend. Smaller = faster xterm rendering.
         // 512KB is ~128 full terminal screens, well beyond what's visually useful.
-        const MAX_HISTORY_TO_SEND = 512 * 1024; // 512KB max
+        const MAX_HISTORY_TO_SEND = 2 * 1024 * 1024; // 2MB max
 
         // Handle lazy loading from file
         if (!task.previousHistory && !task.lazyHistoryBase64) {

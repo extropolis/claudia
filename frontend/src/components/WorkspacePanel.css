@@ -8,6 +8,28 @@
     /* Never exceed viewport width — ensures header spans exactly the screen width */
     max-width: 100vw;
     overflow-x: hidden;
+    position: relative;
+}
+
+.workspace-panel.drag-over {
+    outline: 2px dashed var(--accent-secondary, #00d4ff);
+    outline-offset: -4px;
+}
+
+.workspace-drop-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: rgba(0, 212, 255, 0.08);
+    color: var(--accent-secondary, #00d4ff);
+    font-size: 14px;
+    font-weight: 500;
+    pointer-events: none;
 }
 
 .workspace-panel-header {

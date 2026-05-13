@@ -2200,17 +2200,34 @@ export async function createApp(basePath?: string) {
             const platform = process.platform;
             let cmd: string;
             let args: string[];
+            const lastBrowsed = workspaceStore.getLastBrowsedPath();
 
             if (platform === 'darwin') {
+                const scriptParts = ['POSIX path of (choose folder with prompt "Select a workspace folder"'];
+                if (lastBrowsed) {
+                    const safe = lastBrowsed.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                    scriptParts.push(` default location POSIX file "${safe}"`);
+                }
+                scriptParts.push(')');
                 cmd = 'osascript';
-                args = ['-e', 'POSIX path of (choose folder with prompt "Select reference folder")'];
+                args = ['-e', scriptParts.join('')];
             } else if (platform === 'win32') {
+                const initialDir = lastBrowsed
+                    ? `$f.SelectedPath = [System.IO.Path]::GetFullPath("${lastBrowsed.replace(/"/g, '')}"); `
+                    : '';
                 cmd = 'powershell';
-                args = ['-Command', `Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Select reference folder'; if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }`];
+                args = ['-STA', '-NoProfile', '-Command', `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Application]::EnableVisualStyles(); $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Select a workspace folder'; $f.ShowNewFolderButton = $true; ${initialDir}if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }`];
             } else {
-                // Linux - try zenity, then kdialog
-                cmd = 'zenity';
-                args = ['--file-selection', '--directory', '--title=Select reference folder'];
+                // Linux - try zenity first, fall back to kdialog
+                try {
+                    require('child_process').execFileSync('which', ['zenity'], { stdio: 'ignore' });
+                    cmd = 'zenity';
+                    args = ['--file-selection', '--directory', '--title=Select a workspace folder'];
+                    if (lastBrowsed) args.push(`--filename=${lastBrowsed}/`);
+                } catch {
+                    cmd = 'kdialog';
+                    args = ['--getexistingdirectory', lastBrowsed || process.env['HOME'] || '/', '--title', 'Select a workspace folder'];
+                }
             }
 
             const child = spawn(cmd, args);
@@ -2221,6 +2238,7 @@ export async function createApp(basePath?: string) {
             child.on('close', (code: number | null) => {
                 const path = stdout.trim();
                 if (code === 0 && path) {
+                    workspaceStore.setLastBrowsedPath(path);
                     res.json({ success: true, path });
                 } else {
                     // User cancelled or error
