@@ -422,7 +422,7 @@ function App() {
                 token = 'local-' + Math.random().toString(36).substring(2, 15);
             }
 
-            const voiceUrl = `${getApiBaseUrl()}/voice?token=${token}`;
+            const voiceUrl = `${getApiBaseUrl()}/voice?token=${token}&dgKey=${encodeURIComponent(useTaskStore.getState().deepgramApiKey || '')}`;
             window.open(voiceUrl, '_blank');
         } catch (error) {
             console.error('Failed to open voice agent:', error);

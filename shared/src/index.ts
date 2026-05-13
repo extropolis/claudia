@@ -198,6 +198,9 @@ export type WSMessageType =
     // Usage/Cost tracking
     | 'usage:summary'
     | 'usage:recorded'
+    // Autonomous mode
+    | 'voice:autonomous_status'
+    | 'voice:autonomous_update'
     // Server status
     | 'server:reloading'
     | 'server:reconnecting'
@@ -248,4 +251,24 @@ export interface WSErrorPayload {
     message: string;
     code?: string;
     originalType?: string;
+}
+
+/**
+ * Autonomous mode status payload (sent via voice:autonomous_status WS message)
+ */
+export interface AutonomousStatusPayload {
+    state: string;
+    goalDescription: string;
+    currentPhase: string;
+    totalSteps: number;
+    completedSteps: number;
+    failedSteps: number;
+    currentStepDescription: string;
+    activeTasks: Array<{ taskId: string; description: string; state: string }>;
+    steps: Array<{ id: string; description: string; status: string; phase: string }>;
+    iteration: number;
+    maxIterations: number;
+    recentTestResults: Array<{ type: string; passed: boolean; details: string }>;
+    startedAt: string;
+    elapsedMs: number;
 }

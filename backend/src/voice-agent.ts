@@ -1,18 +1,21 @@
 /**
- * VoiceSupervisor - Voice-optimized AI supervisor for mobile hands-free control
+ * VoiceAgent - Voice-optimized AI agent for mobile hands-free control
  *
- * This supervisor is optimized for voice interaction:
+ * Features:
  * - Responds directly to simple queries without creating tasks
  * - Uses Claudia backend tools to manage tasks (create, stop, list, etc.)
  * - Ultra-short responses (1-2 sentences, < 20 words)
- * - No markdown formatting
- * - Conversational tone
+ * - No markdown formatting, conversational tone
  * - STREAMS responses for lower latency
+ * - Proactive task updates: periodically summarizes what running tasks are doing
  */
 
 import Anthropic from '@anthropic-ai/sdk';
 import { SupervisorChat } from './supervisor-chat.js';
 import { TaskSpawner } from './task-spawner.js';
+import { WorkspaceStore } from './workspace-store.js';
+import { ConfigStore } from './config-store.js';
+import { AutonomousController } from './autonomous-controller.js';
 import { EventEmitter } from 'events';
 import type { Task, ChatMessage } from '@claudia/shared';
 
@@ -105,35 +108,110 @@ const VOICE_TOOLS: Anthropic.Tool[] = [
             },
             required: ['taskId']
         }
+    },
+    // Autonomous mode tools
+    {
+        name: 'start_autonomous',
+        description: 'Start autonomous development mode. The system will plan, build, test, and iterate on a project by itself. Ask the user for a workspace path before calling this.',
+        input_schema: {
+            type: 'object' as const,
+            properties: {
+                goal: { type: 'string', description: 'High-level goal (e.g. "Build a todo app with React and Tailwind")' },
+                workspacePath: { type: 'string', description: 'Absolute path for the project workspace (required — ask the user where to create it)' },
+                maxIterations: { type: 'number', description: 'Optional iteration budget (default 50)' }
+            },
+            required: ['goal', 'workspacePath']
+        }
+    },
+    {
+        name: 'stop_autonomous',
+        description: 'Stop the current autonomous development session. All running tasks will be stopped.',
+        input_schema: {
+            type: 'object' as const,
+            properties: {},
+            required: []
+        }
+    },
+    {
+        name: 'pause_autonomous',
+        description: 'Pause or resume the autonomous session. When paused, no new tasks are spawned but existing ones continue.',
+        input_schema: {
+            type: 'object' as const,
+            properties: {},
+            required: []
+        }
+    },
+    {
+        name: 'get_autonomous_status',
+        description: 'Get the current status of the autonomous development session including plan progress, active tasks, and test results.',
+        input_schema: {
+            type: 'object' as const,
+            properties: {},
+            required: []
+        }
+    },
+    {
+        name: 'adjust_autonomous_goal',
+        description: 'Adjust the goal of the current autonomous session mid-flight. The system will revise its plan accordingly.',
+        input_schema: {
+            type: 'object' as const,
+            properties: {
+                adjustment: { type: 'string', description: 'What to change (e.g. "Also add dark mode support")' }
+            },
+            required: ['adjustment']
+        }
     }
 ];
 
-export class VoiceSupervisor extends EventEmitter {
+export class VoiceAgent extends EventEmitter {
     private supervisorChat: SupervisorChat;
     private taskSpawner: TaskSpawner;
+    private workspaceStore: WorkspaceStore;
     private anthropic: Anthropic | null = null;
     private customSystemPrompt: string;
+    private autonomousController: AutonomousController;
+
+    // Proactive update state
+    private proactiveInterval: NodeJS.Timeout | null = null;
+    private proactiveIntervalMs: number = 60000; // 60 seconds
+    private lastTaskOutputSnapshots: Map<string, string> = new Map(); // taskId -> last seen output
+    private proactiveEnabled: boolean = true;
+    private activeVoiceWorkspaces: Set<string> = new Set(); // workspaces with voice clients
 
     constructor(
         supervisorChat: SupervisorChat,
-        taskSpawner: TaskSpawner
+        taskSpawner: TaskSpawner,
+        workspaceStore: WorkspaceStore,
+        configStore: ConfigStore
     ) {
         super();
         this.supervisorChat = supervisorChat;
         this.taskSpawner = taskSpawner;
+        this.workspaceStore = workspaceStore;
 
         // Initialize Anthropic SDK for streaming (optional - voice features disabled without API key)
         const apiKey = process.env.ANTHROPIC_API_KEY;
         if (!apiKey) {
-            console.warn('[VoiceSupervisor] ANTHROPIC_API_KEY not set - voice features will be unavailable');
+            console.warn('[VoiceAgent] ANTHROPIC_API_KEY not set - voice features will be unavailable');
         } else {
             this.anthropic = new Anthropic({ apiKey });
         }
+
+        // Initialize autonomous controller
+        this.autonomousController = new AutonomousController(taskSpawner, workspaceStore, configStore);
+        this.autonomousController.on('autonomous:announce', (msg: string) => {
+            this.emit('voice:autonomous_update', { text: msg });
+        });
+        this.autonomousController.on('autonomous:stateChanged', (status: any) => {
+            this.emit('voice:autonomous_status', status);
+        });
 
         // Default system prompt
         this.customSystemPrompt = `You are a voice assistant for a coding environment called Claudia. Keep responses ULTRA SHORT - 1-2 sentences max, under 20 words if possible. Be conversational, natural, and friendly. No markdown, no bullet points, no formatting. Just speak naturally.
 
 You have tools to manage coding tasks. Use them when the user asks to create tasks, check status, stop tasks, send input, or interact with running tasks. After using tools, summarize the result briefly in a conversational way.
+
+You can also start AUTONOMOUS MODE — where you plan, build, test, and iterate on a project by yourself. When the user asks you to "build something autonomously" or "go autonomous", use start_autonomous. ALWAYS ask the user where they want the project created before starting.
 
 Answer questions directly. If the user wants to create a task or control tasks, use your tools to do it.`;
     }
@@ -151,7 +229,7 @@ Answer questions directly. If the user wants to create a task or control tasks, 
             onError?: (error: Error) => void;
         }
     ): Promise<void> {
-        console.log('[VoiceSupervisor] Processing (streaming):', transcript);
+        console.log('[VoiceAgent] Processing (streaming):', transcript);
 
         // Check for interrupt commands first
         if (this.isInterruptCommand(transcript)) {
@@ -237,7 +315,7 @@ ${taskContext ? `\n## Current Task Status\n${taskContext}\n` : ''}`;
                 }
 
                 // Execute tool calls and build tool results
-                console.log(`[VoiceSupervisor] Executing ${toolUseBlocks.length} tool call(s) (iteration ${iteration + 1})`);
+                console.log(`[VoiceAgent] Executing ${toolUseBlocks.length} tool call(s) (iteration ${iteration + 1})`);
 
                 // Build assistant message content from the final message
                 const assistantContent: Anthropic.ContentBlockParam[] = [];
@@ -260,7 +338,7 @@ ${taskContext ? `\n## Current Task Status\n${taskContext}\n` : ''}`;
                 const toolResults: Anthropic.ToolResultBlockParam[] = [];
                 for (const tool of toolUseBlocks) {
                     const result = await this.executeTool(tool.name, tool.input, workspaceId);
-                    console.log(`[VoiceSupervisor] Tool ${tool.name} result:`, result.substring(0, 200));
+                    console.log(`[VoiceAgent] Tool ${tool.name} result:`, result.substring(0, 200));
                     toolResults.push({
                         type: 'tool_result',
                         tool_use_id: tool.id,
@@ -281,7 +359,7 @@ ${taskContext ? `\n## Current Task Status\n${taskContext}\n` : ''}`;
             }
 
         } catch (error) {
-            console.error('[VoiceSupervisor] Streaming error:', error);
+            console.error('[VoiceAgent] Streaming error:', error);
             if (callbacks?.onError) {
                 callbacks.onError(error as Error);
             }
@@ -319,6 +397,16 @@ ${taskContext ? `\n## Current Task Status\n${taskContext}\n` : ''}`;
                     return await this.toolSendInput(input.taskId as string, input.input as string);
                 case 'continue_task':
                     return await this.toolContinueTask(input.taskId as string, input.prompt as string);
+                case 'start_autonomous':
+                    return await this.toolStartAutonomous(input.goal as string, input.workspacePath as string, input.maxIterations as number | undefined);
+                case 'stop_autonomous':
+                    return await this.toolStopAutonomous();
+                case 'pause_autonomous':
+                    return await this.toolPauseAutonomous();
+                case 'get_autonomous_status':
+                    return await this.toolGetAutonomousStatus();
+                case 'adjust_autonomous_goal':
+                    return await this.toolAdjustAutonomousGoal(input.adjustment as string);
                 default:
                     return JSON.stringify({ error: `Unknown tool: ${name}` });
             }
@@ -355,7 +443,7 @@ ${taskContext ? `\n## Current Task Status\n${taskContext}\n` : ''}`;
         const result = await this.sendWSMessage('task:create', {
             prompt,
             workspaceId,
-            source: 'mcp',
+            source: 'voice',
         });
         const task = (result as any)?.task;
         if (task && displayName) {
@@ -470,6 +558,78 @@ ${taskContext ? `\n## Current Task Status\n${taskContext}\n` : ''}`;
         return JSON.stringify({ success: true, message: `Follow-up prompt sent to task '${taskId}'.` });
     }
 
+    // ===== AUTONOMOUS MODE TOOLS =====
+
+    private async toolStartAutonomous(goal: string, workspacePath: string, maxIterations?: number): Promise<string> {
+        try {
+            const sessionId = await this.autonomousController.start(goal, workspacePath, maxIterations);
+            return JSON.stringify({
+                success: true,
+                sessionId,
+                message: `Autonomous mode started. Goal: "${goal}". Planning in progress...`
+            });
+        } catch (err) {
+            return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+        }
+    }
+
+    async startAutonomousFromUI(goal: string, workspaceId?: string): Promise<void> {
+        const workspacePath = workspaceId || this.workspaceStore.getWorkspaces()[0]?.id;
+        if (!workspacePath) {
+            this.emit('voice:response', { text: 'No workspace available. Please select a workspace first.' });
+            return;
+        }
+        try {
+            await this.autonomousController.start(goal, workspacePath);
+        } catch (err) {
+            this.emit('voice:response', { text: `Failed to start autonomous mode: ${err instanceof Error ? err.message : String(err)}` });
+        }
+    }
+
+    private async toolStopAutonomous(): Promise<string> {
+        try {
+            await this.autonomousController.stop();
+            return JSON.stringify({ success: true, message: 'Autonomous mode stopped.' });
+        } catch (err) {
+            return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+        }
+    }
+
+    private async toolPauseAutonomous(): Promise<string> {
+        try {
+            if (this.autonomousController.isActive()) {
+                const status = this.autonomousController.getStatus();
+                if (status?.state === 'paused') {
+                    await this.autonomousController.resume();
+                    return JSON.stringify({ success: true, message: 'Autonomous mode resumed.' });
+                } else {
+                    await this.autonomousController.pause();
+                    return JSON.stringify({ success: true, message: 'Autonomous mode paused.' });
+                }
+            }
+            return JSON.stringify({ error: 'No active autonomous session.' });
+        } catch (err) {
+            return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+        }
+    }
+
+    private async toolGetAutonomousStatus(): Promise<string> {
+        const status = this.autonomousController.getStatus();
+        if (!status) {
+            return JSON.stringify({ message: 'No autonomous session active.' });
+        }
+        return JSON.stringify(status);
+    }
+
+    private async toolAdjustAutonomousGoal(adjustment: string): Promise<string> {
+        try {
+            await this.autonomousController.adjustGoal(adjustment);
+            return JSON.stringify({ success: true, message: `Goal adjusted: "${adjustment}". Plan is being revised.` });
+        } catch (err) {
+            return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+        }
+    }
+
     /**
      * Send a WebSocket message to the backend and wait for a response
      */
@@ -492,7 +652,7 @@ ${taskContext ? `\n## Current Task Status\n${taskContext}\n` : ''}`;
                 try {
                     const msg = JSON.parse(data.toString());
 
-                    if (type === 'task:create' && msg.type === 'task:created' && msg.payload?.source === 'mcp') {
+                    if (type === 'task:create' && msg.type === 'task:created' && msg.payload?.source === 'voice') {
                         clearTimeout(timeout);
                         ws.close();
                         resolve(msg.payload);
@@ -555,7 +715,7 @@ ${taskContext ? `\n## Current Task Status\n${taskContext}\n` : ''}`;
         workspaceId?: string,
         userId?: string
     ): Promise<VoiceResponse> {
-        console.log('[VoiceSupervisor] Processing:', transcript);
+        console.log('[VoiceAgent] Processing:', transcript);
 
         // Check for interrupt commands first
         if (this.isInterruptCommand(transcript)) {
@@ -736,7 +896,7 @@ ${taskContext ? `\n## Current Task Status\n${taskContext}\n` : ''}`;
      */
     setSystemPrompt(prompt: string): void {
         this.customSystemPrompt = prompt;
-        console.log('[VoiceSupervisor] System prompt updated');
+        console.log('[VoiceAgent] System prompt updated');
     }
 
     /**
@@ -744,6 +904,156 @@ ${taskContext ? `\n## Current Task Status\n${taskContext}\n` : ''}`;
      */
     getAvailableTools(): Array<{ name: string; description: string }> {
         return VOICE_TOOLS.map(t => ({ name: t.name, description: t.description || '' }));
+    }
+
+    // ===== PROACTIVE TASK UPDATES =====
+
+    /**
+     * Register a workspace as having an active voice client.
+     * Starts proactive updates if tasks are running.
+     */
+    addVoiceWorkspace(workspaceId: string): void {
+        this.activeVoiceWorkspaces.add(workspaceId || '__all__');
+        console.log('[VoiceAgent] Voice workspace added:', workspaceId || '__all__');
+        this.maybeStartProactiveUpdates();
+    }
+
+    /**
+     * Remove a workspace from active voice tracking.
+     * Stops updates if no voice clients remain.
+     */
+    removeVoiceWorkspace(workspaceId: string): void {
+        this.activeVoiceWorkspaces.delete(workspaceId || '__all__');
+        console.log('[VoiceAgent] Voice workspace removed:', workspaceId || '__all__');
+        if (this.activeVoiceWorkspaces.size === 0) {
+            this.stopProactiveUpdates();
+        }
+    }
+
+    /**
+     * Notify the voice agent that a task state changed.
+     * Used to start/stop proactive update polling.
+     */
+    onTaskStateChanged(task: Task): void {
+        if (task.state === 'busy') {
+            this.maybeStartProactiveUpdates();
+        } else {
+            const allTasks = this.taskSpawner.getAllTasks();
+            const hasBusy = allTasks.some(t => t.state === 'busy');
+            if (!hasBusy) {
+                this.stopProactiveUpdates();
+                this.lastTaskOutputSnapshots.clear();
+            }
+        }
+    }
+
+    /**
+     * Enable or disable proactive updates
+     */
+    setProactiveEnabled(enabled: boolean): void {
+        this.proactiveEnabled = enabled;
+        console.log('[VoiceAgent] Proactive updates:', enabled ? 'enabled' : 'disabled');
+        if (!enabled) {
+            this.stopProactiveUpdates();
+        } else {
+            this.maybeStartProactiveUpdates();
+        }
+    }
+
+    private maybeStartProactiveUpdates(): void {
+        if (this.proactiveInterval) return;
+        if (!this.proactiveEnabled) return;
+        if (this.activeVoiceWorkspaces.size === 0) return;
+        if (!this.anthropic) return;
+
+        const allTasks = this.taskSpawner.getAllTasks();
+        const hasBusy = allTasks.some(t => t.state === 'busy');
+        if (!hasBusy) return;
+
+        console.log('[VoiceAgent] Starting proactive update interval (60s)');
+        this.proactiveInterval = setInterval(() => this.generateProactiveUpdate(), this.proactiveIntervalMs);
+    }
+
+    private stopProactiveUpdates(): void {
+        if (this.proactiveInterval) {
+            clearInterval(this.proactiveInterval);
+            this.proactiveInterval = null;
+            console.log('[VoiceAgent] Stopped proactive updates');
+        }
+    }
+
+    private async generateProactiveUpdate(): Promise<void> {
+        if (!this.anthropic) return;
+        if (this.autonomousController.isActive()) return;
+
+        const allTasks = this.taskSpawner.getAllTasks();
+        const busyTasks = allTasks.filter(t => t.state === 'busy');
+
+        if (busyTasks.length === 0) {
+            this.stopProactiveUpdates();
+            return;
+        }
+
+        // Fetch recent output for each busy task and check for changes
+        const taskSummaries: Array<{ id: string; name: string; output: string }> = [];
+
+        for (const task of busyTasks) {
+            try {
+                const response = await fetch(`${BACKEND_URL}/api/tasks/${task.id}/output?maxBytes=2048`);
+                if (!response.ok) continue;
+                const data = await response.json();
+                const output = (data.output || '') as string;
+
+                const lastSnapshot = this.lastTaskOutputSnapshots.get(task.id) || '';
+                if (output === lastSnapshot) continue;
+
+                // Get only the new portion of output
+                const newOutput = output.startsWith(lastSnapshot)
+                    ? output.slice(lastSnapshot.length)
+                    : output.slice(-2000);
+
+                this.lastTaskOutputSnapshots.set(task.id, output);
+
+                if (newOutput.trim()) {
+                    taskSummaries.push({
+                        id: task.id,
+                        name: task.displayName || task.prompt?.substring(0, 50) || task.id,
+                        output: newOutput.slice(-2000)
+                    });
+                }
+            } catch (err) {
+                console.error('[VoiceAgent] Error fetching task output for proactive update:', err);
+            }
+        }
+
+        if (taskSummaries.length === 0) return;
+
+        // Generate LLM summary
+        try {
+            const taskDescriptions = taskSummaries.map(t =>
+                `Task "${t.name}" (${t.id}):\n${t.output}`
+            ).join('\n\n---\n\n');
+
+            const response = await this.anthropic.messages.create({
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 150,
+                system: `You generate ultra-brief voice status updates about coding tasks. One or two short sentences max. Be specific about what's happening (e.g. "running tests", "installing packages", "writing a component"). No markdown. Conversational tone. If multiple tasks, briefly mention each.`,
+                messages: [{
+                    role: 'user',
+                    content: `Here is the recent terminal output from ${taskSummaries.length} running task(s). Summarize what they're currently doing in 1-2 sentences for a voice update:\n\n${taskDescriptions}`
+                }]
+            });
+
+            const textBlock = response.content.find(b => b.type === 'text');
+            const summary = textBlock ? this.optimizeForVoice(textBlock.text) : null;
+
+            if (summary) {
+                console.log('[VoiceAgent] Proactive update:', summary);
+                this.emit('voice:proactive_update', { text: summary });
+            }
+        } catch (err) {
+            console.error('[VoiceAgent] Error generating proactive update:', err);
+        }
     }
 }
 

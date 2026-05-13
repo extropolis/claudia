@@ -437,6 +437,9 @@ function WorkspaceSection({
 
     const [showResetConfirm, setShowResetConfirm] = useState(false);
     const [branchName, setBranchName] = useState<string | null>(null);
+    const [hideBranch, setHideBranch] = useState(false);
+    const workspaceNameRef = useRef<HTMLSpanElement>(null);
+    const headerLeftRef = useRef<HTMLDivElement>(null);
 
     // Reset submenu state when parent menu closes, and cleanup timeout on unmount
     useEffect(() => {
@@ -474,6 +477,30 @@ function WorkspaceSection({
         const interval = setInterval(fetchBranch, 30_000);
         return () => clearInterval(interval);
     }, [workspace.id, isConnected]);
+
+    // Hide branch label when workspace title would be truncated
+    useEffect(() => {
+        const nameEl = workspaceNameRef.current;
+        const headerEl = headerLeftRef.current;
+        if (!nameEl || !headerEl) return;
+        const checkOverflow = () => {
+            // If the name text needs more space than available, hide the branch.
+            // Use a buffer (~150px) so the branch doesn't pop back in only to cause truncation again.
+            const nameNeeds = nameEl.scrollWidth;
+            const nameHas = nameEl.clientWidth;
+            if (nameNeeds > nameHas) {
+                // Name is truncated right now — hide branch
+                setHideBranch(true);
+            } else if (nameHas - nameNeeds > 150) {
+                // Name has plenty of spare room — safe to show branch again
+                setHideBranch(false);
+            }
+        };
+        checkOverflow();
+        const observer = new ResizeObserver(checkOverflow);
+        observer.observe(headerEl);
+        return () => observer.disconnect();
+    }, [workspace.displayName, workspace.name, branchName]);
 
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
@@ -723,11 +750,7 @@ function WorkspaceSection({
                     : `\n\n[Attached images:\n${imagePaths}]`;
                 fullMessage = inputValue + imageText;
             }
-            // Estimate terminal size based on window size
-            // Typically ~9px width per char and ~18px height per line for monospace font
-            const cols = Math.floor((window.innerWidth - 400) / 9); // Subtract sidebar/padding
-            const rows = Math.floor((window.innerHeight - 100) / 18); // Subtract header/input
-            onCreateTask(fullMessage.trim(), cols, rows);
+            onCreateTask(fullMessage.trim());
             setInputValue('');
             // Clear images after sending
             images.forEach(img => URL.revokeObjectURL(img.previewUrl));
@@ -844,7 +867,7 @@ function WorkspaceSection({
                 >
                     <GripVertical size={14} />
                 </div>
-                <div className="workspace-header-left" onClick={() => !isEditingWorkspaceName && onToggleExpand()}>
+                <div className="workspace-header-left" ref={headerLeftRef} onClick={() => !isEditingWorkspaceName && onToggleExpand()}>
                     {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                     <Briefcase size={16} className="workspace-icon" />
                     {isEditingWorkspaceName ? (
@@ -861,6 +884,7 @@ function WorkspaceSection({
                         <>
                             <span
                                 className="workspace-name"
+                                ref={workspaceNameRef}
                                 title={workspace.id}
                             >
                                 {workspaceDisplayName}
@@ -876,7 +900,7 @@ function WorkspaceSection({
                             )}
                         </>
                     )}
-                    {branchName && (
+                    {branchName && !hideBranch && (
                         <span
                             className="workspace-branch-label"
                             title={`Click to copy: ${branchName}`}

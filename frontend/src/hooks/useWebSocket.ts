@@ -203,6 +203,15 @@ export function useWebSocket() {
                                 if (config.deepgramApiKey && !useTaskStore.getState().deepgramApiKey) {
                                     useTaskStore.setState({ deepgramApiKey: config.deepgramApiKey });
                                 }
+                                // Sync Deepgram API key TO backend if frontend has one and backend doesn't (or has stale value)
+                                const frontendDgKey = useTaskStore.getState().deepgramApiKey;
+                                if (frontendDgKey && frontendDgKey !== config.deepgramApiKey) {
+                                    fetch(`${API_URL}/api/config`, {
+                                        method: 'PUT',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ deepgramApiKey: frontendDgKey })
+                                    }).catch(err => console.error('[WebSocket] Failed to sync Deepgram key to backend:', err));
+                                }
                             })
                             .catch(err => console.error('Failed to fetch config:', err));
 

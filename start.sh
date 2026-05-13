@@ -30,7 +30,7 @@ fi
 echo $$ > "$LOCK_FILE"
 
 # Clean up lock file on exit
-trap "rm -f '$LOCK_FILE'" EXIT INT TERM
+trap "rm -f $LOCK_FILE" EXIT INT TERM
 
 # Ensure OpenCode CLI is in PATH
 export PATH=$HOME/.opencode/bin:$PATH
@@ -71,6 +71,9 @@ check_deps() {
     fi
 }
 
+# Start from project root
+cd "$(dirname "$0")"
+
 check_deps
 
 # Fix node-pty spawn-helper permissions (npm doesn't preserve execute bits)
@@ -100,9 +103,6 @@ echo "🔮 Starting Claudia..."
 echo "   Backend: http://localhost:$BACKEND_PORT"
 echo "   Frontend: http://localhost:$FRONTEND_PORT"
 echo ""
-
-# Start from project root
-cd "$(dirname "$0")"
 
 # Export CLAUDIA_BACKEND_PORT for the backend to use
 export CLAUDIA_BACKEND_PORT=$BACKEND_PORT

@@ -96,6 +96,7 @@ export interface AppConfig {
     enabledPlugins?: string[];  // List of enabled plugin names (all disabled by default)
     claudiaMcpServerEnabled: boolean;  // [Experimental] Enable Claudia MCP server for Claude Code sessions
     defaultBaseDirectory?: string;  // Default base directory for new workspaces (optional)
+    autoReloadEnabled: boolean;  // Whether dev watcher auto-reloads on file changes
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
@@ -154,7 +155,8 @@ const DEFAULT_CONFIG: AppConfig = {
     hyperspaceProxy: DEFAULT_HYPERSPACE_PROXY,
     enabledPlugins: [],  // All plugins disabled by default
     claudiaMcpServerEnabled: true,  // Enabled by default - provides task orchestration tools to Claude Code sessions
-    defaultBaseDirectory: undefined  // No default base directory set
+    defaultBaseDirectory: undefined,  // No default base directory set
+    autoReloadEnabled: true
 };
 
 export class ConfigStore {
@@ -197,7 +199,8 @@ export class ConfigStore {
             aiCoreCredentials: loaded.aiCoreCredentials,
             enabledPlugins: loaded.enabledPlugins ?? [],
             claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? false,
-            defaultBaseDirectory: loaded.defaultBaseDirectory
+            defaultBaseDirectory: loaded.defaultBaseDirectory,
+            autoReloadEnabled: loaded.autoReloadEnabled ?? true
         };
     }
 
@@ -292,6 +295,9 @@ export class ConfigStore {
         if (updates.defaultBaseDirectory !== undefined) {
             this.config.defaultBaseDirectory = updates.defaultBaseDirectory;
         }
+        if (updates.autoReloadEnabled !== undefined) {
+            this.config.autoReloadEnabled = updates.autoReloadEnabled;
+        }
         this.saveConfig();
         return this.getConfig();
     }
@@ -349,7 +355,8 @@ export class ConfigStore {
             claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
             hyperspaceProxy: { ...DEFAULT_HYPERSPACE_PROXY },
             claudiaMcpServerEnabled: false,
-            defaultBaseDirectory: undefined
+            defaultBaseDirectory: undefined,
+            autoReloadEnabled: true
         };
         this.saveConfig();
         return this.getConfig();

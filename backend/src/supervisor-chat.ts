@@ -519,7 +519,7 @@ Be witty — dry humor, light sarcasm, maybe a pun. Think "funny coworker" not "
 
     /**
      * Send a message with additional context injected into the system prompt
-     * Used by VoiceSupervisor to provide dynamic task status updates
+     * Used by VoiceAgent to provide dynamic task status updates
      */
     async sendMessageWithContext(
         content: string,

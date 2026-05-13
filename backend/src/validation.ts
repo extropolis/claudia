@@ -82,6 +82,7 @@ export interface ConfigUpdatePayload {
         timeoutMs?: number;
     };
     claudiaMcpServerEnabled?: boolean;
+    autoReloadEnabled?: boolean;
 }
 
 /**
@@ -189,7 +190,8 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
         'skipPermissions',
         'autoFocusOnInput',
         'supervisorEnabled',
-        'claudiaMcpServerEnabled'
+        'claudiaMcpServerEnabled',
+        'autoReloadEnabled'
     ];
 
     for (const field of booleanFields) {

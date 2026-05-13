@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { RecentWorkspace } from '@claudia/shared';
 import './PathInputModal.css';
 
@@ -15,6 +15,17 @@ interface PathInputModalProps {
 
 export function PathInputModal({ onSubmit, onCancel, recentWorkspaces = [], onRemoveRecent, onBrowse, isBrowsing = false, showBrowseButton = true, defaultBaseDirectory }: PathInputModalProps) {
     const [path, setPath] = useState('');
+
+    // Close on Escape key
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                onCancel();
+            }
+        };
+        document.addEventListener('keydown', handleKeyDown);
+        return () => document.removeEventListener('keydown', handleKeyDown);
+    }, [onCancel]);
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();

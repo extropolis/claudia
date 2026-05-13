@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "cross-env NODE_OPTIONS=--max-old-space-size=2048 tsx watch --watch-path=src src/index.ts",
+    "dev": "cross-env NODE_OPTIONS=--max-old-space-size=2048 node dev-watcher.mjs",
     "dev:no-watch": "cross-env NODE_OPTIONS=--max-old-space-size=2048 tsx src/index.ts",
+    "dev:watch-always": "cross-env NODE_OPTIONS=--max-old-space-size=2048 tsx watch --watch-path=src src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "test:cli": "tsx test-cli.ts",

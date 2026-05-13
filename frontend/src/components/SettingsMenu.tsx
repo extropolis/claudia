@@ -106,6 +106,18 @@ export function SettingsMenu({ isOpen, onClose, initialPanel, wsRef }: SettingsM
         }
     }, [isOpen, initialPanel]);
 
+    // Close on Escape key
+    useEffect(() => {
+        if (!isOpen) return;
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                onClose();
+            }
+        };
+        document.addEventListener('keydown', handleKeyDown);
+        return () => document.removeEventListener('keydown', handleKeyDown);
+    }, [isOpen, onClose]);
+
     const [isAddingServer, setIsAddingServer] = useState(false);
     const [newServer, setNewServer] = useState({ name: '', type: 'stdio' as 'stdio' | 'http' | 'streamableHttp', command: '', args: '', url: '', headers: '' });
 
@@ -123,6 +135,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel, wsRef }: SettingsM
     const [supervisorEnabled, setSupervisorEnabled] = useState(false);
     const [supervisorSystemPrompt, setSupervisorSystemPrompt] = useState('');
     const [autoFocusOnInput, setAutoFocusOnInput] = useState(false);
+    const [autoReloadEnabled, setAutoReloadEnabled] = useState(true);
     const [useLearnings, setUseLearnings] = useState(false);
     const [claudiaMcpServerEnabled, setClaudiaMcpServerEnabled] = useState(false);
     const [defaultBaseDirectory, setDefaultBaseDirectory] = useState('');
@@ -321,6 +334,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel, wsRef }: SettingsM
                 setSupervisorEnabled(config.supervisorEnabled || false);
                 setSupervisorSystemPrompt(config.supervisorSystemPrompt || '');
                 setAutoFocusOnInput(config.autoFocusOnInput || false);
+                setAutoReloadEnabled(config.autoReloadEnabled !== false);
                 setApiMode(config.apiMode || 'default');
                 setCustomAnthropicApiKey(config.customAnthropicApiKey || '');
                 setBackend(config.backend || 'claude-code');
@@ -669,6 +683,21 @@ export function SettingsMenu({ isOpen, onClose, initialPanel, wsRef }: SettingsM
             }
         } catch (error) {
             console.error('Failed to save auto focus setting:', error);
+        }
+    };
+
+    const saveAutoReloadEnabled = async (value: boolean) => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ autoReloadEnabled: value })
+            });
+            if (response.ok) {
+                setAutoReloadEnabled(value);
+            }
+        } catch (error) {
+            console.error('Failed to save auto-reload setting:', error);
         }
     };
 
@@ -1434,6 +1463,22 @@ export function SettingsMenu({ isOpen, onClose, initialPanel, wsRef }: SettingsM
                                         type="checkbox"
                                         checked={autoFocusOnInput}
                                         onChange={(e) => saveAutoFocusOnInput(e.target.checked)}
+                                    />
+                                    <span className="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Auto-reload on File Changes</span>
+                                    <span className="permission-description">
+                                        Restart the backend when source files change. Disable while tasks are running.
+                                    </span>
+                                </div>
+                                <label className="toggle-switch">
+                                    <input
+                                        type="checkbox"
+                                        checked={autoReloadEnabled}
+                                        onChange={(e) => saveAutoReloadEnabled(e.target.checked)}
                                     />
                                     <span className="toggle-slider"></span>
                                 </label>

@@ -948,6 +948,7 @@ server.tool(
                 useLearnings: config.useLearnings ?? false,
                 claudeCodeSwitches: config.claudeCodeSwitches || {},
                 defaultBaseDirectory: config.defaultBaseDirectory || null,
+                autoReloadEnabled: config.autoReloadEnabled ?? true,
             };
 
             return { content: [{ type: 'text', text: JSON.stringify(safeConfig, null, 2) }] };
@@ -962,7 +963,7 @@ server.tool(
     'claudia_update_settings',
     'Update Claudia settings. Accepts a partial settings object — only provided fields are updated. Use this to change rules, CLI switches, feature flags, etc. Do NOT use this to manage MCP servers (use the dedicated MCP tools instead).',
     {
-        settings: z.string().describe('JSON string of settings to update. Allowed fields: rules (string), skipPermissions (boolean), supervisorEnabled (boolean), supervisorSystemPrompt (string), autoFocusOnInput (boolean), claudiaMcpServerEnabled (boolean), claudeCodeSwitches (object with: verbose, maxTurns, maxBudgetUsd, permissionMode, allowedTools, disallowedTools, appendSystemPrompt, defaultModel, effortLevel)')
+        settings: z.string().describe('JSON string of settings to update. Allowed fields: rules (string), skipPermissions (boolean), supervisorEnabled (boolean), supervisorSystemPrompt (string), autoFocusOnInput (boolean), claudiaMcpServerEnabled (boolean), autoReloadEnabled (boolean), claudeCodeSwitches (object with: verbose, maxTurns, maxBudgetUsd, permissionMode, allowedTools, disallowedTools, appendSystemPrompt, defaultModel, effortLevel)')
     },
     async ({ settings }) => {
         try {
@@ -977,7 +978,7 @@ server.tool(
             const allowedFields = [
                 'rules', 'skipPermissions', 'supervisorEnabled', 'supervisorSystemPrompt',
                 'autoFocusOnInput', 'claudiaMcpServerEnabled', 'claudeCodeSwitches',
-                'defaultBaseDirectory'
+                'defaultBaseDirectory', 'autoReloadEnabled'
             ];
             const filtered: Record<string, unknown> = {};
             for (const key of allowedFields) {

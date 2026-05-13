@@ -386,6 +386,17 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     }));
                 }
 
+                // Re-send resize after delay — catches cases where Claude Code's
+                // Ink TUI hasn't yet installed its SIGWINCH handler.
+                setTimeout(() => {
+                    if (wsRef.current?.readyState === WebSocket.OPEN) {
+                        wsRef.current.send(JSON.stringify({
+                            type: 'task:resize',
+                            payload: { taskId: task.id, cols: term.cols, rows: term.rows }
+                        }));
+                    }
+                }, 500);
+
                 // NOW request history — terminal is properly sized, so history
                 // will render correctly without reflow.
                 if (wsRef.current?.readyState === WebSocket.OPEN) {

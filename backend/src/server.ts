@@ -26,7 +26,7 @@ import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
 import { getVoiceAgentPageHtml } from './voice-agent-page.js';
-import { VoiceSupervisor } from './voice-supervisor.js';
+import { VoiceAgent } from './voice-agent.js';
 // import { ElevenLabsTTS } from './elevenlabs-tts.js'; // TODO: Implement ElevenLabs TTS
 import { createLogger } from './logger.js';
 import { PluginManager, PluginContext } from './plugin-system/index.js';
@@ -487,8 +487,8 @@ export async function createApp(basePath?: string) {
     const workspaceStore = new WorkspaceStore(basePath);
     // SupervisorChat now handles both auto-analysis (formerly TaskSupervisor) and chat
     const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore);
-    // VoiceSupervisor for hands-free voice control
-    const voiceSupervisor = new VoiceSupervisor(supervisorChat, taskSpawner);
+    // VoiceAgent for hands-free voice control
+    const voiceAgent = new VoiceAgent(supervisorChat, taskSpawner, workspaceStore, configStore);
     // LearningsStore for RAG-based learnings
     const learningsStore = new LearningsStore(basePath, configStore);
 
@@ -791,6 +791,9 @@ export async function createApp(basePath?: string) {
         console.log(`[Server] taskStateChanged event: task=${task.id} state=${task.state}`);
         queueTaskStateChange(task); // Batched - deduplicates rapid state changes
 
+        // Notify voice agent for proactive updates
+        voiceAgent.onTaskStateChanged(task);
+
         // Deliver pending reference notifications when a task becomes idle
         if (task.state === 'idle') {
             const internalTask = taskSpawner.getTask(task.id);
@@ -1051,7 +1054,12 @@ export async function createApp(basePath?: string) {
 
         console.log('[Server] Client connected' + (isMobile ? ' (mobile)' : '') + (isVoice ? ' (voice)' : ''));
         clients.add(ws);
-        if (isVoice) voiceClients.add(ws);
+        if (isVoice) {
+            voiceClients.add(ws);
+            const voiceWorkspaceId = url.searchParams.get('workspaceId') || '';
+            (ws as any).__voiceWorkspaceId = voiceWorkspaceId;
+            voiceAgent.addVoiceWorkspace(voiceWorkspaceId);
+        }
         clientAliveMap.set(ws, true); // Mark as alive on connection
 
         // Handle pong responses to keep connection alive
@@ -2334,13 +2342,25 @@ export async function createApp(basePath?: string) {
                     // ===== Voice Agent =====
 
                     case 'voice:input': {
-                        const { text, workspaceId } = payload as { text?: string; workspaceId?: string };
+                        const { text, workspaceId, autonomous } = payload as { text?: string; workspaceId?: string; autonomous?: boolean };
                         if (!text) {
                             sendWSError(ws, 'voice:input requires text', message.type, 'MISSING_PARAMS');
                             break;
                         }
 
-                        logger.info('[Voice WS] Processing voice input', { text, workspaceId });
+                        logger.info('[Voice WS] Processing voice input', { text, workspaceId, autonomous });
+
+                        // If autonomous flag is set, go directly to autonomous mode
+                        if (autonomous) {
+                            voiceAgent.startAutonomousFromUI(text, workspaceId);
+                            if (ws.readyState === WebSocket.OPEN) {
+                                ws.send(JSON.stringify({
+                                    type: 'voice:response',
+                                    payload: { text: 'Starting autonomous mode...', action: 'autonomous' }
+                                }));
+                            }
+                            break;
+                        }
 
                         // Send processing status
                         ws.send(JSON.stringify({
@@ -2349,7 +2369,7 @@ export async function createApp(basePath?: string) {
                         }));
 
                         // Process via voice supervisor with streaming callbacks
-                        voiceSupervisor.processVoiceMessageStreaming(
+                        voiceAgent.processVoiceMessageStreaming(
                             text,
                             workspaceId,
                             undefined,
@@ -2408,7 +2428,11 @@ export async function createApp(basePath?: string) {
             const reasonStr = reason.toString() || 'no reason';
             console.log(`[Server] Client disconnected - code: ${code}, reason: ${reasonStr}`);
             clients.delete(ws);
-            voiceClients.delete(ws);
+            if (voiceClients.has(ws)) {
+                voiceClients.delete(ws);
+                const wsId = (ws as any).__voiceWorkspaceId || '';
+                voiceAgent.removeVoiceWorkspace(wsId);
+            }
         });
 
         ws.on('error', (error: Error) => {
@@ -2807,7 +2831,7 @@ export async function createApp(basePath?: string) {
             }
 
             // Start processing with callbacks
-            await voiceSupervisor.processVoiceMessageStreaming(
+            await voiceAgent.processVoiceMessageStreaming(
                 transcript,
                 workspaceId,
                 userId,
@@ -2865,7 +2889,7 @@ export async function createApp(basePath?: string) {
 
             logger.info('[Voice API] Processing transcript', { transcript, workspaceId, clientId });
 
-            const response = await voiceSupervisor.processVoiceMessage(
+            const response = await voiceAgent.processVoiceMessage(
                 transcript,
                 workspaceId,
                 userId
@@ -2886,7 +2910,7 @@ export async function createApp(basePath?: string) {
     // Get voice agent system prompt
     app.get('/api/voice-agent/system-prompt', async (req, res) => {
         try {
-            const systemPrompt = voiceSupervisor.getSystemPrompt();
+            const systemPrompt = voiceAgent.getSystemPrompt();
             res.json({ systemPrompt });
         } catch (error) {
             logger.error('[Voice API] Error getting system prompt', { error });
@@ -2903,7 +2927,7 @@ export async function createApp(basePath?: string) {
                 return res.status(400).json({ error: 'Missing or invalid systemPrompt' });
             }
 
-            voiceSupervisor.setSystemPrompt(systemPrompt);
+            voiceAgent.setSystemPrompt(systemPrompt);
             logger.info('[Voice API] System prompt updated');
             res.json({ success: true });
         } catch (error) {
@@ -2915,7 +2939,7 @@ export async function createApp(basePath?: string) {
     // Get available tools for voice agent
     app.get('/api/voice-agent/tools', async (req, res) => {
         try {
-            const tools = voiceSupervisor.getAvailableTools();
+            const tools = voiceAgent.getAvailableTools();
             res.json({ tools });
         } catch (error) {
             logger.error('[Voice API] Error getting tools', { error });
@@ -2951,8 +2975,15 @@ export async function createApp(basePath?: string) {
         const host = req.get('host');
         const wsUrl = `${protocol}://${host}`;
 
-        // Get Deepgram API key from config
-        const deepgramApiKey = configStore.getConfig().deepgramApiKey || '';
+        // Get Deepgram API key from query param, env, or config (in priority order)
+        const dgKeyFromQuery = req.query.dgKey as string | undefined;
+        const deepgramApiKey = dgKeyFromQuery || process.env.DEEPGRAM_API_KEY || configStore.getConfig().deepgramApiKey || '';
+
+        // If we got a key from query param, sync it to config for future use
+        if (dgKeyFromQuery && dgKeyFromQuery !== configStore.getConfig().deepgramApiKey) {
+            configStore.updateConfig({ deepgramApiKey: dgKeyFromQuery });
+            logger.info('[Voice Agent] Synced Deepgram API key from query param to config');
+        }
 
         const html = getVoiceAgentPageHtml(wsUrl, token, deepgramApiKey);
         logger.info('[Voice Agent] Page served', { hasToken: !!token, hasDeepgramKey: !!deepgramApiKey });
@@ -2960,7 +2991,7 @@ export async function createApp(basePath?: string) {
     });
 
     // Send voice announcements via WebSocket
-    voiceSupervisor.on('voice:announce', (announcement) => {
+    voiceAgent.on('voice:announce', (announcement) => {
         logger.info('[Voice Supervisor] Broadcasting announcement', {
             text: announcement.text,
             taskId: announcement.taskId
@@ -2973,6 +3004,19 @@ export async function createApp(basePath?: string) {
                 }));
             }
         });
+    });
+
+    // Send proactive task updates to voice clients
+    voiceAgent.on('voice:proactive_update', (update) => {
+        logger.info('[Voice Agent] Proactive update', { text: update.text });
+        for (const client of voiceClients) {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify({
+                    type: 'voice:proactive_update',
+                    payload: { text: update.text }
+                }));
+            }
+        }
     });
 
     // ===== Mobile Route (legacy redirect) =====
