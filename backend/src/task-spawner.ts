@@ -2,7 +2,7 @@ import { spawn, IPty } from 'node-pty';
 import { EventEmitter } from 'events';
 import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, TaskTokenUsage } from '@claudia/shared';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, resolve } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
@@ -625,9 +625,17 @@ export class TaskSpawner extends EventEmitter {
             enabledMcpjsonServers: serverNames
         };
 
+        // The Claudia project root — skip syncing to our own directory to avoid
+        // triggering tsx watch restarts from file writes in the project tree.
+        const selfRoot = resolve(join(__dirname, '..', '..'));
+
         for (const workspaceId of workspaceIds) {
             if (!existsSync(workspaceId)) {
                 logger.warn('Workspace does not exist, skipping MCP sync', { workspaceId });
+                continue;
+            }
+            if (resolve(workspaceId) === selfRoot) {
+                logger.info('Skipping MCP sync for Claudia\'s own workspace (prevents tsx watch restart)', { workspaceId });
                 continue;
             }
 

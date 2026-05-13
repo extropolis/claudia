@@ -194,7 +194,7 @@ export function ProjectPicker({ onSelect, wsRef, requestRecentWorkspaces, clearR
                     onRemoveRecent={handleRemoveRecent}
                     onBrowse={handleBrowse}
                     isBrowsing={isBrowsing}
-                    showBrowseButton={!!window.electronAPI}
+                    showBrowseButton={true}
                     defaultBaseDirectory={defaultBaseDirectory}
                 />
             )}

@@ -1681,20 +1681,23 @@ export function WorkspacePanel({
     };
 
 
+    // External drag-and-drop (from OS file explorer) to add workspaces.
+    // Only activates when dataTransfer contains files — internal workspace
+    // reordering drags don't have files so they pass through unaffected.
     const [isDragOver, setIsDragOver] = useState(false);
+    const isExternalDrag = (e: React.DragEvent) => e.dataTransfer.types.includes('Files');
     const handleDragOver = (e: React.DragEvent) => {
+        if (!isExternalDrag(e)) return; // let internal drags pass through
         e.preventDefault();
-        e.stopPropagation();
         setIsDragOver(true);
     };
     const handleDragLeave = (e: React.DragEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
+        if (!isExternalDrag(e)) return;
         setIsDragOver(false);
     };
     const handleDrop = (e: React.DragEvent) => {
+        if (!isExternalDrag(e)) return; // let internal drops pass through
         e.preventDefault();
-        e.stopPropagation();
         setIsDragOver(false);
         // Electron gives full paths via file.path
         const files = e.dataTransfer.files;
