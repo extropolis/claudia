@@ -276,6 +276,42 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         let lastSentCols = 0;
         let lastSentRows = 0;
 
+        // Resize output buffer: after sending a resize to the backend, buffer all
+        // incoming PTY output for RESIZE_BUFFER_MS. This gives the PTY time to
+        // process SIGWINCH and start rendering at the new width. Without this,
+        // output rendered at the OLD width arrives at xterm which is already at
+        // the NEW width, causing ANSI cursor positioning to misalign.
+        const RESIZE_BUFFER_MS = 250;
+        let resizeBuffering = false;
+        let resizeBuffer: string[] = [];
+        let resizeBufferTimer: number | undefined;
+
+        const flushResizeBuffer = () => {
+            resizeBuffering = false;
+            if (resizeBuffer.length > 0) {
+                const combined = resizeBuffer.join('');
+                resizeBuffer = [];
+                term.write(combined);
+            }
+        };
+
+        // Guard: suppress task:output writes during task:restore processing.
+        // Between term.reset() and the completion of term.write(history),
+        // any live output written would be interleaved/overwritten by the
+        // history replay, causing garbled text. Buffer output during restore
+        // and flush after the history write completes.
+        let restoreInProgress = false;
+        let restoreOutputBuffer: string[] = [];
+
+        const flushRestoreBuffer = () => {
+            restoreInProgress = false;
+            if (restoreOutputBuffer.length > 0) {
+                const combined = restoreOutputBuffer.join('');
+                restoreOutputBuffer = [];
+                term.write(combined);
+            }
+        };
+
         // Handle resize - sync to backend
         term.onResize(({ cols, rows }) => {
             if (initPhase) return; // Skip during init — we send one resize after fit
@@ -283,6 +319,13 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             if (Math.abs(cols - lastSentCols) <= 2 && rows === lastSentRows) return;
             lastSentCols = cols;
             lastSentRows = rows;
+
+            // Start buffering output during the resize transition
+            if (resizeBufferTimer) window.clearTimeout(resizeBufferTimer);
+            resizeBuffering = true;
+            resizeBuffer = [];
+            resizeBufferTimer = window.setTimeout(flushResizeBuffer, RESIZE_BUFFER_MS);
+
             if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({
                     type: 'task:resize',
@@ -376,9 +419,13 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 const oldViewportY = term.buffer.active.viewportY;
                 const linesFromBottom = oldTotalLines - oldViewportY;
 
+                // Block live output during the reset+rewrite to prevent interleaving
+                restoreInProgress = true;
+                restoreOutputBuffer = [];
                 programmaticScrollRef.current = true;
                 term.reset();
                 term.write(loadedHistoryRef.current, () => {
+                    flushRestoreBuffer();
                     const newTotal = term.buffer.active.length;
                     const targetViewportY = Math.max(0, newTotal - linesFromBottom);
                     term.scrollToLine(targetViewportY);
@@ -497,6 +544,23 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             try {
                 const message = JSON.parse(event.data);
                 if (message.type === 'task:output' && message.payload.taskId === task.id) {
+                    const data = message.payload.data;
+
+                    // Buffer output during resize transitions and history restores
+                    // to prevent garbled text from interleaving.
+                    if (resizeBuffering || restoreInProgress) {
+                        if (resizeBuffering) resizeBuffer.push(data);
+                        if (restoreInProgress) restoreOutputBuffer.push(data);
+                        // Still track history so scroll-up loading stays current
+                        if (loadedHistoryRef.current !== '') {
+                            loadedHistoryRef.current += data;
+                        }
+                        if (totalSizeRef.current > 0) {
+                            totalSizeRef.current += data.length;
+                        }
+                        return;
+                    }
+
                     // Check if user is at bottom BEFORE writing
                     const viewport = term.buffer.active.viewportY;
                     const totalRows = term.buffer.active.length;
@@ -510,7 +574,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
                     console.log(`[TerminalView] Writing output, wasAtBottom: ${wasAtBottom}, userHasScrolled: ${userHasScrolledRef.current}, viewport: ${viewport}`);
 
-                    term.write(message.payload.data);
+                    term.write(data);
                     // Keep our loaded-history snapshot current so a later
                     // scroll-up rewrite (loadEarlierChunkIfNeeded) doesn't lose
                     // live output that arrived after the initial restore.
@@ -556,10 +620,17 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     const { history } = message.payload;
                     console.log(`[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}, alreadyLoaded: ${historyLoadedRef.current}`);
                     if (history && history.length > 0) {
+                        // Block task:output writes until the history replay completes.
+                        // Without this, live output arriving between reset() and write()
+                        // completion gets interleaved with history, causing garbled text.
+                        restoreInProgress = true;
+                        restoreOutputBuffer = [];
                         term.reset();
                         const cleaned = stripScreenClears(history);
                         programmaticScrollRef.current = true;
                         term.write(cleaned, () => {
+                            // History fully written — flush any output that arrived during restore
+                            flushRestoreBuffer();
                             term.scrollToBottom();
                             setTimeout(() => {
                                 programmaticScrollRef.current = false;
@@ -607,6 +678,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
         return () => {
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
+            if (resizeBufferTimer) window.clearTimeout(resizeBufferTimer);
             resizeObserver.disconnect();
             window.removeEventListener('resize', handleWindowResize);
             if (viewport) {
