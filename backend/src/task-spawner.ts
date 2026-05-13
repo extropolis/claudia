@@ -1245,21 +1245,19 @@ export class TaskSpawner extends EventEmitter {
             return;
         }
 
-        // Only auto-reconnect tasks that were mid-turn (shouldContinue=true) when the server
-        // restarted. Idle tasks still have wasInterrupted=true for display purposes but
-        // reconnect on-demand (when the user clicks them) to avoid spawning too many PTY
-        // processes and MCP servers on startup.
-        const MAX_STALE_AGE_MS = 60 * 60 * 1000; // 1 hour
+        // Auto-reconnect ALL tasks that were recently active (within the last 2 hours).
+        // tsx watch restarts happen frequently during development, and leaving all tasks
+        // disconnected is extremely disruptive. Reconnection is batched (2 at a time with
+        // delays) to prevent resource exhaustion from spawning too many PTY + MCP processes.
+        // Mid-turn tasks (shouldContinue=true) get priority in the sort order.
+        const MAX_STALE_AGE_MS = 2 * 60 * 60 * 1000; // 2 hours
         const now = Date.now();
         const tasksToReconnect = disconnectedIds.filter(id => {
             const task = this.disconnectedTasks.get(id);
-            if (!task || !task.shouldContinue) return false;
-            // Skip stale tasks — they were interrupted long ago and should reconnect on-demand
+            if (!task || !task.wasInterrupted) return false;
+            if (!task.sessionId) return false; // can't reconnect without a session
             const lastActive = task.lastActivity ? new Date(task.lastActivity).getTime() : 0;
             if (now - lastActive > MAX_STALE_AGE_MS) {
-                console.log(`[TaskSpawner] Skipping stale task ${id} (last active ${Math.round((now - lastActive) / 60000)}m ago), clearing shouldContinue`);
-                task.shouldContinue = false;
-                task.wasInterrupted = false;
                 return false;
             }
             return true;
@@ -1272,10 +1270,14 @@ export class TaskSpawner extends EventEmitter {
             return;
         }
 
-        // Sort by most recently active first so the most important tasks reconnect first
+        // Sort: mid-turn tasks first (shouldContinue=true), then by most recent activity
         tasksToReconnect.sort((a, b) => {
             const taskA = this.disconnectedTasks.get(a);
             const taskB = this.disconnectedTasks.get(b);
+            // shouldContinue tasks get highest priority
+            const prioA = taskA?.shouldContinue ? 1 : 0;
+            const prioB = taskB?.shouldContinue ? 1 : 0;
+            if (prioA !== prioB) return prioB - prioA;
             const timeA = taskA?.lastActivity ? new Date(taskA.lastActivity).getTime() : 0;
             const timeB = taskB?.lastActivity ? new Date(taskB.lastActivity).getTime() : 0;
             return timeB - timeA; // most recent first
