@@ -22,8 +22,9 @@ import {
 import { ConfigStore, ClaudeCodeSwitches } from '../config-store.js';
 import { createLogger } from '../logger.js';
 
+const isWindows = process.platform === 'win32';
 /** On Windows, node-pty requires the .exe extension to find executables */
-const claudeExe = process.platform === 'win32' ? 'claude.exe' : 'claude';
+const claudeExe = isWindows ? 'claude.exe' : 'claude';
 const logger = createLogger('[ClaudeCodeBackend]');
 
 /**
@@ -135,8 +136,9 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
     }
 
     async checkInstalled(): Promise<BackendStatus> {
+        const cmd = this.shouldUseWsl() ? 'wsl -- claude --version' : 'claude --version';
         try {
-            const version = execSync('claude --version', { encoding: 'utf8', timeout: 5000 }).trim();
+            const version = execSync(cmd, { encoding: 'utf8', timeout: 5000 }).trim();
             return { installed: true, version };
         } catch (error) {
             return {
@@ -144,6 +146,17 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
                 error: 'Claude Code CLI is not installed. Please install it from: https://claude.ai/code'
             };
         }
+    }
+
+    private shouldUseWsl(): boolean {
+        return isWindows && (this.configStore?.getUseWsl() ?? false);
+    }
+
+    private resolveClaudeSpawn(claudeArgs: string[]): { exe: string; args: string[] } {
+        if (this.shouldUseWsl()) {
+            return { exe: 'wsl.exe', args: ['--', 'claude', ...claudeArgs] };
+        }
+        return { exe: claudeExe, args: claudeArgs };
     }
 
     async initialize(): Promise<void> {
@@ -218,7 +231,10 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
         logger.info('Creating task', { taskId: id, workspaceId: config.workspaceId });
         logger.debug('Command args', { args: claudeArgs });
 
-        const ptyProcess = spawn(claudeExe, claudeArgs, {
+        const { exe: spawnExe, args: spawnArgs } = this.resolveClaudeSpawn(claudeArgs);
+        if (spawnExe === 'wsl.exe') logger.info('Spawning claude via WSL');
+
+        const ptyProcess = spawn(spawnExe, spawnArgs, {
             name: 'xterm-256color',
             cols: 120,
             rows: 40,
@@ -299,7 +315,10 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
             logger.info('Reconnecting task (fresh start)', { taskId: config.taskId });
         }
 
-        const ptyProcess = spawn(claudeExe, claudeArgs, {
+        const { exe: reconnectExe, args: reconnectArgs } = this.resolveClaudeSpawn(claudeArgs);
+        if (reconnectExe === 'wsl.exe') logger.info('Reconnecting claude via WSL');
+
+        const ptyProcess = spawn(reconnectExe, reconnectArgs, {
             name: 'xterm-256color',
             cols: 120,
             rows: 40,

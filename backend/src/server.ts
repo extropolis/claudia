@@ -342,7 +342,7 @@ export async function createApp(basePath?: string) {
     app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests
 
     // TunnelManager for mobile remote access (ngrok-based, created early for middleware use)
-    const tunnelManager = new TunnelManager(PORTS.BACKEND);
+    const tunnelManager = new TunnelManager(PORTS.BACKEND, undefined, basePath);
     logger.info('TunnelManager created (ngrok)');
     // Auto-recover any orphaned ngrok left by a previous server instance (tsx watch restart).
     // Fire-and-forget: completes quickly (2 s timeout) well before any client connects.

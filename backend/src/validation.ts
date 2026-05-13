@@ -71,6 +71,7 @@ export interface ConfigUpdatePayload {
         timeoutMs?: number;
     };
     claudiaMcpServerEnabled?: boolean;
+    useWsl?: boolean;
 }
 
 /**
@@ -175,7 +176,8 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
         'skipPermissions',
         'autoFocusOnInput',
         'supervisorEnabled',
-        'claudiaMcpServerEnabled'
+        'claudiaMcpServerEnabled',
+        'useWsl'
     ];
 
     for (const field of booleanFields) {

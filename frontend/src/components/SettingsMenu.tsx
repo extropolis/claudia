@@ -122,6 +122,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [autoFocusOnInput, setAutoFocusOnInput] = useState(false);
     const [useLearnings, setUseLearnings] = useState(false);
     const [claudiaMcpServerEnabled, setClaudiaMcpServerEnabled] = useState(false);
+    const [useWsl, setUseWsl] = useState(false);
 
     // CLI Switches state
     const [cliSwitches, setCliSwitches] = useState({
@@ -320,6 +321,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 setBackend(config.backend || 'claude-code');
                 setUseLearnings(config.useLearnings || false);
                 setClaudiaMcpServerEnabled(config.claudiaMcpServerEnabled || false);
+                setUseWsl(config.useWsl || false);
 
                 // Load SAP AI Core config
                 if (config.sapAiCore) {
@@ -690,6 +692,21 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             }
         } catch (error) {
             console.error('Failed to save Claudia MCP server setting:', error);
+        }
+    };
+
+    const saveUseWsl = async (value: boolean) => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ useWsl: value })
+            });
+            if (response.ok) {
+                setUseWsl(value);
+            }
+        } catch (error) {
+            console.error('Failed to save WSL setting:', error);
         }
     };
 
@@ -2119,6 +2136,24 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     Only enable in secure, sandboxed environments.
                                 </div>
                             )}
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Use WSL (Windows)</span>
+                                    <span className="permission-description">
+                                        Run Claude Code sessions inside Windows Subsystem for Linux.
+                                        Requires Claude Code to be installed inside your WSL distribution.
+                                        Note: session reconnection is not supported in WSL mode.
+                                    </span>
+                                </div>
+                                <label className="toggle-switch">
+                                    <input
+                                        type="checkbox"
+                                        checked={useWsl}
+                                        onChange={(e) => saveUseWsl(e.target.checked)}
+                                    />
+                                    <span className="toggle-slider"></span>
+                                </label>
+                            </div>
                         </div>
                     </CollapsiblePanel>
 

@@ -89,6 +89,7 @@ export interface AppConfig {
     };
     enabledPlugins?: string[];  // List of enabled plugin names (all disabled by default)
     claudiaMcpServerEnabled: boolean;  // Enable Claudia MCP server for Claude Code sessions
+    useWsl: boolean;  // Run Claude Code sessions inside WSL (Windows only)
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
@@ -131,7 +132,8 @@ const DEFAULT_CONFIG: AppConfig = {
     claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
     hyperspaceProxy: DEFAULT_HYPERSPACE_PROXY,
     enabledPlugins: [],  // All plugins disabled by default
-    claudiaMcpServerEnabled: true  // Enabled by default
+    claudiaMcpServerEnabled: true,  // Enabled by default
+    useWsl: false  // Run Claude Code sessions inside WSL (Windows only)
 };
 
 export class ConfigStore {
@@ -176,7 +178,8 @@ export class ConfigStore {
                     hyperspaceProxy: loaded.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY,
                     aiCoreCredentials: loaded.aiCoreCredentials,
                     enabledPlugins: loaded.enabledPlugins ?? [],
-                    claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? true
+                    claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? true,
+                    useWsl: loaded.useWsl ?? false
                 };
             }
         } catch (error) {
@@ -196,7 +199,8 @@ export class ConfigStore {
             claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
             hyperspaceProxy: { ...DEFAULT_HYPERSPACE_PROXY },
             enabledPlugins: [],
-            claudiaMcpServerEnabled: true
+            claudiaMcpServerEnabled: true,
+            useWsl: false
         };
     }
 
@@ -266,6 +270,9 @@ export class ConfigStore {
         if (updates.claudiaMcpServerEnabled !== undefined) {
             this.config.claudiaMcpServerEnabled = updates.claudiaMcpServerEnabled;
         }
+        if (updates.useWsl !== undefined) {
+            this.config.useWsl = updates.useWsl;
+        }
         this.saveConfig();
         return this.getConfig();
     }
@@ -322,7 +329,8 @@ export class ConfigStore {
             useLearnings: false,
             claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
             hyperspaceProxy: { ...DEFAULT_HYPERSPACE_PROXY },
-            claudiaMcpServerEnabled: true
+            claudiaMcpServerEnabled: true,
+            useWsl: false
         };
         this.saveConfig();
         return this.getConfig();
@@ -404,6 +412,15 @@ export class ConfigStore {
 
     setClaudioMcpServerEnabled(enabled: boolean): void {
         this.config.claudiaMcpServerEnabled = enabled;
+        this.saveConfig();
+    }
+
+    getUseWsl(): boolean {
+        return this.config.useWsl ?? false;
+    }
+
+    setUseWsl(useWsl: boolean): void {
+        this.config.useWsl = useWsl;
         this.saveConfig();
     }
 }
