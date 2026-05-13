@@ -460,20 +460,12 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             });
         });
 
-        // ResizeObserver for container changes
+        // ResizeObserver for container changes — use fitTerminal() which does
+        // fit() + refresh() to clear rendering artifacts from the previous width
         let resizeTimeout: number;
         const resizeObserver = new ResizeObserver(() => {
-            // Debounce resize
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
-            resizeTimeout = window.setTimeout(() => {
-                if (fitAddonRef.current) {
-                    try {
-                        fitAddonRef.current.fit();
-                    } catch (e) {
-                        console.warn('[TerminalView] Resize fit failed:', e);
-                    }
-                }
-            }, 50);
+            resizeTimeout = window.setTimeout(fitTerminal, 50);
         });
 
         resizeObserver.observe(terminalRef.current);
@@ -481,9 +473,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // Window resize fallback
         const handleWindowResize = () => {
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
-            resizeTimeout = window.setTimeout(() => {
-                fitAddonRef.current?.fit();
-            }, 50);
+            resizeTimeout = window.setTimeout(fitTerminal, 50);
         };
         window.addEventListener('resize', handleWindowResize);
 
