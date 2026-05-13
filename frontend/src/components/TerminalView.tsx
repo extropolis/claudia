@@ -276,6 +276,25 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         let lastSentCols = 0;
         let lastSentRows = 0;
 
+        // Resize output buffer: after sending a resize to the backend, buffer all
+        // incoming PTY output for RESIZE_BUFFER_MS. This gives the PTY time to
+        // process SIGWINCH and start rendering at the new width. Without this,
+        // output rendered at the OLD width arrives at xterm which is already at
+        // the NEW width, causing ANSI cursor positioning to misalign.
+        const RESIZE_BUFFER_MS = 250;
+        let resizeBuffering = false;
+        let resizeBuffer: string[] = [];
+        let resizeBufferTimer: number | undefined;
+
+        const flushResizeBuffer = () => {
+            resizeBuffering = false;
+            if (resizeBuffer.length > 0) {
+                const combined = resizeBuffer.join('');
+                resizeBuffer = [];
+                term.write(combined);
+            }
+        };
+
         // Handle resize - sync to backend
         term.onResize(({ cols, rows }) => {
             if (initPhase) return; // Skip during init — we send one resize after fit
@@ -283,6 +302,13 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             if (Math.abs(cols - lastSentCols) <= 2 && rows === lastSentRows) return;
             lastSentCols = cols;
             lastSentRows = rows;
+
+            // Start buffering output during the resize transition
+            if (resizeBufferTimer) window.clearTimeout(resizeBufferTimer);
+            resizeBuffering = true;
+            resizeBuffer = [];
+            resizeBufferTimer = window.setTimeout(flushResizeBuffer, RESIZE_BUFFER_MS);
+
             if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({
                     type: 'task:resize',
@@ -497,6 +523,25 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             try {
                 const message = JSON.parse(event.data);
                 if (message.type === 'task:output' && message.payload.taskId === task.id) {
+                    const data = message.payload.data;
+
+                    // During a resize transition, buffer output instead of writing
+                    // immediately. The PTY is still rendering at the old width;
+                    // writing that data to xterm (now at the new width) would cause
+                    // cursor positioning to misalign. After RESIZE_BUFFER_MS, the
+                    // PTY has processed SIGWINCH and output is at the correct width.
+                    if (resizeBuffering) {
+                        resizeBuffer.push(data);
+                        // Still track history so scroll-up loading stays current
+                        if (loadedHistoryRef.current !== '') {
+                            loadedHistoryRef.current += data;
+                        }
+                        if (totalSizeRef.current > 0) {
+                            totalSizeRef.current += data.length;
+                        }
+                        return;
+                    }
+
                     // Check if user is at bottom BEFORE writing
                     const viewport = term.buffer.active.viewportY;
                     const totalRows = term.buffer.active.length;
@@ -510,7 +555,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
                     console.log(`[TerminalView] Writing output, wasAtBottom: ${wasAtBottom}, userHasScrolled: ${userHasScrolledRef.current}, viewport: ${viewport}`);
 
-                    term.write(message.payload.data);
+                    term.write(data);
                     // Keep our loaded-history snapshot current so a later
                     // scroll-up rewrite (loadEarlierChunkIfNeeded) doesn't lose
                     // live output that arrived after the initial restore.
@@ -607,6 +652,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
         return () => {
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
+            if (resizeBufferTimer) window.clearTimeout(resizeBufferTimer);
             resizeObserver.disconnect();
             window.removeEventListener('resize', handleWindowResize);
             if (viewport) {
