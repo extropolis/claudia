@@ -295,6 +295,23 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             }
         };
 
+        // Guard: suppress task:output writes during task:restore processing.
+        // Between term.reset() and the completion of term.write(history),
+        // any live output written would be interleaved/overwritten by the
+        // history replay, causing garbled text. Buffer output during restore
+        // and flush after the history write completes.
+        let restoreInProgress = false;
+        let restoreOutputBuffer: string[] = [];
+
+        const flushRestoreBuffer = () => {
+            restoreInProgress = false;
+            if (restoreOutputBuffer.length > 0) {
+                const combined = restoreOutputBuffer.join('');
+                restoreOutputBuffer = [];
+                term.write(combined);
+            }
+        };
+
         // Handle resize - sync to backend
         term.onResize(({ cols, rows }) => {
             if (initPhase) return; // Skip during init — we send one resize after fit
@@ -402,9 +419,13 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 const oldViewportY = term.buffer.active.viewportY;
                 const linesFromBottom = oldTotalLines - oldViewportY;
 
+                // Block live output during the reset+rewrite to prevent interleaving
+                restoreInProgress = true;
+                restoreOutputBuffer = [];
                 programmaticScrollRef.current = true;
                 term.reset();
                 term.write(loadedHistoryRef.current, () => {
+                    flushRestoreBuffer();
                     const newTotal = term.buffer.active.length;
                     const targetViewportY = Math.max(0, newTotal - linesFromBottom);
                     term.scrollToLine(targetViewportY);
@@ -525,13 +546,11 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 if (message.type === 'task:output' && message.payload.taskId === task.id) {
                     const data = message.payload.data;
 
-                    // During a resize transition, buffer output instead of writing
-                    // immediately. The PTY is still rendering at the old width;
-                    // writing that data to xterm (now at the new width) would cause
-                    // cursor positioning to misalign. After RESIZE_BUFFER_MS, the
-                    // PTY has processed SIGWINCH and output is at the correct width.
-                    if (resizeBuffering) {
-                        resizeBuffer.push(data);
+                    // Buffer output during resize transitions and history restores
+                    // to prevent garbled text from interleaving.
+                    if (resizeBuffering || restoreInProgress) {
+                        if (resizeBuffering) resizeBuffer.push(data);
+                        if (restoreInProgress) restoreOutputBuffer.push(data);
                         // Still track history so scroll-up loading stays current
                         if (loadedHistoryRef.current !== '') {
                             loadedHistoryRef.current += data;
@@ -601,10 +620,17 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     const { history } = message.payload;
                     console.log(`[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}, alreadyLoaded: ${historyLoadedRef.current}`);
                     if (history && history.length > 0) {
+                        // Block task:output writes until the history replay completes.
+                        // Without this, live output arriving between reset() and write()
+                        // completion gets interleaved with history, causing garbled text.
+                        restoreInProgress = true;
+                        restoreOutputBuffer = [];
                         term.reset();
                         const cleaned = stripScreenClears(history);
                         programmaticScrollRef.current = true;
                         term.write(cleaned, () => {
+                            // History fully written — flush any output that arrived during restore
+                            flushRestoreBuffer();
                             term.scrollToBottom();
                             setTimeout(() => {
                                 programmaticScrollRef.current = false;
