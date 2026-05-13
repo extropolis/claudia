@@ -268,9 +268,21 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // that trigger Claude TUI redraws interleaving with history output.
         let initPhase = true;
 
+        // Track last sent dimensions to prevent resize oscillation.
+        // When a scrollbar appears/disappears, the container width changes by ~15px
+        // which flips cols by 1-2. This causes Claude Code's TUI to re-render at
+        // alternating widths, producing garbled overlapping text. We suppress resizes
+        // that change cols by <= 2 to break this feedback loop.
+        let lastSentCols = 0;
+        let lastSentRows = 0;
+
         // Handle resize - sync to backend
         term.onResize(({ cols, rows }) => {
             if (initPhase) return; // Skip during init — we send one resize after fit
+            // Suppress small col changes (scrollbar oscillation)
+            if (Math.abs(cols - lastSentCols) <= 2 && rows === lastSentRows) return;
+            lastSentCols = cols;
+            lastSentRows = rows;
             if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({
                     type: 'task:resize',
@@ -442,6 +454,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
                 // Send ONE definitive resize to the backend with the correct dimensions
                 const { cols, rows } = term;
+                lastSentCols = cols;
+                lastSentRows = rows;
                 if (wsRef.current?.readyState === WebSocket.OPEN) {
                     wsRef.current.send(JSON.stringify({
                         type: 'task:resize',
@@ -460,20 +474,13 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             });
         });
 
-        // ResizeObserver for container changes
+        // ResizeObserver for container changes — use fitTerminal() which does
+        // fit() + refresh() to clear rendering artifacts from the previous width.
+        // 150ms debounce prevents rapid-fire resizes during layout transitions.
         let resizeTimeout: number;
         const resizeObserver = new ResizeObserver(() => {
-            // Debounce resize
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
-            resizeTimeout = window.setTimeout(() => {
-                if (fitAddonRef.current) {
-                    try {
-                        fitAddonRef.current.fit();
-                    } catch (e) {
-                        console.warn('[TerminalView] Resize fit failed:', e);
-                    }
-                }
-            }, 50);
+            resizeTimeout = window.setTimeout(fitTerminal, 150);
         });
 
         resizeObserver.observe(terminalRef.current);
@@ -481,9 +488,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // Window resize fallback
         const handleWindowResize = () => {
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
-            resizeTimeout = window.setTimeout(() => {
-                fitAddonRef.current?.fit();
-            }, 50);
+            resizeTimeout = window.setTimeout(fitTerminal, 150);
         };
         window.addEventListener('resize', handleWindowResize);
 
