@@ -2,38 +2,42 @@
 
 ## Executive Summary
 
-**Current State:** 399 tests (333 backend, 66 frontend) across 10 test files. All passing.
-**Codebase Size:** ~31,600 LOC across backend, frontend, and shared packages.
-**Critical Gap:** ~15,000+ lines of production code in 12 critical backend modules and 8 critical frontend modules have **zero test coverage**. No integration tests, no E2E tests, no performance tests exist.
+**Current State:** 333 backend tests + 66 frontend tests = 399 total across 10 test files. All passing.
+**Codebase Size:** ~41,400 LOC across backend (23,500), frontend (17,600), shared (260), and electron (520).
+**Critical Gap:** ~25,000+ lines of production code across 16 backend modules and 35 frontend components have **zero test coverage**. No integration tests, no E2E tests, no performance tests exist.
 
 ### Coverage by Module
 
-| Module | LOC | Test Cases | Status |
-|--------|-----|-----------|--------|
-| config-store.ts | ~600 | 67 | Covered |
-| conversation-parser.ts | ~400 | 26 | Covered |
-| git-utils.ts | ~300 | 23 | Covered |
-| ring-buffer.ts | ~150 | 28 | Covered |
-| task-spawner-args (in task-spawner) | ~200 | 27 | Covered |
-| task-state-detection.ts | ~200 | 58 | Covered |
-| token-parser.ts | ~350 | 46 | Covered |
-| validation.ts | ~300 | 57 | Covered |
-| workspace-store.ts | ~400 | 52 | Covered |
-| taskStore.ts (frontend) | ~690 | 66 | Partial |
+| Module | LOC | Tests | Status |
+|--------|-----|-------|--------|
+| config-store.ts | 600 | 72 | Covered |
+| conversation-parser.ts | 555 | 21 | Covered |
+| git-utils.ts | 300 | 28 | Covered |
+| ring-buffer.ts | 150 | 26 | Covered |
+| task-spawner-args (in task-spawner) | 200 | 29 | Covered |
+| task-state-detection.ts | 200 | 57 | Covered |
+| token-parser.ts | 350 | 30 | Covered |
+| validation.ts | 300 | 28 | Covered |
+| workspace-store.ts | 400 | 42 | Covered |
+| taskStore.ts (frontend) | 889 | 66 | Partial |
 | **server.ts** | **5,696** | **0** | **NONE** |
 | **task-spawner.ts** | **4,298** | **0** | **NONE** |
+| **mobile-page.ts** | **2,088** | **0** | **NONE** |
 | **claude-code-backend.ts** | **1,087** | **0** | **NONE** |
 | **supervisor-chat.ts** | **1,148** | **0** | **NONE** |
+| **claudia-mcp-server.ts** | **983** | **0** | **NONE** |
+| **opencode-backend.ts** | **853** | **0** | **NONE** |
 | **cron-scheduler.ts** | **658** | **0** | **NONE** |
+| **voice-agent-page.ts** | **642** | **0** | **NONE** |
+| **tunnel-manager.ts** | **455** | **0** | **NONE** |
+| **voice-supervisor.ts** | **424** | **0** | **NONE** |
 | **task-persistence.ts** | **387** | **0** | **NONE** |
 | **learnings-store.ts** | **362** | **0** | **NONE** |
-| **tunnel-manager.ts** | **455** | **0** | **NONE** |
-| **claudia-mcp-server.ts** | **983** | **0** | **NONE** |
-| **llm-service.ts** | **164** | **0** | **NONE** |
 | **plugin-manager.ts** | **358** | **0** | **NONE** |
-| **opencode-backend.ts** | **~400** | **0** | **NONE** |
-| **useWebSocket.ts** | **~850** | **0** | **NONE** |
-| **All frontend components** | **~8,000** | **0** | **NONE** |
+| **llm-service.ts** | **164** | **0** | **NONE** |
+| **useWebSocket.ts** | **850** | **0** | **NONE** |
+| **All frontend components (35)** | **13,014** | **0** | **NONE** |
+| **Electron package** | **523** | **0** | **NONE** |
 
 ---
 
@@ -1071,9 +1075,28 @@ coverage: {
 | Phase 4: Integration & E2E | ~35 | P1 |
 | Phase 5: Robustness & Security | ~45 | P2 |
 | Phase 6: Performance | ~10 | P2 |
-| **Total New Tests** | **~660** | |
+| Known Bug Regressions | ~25 | P0 |
+| **Total New Tests** | **~685** | |
 | **Existing Tests** | **399** | |
-| **Grand Total** | **~1,059** | |
+| **Grand Total** | **~1,084** | |
+
+## Known Bug Regression Tests (P0)
+
+These are specific bugs discovered in production that MUST have regression tests. They are the highest-priority test cases because they represent real failures that affected users.
+
+| Bug | Module | Test Scenario |
+|-----|--------|---------------|
+| MCP sync triggers tsx watch restart | task-spawner.ts | `syncWorkspaceMcpConfigs` skips Claudia's own workspace directory |
+| Terminal resize corruption (scrollbar oscillation) | TerminalView.tsx | Suppress resize events when cols change by ≤2 |
+| Terminal resize corruption (in-flight data) | TerminalView.tsx | Buffer PTY output for 250ms after sending resize to backend |
+| History restore interleaving | TerminalView.tsx | Buffer task:output during term.reset() + term.write(history) |
+| UTF-8 boundary splitting | task-spawner.ts | `readTaskHistoryRange` skips leading continuation bytes at read offset |
+| History loss from aggressive rotation | task-spawner.ts | Disk cap (10MB) and keep-tail (5MB) preserve scrollback |
+| OOM from loading large history on reconnect | task-spawner.ts | Reconnect loads max 512KB tail, not entire file |
+| Sleep/wake disconnects all tasks | task-spawner.ts | Detect >30s polling gap, auto-reconnect exited tasks |
+| Process spike on startup (7+ PTYs) | task-spawner.ts | Only auto-reconnect mid-turn tasks (shouldContinue=true) |
+| PowerShell folder dialog not showing | server.ts | Browse endpoint uses -STA flag on Windows |
+| Git status polling process storm | WorkspacePanel.tsx | Only poll git-status for active workspace, not all 7+ |
 
 ## Key Risks If Tests Are Not Written
 
@@ -1081,5 +1104,6 @@ coverage: {
 2. **Process leaks** - PTY process management is untested. Zombie processes could exhaust system resources.
 3. **State corruption** - No concurrency tests for the task state machine. Race conditions in WebSocket handlers could corrupt task state silently.
 4. **Security vulnerabilities** - No path traversal or injection tests. Workspace paths and CLI arguments are built from user input.
-5. **Regression risk** - 15,000+ LOC of untested code means any refactor is a gamble.
+5. **Regression risk** - 25,000+ LOC of untested code means any refactor is a gamble.
 6. **Cron reliability** - Scheduled tasks have no tests for timing accuracy, expiry, or persistence. Critical for autonomous agent workflows.
+7. **Enterprise Windows support** - No tests for Okta/enterprise auth slow git, PowerShell -STA dialogs, or NTFS file watcher quirks.
