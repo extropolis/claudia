@@ -3963,10 +3963,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 console.log(`[TaskSpawner] Reconnecting OpenCode task ${taskId} (fresh start)`);
             }
 
+            const pendingSizeOC = this.pendingResizes.get(taskId);
             ptyProcess = spawn(exe('opencode'), opencodeArgs, {
                 name: 'xterm-256color',
-                cols: 120,
-                rows: 40,
+                cols: pendingSizeOC?.cols || 120,
+                rows: pendingSizeOC?.rows || 40,
                 cwd: persisted.workspaceId,
                 env: taskEnv,
             });
@@ -4012,11 +4013,17 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 console.log(`[TaskSpawner] Reconnecting Claude Code task ${taskId} (fresh start)`);
             }
 
+            // Use pending resize dimensions if the frontend already sent them while the
+            // task was disconnected — avoids spawning at 120x40 then immediately resizing,
+            // which causes Claude Code's initial TUI render to use the wrong width.
+            const pendingSize = this.pendingResizes.get(taskId);
+            const spawnCols = pendingSize?.cols || 120;
+            const spawnRows = pendingSize?.rows || 40;
             const { command: claudeCmd2, prefixArgs: claudePrefix2 } = resolveClaudeSpawn();
             ptyProcess = spawn(claudeCmd2, [...claudePrefix2, ...claudeArgs], {
                 name: 'xterm-256color',
-                cols: 120,
-                rows: 40,
+                cols: spawnCols,
+                rows: spawnRows,
                 cwd: persisted.workspaceId,
                 env: taskEnv,
             });
