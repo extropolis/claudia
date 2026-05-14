@@ -772,7 +772,16 @@ export class TaskSpawner extends EventEmitter {
             }
             const buf = Buffer.alloc(length);
             readSync(fd, buf, 0, length, startOffset);
-            return { data: buf.toString('utf8'), startOffset, totalSize, isBase64Legacy: false };
+            // Skip leading bytes that are UTF-8 continuation bytes (10xxxxxx) to
+            // avoid producing replacement characters from a multi-byte char that
+            // was split at the read boundary. E.g., the '─' char is 3 bytes
+            // (E2 94 80); if startOffset lands on byte 2 (0x94), skip it.
+            let skipBytes = 0;
+            while (skipBytes < buf.length && (buf[skipBytes] & 0xC0) === 0x80) {
+                skipBytes++;
+            }
+            const cleanBuf = skipBytes > 0 ? buf.subarray(skipBytes) : buf;
+            return { data: cleanBuf.toString('utf8'), startOffset: startOffset + skipBytes, totalSize, isBase64Legacy: false };
         } finally {
             try { closeSync(fd); } catch { /* best effort */ }
         }
@@ -3965,10 +3974,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 console.log(`[TaskSpawner] Reconnecting OpenCode task ${taskId} (fresh start)`);
             }
 
+            const pendingSizeOC = this.pendingResizes.get(taskId);
             ptyProcess = spawn(exe('opencode'), opencodeArgs, {
                 name: 'xterm-256color',
-                cols: 120,
-                rows: 40,
+                cols: pendingSizeOC?.cols || 120,
+                rows: pendingSizeOC?.rows || 40,
                 cwd: persisted.workspaceId,
                 env: taskEnv,
             });
@@ -4014,11 +4024,17 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 console.log(`[TaskSpawner] Reconnecting Claude Code task ${taskId} (fresh start)`);
             }
 
+            // Use pending resize dimensions if the frontend already sent them while the
+            // task was disconnected — avoids spawning at 120x40 then immediately resizing,
+            // which causes Claude Code's initial TUI render to use the wrong width.
+            const pendingSize = this.pendingResizes.get(taskId);
+            const spawnCols = pendingSize?.cols || 120;
+            const spawnRows = pendingSize?.rows || 40;
             const { command: claudeCmd2, prefixArgs: claudePrefix2 } = resolveClaudeSpawn();
             ptyProcess = spawn(claudeCmd2, [...claudePrefix2, ...claudeArgs], {
                 name: 'xterm-256color',
-                cols: 120,
-                rows: 40,
+                cols: spawnCols,
+                rows: spawnRows,
                 cwd: persisted.workspaceId,
                 env: taskEnv,
             });

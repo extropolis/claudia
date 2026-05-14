@@ -727,10 +727,13 @@ function WorkspaceSection({
                     : `\n\n[Attached images:\n${imagePaths}]`;
                 fullMessage = inputValue + imageText;
             }
-            // Estimate terminal size based on window size
-            // Typically ~9px width per char and ~18px height per line for monospace font
-            const cols = Math.floor((window.innerWidth - 400) / 9); // Subtract sidebar/padding
-            const rows = Math.floor((window.innerHeight - 100) / 18); // Subtract header/input
+            // Estimate terminal size from the actual main panel container width
+            // rather than guessing sidebar offset. Falls back to window-based estimate.
+            const mainPanel = document.querySelector('.main-panel');
+            const panelWidth = mainPanel?.clientWidth || (window.innerWidth - 640);
+            const panelHeight = mainPanel?.clientHeight || (window.innerHeight - 100);
+            const cols = Math.max(80, Math.floor(panelWidth / 9)); // ~9px per char
+            const rows = Math.max(24, Math.floor(panelHeight / 18)); // ~18px per line
             onCreateTask(fullMessage.trim(), cols, rows);
             setInputValue('');
             // Clear images after sending
