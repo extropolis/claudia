@@ -198,9 +198,6 @@ export type WSMessageType =
     // Usage/Cost tracking
     | 'usage:summary'
     | 'usage:recorded'
-    // Autonomous mode
-    | 'voice:autonomous_status'
-    | 'voice:autonomous_update'
     // Server status
     | 'server:reloading'
     | 'server:reconnecting'

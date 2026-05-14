@@ -18,7 +18,7 @@ import { ActivityPanel } from './components/ActivityPanel';
 import { useTheme } from './hooks/useTheme';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Bell, BellOff, AudioLines } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Bell, BellOff } from 'lucide-react';
 import { getApiBaseUrl } from './config/api-config';
 import { isSoundEnabled, setSoundEnabled } from './utils/browserCapabilities';
 
@@ -410,26 +410,6 @@ function App() {
         }
     };
 
-    // Open voice agent in new tab
-    const handleOpenVoiceAgent = useCallback(async () => {
-        try {
-            const res = await fetch(`${getApiBaseUrl()}/api/tunnel/status`);
-            const data = await res.json();
-            let token = data.token;
-
-            // If no tunnel token, generate a temporary local token
-            if (!token) {
-                token = 'local-' + Math.random().toString(36).substring(2, 15);
-            }
-
-            const voiceUrl = `${getApiBaseUrl()}/voice?token=${token}&dgKey=${encodeURIComponent(useTaskStore.getState().deepgramApiKey || '')}`;
-            window.open(voiceUrl, '_blank');
-        } catch (error) {
-            console.error('Failed to open voice agent:', error);
-            alert('Failed to open voice agent. Please try again.');
-        }
-    }, []);
-
     // Check tunnel status on mount
     useEffect(() => {
         (async () => {
@@ -567,14 +547,6 @@ function App() {
                             {tunnelActive && <span className="tunnel-active-dot" />}
                         </button>
                     )}
-                    <button
-                        className="chat-toggle-button voice-agent-button"
-                        onClick={handleOpenVoiceAgent}
-                        title="Open Voice Agent"
-                    >
-                        <AudioLines size={18} />
-                        <span className="btn-label">Voice Agent</span>
-                    </button>
                     <GlobalVoiceToggle />
                     <button
                         className={`notification-toggle-button ${soundMuted ? 'muted' : ''}`}

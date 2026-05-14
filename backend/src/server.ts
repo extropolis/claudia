@@ -25,8 +25,6 @@ import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch } from '.
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
-import { getVoiceAgentPageHtml } from './voice-agent-page.js';
-import { VoiceAgent } from './voice-agent.js';
 // import { ElevenLabsTTS } from './elevenlabs-tts.js'; // TODO: Implement ElevenLabs TTS
 import { createLogger } from './logger.js';
 import { PluginManager, PluginContext } from './plugin-system/index.js';
@@ -105,7 +103,6 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'checkpoint:restore-force',
     'checkpoint:delete',
     'checkpoint:fork',
-    'voice:input',
 ]);
 
 // WebSocket message validation
@@ -418,11 +415,6 @@ export async function createApp(basePath?: string) {
             return next();
         }
 
-        // Let /voice route pass through to Express handler
-        if (req.path === '/voice') {
-            return next();
-        }
-
         // Let /assets/ requests fall through to static file server directly.
         // These are hashed production build files that Vite dev server won't
         // know about — proxying them to Vite results in HTML error pages
@@ -487,8 +479,6 @@ export async function createApp(basePath?: string) {
     const workspaceStore = new WorkspaceStore(basePath);
     // SupervisorChat now handles both auto-analysis (formerly TaskSupervisor) and chat
     const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore);
-    // VoiceAgent for hands-free voice control
-    const voiceAgent = new VoiceAgent(supervisorChat, taskSpawner, workspaceStore, configStore);
     // LearningsStore for RAG-based learnings
     const learningsStore = new LearningsStore(basePath, configStore);
 
@@ -611,7 +601,7 @@ export async function createApp(basePath?: string) {
 
     // Track connected clients with their alive status for heartbeat
     const clients = new Set<WebSocket>();
-    const voiceClients = new Set<WebSocket>(); // Voice agent clients - don't send task:output
+    const voiceClients = new Set<WebSocket>(); // Voice clients - don't send task:output
     const clientAliveMap = new WeakMap<WebSocket, boolean>();
 
     // Heartbeat interval to keep WebSocket connections alive
@@ -790,9 +780,6 @@ export async function createApp(basePath?: string) {
     taskSpawner.on('taskStateChanged', (task: Task) => {
         console.log(`[Server] taskStateChanged event: task=${task.id} state=${task.state}`);
         queueTaskStateChange(task); // Batched - deduplicates rapid state changes
-
-        // Notify voice agent for proactive updates
-        voiceAgent.onTaskStateChanged(task);
 
         // Deliver pending reference notifications when a task becomes idle
         if (task.state === 'idle') {
@@ -1056,9 +1043,6 @@ export async function createApp(basePath?: string) {
         clients.add(ws);
         if (isVoice) {
             voiceClients.add(ws);
-            const voiceWorkspaceId = url.searchParams.get('workspaceId') || '';
-            (ws as any).__voiceWorkspaceId = voiceWorkspaceId;
-            voiceAgent.addVoiceWorkspace(voiceWorkspaceId);
         }
         clientAliveMap.set(ws, true); // Mark as alive on connection
 
@@ -2339,80 +2323,6 @@ export async function createApp(basePath?: string) {
                         break;
                     }
 
-                    // ===== Voice Agent =====
-
-                    case 'voice:input': {
-                        const { text, workspaceId, autonomous } = payload as { text?: string; workspaceId?: string; autonomous?: boolean };
-                        if (!text) {
-                            sendWSError(ws, 'voice:input requires text', message.type, 'MISSING_PARAMS');
-                            break;
-                        }
-
-                        logger.info('[Voice WS] Processing voice input', { text, workspaceId, autonomous });
-
-                        // If autonomous flag is set, go directly to autonomous mode
-                        if (autonomous) {
-                            voiceAgent.startAutonomousFromUI(text, workspaceId);
-                            if (ws.readyState === WebSocket.OPEN) {
-                                ws.send(JSON.stringify({
-                                    type: 'voice:response',
-                                    payload: { text: 'Starting autonomous mode...', action: 'autonomous' }
-                                }));
-                            }
-                            break;
-                        }
-
-                        // Send processing status
-                        ws.send(JSON.stringify({
-                            type: 'voice:status',
-                            payload: { status: 'processing' }
-                        }));
-
-                        // Process via voice supervisor with streaming callbacks
-                        voiceAgent.processVoiceMessageStreaming(
-                            text,
-                            workspaceId,
-                            undefined,
-                            {
-                                onTextChunk: (chunk: string) => {
-                                    logger.info('[Voice WS] Text chunk', { chunk });
-                                    if (ws.readyState === WebSocket.OPEN) {
-                                        ws.send(JSON.stringify({
-                                            type: 'voice:text_chunk',
-                                            payload: { text: chunk }
-                                        }));
-                                    }
-                                },
-                                onComplete: (response: any) => {
-                                    logger.info('[Voice WS] Response complete', { text: response.text });
-                                    if (ws.readyState === WebSocket.OPEN) {
-                                        ws.send(JSON.stringify({
-                                            type: 'voice:response',
-                                            payload: { text: response.text, action: response.action }
-                                        }));
-                                    }
-                                },
-                                onError: (error: Error) => {
-                                    logger.error('[Voice WS] Error processing voice input', { error: error.message });
-                                    if (ws.readyState === WebSocket.OPEN) {
-                                        ws.send(JSON.stringify({
-                                            type: 'voice:response',
-                                            payload: { text: "Sorry, I couldn't process that. Can you try again?", action: 'error' }
-                                        }));
-                                    }
-                                }
-                            }
-                        ).catch((err) => {
-                            logger.error('[Voice WS] Unhandled error', { error: err instanceof Error ? err.message : String(err) });
-                            if (ws.readyState === WebSocket.OPEN) {
-                                ws.send(JSON.stringify({
-                                    type: 'voice:response',
-                                    payload: { text: "Sorry, something went wrong.", action: 'error' }
-                                }));
-                            }
-                        });
-                        break;
-                    }
                 }
             } catch (err) {
                 logger.error('Error handling message', {
@@ -2430,8 +2340,6 @@ export async function createApp(basePath?: string) {
             clients.delete(ws);
             if (voiceClients.has(ws)) {
                 voiceClients.delete(ws);
-                const wsId = (ws as any).__voiceWorkspaceId || '';
-                voiceAgent.removeVoiceWorkspace(wsId);
             }
         });
 
@@ -2765,258 +2673,6 @@ export async function createApp(basePath?: string) {
 
     app.get('/api/tunnel/status', (_req, res) => {
         res.json(tunnelManager.getStatus());
-    });
-
-    // ===== Voice Agent API =====
-
-    // Streaming voice message endpoint - streams text chunks and audio in real-time
-    app.get('/api/voice/message/stream', async (req, res) => {
-        try {
-            const transcript = typeof req.query.transcript === 'string' ? req.query.transcript : undefined;
-            const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
-            const userId = typeof req.query.userId === 'string' ? req.query.userId : undefined;
-            const clientId = typeof req.query.clientId === 'string' ? req.query.clientId : undefined;
-
-            if (!transcript || typeof transcript !== 'string') {
-                return res.status(400).json({ error: 'Missing or invalid transcript' });
-            }
-
-            logger.info('[Voice API] Processing transcript (streaming)', { transcript, workspaceId, clientId });
-
-            // Set up Server-Sent Events
-            res.setHeader('Content-Type', 'text/event-stream');
-            res.setHeader('Cache-Control', 'no-cache');
-            res.setHeader('Connection', 'keep-alive');
-
-            // Initialize ElevenLabs TTS streaming session
-            const elevenlabsKey = process.env.ELEVENLABS_API_KEY;
-            let ttsSession: any = null;
-
-            logger.info('[Voice API] ElevenLabs API key present:', { hasKey: !!elevenlabsKey });
-
-            if (elevenlabsKey) {
-                try {
-                    logger.info('[Voice API] Creating ElevenLabs streaming session...');
-                    // @ts-ignore - ElevenLabs TTS module is optional
-                    const { ElevenLabsTTS } = await import('./elevenlabs-tts.js').catch(() => {
-                        throw new Error('ElevenLabs TTS module not available');
-                    });
-                    const tts = new ElevenLabsTTS(elevenlabsKey);
-                    ttsSession = tts.createStreamingSession();
-
-                    // Forward audio chunks to client
-                    ttsSession.on('audio', (audioChunk: Buffer) => {
-                        logger.info('[Voice API] Received audio chunk', { length: audioChunk.length });
-                        const base64Audio = audioChunk.toString('base64');
-                        res.write(`event: audio\ndata: ${JSON.stringify({ audio: base64Audio })}\n\n`);
-                    });
-
-                    ttsSession.on('error', (error: Error) => {
-                        logger.error('[Voice API] TTS error', { error });
-                    });
-
-                    ttsSession.on('ready', () => {
-                        logger.info('[Voice API] ElevenLabs TTS session ready');
-                    });
-
-                    // Wait for TTS to be ready
-                    logger.info('[Voice API] Waiting for TTS session to be ready...');
-                    await new Promise((resolve) => {
-                        ttsSession.once('ready', resolve);
-                    });
-                    logger.info('[Voice API] TTS session is ready!');
-                } catch (error) {
-                    logger.warn('[Voice API] ElevenLabs TTS module not available, voice output disabled', { error: error instanceof Error ? error.message : String(error) });
-                }
-            }
-
-            // Start processing with callbacks
-            await voiceAgent.processVoiceMessageStreaming(
-                transcript,
-                workspaceId,
-                userId,
-                {
-                    onTextChunk: (text: string) => {
-                        logger.info('[Voice API] Text chunk:', { text });
-                        // Send text chunk to client
-                        res.write(`event: text\ndata: ${JSON.stringify({ text })}\n\n`);
-
-                        // Send to TTS for streaming audio generation
-                        if (ttsSession) {
-                            logger.info('[Voice API] Sending text to TTS:', { text });
-                            ttsSession.sendText(text);
-                        }
-                    },
-                    onComplete: (response: any) => {
-                        // Flush TTS and close session
-                        if (ttsSession) {
-                            ttsSession.flush();
-                            setTimeout(() => {
-                                ttsSession.close();
-                            }, 1000); // Give time for final audio chunks
-                        }
-
-                        // Send completion event
-                        res.write(`event: complete\ndata: ${JSON.stringify(response)}\n\n`);
-                        res.end();
-                    },
-                    onError: (error: Error) => {
-                        logger.error('[Voice API] Processing error', { error });
-                        if (ttsSession) {
-                            ttsSession.close();
-                        }
-                        res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`);
-                        res.end();
-                    }
-                }
-            );
-
-        } catch (error) {
-            logger.error('[Voice API] Error in streaming', { error });
-            res.write(`event: error\ndata: ${JSON.stringify({ error: 'Processing error' })}\n\n`);
-            res.end();
-        }
-    });
-
-    // Voice message endpoint - processes voice input with voice-optimized responses (non-streaming fallback)
-    app.post('/api/voice/message', async (req, res) => {
-        try {
-            const { transcript, workspaceId, userId, clientId } = req.body;
-
-            if (!transcript || typeof transcript !== 'string') {
-                return res.status(400).json({ error: 'Missing or invalid transcript' });
-            }
-
-            logger.info('[Voice API] Processing transcript', { transcript, workspaceId, clientId });
-
-            const response = await voiceAgent.processVoiceMessage(
-                transcript,
-                workspaceId,
-                userId
-            );
-
-            logger.info('[Voice API] Response generated', { action: response.action });
-            res.json(response);
-        } catch (error) {
-            logger.error('[Voice API] Error processing message', { error });
-            res.status(500).json({
-                error: 'Failed to process voice message',
-                text: "Sorry, something went wrong. Try again?",
-                action: 'error'
-            });
-        }
-    });
-
-    // Get voice agent system prompt
-    app.get('/api/voice-agent/system-prompt', async (req, res) => {
-        try {
-            const systemPrompt = voiceAgent.getSystemPrompt();
-            res.json({ systemPrompt });
-        } catch (error) {
-            logger.error('[Voice API] Error getting system prompt', { error });
-            res.status(500).json({ error: 'Failed to get system prompt' });
-        }
-    });
-
-    // Update voice agent system prompt
-    app.post('/api/voice-agent/system-prompt', async (req, res) => {
-        try {
-            const { systemPrompt } = req.body;
-
-            if (!systemPrompt || typeof systemPrompt !== 'string') {
-                return res.status(400).json({ error: 'Missing or invalid systemPrompt' });
-            }
-
-            voiceAgent.setSystemPrompt(systemPrompt);
-            logger.info('[Voice API] System prompt updated');
-            res.json({ success: true });
-        } catch (error) {
-            logger.error('[Voice API] Error updating system prompt', { error });
-            res.status(500).json({ error: 'Failed to update system prompt' });
-        }
-    });
-
-    // Get available tools for voice agent
-    app.get('/api/voice-agent/tools', async (req, res) => {
-        try {
-            const tools = voiceAgent.getAvailableTools();
-            res.json({ tools });
-        } catch (error) {
-            logger.error('[Voice API] Error getting tools', { error });
-            res.status(500).json({ error: 'Failed to get tools' });
-        }
-    });
-
-    // Voice agent page route
-    app.get('/voice', (req, res) => {
-        let token = req.query.token as string;
-
-        if (!token) {
-            const host = req.headers.host || '';
-            const tunnelStatus = tunnelManager.getStatus();
-
-            if (isTunnelHost(host) && tunnelStatus.active && tunnelStatus.token) {
-                token = tunnelStatus.token;
-            } else {
-                res.status(401).send('Access denied: Missing token');
-                return;
-            }
-        }
-
-        // Allow local tokens (starting with 'local-') or validate tunnel tokens
-        const isLocalToken = token.startsWith('local-');
-        if (!isLocalToken && !tunnelManager.validateToken(token)) {
-            res.status(401).send('Access denied: Invalid or expired token');
-            return;
-        }
-
-        // Use WebSocket URL from request
-        const protocol = req.protocol === 'https' ? 'wss' : 'ws';
-        const host = req.get('host');
-        const wsUrl = `${protocol}://${host}`;
-
-        // Get Deepgram API key from query param, env, or config (in priority order)
-        const dgKeyFromQuery = req.query.dgKey as string | undefined;
-        const deepgramApiKey = dgKeyFromQuery || process.env.DEEPGRAM_API_KEY || configStore.getConfig().deepgramApiKey || '';
-
-        // If we got a key from query param, sync it to config for future use
-        if (dgKeyFromQuery && dgKeyFromQuery !== configStore.getConfig().deepgramApiKey) {
-            configStore.updateConfig({ deepgramApiKey: dgKeyFromQuery });
-            logger.info('[Voice Agent] Synced Deepgram API key from query param to config');
-        }
-
-        const html = getVoiceAgentPageHtml(wsUrl, token, deepgramApiKey);
-        logger.info('[Voice Agent] Page served', { hasToken: !!token, hasDeepgramKey: !!deepgramApiKey });
-        res.send(html);
-    });
-
-    // Send voice announcements via WebSocket
-    voiceAgent.on('voice:announce', (announcement) => {
-        logger.info('[Voice Supervisor] Broadcasting announcement', {
-            text: announcement.text,
-            taskId: announcement.taskId
-        });
-        wss.clients.forEach((client) => {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify({
-                    type: 'voice_announcement',
-                    ...announcement
-                }));
-            }
-        });
-    });
-
-    // Send proactive task updates to voice clients
-    voiceAgent.on('voice:proactive_update', (update) => {
-        logger.info('[Voice Agent] Proactive update', { text: update.text });
-        for (const client of voiceClients) {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify({
-                    type: 'voice:proactive_update',
-                    payload: { text: update.text }
-                }));
-            }
-        }
     });
 
     // ===== Mobile Route (legacy redirect) =====
