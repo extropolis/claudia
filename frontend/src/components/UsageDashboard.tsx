@@ -14,9 +14,10 @@ interface PricingConfig {
 interface UsageDashboardProps {
     isOpen: boolean;
     onClose: () => void;
+    embedded?: boolean;
 }
 
-export function UsageDashboard({ isOpen, onClose }: UsageDashboardProps) {
+export function UsageDashboard({ isOpen, onClose, embedded }: UsageDashboardProps) {
     const [data, setData] = useState<UsageDashboardData | null>(null);
     const [pricingConfig, setPricingConfig] = useState<PricingConfig | null>(null);
     const [loading, setLoading] = useState(false);
@@ -98,9 +99,9 @@ export function UsageDashboard({ isOpen, onClose }: UsageDashboardProps) {
     const modelEntries = data ? Object.entries(data.byModel) as [string, ModelTokenUsage][] : [];
     const pricingEntries = Object.entries(editedPricing) as [string, ModelPricing][];
 
-    return (
-        <div className="usage-dashboard-overlay" onClick={onClose}>
-            <div className="usage-dashboard" onClick={(e) => e.stopPropagation()}>
+    const content = (
+        <div className={embedded ? "usage-dashboard usage-dashboard-embedded" : "usage-dashboard"} onClick={embedded ? undefined : (e) => e.stopPropagation()}>
+            {!embedded && (
                 <div className="usage-dashboard-header">
                     <h2>Token Usage Dashboard</h2>
                     <div className="usage-dashboard-actions">
@@ -117,6 +118,7 @@ export function UsageDashboard({ isOpen, onClose }: UsageDashboardProps) {
                         </button>
                     </div>
                 </div>
+            )}
 
                 <div className="usage-dashboard-body">
                 {error && (
@@ -328,6 +330,15 @@ export function UsageDashboard({ isOpen, onClose }: UsageDashboardProps) {
                 )}
                 </div>
             </div>
+    );
+
+    if (embedded) {
+        return content;
+    }
+
+    return (
+        <div className="usage-dashboard-overlay" onClick={onClose}>
+            {content}
         </div>
     );
 }

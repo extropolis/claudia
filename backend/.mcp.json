@@ -1,29 +1,22 @@
 {
   "mcpServers": {
     "playwright": {
-      "command": "npx",
+      "command": "/Users/I850333/.nvm/versions/node/v24.13.1/bin/node",
       "args": [
-        "@playwright/mcp@latest",
+        "/Users/I850333/experiments/claudia/node_modules/@playwright/mcp/cli.js",
+        "--browser",
+        "chromium",
         "--isolated"
-      ]
-    },
-    "duckduckgo": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "ddg-mcp-search"
-      ]
-    },
-    "jira_mcp": {
-      "type": "http",
-      "url": "https://litellm.concur.click/mcp/jira_mcp",
-      "timeout": 30
+      ],
+      "env": {
+        "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": "/Users/I850333/Library/Caches/ms-playwright/chromium-1217/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+      }
     },
     "claudia": {
-      "command": "npx",
+      "command": "/Users/I850333/.nvm/versions/node/v24.13.1/bin/node",
       "args": [
-        "tsx",
-        "/Users/I850333/projects/experiments/claudia/backend/src/claudia-mcp-server.ts"
+        "/Users/I850333/experiments/claudia/node_modules/tsx/dist/cli.mjs",
+        "/Users/I850333/experiments/claudia/backend/src/claudia-mcp-server.ts"
       ]
     }
   }

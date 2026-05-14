@@ -1641,7 +1641,7 @@ export function WorkspacePanel({
     }, [waitingInputNotifications]);
 
     const handleAddWorkspace = () => {
-        setShowProjectPicker(true);
+        setShowWorkspaceManager(true);
     };
 
     const handleToggleArchivedTasks = () => {
@@ -1733,6 +1733,13 @@ export function WorkspacePanel({
                 <h2>Workspaces</h2>
                 <div className="workspace-panel-header-actions">
                     <button
+                        className="add-workspace-button"
+                        onClick={handleAddWorkspace}
+                        title="Add workspace"
+                    >
+                        <Plus size={16} />
+                    </button>
+                    <button
                         className={`archived-toggle-button ${showArchivedTasks ? 'active' : ''}`}
                         onClick={handleToggleArchivedTasks}
                         title={showArchivedTasks ? 'Hide archived tasks' : 'Show archived tasks'}
@@ -1772,13 +1779,6 @@ export function WorkspacePanel({
                         title="Manage workspaces"
                     >
                         <Settings size={16} />
-                    </button>
-                    <button
-                        className="add-workspace-button"
-                        onClick={handleAddWorkspace}
-                        title="Add workspace"
-                    >
-                        <Plus size={16} />
                     </button>
                     {onCollapse && (
                         <button

@@ -1354,7 +1354,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel, wsRef }: SettingsM
                         onToggle={() => togglePanel('usage')}
                     >
                         <div style={{ padding: '8px 0' }}>
-                            <UsageDashboard wsRef={wsRef} />
+                            <UsageDashboard isOpen={expandedPanels.usage} onClose={() => togglePanel('usage')} embedded />
                         </div>
                     </CollapsiblePanel>
 

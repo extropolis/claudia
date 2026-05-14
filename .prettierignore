@@ -1,0 +1,8 @@
+dist/
+dist-electron/
+node_modules/
+build/
+release/
+coverage/
+*.tsbuildinfo
+package-lock.json

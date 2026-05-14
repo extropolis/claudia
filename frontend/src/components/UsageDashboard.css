@@ -32,6 +32,17 @@
     overflow: hidden;
 }
 
+.usage-dashboard.usage-dashboard-embedded {
+    width: 100%;
+    max-width: none;
+    max-height: none;
+    background: none;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    overflow: visible;
+}
+
 .usage-dashboard-header {
     display: flex;
     align-items: center;

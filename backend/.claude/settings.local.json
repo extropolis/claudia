@@ -8,8 +8,6 @@
   "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "playwright",
-    "duckduckgo",
-    "jira_mcp",
     "claudia"
   ]
 }
