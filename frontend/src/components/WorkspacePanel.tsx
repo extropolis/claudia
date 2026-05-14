@@ -1641,7 +1641,7 @@ export function WorkspacePanel({
     }, [waitingInputNotifications]);
 
     const handleAddWorkspace = () => {
-        setShowProjectPicker(true);
+        setShowWorkspaceManager(true);
     };
 
     const handleToggleArchivedTasks = () => {
