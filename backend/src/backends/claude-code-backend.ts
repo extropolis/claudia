@@ -6,19 +6,29 @@
 import { spawn, IPty } from 'node-pty';
 import { EventEmitter } from 'events';
 import { execSync } from 'child_process';
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, statSync, openSync, readSync, closeSync } from 'fs';
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  statSync,
+  openSync,
+  readSync,
+  closeSync,
+} from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { randomBytes } from 'crypto';
 import { TaskState, WaitingInputType, TaskGitState } from '@claudia/shared';
 import {
-    CodeBackend,
-    BackendType,
-    BackendStatus,
-    BackendTask,
-    TaskConfig,
-    ReconnectConfig,
-    TaskEnvironment
+  CodeBackend,
+  BackendType,
+  BackendStatus,
+  BackendTask,
+  TaskConfig,
+  ReconnectConfig,
+  TaskEnvironment,
 } from './types.js';
 import { ConfigStore, ClaudeCodeSwitches } from '../config-store.js';
 import { createLogger } from '../logger.js';
@@ -33,47 +43,47 @@ const logger = createLogger('[ClaudeCodeBackend]');
  * Old Claudia UI used: plan, safe, dangerous, auto
  */
 const PERMISSION_MODE_MAP: Record<string, string> = {
-    'safe': 'acceptEdits',
-    'dangerous': 'bypassPermissions',
-    'auto': 'dontAsk',
-    'plan': 'plan',
-    'default': 'default',
-    'acceptEdits': 'acceptEdits',
-    'bypassPermissions': 'bypassPermissions',
-    'dontAsk': 'dontAsk',
+  safe: 'acceptEdits',
+  dangerous: 'bypassPermissions',
+  auto: 'dontAsk',
+  plan: 'plan',
+  default: 'default',
+  acceptEdits: 'acceptEdits',
+  bypassPermissions: 'bypassPermissions',
+  dontAsk: 'dontAsk',
 };
 
 /**
  * Build CLI args from ClaudeCodeSwitches config.
  */
 function buildClaudeCodeSwitchArgs(switches: ClaudeCodeSwitches): string[] {
-    const args: string[] = [];
+  const args: string[] = [];
 
-    if (switches.verbose) {
-        args.push('--verbose');
-    }
-    if (switches.maxTurns != null && switches.maxTurns > 0) {
-        args.push('--max-turns', String(switches.maxTurns));
-    }
-    if (switches.maxBudgetUsd != null && switches.maxBudgetUsd > 0) {
-        args.push('--max-budget-usd', String(switches.maxBudgetUsd));
-    }
-    if (switches.permissionMode) {
-        const cliMode = PERMISSION_MODE_MAP[switches.permissionMode] || switches.permissionMode;
-        args.push('--permission-mode', cliMode);
-        logger.info(`Permission mode: "${switches.permissionMode}" → CLI: "${cliMode}"`);
-    }
-    if (switches.allowedTools && switches.allowedTools.trim()) {
-        args.push('--allowedTools', switches.allowedTools.trim());
-    }
-    if (switches.disallowedTools && switches.disallowedTools.trim()) {
-        args.push('--disallowedTools', switches.disallowedTools.trim());
-    }
-    if (switches.appendSystemPrompt && switches.appendSystemPrompt.trim()) {
-        args.push('--append-system-prompt', switches.appendSystemPrompt.trim());
-    }
+  if (switches.verbose) {
+    args.push('--verbose');
+  }
+  if (switches.maxTurns != null && switches.maxTurns > 0) {
+    args.push('--max-turns', String(switches.maxTurns));
+  }
+  if (switches.maxBudgetUsd != null && switches.maxBudgetUsd > 0) {
+    args.push('--max-budget-usd', String(switches.maxBudgetUsd));
+  }
+  if (switches.permissionMode) {
+    const cliMode = PERMISSION_MODE_MAP[switches.permissionMode] || switches.permissionMode;
+    args.push('--permission-mode', cliMode);
+    logger.info(`Permission mode: "${switches.permissionMode}" → CLI: "${cliMode}"`);
+  }
+  if (switches.allowedTools && switches.allowedTools.trim()) {
+    args.push('--allowedTools', switches.allowedTools.trim());
+  }
+  if (switches.disallowedTools && switches.disallowedTools.trim()) {
+    args.push('--disallowedTools', switches.disallowedTools.trim());
+  }
+  if (switches.appendSystemPrompt && switches.appendSystemPrompt.trim()) {
+    args.push('--append-system-prompt', switches.appendSystemPrompt.trim());
+  }
 
-    return args;
+  return args;
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -83,1004 +93,1084 @@ const __dirname = dirname(__filename);
  * Internal task representation with PTY process
  */
 interface InternalTask {
-    id: string;
-    prompt: string;
-    workspaceId: string;
-    process: IPty;
-    state: TaskState;
-    outputHistory: Buffer[];
-    previousHistory?: Buffer;
-    lazyHistoryBase64?: string;
-    lastActivity: Date;
-    createdAt: Date;
-    isActive: boolean;
-    initialPromptSent: boolean;
-    pendingPrompt: string | null;
-    sessionId: string | null;
-    promptSubmitAttempts?: number;
-    gitStateBefore?: Partial<TaskGitState>;
-    gitState?: TaskGitState;
-    systemPrompt?: string;
-    waitingInputType?: WaitingInputType;
-    lastOutputLength: number;
-    hasStartedProcessing: boolean;
-    stateTransitionLock?: boolean;
-    shouldContinue?: boolean;
-    continuationSent?: boolean;
-    consecutiveOutputChanges?: number;
+  id: string;
+  prompt: string;
+  workspaceId: string;
+  process: IPty;
+  state: TaskState;
+  outputHistory: Buffer[];
+  previousHistory?: Buffer;
+  lazyHistoryBase64?: string;
+  lastActivity: Date;
+  createdAt: Date;
+  isActive: boolean;
+  initialPromptSent: boolean;
+  pendingPrompt: string | null;
+  sessionId: string | null;
+  promptSubmitAttempts?: number;
+  gitStateBefore?: Partial<TaskGitState>;
+  gitState?: TaskGitState;
+  systemPrompt?: string;
+  waitingInputType?: WaitingInputType;
+  lastOutputLength: number;
+  hasStartedProcessing: boolean;
+  stateTransitionLock?: boolean;
+  shouldContinue?: boolean;
+  continuationSent?: boolean;
+  consecutiveOutputChanges?: number;
 }
 
 /**
  * Claude Code Backend implementation using PTY
  */
 export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
-    readonly name: BackendType = 'claude-code';
+  readonly name: BackendType = 'claude-code';
 
-    private tasks: Map<string, InternalTask> = new Map();
-    private configStore: ConfigStore | null = null;
-    private pendingSessionCapture: Map<string, { taskId: string; workspaceId: string; startTime: number; interval?: ReturnType<typeof setInterval> }> = new Map();
-    private sessionCaptureIntervals: Map<string, NodeJS.Timeout> = new Map();
-    private statePollingInterval: NodeJS.Timeout | null = null;
-    private readonly statePollingMs: number;
-    private historyDir: string;
+  private tasks: Map<string, InternalTask> = new Map();
+  private configStore: ConfigStore | null = null;
+  private pendingSessionCapture: Map<
+    string,
+    {
+      taskId: string;
+      workspaceId: string;
+      startTime: number;
+      interval?: ReturnType<typeof setInterval>;
+    }
+  > = new Map();
+  private sessionCaptureIntervals: Map<string, NodeJS.Timeout> = new Map();
+  private statePollingInterval: NodeJS.Timeout | null = null;
+  private readonly statePollingMs: number;
+  private historyDir: string;
 
-    constructor(configStore?: ConfigStore, historyDir?: string) {
-        super();
-        this.configStore = configStore || null;
+  constructor(configStore?: ConfigStore, historyDir?: string) {
+    super();
+    this.configStore = configStore || null;
 
-        // Configurable polling interval via environment variable (default: 3000ms)
-        const envPollingMs = parseInt(process.env.STATE_POLLING_MS || '', 10);
-        this.statePollingMs = !isNaN(envPollingMs) && envPollingMs >= 500 ? envPollingMs : 3000;
+    // Configurable polling interval via environment variable (default: 3000ms)
+    const envPollingMs = parseInt(process.env.STATE_POLLING_MS || '', 10);
+    this.statePollingMs = !isNaN(envPollingMs) && envPollingMs >= 500 ? envPollingMs : 3000;
 
-        this.historyDir = historyDir || join(__dirname, '..', '..', 'task-histories');
+    this.historyDir = historyDir || join(__dirname, '..', '..', 'task-histories');
+  }
+
+  async checkInstalled(): Promise<BackendStatus> {
+    try {
+      const version = execSync('claude --version', { encoding: 'utf8', timeout: 5000 }).trim();
+      return { installed: true, version };
+    } catch (error) {
+      return {
+        installed: false,
+        error: 'Claude Code CLI is not installed. Please install it from: https://claude.ai/code',
+      };
+    }
+  }
+
+  async initialize(): Promise<void> {
+    // Start state polling
+    this.startStatePolling();
+    logger.info('Claude Code backend initialized', { pollingMs: this.statePollingMs });
+  }
+
+  async shutdown(): Promise<void> {
+    // Stop state polling
+    if (this.statePollingInterval) {
+      clearInterval(this.statePollingInterval);
+      this.statePollingInterval = null;
     }
 
-    async checkInstalled(): Promise<BackendStatus> {
+    // Clean up session capture intervals
+    for (const taskId of this.sessionCaptureIntervals.keys()) {
+      this.clearSessionCapture(taskId);
+    }
+
+    // Kill all processes
+    for (const task of this.tasks.values()) {
+      try {
+        task.process.kill();
+      } catch (_e) {
+        // Process might already be dead
+      }
+    }
+    this.tasks.clear();
+
+    logger.info('Claude Code backend shut down');
+  }
+
+  async createTask(config: TaskConfig, environment: TaskEnvironment): Promise<BackendTask> {
+    const id = `task-${Date.now()}-${randomBytes(5).toString('hex')}`;
+
+    const customArgs = process.env['CC_CLAUDE_ARGS']
+      ? process.env['CC_CLAUDE_ARGS'].split(' ')
+      : [];
+
+    const claudeArgs = [...customArgs];
+
+    if (config.skipPermissions) {
+      claudeArgs.push('--dangerously-skip-permissions');
+      logger.info('Skip permissions enabled');
+    }
+
+    if (config.systemPrompt && config.systemPrompt.trim()) {
+      claudeArgs.push('--system-prompt', config.systemPrompt.trim());
+      logger.info('Using custom system prompt');
+    }
+
+    if (config.model) {
+      claudeArgs.push('--model', config.model);
+      logger.info('Using model', { model: config.model });
+    }
+
+    // Add Claude Code CLI switches from settings
+    if (this.configStore) {
+      const switches = this.configStore.getClaudeCodeSwitches();
+      const switchArgs = buildClaudeCodeSwitchArgs(switches);
+      if (switchArgs.length > 0) {
+        claudeArgs.push(...switchArgs);
+        logger.info('Applied CLI switches', { switchArgs });
+      }
+      if (switches.effortLevel) {
+        environment = { ...environment, CLAUDE_CODE_EFFORT_LEVEL: switches.effortLevel };
+        logger.info('Effort level', { effortLevel: switches.effortLevel });
+      }
+    }
+
+    logger.info('Creating task', { taskId: id, workspaceId: config.workspaceId });
+    logger.debug('Command args', { args: claudeArgs });
+
+    const ptyProcess = spawn(claudeExe, claudeArgs, {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 40,
+      cwd: config.workspaceId,
+      env: environment,
+    });
+
+    const now = new Date();
+    const task: InternalTask = {
+      id,
+      prompt: config.prompt,
+      workspaceId: config.workspaceId,
+      process: ptyProcess,
+      state: 'starting',
+      outputHistory: [],
+      lastActivity: now,
+      createdAt: now,
+      isActive: false,
+      initialPromptSent: false,
+      pendingPrompt: config.prompt,
+      sessionId: null,
+      systemPrompt: config.systemPrompt?.trim() || undefined,
+      lastOutputLength: 0,
+      hasStartedProcessing: false,
+    };
+
+    this.setupProcessHandlers(task);
+    this.tasks.set(id, task);
+    this.emit('task:stateChanged', this.toBackendTask(task));
+    this.startSessionCapture(id, config.workspaceId);
+
+    return this.toBackendTask(task);
+  }
+
+  async reconnectTask(config: ReconnectConfig, environment: TaskEnvironment): Promise<BackendTask> {
+    const customArgs = process.env['CC_CLAUDE_ARGS']
+      ? process.env['CC_CLAUDE_ARGS'].split(' ')
+      : [];
+
+    const claudeArgs = [...customArgs];
+
+    if (this.configStore?.getSkipPermissions()) {
+      claudeArgs.push('--dangerously-skip-permissions');
+    }
+
+    // Add Claude Code CLI switches from settings
+    if (this.configStore) {
+      const switches = this.configStore.getClaudeCodeSwitches();
+      const switchArgs = buildClaudeCodeSwitchArgs(switches);
+      if (switchArgs.length > 0) {
+        claudeArgs.push(...switchArgs);
+        logger.info('Applied CLI switches for reconnect', { switchArgs });
+      }
+      if (switches.effortLevel) {
+        environment = { ...environment, CLAUDE_CODE_EFFORT_LEVEL: switches.effortLevel };
+      }
+    }
+
+    // Check if session file exists before trying to resume
+    let sessionIdToUse = config.sessionId;
+    if (sessionIdToUse) {
+      const claudeDir = this.getClaudeProjectsDir(config.workspaceId);
+      const sessionFilePath = join(claudeDir, `${sessionIdToUse}.jsonl`);
+      if (!existsSync(sessionFilePath)) {
+        logger.warn('Session file not found, starting fresh', {
+          taskId: config.taskId,
+          sessionId: sessionIdToUse,
+          path: sessionFilePath,
+        });
+        sessionIdToUse = null;
+      }
+    }
+
+    if (sessionIdToUse) {
+      claudeArgs.push('--resume', sessionIdToUse);
+      logger.info('Reconnecting task with session', {
+        taskId: config.taskId,
+        sessionId: sessionIdToUse,
+      });
+    } else {
+      logger.info('Reconnecting task (fresh start)', { taskId: config.taskId });
+    }
+
+    const ptyProcess = spawn(claudeExe, claudeArgs, {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 40,
+      cwd: config.workspaceId,
+      env: environment,
+    });
+
+    const now = new Date();
+    const shouldContinue = config.shouldContinue && sessionIdToUse != null;
+
+    const resumeMessage = sessionIdToUse
+      ? `\r\n\x1b[90m─── Resuming session ${sessionIdToUse} ───\x1b[0m\r\n\r\n`
+      : `\r\n\x1b[90m─── Session reconnected ───\x1b[0m\r\n\r\n`;
+
+    const task: InternalTask = {
+      id: config.taskId,
+      prompt: '',
+      workspaceId: config.workspaceId,
+      process: ptyProcess,
+      state: shouldContinue ? 'starting' : 'idle',
+      outputHistory: [Buffer.from(resumeMessage)],
+      lastActivity: now,
+      createdAt: now,
+      isActive: false,
+      initialPromptSent: !shouldContinue,
+      pendingPrompt: shouldContinue ? 'continue' : null,
+      sessionId: sessionIdToUse,
+      lastOutputLength: resumeMessage.length,
+      hasStartedProcessing: !shouldContinue,
+      shouldContinue,
+      continuationSent: false,
+    };
+
+    this.setupProcessHandlers(task);
+    this.tasks.set(task.id, task);
+    this.emit('task:stateChanged', this.toBackendTask(task));
+
+    return this.toBackendTask(task);
+  }
+
+  sendInput(taskId: string, input: string, options: { typeCharByChar?: boolean } = {}): void {
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+
+    const endsWithEnter = input.endsWith('\r') || input.endsWith('\n');
+    const hasMessageContent = input.length > 0;
+
+    // Ensure we handle input correctly whether it ends with newline or not
+    const messageContent = endsWithEnter ? input.slice(0, -1) : input;
+    const enterKey = endsWithEnter ? input.slice(-1) : '';
+
+    // Handle character-by-character typing (for initial prompt)
+    if (options.typeCharByChar && messageContent.length > 0) {
+      // Echo the full input to output history immediately so it's visible in UI
+      const echoBuffer = Buffer.from(messageContent);
+      task.outputHistory.push(echoBuffer);
+      if (task.isActive) {
+        this.emit('task:output', task.id, messageContent);
+      }
+
+      // Type character by character to the PTY
+      let charIndex = 0;
+      const typeNextChar = () => {
+        if (charIndex < messageContent.length) {
+          task.process.write(messageContent[charIndex]);
+          charIndex++;
+          setTimeout(typeNextChar, 10); // 10ms delay per char
+        } else if (enterKey) {
+          // Send Enter after typing finishes
+          setTimeout(
+            () => this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey }),
+            200,
+          );
+        }
+      };
+      typeNextChar();
+      return;
+    }
+
+    if (
+      hasMessageContent &&
+      (task.state === 'idle' || task.state === 'waiting_input' || task.state === 'starting')
+    ) {
+      // Echo to history immediately (UI)
+      const echoBuffer = Buffer.from(messageContent);
+      task.outputHistory.push(echoBuffer);
+      if (task.isActive) {
+        this.emit('task:output', task.id, messageContent);
+      }
+
+      task.process.write(messageContent);
+      task.promptSubmitAttempts = 0;
+
+      setTimeout(
+        () =>
+          this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey: enterKey || '\r' }),
+        200,
+      );
+    } else {
+      // For single characters or non-message input, echo them too
+      const echoBuffer = Buffer.from(input);
+      task.outputHistory.push(echoBuffer);
+      if (task.isActive) {
+        this.emit('task:output', task.id, input);
+      }
+      task.process.write(input);
+    }
+  }
+
+  resizeTask(taskId: string, cols: number, rows: number): void {
+    const task = this.tasks.get(taskId);
+    if (task) {
+      task.process.resize(cols, rows);
+    }
+  }
+
+  interruptTask(taskId: string): boolean {
+    const task = this.tasks.get(taskId);
+    if (task && task.state === 'busy') {
+      logger.info('Interrupting task', { taskId });
+      task.process.write('\x1b');
+      return true;
+    }
+    return false;
+  }
+
+  stopTask(taskId: string): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task) {
+      logger.info('stopTask: task not found', { taskId });
+      return false;
+    }
+
+    if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
+      logger.info('Stopping task', { taskId, state: task.state });
+      try {
+        task.process.write('\x1b');
+      } catch (_e) {
+        // Process might already be dead
+      }
+      return true;
+    }
+
+    logger.info('stopTask: task not in stoppable state', { taskId, state: task.state });
+    return false;
+  }
+
+  destroyTask(taskId: string): void {
+    logger.info('Destroying task', { taskId });
+
+    this.clearSessionCapture(taskId);
+
+    const task = this.tasks.get(taskId);
+    if (task) {
+      if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
         try {
-            const version = execSync('claude --version', { encoding: 'utf8', timeout: 5000 }).trim();
-            return { installed: true, version };
-        } catch (error) {
-            return {
-                installed: false,
-                error: 'Claude Code CLI is not installed. Please install it from: https://claude.ai/code'
-            };
-        }
-    }
-
-    async initialize(): Promise<void> {
-        // Start state polling
-        this.startStatePolling();
-        logger.info('Claude Code backend initialized', { pollingMs: this.statePollingMs });
-    }
-
-    async shutdown(): Promise<void> {
-        // Stop state polling
-        if (this.statePollingInterval) {
-            clearInterval(this.statePollingInterval);
-            this.statePollingInterval = null;
-        }
-
-        // Clean up session capture intervals
-        for (const taskId of this.sessionCaptureIntervals.keys()) {
-            this.clearSessionCapture(taskId);
-        }
-
-        // Kill all processes
-        for (const task of this.tasks.values()) {
-            try {
-                task.process.kill();
-            } catch (_e) {
-                // Process might already be dead
-            }
-        }
-        this.tasks.clear();
-
-        logger.info('Claude Code backend shut down');
-    }
-
-    async createTask(config: TaskConfig, environment: TaskEnvironment): Promise<BackendTask> {
-        const id = `task-${Date.now()}-${randomBytes(5).toString('hex')}`;
-
-        const customArgs = process.env['CC_CLAUDE_ARGS']
-            ? process.env['CC_CLAUDE_ARGS'].split(' ')
-            : [];
-
-        const claudeArgs = [...customArgs];
-
-        if (config.skipPermissions) {
-            claudeArgs.push('--dangerously-skip-permissions');
-            logger.info('Skip permissions enabled');
-        }
-
-        if (config.systemPrompt && config.systemPrompt.trim()) {
-            claudeArgs.push('--system-prompt', config.systemPrompt.trim());
-            logger.info('Using custom system prompt');
-        }
-
-        if (config.model) {
-            claudeArgs.push('--model', config.model);
-            logger.info('Using model', { model: config.model });
-        }
-
-        // Add Claude Code CLI switches from settings
-        if (this.configStore) {
-            const switches = this.configStore.getClaudeCodeSwitches();
-            const switchArgs = buildClaudeCodeSwitchArgs(switches);
-            if (switchArgs.length > 0) {
-                claudeArgs.push(...switchArgs);
-                logger.info('Applied CLI switches', { switchArgs });
-            }
-            if (switches.effortLevel) {
-                environment = { ...environment, CLAUDE_CODE_EFFORT_LEVEL: switches.effortLevel };
-                logger.info('Effort level', { effortLevel: switches.effortLevel });
-            }
-        }
-
-        logger.info('Creating task', { taskId: id, workspaceId: config.workspaceId });
-        logger.debug('Command args', { args: claudeArgs });
-
-        const ptyProcess = spawn(claudeExe, claudeArgs, {
-            name: 'xterm-256color',
-            cols: 120,
-            rows: 40,
-            cwd: config.workspaceId,
-            env: environment,
-        });
-
-        const now = new Date();
-        const task: InternalTask = {
-            id,
-            prompt: config.prompt,
-            workspaceId: config.workspaceId,
-            process: ptyProcess,
-            state: 'starting',
-            outputHistory: [],
-            lastActivity: now,
-            createdAt: now,
-            isActive: false,
-            initialPromptSent: false,
-            pendingPrompt: config.prompt,
-            sessionId: null,
-            systemPrompt: config.systemPrompt?.trim() || undefined,
-            lastOutputLength: 0,
-            hasStartedProcessing: false,
-        };
-
-        this.setupProcessHandlers(task);
-        this.tasks.set(id, task);
-        this.emit('task:stateChanged', this.toBackendTask(task));
-        this.startSessionCapture(id, config.workspaceId);
-
-        return this.toBackendTask(task);
-    }
-
-    async reconnectTask(config: ReconnectConfig, environment: TaskEnvironment): Promise<BackendTask> {
-        const customArgs = process.env['CC_CLAUDE_ARGS']
-            ? process.env['CC_CLAUDE_ARGS'].split(' ')
-            : [];
-
-        const claudeArgs = [...customArgs];
-
-        if (this.configStore?.getSkipPermissions()) {
-            claudeArgs.push('--dangerously-skip-permissions');
-        }
-
-        // Add Claude Code CLI switches from settings
-        if (this.configStore) {
-            const switches = this.configStore.getClaudeCodeSwitches();
-            const switchArgs = buildClaudeCodeSwitchArgs(switches);
-            if (switchArgs.length > 0) {
-                claudeArgs.push(...switchArgs);
-                logger.info('Applied CLI switches for reconnect', { switchArgs });
-            }
-            if (switches.effortLevel) {
-                environment = { ...environment, CLAUDE_CODE_EFFORT_LEVEL: switches.effortLevel };
-            }
-        }
-
-        // Check if session file exists before trying to resume
-        let sessionIdToUse = config.sessionId;
-        if (sessionIdToUse) {
-            const claudeDir = this.getClaudeProjectsDir(config.workspaceId);
-            const sessionFilePath = join(claudeDir, `${sessionIdToUse}.jsonl`);
-            if (!existsSync(sessionFilePath)) {
-                logger.warn('Session file not found, starting fresh', {
-                    taskId: config.taskId,
-                    sessionId: sessionIdToUse,
-                    path: sessionFilePath
-                });
-                sessionIdToUse = null;
-            }
-        }
-
-        if (sessionIdToUse) {
-            claudeArgs.push('--resume', sessionIdToUse);
-            logger.info('Reconnecting task with session', { taskId: config.taskId, sessionId: sessionIdToUse });
-        } else {
-            logger.info('Reconnecting task (fresh start)', { taskId: config.taskId });
-        }
-
-        const ptyProcess = spawn(claudeExe, claudeArgs, {
-            name: 'xterm-256color',
-            cols: 120,
-            rows: 40,
-            cwd: config.workspaceId,
-            env: environment,
-        });
-
-        const now = new Date();
-        const shouldContinue = config.shouldContinue && sessionIdToUse != null;
-
-        const resumeMessage = sessionIdToUse
-            ? `\r\n\x1b[90m─── Resuming session ${sessionIdToUse} ───\x1b[0m\r\n\r\n`
-            : `\r\n\x1b[90m─── Session reconnected ───\x1b[0m\r\n\r\n`;
-
-        const task: InternalTask = {
-            id: config.taskId,
-            prompt: '',
-            workspaceId: config.workspaceId,
-            process: ptyProcess,
-            state: shouldContinue ? 'starting' : 'idle',
-            outputHistory: [Buffer.from(resumeMessage)],
-            lastActivity: now,
-            createdAt: now,
-            isActive: false,
-            initialPromptSent: !shouldContinue,
-            pendingPrompt: shouldContinue ? 'continue' : null,
-            sessionId: sessionIdToUse,
-            lastOutputLength: resumeMessage.length,
-            hasStartedProcessing: !shouldContinue,
-            shouldContinue,
-            continuationSent: false,
-        };
-
-        this.setupProcessHandlers(task);
-        this.tasks.set(task.id, task);
-        this.emit('task:stateChanged', this.toBackendTask(task));
-
-        return this.toBackendTask(task);
-    }
-
-    sendInput(taskId: string, input: string, options: { typeCharByChar?: boolean } = {}): void {
-        const task = this.tasks.get(taskId);
-        if (!task) return;
-
-        const endsWithEnter = input.endsWith('\r') || input.endsWith('\n');
-        const hasMessageContent = input.length > 0;
-
-        // Ensure we handle input correctly whether it ends with newline or not
-        const messageContent = endsWithEnter ? input.slice(0, -1) : input;
-        const enterKey = endsWithEnter ? input.slice(-1) : '';
-
-        // Handle character-by-character typing (for initial prompt)
-        if (options.typeCharByChar && messageContent.length > 0) {
-            // Echo the full input to output history immediately so it's visible in UI
-            const echoBuffer = Buffer.from(messageContent);
-            task.outputHistory.push(echoBuffer);
-            if (task.isActive) {
-                this.emit('task:output', task.id, messageContent);
-            }
-
-            // Type character by character to the PTY
-            let charIndex = 0;
-            const typeNextChar = () => {
-                if (charIndex < messageContent.length) {
-                    task.process.write(messageContent[charIndex]);
-                    charIndex++;
-                    setTimeout(typeNextChar, 10); // 10ms delay per char
-                } else if (enterKey) {
-                    // Send Enter after typing finishes
-                    setTimeout(() => this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey }), 200);
-                }
-            };
-            typeNextChar();
-            return;
-        }
-
-        if (hasMessageContent && (task.state === 'idle' || task.state === 'waiting_input' || task.state === 'starting')) {
-            // Echo to history immediately (UI)
-            const echoBuffer = Buffer.from(messageContent);
-            task.outputHistory.push(echoBuffer);
-            if (task.isActive) {
-                this.emit('task:output', task.id, messageContent);
-            }
-
-            task.process.write(messageContent);
-            task.promptSubmitAttempts = 0;
-
-            setTimeout(() => this.sendEnterWithRetry(task, 3, { isInitialPrompt: false, enterKey: enterKey || '\r' }), 200);
-        } else {
-            // For single characters or non-message input, echo them too
-            const echoBuffer = Buffer.from(input);
-            task.outputHistory.push(echoBuffer);
-            if (task.isActive) {
-                this.emit('task:output', task.id, input);
-            }
-            task.process.write(input);
-        }
-    }
-
-    resizeTask(taskId: string, cols: number, rows: number): void {
-        const task = this.tasks.get(taskId);
-        if (task) {
-            task.process.resize(cols, rows);
-        }
-    }
-
-    interruptTask(taskId: string): boolean {
-        const task = this.tasks.get(taskId);
-        if (task && task.state === 'busy') {
-            logger.info('Interrupting task', { taskId });
-            task.process.write('\x1b');
-            return true;
-        }
-        return false;
-    }
-
-    stopTask(taskId: string): boolean {
-        const task = this.tasks.get(taskId);
-        if (!task) {
-            logger.info('stopTask: task not found', { taskId });
-            return false;
-        }
-
-        if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
-            logger.info('Stopping task', { taskId, state: task.state });
-            try {
-                task.process.write('\x1b');
-            } catch (_e) {
-                // Process might already be dead
-            }
-            return true;
-        }
-
-        logger.info('stopTask: task not in stoppable state', { taskId, state: task.state });
-        return false;
-    }
-
-    destroyTask(taskId: string): void {
-        logger.info('Destroying task', { taskId });
-
-        this.clearSessionCapture(taskId);
-
-        const task = this.tasks.get(taskId);
-        if (task) {
-            if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
-                try {
-                    task.process.write('\x1b');
-                } catch (_e) {
-                    // Process might already be dead
-                }
-            }
-
-            this.tasks.delete(taskId);
-            try {
-                task.process.kill();
-            } catch (_e) {
-                // Process might already be dead
-            }
-        }
-    }
-
-    getTaskState(taskId: string): TaskState | null {
-        const task = this.tasks.get(taskId);
-        return task ? task.state : null;
-    }
-
-    getTask(taskId: string): BackendTask | undefined {
-        const task = this.tasks.get(taskId);
-        return task ? this.toBackendTask(task) : undefined;
-    }
-
-    getTaskHistory(taskId: string, maxBytes: number = 2 * 1024 * 1024): string | null {
-        const task = this.tasks.get(taskId);
-        if (!task) return null;
-
-        return this.getCombinedHistory(task, maxBytes);
-    }
-
-    setTaskActive(taskId: string, active: boolean): void {
-        if (active) {
-            // Clear decoded history from all other tasks to free memory
-            for (const task of this.tasks.values()) {
-                task.isActive = false;
-                if (task.id !== taskId && (task.previousHistory || task.lazyHistoryBase64)) {
-                    task.previousHistory = undefined;
-                    task.lazyHistoryBase64 = undefined;
-                    logger.debug('Freed memory for inactive task', { taskId: task.id });
-                }
-            }
-        }
-
-        const task = this.tasks.get(taskId);
-        if (task) {
-            task.isActive = active;
-
-            if (active) {
-                const history = this.getCombinedHistory(task, 2 * 1024 * 1024);
-                if (history) {
-                    this.emit('task:output', task.id, history);
-                }
-            }
-        }
-    }
-
-    hasProcessingIndicators(taskId: string): boolean {
-        const task = this.tasks.get(taskId);
-        if (!task) return false;
-
-        const recentOutput = this.getRecentOutput(task, 1024);
-        const processingPatterns = [
-            /Thinking/i,
-            /Working/i,
-            /Concocting/i,
-            /Analyzing/i,
-            /Reading/i,
-            /Writing/i,
-            /⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/,
-            /✶|✳|✢|·|✻|✽|✺/,
-            /───.*Claude/,
-        ];
-        return processingPatterns.some(pattern => pattern.test(recentOutput));
-    }
-
-    /**
-     * Get the internal task (for TaskSpawner compatibility during migration)
-     */
-    getInternalTask(taskId: string): InternalTask | undefined {
-        return this.tasks.get(taskId);
-    }
-
-    /**
-     * Update git state on a task
-     */
-    updateGitState(taskId: string, gitState: TaskGitState): void {
-        const task = this.tasks.get(taskId);
-        if (task) {
-            task.gitState = gitState;
-            this.emit('task:stateChanged', this.toBackendTask(task));
-        }
-    }
-
-    /**
-     * Set git state before task execution
-     */
-    setGitStateBefore(taskId: string, gitStateBefore: Partial<TaskGitState>): void {
-        const task = this.tasks.get(taskId);
-        if (task) {
-            task.gitStateBefore = gitStateBefore;
-        }
-    }
-
-    /**
-     * Get git state before task execution
-     */
-    getGitStateBefore(taskId: string): Partial<TaskGitState> | undefined {
-        const task = this.tasks.get(taskId);
-        return task?.gitStateBefore;
-    }
-
-    // ============ Private Methods ============
-
-    private startStatePolling(): void {
-        if (this.statePollingInterval) return;
-
-        this.statePollingInterval = setInterval(() => {
-            this.checkTaskStates();
-        }, this.statePollingMs);
-
-        logger.info('State polling started', { intervalMs: this.statePollingMs });
-    }
-
-    private checkTaskStates(): void {
-        const CONSECUTIVE_CHANGES_FOR_BUSY = 2;
-
-        for (const task of this.tasks.values()) {
-            if (task.state === 'exited') continue;
-            if (task.stateTransitionLock) continue;
-
-            const currentLength = task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
-            const outputChanged = currentLength !== task.lastOutputLength;
-            task.lastOutputLength = currentLength;
-
-            if (outputChanged) {
-                task.consecutiveOutputChanges = (task.consecutiveOutputChanges || 0) + 1;
-
-                if (task.state === 'starting') {
-                    if (task.hasStartedProcessing) {
-                        this.transitionTaskState(task, 'busy', undefined, 'polling: starting with output');
-                    }
-                } else if (task.state === 'busy') {
-                    // Already busy
-                } else if (task.state === 'idle' || task.state === 'waiting_input') {
-                    if (task.consecutiveOutputChanges >= CONSECUTIVE_CHANGES_FOR_BUSY) {
-                        this.transitionTaskState(task, 'busy', undefined, `polling: sustained output (${task.consecutiveOutputChanges} consecutive)`);
-                    }
-                } else {
-                    this.transitionTaskState(task, 'busy', undefined, 'polling: output changed');
-                }
-            } else {
-                task.consecutiveOutputChanges = 0;
-
-                if (task.state === 'busy') {
-                    const recentOutput = this.getRecentOutput(task, 2048);
-                    const inputType = this.detectWaitingForInput(recentOutput);
-
-                    if (inputType) {
-                        this.transitionTaskState(task, 'waiting_input', inputType, `polling: detected ${inputType}`);
-                        this.emit('task:waitingInput', task.id, inputType, recentOutput);
-                    } else {
-                        this.transitionTaskState(task, 'idle', undefined, 'polling: output stable');
-                    }
-                }
-            }
-        }
-    }
-
-    private transitionTaskState(
-        task: InternalTask,
-        newState: TaskState,
-        waitingInputType: WaitingInputType | undefined,
-        reason: string
-    ): void {
-        if (task.stateTransitionLock) {
-            logger.warn('Skipping state transition - lock held', { taskId: task.id, newState, reason });
-            return;
-        }
-        task.stateTransitionLock = true;
-
-        try {
-            const oldState = task.state;
-            if (oldState === newState && task.waitingInputType === waitingInputType) {
-                return;
-            }
-
-            logger.debug('Task state transition', { taskId: task.id, oldState, newState, reason });
-            task.state = newState;
-            task.waitingInputType = waitingInputType;
-            this.emit('task:stateChanged', this.toBackendTask(task));
-        } finally {
-            task.stateTransitionLock = false;
-        }
-    }
-
-    private setupProcessHandlers(task: InternalTask): void {
-        task.process.onData((rawData: string) => {
-            // Filter out auth conflict warning that appears when multiple auth methods are set
-            const data = this.filterAuthConflictWarning(rawData);
-            if (!data) return; // Entire chunk was warning content
-
-            const buffer = Buffer.from(data, 'utf8');
-            task.outputHistory.push(buffer);
-
-            // Limit history to 2MB per task
-            const MAX_HISTORY_SIZE = 2 * 1024 * 1024;
-            let totalSize = task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
-            while (totalSize > MAX_HISTORY_SIZE && task.outputHistory.length > 0) {
-                const removed = task.outputHistory.shift();
-                if (removed) totalSize -= removed.length;
-            }
-
-            task.lastActivity = new Date();
-            const cleanData = this.stripAnsi(data);
-
-            // Try to extract session ID
-            if (!task.sessionId) {
-                const sessionId = this.extractSessionId(cleanData);
-                if (sessionId) {
-                    logger.info('Found session ID', { taskId: task.id, sessionId });
-                    task.sessionId = sessionId;
-                    this.emit('task:sessionCaptured', task.id, sessionId);
-                }
-            }
-
-            // Send initial prompt when Claude is ready
-            // Check accumulated history, not just the current chunk, as output might be split
-            const recentOutput = this.getRecentOutput(task, 5000);
-            if (!task.initialPromptSent && task.pendingPrompt) {
-                const isReady = this.isReadyForInitialInput(recentOutput);
-                logger.info('Checking ready state', { taskId: task.id, isReady, outputLen: recentOutput.length, outputTail: recentOutput.slice(-300) });
-            }
-            if (!task.initialPromptSent && task.pendingPrompt && this.isReadyForInitialInput(recentOutput)) {
-                logger.info('Claude ready, sending prompt', { taskId: task.id, prompt: task.pendingPrompt });
-                task.initialPromptSent = true;
-                const prompt = task.pendingPrompt;
-                task.pendingPrompt = null;
-                task.promptSubmitAttempts = 0;
-
-                // Wait longer (2.5s) to ensure CLI is fully ready and screen is stable
-                // Use typeCharByChar: true for "human-like" typing effect
-                setTimeout(() => {
-                    this.sendInput(task.id, prompt + '\r', { typeCharByChar: true });
-                }, 2500);
-            }
-
-            // Stream output to active task
-            if (task.isActive) {
-                this.emit('task:output', task.id, data);
-            }
-        });
-
-        task.process.onExit(({ exitCode }) => {
-            logger.info('Task exited', { taskId: task.id, exitCode });
-
-            this.clearSessionCapture(task.id);
-
-            if (!this.tasks.has(task.id)) {
-                logger.debug('Task already removed, skipping state change', { taskId: task.id });
-                return;
-            }
-            task.state = 'exited';
-            this.emit('task:stateChanged', this.toBackendTask(task));
-            this.emit('task:exit', task.id, exitCode);
-        });
-    }
-
-    private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 5): void {
-        // Delegate to sendInput for consistent behavior
-        this.sendInput(task.id, prompt + '\r');
-    }
-
-    private sendEnterWithRetry(
-        task: InternalTask,
-        retriesLeft: number,
-        options: { isInitialPrompt?: boolean; enterKey?: string } = {}
-    ): void {
-        const { isInitialPrompt = false, enterKey = '\r' } = options;
-        const context = isInitialPrompt ? 'initial prompt' : 'input';
-
-        if (retriesLeft <= 0) {
-            logger.debug('Max retries reached for Enter', { taskId: task.id, context });
-            return;
-        }
-
-        task.promptSubmitAttempts = (task.promptSubmitAttempts || 0) + 1;
-        logger.debug('Sending Enter', { taskId: task.id, context, attempt: task.promptSubmitAttempts });
-
-        if (!isInitialPrompt && (task.state === 'idle' || task.state === 'waiting_input')) {
-            task.state = 'busy';
-            task.waitingInputType = undefined;
-            this.emit('task:stateChanged', this.toBackendTask(task));
-        }
-
-        task.process.write(enterKey);
-
-        setTimeout(() => {
-            if (this.hasProcessingIndicators(task.id)) {
-                logger.debug('Processing detected after Enter', { taskId: task.id, context, attempt: task.promptSubmitAttempts });
-                if (task.state === 'starting' && !task.hasStartedProcessing) {
-                    task.hasStartedProcessing = true;
-                    task.state = 'busy';
-                    this.emit('task:stateChanged', this.toBackendTask(task));
-                }
-                return;
-            }
-
-            logger.debug('No processing indicators, will retry Enter', { taskId: task.id });
-            setTimeout(() => this.sendEnterWithRetry(task, retriesLeft - 1, options), 500);
-        }, 800);
-    }
-
-    private startSessionCapture(taskId: string, workspaceId: string): void {
-        this.clearSessionCapture(taskId);
-
-        const claudeDir = this.getClaudeProjectsDir(workspaceId);
-
-        let existingFiles = new Set<string>();
-        try {
-            if (existsSync(claudeDir)) {
-                existingFiles = new Set(readdirSync(claudeDir).filter(f => f.endsWith('.jsonl')));
-            }
+          task.process.write('\x1b');
         } catch (_e) {
-            // Directory might not exist yet
+          // Process might already be dead
         }
+      }
 
-        this.pendingSessionCapture.set(taskId, {
-            taskId,
-            workspaceId,
-            startTime: Date.now(),
-            interval: undefined, // Will be set below
-        });
+      this.tasks.delete(taskId);
+      try {
+        task.process.kill();
+      } catch (_e) {
+        // Process might already be dead
+      }
+    }
+  }
 
-        const checkInterval = setInterval(() => {
-            try {
-                if (!existsSync(claudeDir)) return;
+  getTaskState(taskId: string): TaskState | null {
+    const task = this.tasks.get(taskId);
+    return task ? task.state : null;
+  }
 
-                const currentFiles = readdirSync(claudeDir).filter(f => f.endsWith('.jsonl'));
+  getTask(taskId: string): BackendTask | undefined {
+    const task = this.tasks.get(taskId);
+    return task ? this.toBackendTask(task) : undefined;
+  }
 
-                for (const file of currentFiles) {
-                    if (!existingFiles.has(file)) {
-                        // Found new file
-                        const sessionFile = join(claudeDir, file);
-                        const sessionId = file.replace('.jsonl', '');
-                        logger.info('Captured session ID', { taskId, sessionId });
+  getTaskHistory(taskId: string, maxBytes: number = 2 * 1024 * 1024): string | null {
+    const task = this.tasks.get(taskId);
+    if (!task) return null;
 
-                        const task = this.tasks.get(taskId);
-                        if (task) {
-                            task.sessionId = sessionId;
-                            this.emit('task:sessionCaptured', taskId, sessionId);
-                        }
+    return this.getCombinedHistory(task, maxBytes);
+  }
 
-                        this.clearSessionCapture(taskId);
-                        return;
-                    }
-                }
-
-                // Timeout check (30 seconds)
-                const capture = this.pendingSessionCapture.get(taskId);
-                if (capture && Date.now() - capture.startTime > 30000) {
-                    logger.warn('Session capture timed out', { taskId });
-                    this.clearSessionCapture(taskId);
-                }
-            } catch (err) {
-                logger.error('Error identifying session file', { taskId, error: err });
-            }
-        }, 500);
-
-        this.pendingSessionCapture.get(taskId)!.interval = checkInterval;
+  setTaskActive(taskId: string, active: boolean): void {
+    if (active) {
+      // Clear decoded history from all other tasks to free memory
+      for (const task of this.tasks.values()) {
+        task.isActive = false;
+        if (task.id !== taskId && (task.previousHistory || task.lazyHistoryBase64)) {
+          task.previousHistory = undefined;
+          task.lazyHistoryBase64 = undefined;
+          logger.debug('Freed memory for inactive task', { taskId: task.id });
+        }
+      }
     }
 
-    private clearSessionCapture(taskId: string): void {
+    const task = this.tasks.get(taskId);
+    if (task) {
+      task.isActive = active;
+
+      if (active) {
+        const history = this.getCombinedHistory(task, 2 * 1024 * 1024);
+        if (history) {
+          this.emit('task:output', task.id, history);
+        }
+      }
+    }
+  }
+
+  hasProcessingIndicators(taskId: string): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task) return false;
+
+    const recentOutput = this.getRecentOutput(task, 1024);
+    const processingPatterns = [
+      /Thinking/i,
+      /Working/i,
+      /Concocting/i,
+      /Analyzing/i,
+      /Reading/i,
+      /Writing/i,
+      /⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/,
+      /✶|✳|✢|·|✻|✽|✺/,
+      /───.*Claude/,
+    ];
+    return processingPatterns.some((pattern) => pattern.test(recentOutput));
+  }
+
+  /**
+   * Get the internal task (for TaskSpawner compatibility during migration)
+   */
+  getInternalTask(taskId: string): InternalTask | undefined {
+    return this.tasks.get(taskId);
+  }
+
+  /**
+   * Update git state on a task
+   */
+  updateGitState(taskId: string, gitState: TaskGitState): void {
+    const task = this.tasks.get(taskId);
+    if (task) {
+      task.gitState = gitState;
+      this.emit('task:stateChanged', this.toBackendTask(task));
+    }
+  }
+
+  /**
+   * Set git state before task execution
+   */
+  setGitStateBefore(taskId: string, gitStateBefore: Partial<TaskGitState>): void {
+    const task = this.tasks.get(taskId);
+    if (task) {
+      task.gitStateBefore = gitStateBefore;
+    }
+  }
+
+  /**
+   * Get git state before task execution
+   */
+  getGitStateBefore(taskId: string): Partial<TaskGitState> | undefined {
+    const task = this.tasks.get(taskId);
+    return task?.gitStateBefore;
+  }
+
+  // ============ Private Methods ============
+
+  private startStatePolling(): void {
+    if (this.statePollingInterval) return;
+
+    this.statePollingInterval = setInterval(() => {
+      this.checkTaskStates();
+    }, this.statePollingMs);
+
+    logger.info('State polling started', { intervalMs: this.statePollingMs });
+  }
+
+  private checkTaskStates(): void {
+    const CONSECUTIVE_CHANGES_FOR_BUSY = 2;
+
+    for (const task of this.tasks.values()) {
+      if (task.state === 'exited') continue;
+      if (task.stateTransitionLock) continue;
+
+      const currentLength = task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
+      const outputChanged = currentLength !== task.lastOutputLength;
+      task.lastOutputLength = currentLength;
+
+      if (outputChanged) {
+        task.consecutiveOutputChanges = (task.consecutiveOutputChanges || 0) + 1;
+
+        if (task.state === 'starting') {
+          if (task.hasStartedProcessing) {
+            this.transitionTaskState(task, 'busy', undefined, 'polling: starting with output');
+          }
+        } else if (task.state === 'busy') {
+          // Already busy
+        } else if (task.state === 'idle' || task.state === 'waiting_input') {
+          if (task.consecutiveOutputChanges >= CONSECUTIVE_CHANGES_FOR_BUSY) {
+            this.transitionTaskState(
+              task,
+              'busy',
+              undefined,
+              `polling: sustained output (${task.consecutiveOutputChanges} consecutive)`,
+            );
+          }
+        } else {
+          this.transitionTaskState(task, 'busy', undefined, 'polling: output changed');
+        }
+      } else {
+        task.consecutiveOutputChanges = 0;
+
+        if (task.state === 'busy') {
+          const recentOutput = this.getRecentOutput(task, 2048);
+          const inputType = this.detectWaitingForInput(recentOutput);
+
+          if (inputType) {
+            this.transitionTaskState(
+              task,
+              'waiting_input',
+              inputType,
+              `polling: detected ${inputType}`,
+            );
+            this.emit('task:waitingInput', task.id, inputType, recentOutput);
+          } else {
+            this.transitionTaskState(task, 'idle', undefined, 'polling: output stable');
+          }
+        }
+      }
+    }
+  }
+
+  private transitionTaskState(
+    task: InternalTask,
+    newState: TaskState,
+    waitingInputType: WaitingInputType | undefined,
+    reason: string,
+  ): void {
+    if (task.stateTransitionLock) {
+      logger.warn('Skipping state transition - lock held', { taskId: task.id, newState, reason });
+      return;
+    }
+    task.stateTransitionLock = true;
+
+    try {
+      const oldState = task.state;
+      if (oldState === newState && task.waitingInputType === waitingInputType) {
+        return;
+      }
+
+      logger.debug('Task state transition', { taskId: task.id, oldState, newState, reason });
+      task.state = newState;
+      task.waitingInputType = waitingInputType;
+      this.emit('task:stateChanged', this.toBackendTask(task));
+    } finally {
+      task.stateTransitionLock = false;
+    }
+  }
+
+  private setupProcessHandlers(task: InternalTask): void {
+    task.process.onData((rawData: string) => {
+      // Filter out auth conflict warning that appears when multiple auth methods are set
+      const data = this.filterAuthConflictWarning(rawData);
+      if (!data) return; // Entire chunk was warning content
+
+      const buffer = Buffer.from(data, 'utf8');
+      task.outputHistory.push(buffer);
+
+      // Limit history to 2MB per task
+      const MAX_HISTORY_SIZE = 2 * 1024 * 1024;
+      let totalSize = task.outputHistory.reduce((sum, buf) => sum + buf.length, 0);
+      while (totalSize > MAX_HISTORY_SIZE && task.outputHistory.length > 0) {
+        const removed = task.outputHistory.shift();
+        if (removed) totalSize -= removed.length;
+      }
+
+      task.lastActivity = new Date();
+      const cleanData = this.stripAnsi(data);
+
+      // Try to extract session ID
+      if (!task.sessionId) {
+        const sessionId = this.extractSessionId(cleanData);
+        if (sessionId) {
+          logger.info('Found session ID', { taskId: task.id, sessionId });
+          task.sessionId = sessionId;
+          this.emit('task:sessionCaptured', task.id, sessionId);
+        }
+      }
+
+      // Send initial prompt when Claude is ready
+      // Check accumulated history, not just the current chunk, as output might be split
+      const recentOutput = this.getRecentOutput(task, 5000);
+      if (!task.initialPromptSent && task.pendingPrompt) {
+        const isReady = this.isReadyForInitialInput(recentOutput);
+        logger.info('Checking ready state', {
+          taskId: task.id,
+          isReady,
+          outputLen: recentOutput.length,
+          outputTail: recentOutput.slice(-300),
+        });
+      }
+      if (
+        !task.initialPromptSent &&
+        task.pendingPrompt &&
+        this.isReadyForInitialInput(recentOutput)
+      ) {
+        logger.info('Claude ready, sending prompt', {
+          taskId: task.id,
+          prompt: task.pendingPrompt,
+        });
+        task.initialPromptSent = true;
+        const prompt = task.pendingPrompt;
+        task.pendingPrompt = null;
+        task.promptSubmitAttempts = 0;
+
+        // Wait longer (2.5s) to ensure CLI is fully ready and screen is stable
+        // Use typeCharByChar: true for "human-like" typing effect
+        setTimeout(() => {
+          this.sendInput(task.id, prompt + '\r', { typeCharByChar: true });
+        }, 2500);
+      }
+
+      // Stream output to active task
+      if (task.isActive) {
+        this.emit('task:output', task.id, data);
+      }
+    });
+
+    task.process.onExit(({ exitCode }) => {
+      logger.info('Task exited', { taskId: task.id, exitCode });
+
+      this.clearSessionCapture(task.id);
+
+      if (!this.tasks.has(task.id)) {
+        logger.debug('Task already removed, skipping state change', { taskId: task.id });
+        return;
+      }
+      task.state = 'exited';
+      this.emit('task:stateChanged', this.toBackendTask(task));
+      this.emit('task:exit', task.id, exitCode);
+    });
+  }
+
+  private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 5): void {
+    // Delegate to sendInput for consistent behavior
+    this.sendInput(task.id, prompt + '\r');
+  }
+
+  private sendEnterWithRetry(
+    task: InternalTask,
+    retriesLeft: number,
+    options: { isInitialPrompt?: boolean; enterKey?: string } = {},
+  ): void {
+    const { isInitialPrompt = false, enterKey = '\r' } = options;
+    const context = isInitialPrompt ? 'initial prompt' : 'input';
+
+    if (retriesLeft <= 0) {
+      logger.debug('Max retries reached for Enter', { taskId: task.id, context });
+      return;
+    }
+
+    task.promptSubmitAttempts = (task.promptSubmitAttempts || 0) + 1;
+    logger.debug('Sending Enter', { taskId: task.id, context, attempt: task.promptSubmitAttempts });
+
+    if (!isInitialPrompt && (task.state === 'idle' || task.state === 'waiting_input')) {
+      task.state = 'busy';
+      task.waitingInputType = undefined;
+      this.emit('task:stateChanged', this.toBackendTask(task));
+    }
+
+    task.process.write(enterKey);
+
+    setTimeout(() => {
+      if (this.hasProcessingIndicators(task.id)) {
+        logger.debug('Processing detected after Enter', {
+          taskId: task.id,
+          context,
+          attempt: task.promptSubmitAttempts,
+        });
+        if (task.state === 'starting' && !task.hasStartedProcessing) {
+          task.hasStartedProcessing = true;
+          task.state = 'busy';
+          this.emit('task:stateChanged', this.toBackendTask(task));
+        }
+        return;
+      }
+
+      logger.debug('No processing indicators, will retry Enter', { taskId: task.id });
+      setTimeout(() => this.sendEnterWithRetry(task, retriesLeft - 1, options), 500);
+    }, 800);
+  }
+
+  private startSessionCapture(taskId: string, workspaceId: string): void {
+    this.clearSessionCapture(taskId);
+
+    const claudeDir = this.getClaudeProjectsDir(workspaceId);
+
+    let existingFiles = new Set<string>();
+    try {
+      if (existsSync(claudeDir)) {
+        existingFiles = new Set(readdirSync(claudeDir).filter((f) => f.endsWith('.jsonl')));
+      }
+    } catch (_e) {
+      // Directory might not exist yet
+    }
+
+    this.pendingSessionCapture.set(taskId, {
+      taskId,
+      workspaceId,
+      startTime: Date.now(),
+      interval: undefined, // Will be set below
+    });
+
+    const checkInterval = setInterval(() => {
+      try {
+        if (!existsSync(claudeDir)) return;
+
+        const currentFiles = readdirSync(claudeDir).filter((f) => f.endsWith('.jsonl'));
+
+        for (const file of currentFiles) {
+          if (!existingFiles.has(file)) {
+            // Found new file
+            const sessionFile = join(claudeDir, file);
+            const sessionId = file.replace('.jsonl', '');
+            logger.info('Captured session ID', { taskId, sessionId });
+
+            const task = this.tasks.get(taskId);
+            if (task) {
+              task.sessionId = sessionId;
+              this.emit('task:sessionCaptured', taskId, sessionId);
+            }
+
+            this.clearSessionCapture(taskId);
+            return;
+          }
+        }
+
+        // Timeout check (30 seconds)
         const capture = this.pendingSessionCapture.get(taskId);
-        if (capture?.interval) {
-            clearInterval(capture.interval);
+        if (capture && Date.now() - capture.startTime > 30000) {
+          logger.warn('Session capture timed out', { taskId });
+          this.clearSessionCapture(taskId);
         }
-        this.pendingSessionCapture.delete(taskId);
+      } catch (err) {
+        logger.error('Error identifying session file', { taskId, error: err });
+      }
+    }, 500);
+
+    this.pendingSessionCapture.get(taskId)!.interval = checkInterval;
+  }
+
+  private clearSessionCapture(taskId: string): void {
+    const capture = this.pendingSessionCapture.get(taskId);
+    if (capture?.interval) {
+      clearInterval(capture.interval);
     }
+    this.pendingSessionCapture.delete(taskId);
+  }
 
-    private getClaudeProjectsDir(workspacePath: string): string {
-        const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-        // Claude Code replaces every non-alphanumeric character (except dashes) with a dash
-        const folderName = workspacePath.replace(/[^a-zA-Z0-9-]/g, '-');
-        return join(homeDir, '.claude', 'projects', folderName);
-    }
+  private getClaudeProjectsDir(workspacePath: string): string {
+    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+    // Claude Code replaces every non-alphanumeric character (except dashes) with a dash
+    const folderName = workspacePath.replace(/[^a-zA-Z0-9-]/g, '-');
+    return join(homeDir, '.claude', 'projects', folderName);
+  }
 
-    private extractSessionId(str: string): string | null {
-        return null;
-    }
+  private extractSessionId(str: string): string | null {
+    return null;
+  }
 
-    /**
-     * Filter out the Claude Code auth conflict warning from PTY output.
-     * This warning appears when ANTHROPIC_API_KEY is set alongside a claude.ai login token.
-     */
-    private filterAuthConflictWarning(data: string): string {
-        const cleanData = this.stripAnsi(data);
+  /**
+   * Filter out the Claude Code auth conflict warning from PTY output.
+   * This warning appears when ANTHROPIC_API_KEY is set alongside a claude.ai login token.
+   */
+  private filterAuthConflictWarning(data: string): string {
+    const cleanData = this.stripAnsi(data);
 
-        const warningPhrases = [
-            'Auth conflict:',
-            'Auth conflict',
-            'Both a token (claude.ai) and an API key (ANTHROPIC_API_KEY) are set',
-            'Both a token',
-            'CLAUDE_CODE_OAUTH_TOKEN',
-            'ANTHROPIC_AUTH_TOKEN',
-            'This may lead to unexpected behavior',
-            'Trying to use claude.ai? Unset the ANTHROPIC_API_KEY',
-            'Trying to use ANTHROPIC_API_KEY? claude /logout',
-            'Trying to use ANTHROPIC_AUTH_TOKEN?',
-            'sign out of claude.ai',
-        ];
+    const warningPhrases = [
+      'Auth conflict:',
+      'Auth conflict',
+      'Both a token (claude.ai) and an API key (ANTHROPIC_API_KEY) are set',
+      'Both a token',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'ANTHROPIC_AUTH_TOKEN',
+      'This may lead to unexpected behavior',
+      'Trying to use claude.ai? Unset the ANTHROPIC_API_KEY',
+      'Trying to use ANTHROPIC_API_KEY? claude /logout',
+      'Trying to use ANTHROPIC_AUTH_TOKEN?',
+      'sign out of claude.ai',
+    ];
 
-        for (const phrase of warningPhrases) {
-            if (cleanData.includes(phrase)) {
-                const lines = data.split(/(\r?\n)/);
-                const filteredLines = lines.filter(line => {
-                    const cleanLine = this.stripAnsi(line);
-                    return !warningPhrases.some(p => cleanLine.includes(p));
-                });
-                return filteredLines.join('');
-            }
-        }
-
-        return data;
-    }
-
-    private stripAnsi(str: string): string {
-        return str
-            .replace(/\x1b\[[0-9;]*m/g, '')
-            .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-            .replace(/\x1b\][^\x07]*\x07/g, '')
-            .replace(/\x1b[PX^_].*?\x1b\\/g, '')
-            .replace(/\x1b\[\?[0-9;]*[hl]/g, '')
-            .replace(/\x1b[>=]/g, '')
-            .replace(/[\x00-\x09\x0B-\x1F\x7F]/g, '')
-            .replace(/\r/g, '');
-    }
-
-    private isReadyForInitialInput(str: string): boolean {
-        // Claude Code ready patterns
-        return str.includes('Claude Code') ||
-            str.includes('Enter message') ||
-            str.includes('Type your message') ||
-            str.includes('ask anything') ||
-            str.includes('Sisyphus') ||
-            str.includes('Claude Opus') ||
-            str.includes('>') ||
-            str.includes('Try "') ||
-            str.includes('? for shortcuts') ||
-            (str.includes('───') && str.includes('❯'));
-    }
-
-    private getRecentOutput(task: InternalTask, maxBytes: number): string {
-        const buffers: Buffer[] = [];
-        let totalSize = 0;
-
-        for (let i = task.outputHistory.length - 1; i >= 0 && totalSize < maxBytes; i--) {
-            const buf = task.outputHistory[i];
-            buffers.unshift(buf);
-            totalSize += buf.length;
-        }
-
-        const combined = Buffer.concat(buffers);
-        const str = combined.toString('utf8');
-        return this.stripAnsi(str.slice(-maxBytes));
-    }
-
-    private detectWaitingForInput(str: string): WaitingInputType | null {
-        // Multiple choice question
-        if (str.includes('Enter to select') && str.includes('↑/↓ to navigate')) {
-            return 'question';
-        }
-
-        // Numbered selection menu
-        if (str.match(/❯\s*\d+\.\s+\w/) && str.match(/\s+\d+\.\s+\w/)) {
-            return 'question';
-        }
-
-        // Permission dialog
-        if (str.includes('Allow') && str.includes('Deny')) {
-            return 'permission';
-        }
-
-        // Yes/No confirmation
-        if (str.match(/\(y\/n\)/i) || str.match(/\[y\/N\]/i) || str.match(/\[Y\/n\]/i)) {
-            return 'confirmation';
-        }
-
-        // Question detection in last section
-        const sections = str.split(/(?:⏺|─{3,})/);
-        const meaningfulSections = sections.filter(s => {
-            const trimmed = s.trim();
-            if (!trimmed || trimmed === '❯' || /^❯\s*$/.test(trimmed)) return false;
-            if (/(?:\? for shortcuts|Try "|\/model to try|bypass permissions|shift\+tab to cycle)/i.test(trimmed) && trimmed.length < 100) {
-                return false;
-            }
-            return true;
+    for (const phrase of warningPhrases) {
+      if (cleanData.includes(phrase)) {
+        const lines = data.split(/(\r?\n)/);
+        const filteredLines = lines.filter((line) => {
+          const cleanLine = this.stripAnsi(line);
+          return !warningPhrases.some((p) => cleanLine.includes(p));
         });
-
-        const lastSection = meaningfulSections.length > 0
-            ? meaningfulSections[meaningfulSections.length - 1]
-            : str;
-
-        const cleanSection = lastSection
-            .replace(/\? for shortcuts/g, '')
-            .replace(/Try "[^"]*"/g, '')
-            .replace(/\/model to try/g, '')
-            .replace(/bypass permissions/gi, '')
-            .replace(/shift\+tab to cycle/gi, '');
-
-        const hasQuestionMark = cleanSection.includes('?');
-
-        if (hasQuestionMark) {
-            const questionPatterns = [
-                /\bwhat\b/i, /\bwhich\b/i, /\bhow\b/i, /\bwhere\b/i,
-                /\bwhen\b/i, /\bwhy\b/i, /\bwho\b/i, /\bwould you\b/i,
-                /\bcould you\b/i, /\bdo you\b/i, /\bshould\b/i, /\bcan you\b/i,
-                /\blet me know\b/i, /\bgive me\b/i, /\btell me\b/i, /\bprefer\b/i,
-                /\blike to\b/i, /\bwant to\b/i, /\bchoose\b/i, /\bselect\b/i,
-                /\bpick\b/i, /\bdecide\b/i, /\bconfirm\b/i, /\bproceed\b/i,
-                /\bcontinue\b/i, /\bapproach\b/i, /\boption/i, /\balternative/i,
-            ];
-
-            for (const pattern of questionPatterns) {
-                if (pattern.test(cleanSection)) {
-                    return 'question';
-                }
-            }
-
-            const trimmedSection = cleanSection.trim();
-            if (trimmedSection.endsWith('?') && trimmedSection.length > 10) {
-                return 'question';
-            }
-        }
-
-        return null;
+        return filteredLines.join('');
+      }
     }
 
-    private getCombinedHistory(task: InternalTask, maxBytes: number): string | null {
-        // Handle lazy loading from file
-        if (!task.previousHistory && !task.lazyHistoryBase64) {
-            const historyPath = join(this.historyDir, `${task.id}.txt`);
-            if (existsSync(historyPath)) {
-                try {
-                    const stat = statSync(historyPath);
-                    const fileSize = stat.size;
-                    const maxBase64Size = Math.floor(maxBytes * 1.33);
+    return data;
+  }
 
-                    let base64Content: string;
+  private stripAnsi(str: string): string {
+    return str
+      .replace(/\x1b\[[0-9;]*m/g, '')
+      .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+      .replace(/\x1b\][^\x07]*\x07/g, '')
+      .replace(/\x1b[PX^_].*?\x1b\\/g, '')
+      .replace(/\x1b\[\?[0-9;]*[hl]/g, '')
+      .replace(/\x1b[>=]/g, '')
+      .replace(/[\x00-\x09\x0B-\x1F\x7F]/g, '')
+      .replace(/\r/g, '');
+  }
 
-                    if (fileSize > maxBase64Size) {
-                        const fd = openSync(historyPath, 'r');
-                        const buffer = Buffer.alloc(maxBase64Size);
-                        // Align to base64 group boundary (4 bytes) to avoid corrupting the first decoded bytes
-                        const offset = Math.floor((fileSize - maxBase64Size) / 4) * 4;
-                        readSync(fd, buffer, 0, maxBase64Size, offset);
-                        closeSync(fd);
-                        base64Content = buffer.toString('utf-8');
-                    } else {
-                        base64Content = readFileSync(historyPath, 'utf-8');
-                    }
+  private isReadyForInitialInput(str: string): boolean {
+    // Claude Code ready patterns
+    return (
+      str.includes('Claude Code') ||
+      str.includes('Enter message') ||
+      str.includes('Type your message') ||
+      str.includes('ask anything') ||
+      str.includes('Sisyphus') ||
+      str.includes('Claude Opus') ||
+      str.includes('>') ||
+      str.includes('Try "') ||
+      str.includes('? for shortcuts') ||
+      (str.includes('───') && str.includes('❯'))
+    );
+  }
 
-                    const decoded = Buffer.from(base64Content, 'base64');
+  private getRecentOutput(task: InternalTask, maxBytes: number): string {
+    const buffers: Buffer[] = [];
+    let totalSize = 0;
 
-                    if (fileSize > maxBase64Size) {
-                        const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n');
-                        task.previousHistory = Buffer.concat([truncationMessage, decoded]);
-                    } else {
-                        task.previousHistory = decoded;
-                    }
-                } catch (e) {
-                    logger.error('Failed to load history file', { taskId: task.id, error: e });
-                }
-            }
-        }
-
-        // Handle lazy loading from base64
-        if (task.lazyHistoryBase64 && !task.previousHistory) {
-            try {
-                const fullHistory = Buffer.from(task.lazyHistoryBase64, 'base64');
-                if (fullHistory.length > maxBytes) {
-                    const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n');
-                    task.previousHistory = Buffer.concat([
-                        truncationMessage,
-                        fullHistory.slice(fullHistory.length - maxBytes)
-                    ]);
-                } else {
-                    task.previousHistory = fullHistory;
-                }
-                task.lazyHistoryBase64 = undefined;
-            } catch (e) {
-                logger.error('Failed to lazy load history', { taskId: task.id, error: e });
-                task.lazyHistoryBase64 = undefined;
-            }
-        }
-
-        const parts: Buffer[] = [];
-        let totalSize = 0;
-
-        for (let i = task.outputHistory.length - 1; i >= 0 && totalSize < maxBytes; i--) {
-            parts.unshift(task.outputHistory[i]);
-            totalSize += task.outputHistory[i].length;
-        }
-
-        if (task.previousHistory && totalSize < maxBytes) {
-            const remainingSpace = maxBytes - totalSize;
-            if (task.previousHistory.length <= remainingSpace) {
-                parts.unshift(task.previousHistory);
-            } else {
-                const tailStart = task.previousHistory.length - remainingSpace;
-                const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n');
-                parts.unshift(task.previousHistory.slice(tailStart));
-                parts.unshift(truncationMessage);
-            }
-        }
-
-        if (parts.length === 0) return null;
-
-        return Buffer.concat(parts).toString('utf8');
+    for (let i = task.outputHistory.length - 1; i >= 0 && totalSize < maxBytes; i--) {
+      const buf = task.outputHistory[i];
+      buffers.unshift(buf);
+      totalSize += buf.length;
     }
 
-    private toBackendTask(task: InternalTask): BackendTask {
-        return {
-            id: task.id,
-            sessionId: task.sessionId,
-            state: task.state,
-            workspaceId: task.workspaceId,
-            prompt: task.prompt,
-            createdAt: task.createdAt,
-            lastActivity: task.lastActivity,
-            waitingInputType: task.waitingInputType,
-            gitState: task.gitState,
-            systemPrompt: task.systemPrompt,
-        };
+    const combined = Buffer.concat(buffers);
+    const str = combined.toString('utf8');
+    return this.stripAnsi(str.slice(-maxBytes));
+  }
+
+  private detectWaitingForInput(str: string): WaitingInputType | null {
+    // Multiple choice question
+    if (str.includes('Enter to select') && str.includes('↑/↓ to navigate')) {
+      return 'question';
     }
+
+    // Numbered selection menu
+    if (str.match(/❯\s*\d+\.\s+\w/) && str.match(/\s+\d+\.\s+\w/)) {
+      return 'question';
+    }
+
+    // Permission dialog
+    if (str.includes('Allow') && str.includes('Deny')) {
+      return 'permission';
+    }
+
+    // Yes/No confirmation
+    if (str.match(/\(y\/n\)/i) || str.match(/\[y\/N\]/i) || str.match(/\[Y\/n\]/i)) {
+      return 'confirmation';
+    }
+
+    // Question detection in last section
+    const sections = str.split(/(?:⏺|─{3,})/);
+    const meaningfulSections = sections.filter((s) => {
+      const trimmed = s.trim();
+      if (!trimmed || trimmed === '❯' || /^❯\s*$/.test(trimmed)) return false;
+      if (
+        /(?:\? for shortcuts|Try "|\/model to try|bypass permissions|shift\+tab to cycle)/i.test(
+          trimmed,
+        ) &&
+        trimmed.length < 100
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    const lastSection =
+      meaningfulSections.length > 0 ? meaningfulSections[meaningfulSections.length - 1] : str;
+
+    const cleanSection = lastSection
+      .replace(/\? for shortcuts/g, '')
+      .replace(/Try "[^"]*"/g, '')
+      .replace(/\/model to try/g, '')
+      .replace(/bypass permissions/gi, '')
+      .replace(/shift\+tab to cycle/gi, '');
+
+    const hasQuestionMark = cleanSection.includes('?');
+
+    if (hasQuestionMark) {
+      const questionPatterns = [
+        /\bwhat\b/i,
+        /\bwhich\b/i,
+        /\bhow\b/i,
+        /\bwhere\b/i,
+        /\bwhen\b/i,
+        /\bwhy\b/i,
+        /\bwho\b/i,
+        /\bwould you\b/i,
+        /\bcould you\b/i,
+        /\bdo you\b/i,
+        /\bshould\b/i,
+        /\bcan you\b/i,
+        /\blet me know\b/i,
+        /\bgive me\b/i,
+        /\btell me\b/i,
+        /\bprefer\b/i,
+        /\blike to\b/i,
+        /\bwant to\b/i,
+        /\bchoose\b/i,
+        /\bselect\b/i,
+        /\bpick\b/i,
+        /\bdecide\b/i,
+        /\bconfirm\b/i,
+        /\bproceed\b/i,
+        /\bcontinue\b/i,
+        /\bapproach\b/i,
+        /\boption/i,
+        /\balternative/i,
+      ];
+
+      for (const pattern of questionPatterns) {
+        if (pattern.test(cleanSection)) {
+          return 'question';
+        }
+      }
+
+      const trimmedSection = cleanSection.trim();
+      if (trimmedSection.endsWith('?') && trimmedSection.length > 10) {
+        return 'question';
+      }
+    }
+
+    return null;
+  }
+
+  private getCombinedHistory(task: InternalTask, maxBytes: number): string | null {
+    // Handle lazy loading from file
+    if (!task.previousHistory && !task.lazyHistoryBase64) {
+      const historyPath = join(this.historyDir, `${task.id}.txt`);
+      if (existsSync(historyPath)) {
+        try {
+          const stat = statSync(historyPath);
+          const fileSize = stat.size;
+          const maxBase64Size = Math.floor(maxBytes * 1.33);
+
+          let base64Content: string;
+
+          if (fileSize > maxBase64Size) {
+            const fd = openSync(historyPath, 'r');
+            const buffer = Buffer.alloc(maxBase64Size);
+            // Align to base64 group boundary (4 bytes) to avoid corrupting the first decoded bytes
+            const offset = Math.floor((fileSize - maxBase64Size) / 4) * 4;
+            readSync(fd, buffer, 0, maxBase64Size, offset);
+            closeSync(fd);
+            base64Content = buffer.toString('utf-8');
+          } else {
+            base64Content = readFileSync(historyPath, 'utf-8');
+          }
+
+          const decoded = Buffer.from(base64Content, 'base64');
+
+          if (fileSize > maxBase64Size) {
+            const truncationMessage = Buffer.from(
+              '\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n',
+            );
+            task.previousHistory = Buffer.concat([truncationMessage, decoded]);
+          } else {
+            task.previousHistory = decoded;
+          }
+        } catch (e) {
+          logger.error('Failed to load history file', { taskId: task.id, error: e });
+        }
+      }
+    }
+
+    // Handle lazy loading from base64
+    if (task.lazyHistoryBase64 && !task.previousHistory) {
+      try {
+        const fullHistory = Buffer.from(task.lazyHistoryBase64, 'base64');
+        if (fullHistory.length > maxBytes) {
+          const truncationMessage = Buffer.from(
+            '\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n',
+          );
+          task.previousHistory = Buffer.concat([
+            truncationMessage,
+            fullHistory.slice(fullHistory.length - maxBytes),
+          ]);
+        } else {
+          task.previousHistory = fullHistory;
+        }
+        task.lazyHistoryBase64 = undefined;
+      } catch (e) {
+        logger.error('Failed to lazy load history', { taskId: task.id, error: e });
+        task.lazyHistoryBase64 = undefined;
+      }
+    }
+
+    const parts: Buffer[] = [];
+    let totalSize = 0;
+
+    for (let i = task.outputHistory.length - 1; i >= 0 && totalSize < maxBytes; i--) {
+      parts.unshift(task.outputHistory[i]);
+      totalSize += task.outputHistory[i].length;
+    }
+
+    if (task.previousHistory && totalSize < maxBytes) {
+      const remainingSpace = maxBytes - totalSize;
+      if (task.previousHistory.length <= remainingSpace) {
+        parts.unshift(task.previousHistory);
+      } else {
+        const tailStart = task.previousHistory.length - remainingSpace;
+        const truncationMessage = Buffer.from(
+          '\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n',
+        );
+        parts.unshift(task.previousHistory.slice(tailStart));
+        parts.unshift(truncationMessage);
+      }
+    }
+
+    if (parts.length === 0) return null;
+
+    return Buffer.concat(parts).toString('utf8');
+  }
+
+  private toBackendTask(task: InternalTask): BackendTask {
+    return {
+      id: task.id,
+      sessionId: task.sessionId,
+      state: task.state,
+      workspaceId: task.workspaceId,
+      prompt: task.prompt,
+      createdAt: task.createdAt,
+      lastActivity: task.lastActivity,
+      waitingInputType: task.waitingInputType,
+      gitState: task.gitState,
+      systemPrompt: task.systemPrompt,
+    };
+  }
 }

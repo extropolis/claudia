@@ -3,7 +3,7 @@ import { ModelTokenUsage } from '@claudia/shared';
 import './TaskTokenStats.css';
 
 interface TaskTokenStatsProps {
-    taskId: string;
+  taskId: string;
 }
 
 /**
@@ -11,14 +11,14 @@ interface TaskTokenStatsProps {
  * 0 -> "0", 1234 -> "1.2k", 45100 -> "45.1k", 1234567 -> "1.2M"
  */
 export function formatTokenCount(n: number): string {
-    if (n === 0) return '0';
-    if (n < 1000) return n.toString();
-    if (n < 1_000_000) {
-        const k = n / 1000;
-        return k >= 100 ? `${Math.round(k)}k` : `${k.toFixed(1).replace(/\.0$/, '')}k`;
-    }
-    const m = n / 1_000_000;
-    return m >= 100 ? `${Math.round(m)}M` : `${m.toFixed(1).replace(/\.0$/, '')}M`;
+  if (n === 0) return '0';
+  if (n < 1000) return n.toString();
+  if (n < 1_000_000) {
+    const k = n / 1000;
+    return k >= 100 ? `${Math.round(k)}k` : `${k.toFixed(1).replace(/\.0$/, '')}k`;
+  }
+  const m = n / 1_000_000;
+  return m >= 100 ? `${Math.round(m)}M` : `${m.toFixed(1).replace(/\.0$/, '')}M`;
 }
 
 /**
@@ -26,89 +26,101 @@ export function formatTokenCount(n: number): string {
  * "claude-sonnet-4-6" -> "Sonnet 4.6"
  */
 export function formatModelName(model: string): string {
-    if (!model) return 'Unknown';
-    if (model === 'subagent') return 'Subagent';
+  if (!model) return 'Unknown';
+  if (model === 'subagent') return 'Subagent';
 
-    const simpleMatch = model.match(/claude-(\w+)-(\d+)-(\d+)/);
-    if (simpleMatch) {
-        const name = simpleMatch[1].charAt(0).toUpperCase() + simpleMatch[1].slice(1);
-        return `${name} ${simpleMatch[2]}.${simpleMatch[3]}`;
-    }
+  const simpleMatch = model.match(/claude-(\w+)-(\d+)-(\d+)/);
+  if (simpleMatch) {
+    const name = simpleMatch[1].charAt(0).toUpperCase() + simpleMatch[1].slice(1);
+    return `${name} ${simpleMatch[2]}.${simpleMatch[3]}`;
+  }
 
-    const legacyMatch = model.match(/claude-(\d+)-(\d+)-(\w+)/);
-    if (legacyMatch) {
-        const name = legacyMatch[3].charAt(0).toUpperCase() + legacyMatch[3].slice(1);
-        return `${name} ${legacyMatch[1]}.${legacyMatch[2]}`;
-    }
+  const legacyMatch = model.match(/claude-(\d+)-(\d+)-(\w+)/);
+  if (legacyMatch) {
+    const name = legacyMatch[3].charAt(0).toUpperCase() + legacyMatch[3].slice(1);
+    return `${name} ${legacyMatch[1]}.${legacyMatch[2]}`;
+  }
 
-    const shortMatch = model.match(/claude-(\d+)-(\w+)/);
-    if (shortMatch) {
-        const name = shortMatch[2].charAt(0).toUpperCase() + shortMatch[2].slice(1);
-        return `${name} ${shortMatch[1]}`;
-    }
+  const shortMatch = model.match(/claude-(\d+)-(\w+)/);
+  if (shortMatch) {
+    const name = shortMatch[2].charAt(0).toUpperCase() + shortMatch[2].slice(1);
+    return `${name} ${shortMatch[1]}`;
+  }
 
-    return model;
+  return model;
 }
 
 export function formatCost(cost: number): string {
-    if (cost === 0) return '$0.00';
-    if (cost < 0.01) return `$${cost.toFixed(4)}`;
-    return `$${cost.toFixed(2)}`;
+  if (cost === 0) return '$0.00';
+  if (cost < 0.01) return `$${cost.toFixed(4)}`;
+  return `$${cost.toFixed(2)}`;
 }
 
 export function TaskTokenStats({ taskId }: TaskTokenStatsProps) {
-    const task = useTaskStore(s => s.tasks.get(taskId));
-    const tokenCostEnabled = useTaskStore(s => s.tokenCostEnabled);
+  const task = useTaskStore((s) => s.tasks.get(taskId));
+  const tokenCostEnabled = useTaskStore((s) => s.tokenCostEnabled);
 
-    if (!task?.tokenUsage) {
-        return null;
-    }
+  if (!task?.tokenUsage) {
+    return null;
+  }
 
-    const { inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, totalCostUsd, modelBreakdown } = task.tokenUsage;
+  const {
+    inputTokens,
+    outputTokens,
+    cacheCreationTokens,
+    cacheReadTokens,
+    totalCostUsd,
+    modelBreakdown,
+  } = task.tokenUsage;
 
-    // Convert modelBreakdown record to array for rendering
-    const models = Object.entries(modelBreakdown || {}) as [string, ModelTokenUsage][];
+  // Convert modelBreakdown record to array for rendering
+  const models = Object.entries(modelBreakdown || {}) as [string, ModelTokenUsage][];
 
-    // Determine primary model (highest total tokens)
-    const primaryModelName = models.length > 0
-        ? models.reduce((a, b) =>
-            (a[1].inputTokens + a[1].outputTokens) > (b[1].inputTokens + b[1].outputTokens) ? a : b
+  // Determine primary model (highest total tokens)
+  const primaryModelName =
+    models.length > 0
+      ? models.reduce((a, b) =>
+          a[1].inputTokens + a[1].outputTokens > b[1].inputTokens + b[1].outputTokens ? a : b,
         )[0]
-        : null;
+      : null;
 
-    return (
-        <div className="task-token-stats">
-            <div className="task-token-stats-bar">
-                <span className="token-stat">
-                    <span className="token-value">{formatTokenCount(inputTokens)} in</span>
-                    <span className="token-sep token-sep-section">|</span>
-                    <span className="token-value">{formatTokenCount(outputTokens)} out</span>
-                    {cacheCreationTokens > 0 && (
-                        <>
-                            <span className="token-sep token-sep-section">|</span>
-                            <span className="token-value token-cache">{formatTokenCount(cacheCreationTokens)} cache write</span>
-                        </>
-                    )}
-                    {cacheReadTokens > 0 && (
-                        <>
-                            <span className="token-sep token-sep-section">|</span>
-                            <span className="token-value token-cache">{formatTokenCount(cacheReadTokens)} cache read</span>
-                        </>
-                    )}
-                </span>
-                {tokenCostEnabled && totalCostUsd > 0 && (
-                    <>
-                        <span className="token-sep token-sep-section">|</span>
-                        <span className="token-cost">Cost: {formatCost(totalCostUsd)}</span>
-                    </>
-                )}
-                {primaryModelName && (
-                    <>
-                        <span className="token-sep token-sep-section">|</span>
-                        <span className="token-model">{formatModelName(primaryModelName)}</span>
-                    </>
-                )}
-            </div>
-        </div>
-    );
+  return (
+    <div className="task-token-stats">
+      <div className="task-token-stats-bar">
+        <span className="token-stat">
+          <span className="token-value">{formatTokenCount(inputTokens)} in</span>
+          <span className="token-sep token-sep-section">|</span>
+          <span className="token-value">{formatTokenCount(outputTokens)} out</span>
+          {cacheCreationTokens > 0 && (
+            <>
+              <span className="token-sep token-sep-section">|</span>
+              <span className="token-value token-cache">
+                {formatTokenCount(cacheCreationTokens)} cache write
+              </span>
+            </>
+          )}
+          {cacheReadTokens > 0 && (
+            <>
+              <span className="token-sep token-sep-section">|</span>
+              <span className="token-value token-cache">
+                {formatTokenCount(cacheReadTokens)} cache read
+              </span>
+            </>
+          )}
+        </span>
+        {tokenCostEnabled && totalCostUsd > 0 && (
+          <>
+            <span className="token-sep token-sep-section">|</span>
+            <span className="token-cost">Cost: {formatCost(totalCostUsd)}</span>
+          </>
+        )}
+        {primaryModelName && (
+          <>
+            <span className="token-sep token-sep-section">|</span>
+            <span className="token-model">{formatModelName(primaryModelName)}</span>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }

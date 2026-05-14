@@ -8,7 +8,7 @@ import './styles/index.css';
 setupAudioUnlock();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
-    <NotificationProvider>
-        <App />
-    </NotificationProvider>
+  <NotificationProvider>
+    <App />
+  </NotificationProvider>,
 );

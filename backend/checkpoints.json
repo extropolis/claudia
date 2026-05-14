@@ -222,6 +222,97 @@
           "filesModified": 12,
           "isCurrent": false
         }
+      },
+      {
+        "id": "61c01ebe-58f5-4200-86bc-ec99eea08b9b",
+        "taskId": "task-1778726572331-1711605572",
+        "workspaceId": "/Users/I850333/experiments/claudia",
+        "name": "yes but we want to remove the voice agent and voice agent button.. but keep voice mode and voice button",
+        "timestamp": "2026-05-14T03:04:57.063Z",
+        "gitRef": "05ee6deaf7551f00b3a42578dac5ad2a56bba797",
+        "gitBranch": "feat/wip-checkpoints-voice-tools",
+        "metadata": {
+          "filesModified": 104,
+          "isCurrent": false
+        }
+      },
+      {
+        "id": "07987dc2-1805-4d86-b0cd-a382965d701d",
+        "taskId": "task-1778727558397-dff75de0c1",
+        "workspaceId": "/Users/I850333/experiments/claudia",
+        "name": "continue",
+        "timestamp": "2026-05-14T03:06:52.928Z",
+        "gitRef": "05ee6deaf7551f00b3a42578dac5ad2a56bba797",
+        "gitBranch": "feat/wip-checkpoints-voice-tools",
+        "metadata": {
+          "filesModified": 105,
+          "isCurrent": false
+        }
+      },
+      {
+        "id": "3cb4b99f-55f5-4332-ba25-d958f20dd0bd",
+        "taskId": "task-1778727558397-dff75de0c1",
+        "workspaceId": "/Users/I850333/experiments/claudia",
+        "name": "continue",
+        "timestamp": "2026-05-14T03:31:23.060Z",
+        "gitRef": "05ee6deaf7551f00b3a42578dac5ad2a56bba797",
+        "gitBranch": "feat/wip-checkpoints-voice-tools",
+        "metadata": {
+          "filesModified": 105,
+          "isCurrent": false
+        }
+      },
+      {
+        "id": "0ed4f427-2ef9-4aa0-8581-e69194e54b50",
+        "taskId": "task-1778733729375-da6cfa6c6b",
+        "workspaceId": "/Users/I850333/experiments/claudia",
+        "name": "ok",
+        "timestamp": "2026-05-14T04:47:44.978Z",
+        "gitRef": "05ee6deaf7551f00b3a42578dac5ad2a56bba797",
+        "gitBranch": "feat/wip-checkpoints-voice-tools",
+        "metadata": {
+          "filesModified": 105,
+          "isCurrent": false
+        }
+      },
+      {
+        "id": "db94f6ec-3b40-4ff6-90ec-34be9c029a8a",
+        "taskId": "task-1778723189416-028fca2e51",
+        "workspaceId": "/Users/I850333/experiments/claudia",
+        "name": "ok commit everything",
+        "timestamp": "2026-05-14T04:48:48.799Z",
+        "gitRef": "05ee6deaf7551f00b3a42578dac5ad2a56bba797",
+        "gitBranch": "feat/wip-checkpoints-voice-tools",
+        "metadata": {
+          "filesModified": 105,
+          "isCurrent": false
+        }
+      },
+      {
+        "id": "c92d721f-9a8b-4b97-a4a8-bd0866c897e5",
+        "taskId": "task-1778723189416-028fca2e51",
+        "workspaceId": "/Users/I850333/experiments/claudia",
+        "name": "no remove the ai supervisor",
+        "timestamp": "2026-05-14T04:49:18.691Z",
+        "gitRef": "05ee6deaf7551f00b3a42578dac5ad2a56bba797",
+        "gitBranch": "feat/wip-checkpoints-voice-tools",
+        "metadata": {
+          "filesModified": 105,
+          "isCurrent": false
+        }
+      },
+      {
+        "id": "097761b4-1032-444e-ad86-c757907bed44",
+        "taskId": "task-1778735808025-6295e0a5a0",
+        "workspaceId": "/Users/I850333/experiments/claudia",
+        "name": "remove the related tests.. we are removing the supervisor",
+        "timestamp": "2026-05-14T05:17:52.501Z",
+        "gitRef": "05ee6deaf7551f00b3a42578dac5ad2a56bba797",
+        "gitBranch": "feat/wip-checkpoints-voice-tools",
+        "metadata": {
+          "filesModified": 107,
+          "isCurrent": false
+        }
       }
     ]
   }

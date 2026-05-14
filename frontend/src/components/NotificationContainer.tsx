@@ -3,109 +3,115 @@ import { Notification, NotificationProps, NotificationType } from './Notificatio
 import './NotificationContainer.css';
 
 interface NotificationItem extends Omit<NotificationProps, 'onClose'> {
-    id: string;
+  id: string;
 }
 
 interface NotificationContextValue {
-    showNotification: (
-        type: NotificationType,
-        title: string,
-        message?: string,
-        duration?: number,
-        onClick?: () => void
-    ) => void;
-    showSuccess: (title: string, message?: string, onClick?: () => void) => void;
-    showError: (title: string, message?: string) => void;
-    showWarning: (title: string, message?: string) => void;
-    showInfo: (title: string, message?: string, onClick?: () => void) => void;
+  showNotification: (
+    type: NotificationType,
+    title: string,
+    message?: string,
+    duration?: number,
+    onClick?: () => void,
+  ) => void;
+  showSuccess: (title: string, message?: string, onClick?: () => void) => void;
+  showError: (title: string, message?: string) => void;
+  showWarning: (title: string, message?: string) => void;
+  showInfo: (title: string, message?: string, onClick?: () => void) => void;
 }
 
 const NotificationContext = createContext<NotificationContextValue | undefined>(undefined);
 
 export function useNotification() {
-    const context = useContext(NotificationContext);
-    if (!context) {
-        throw new Error('useNotification must be used within NotificationProvider');
-    }
-    return context;
+  const context = useContext(NotificationContext);
+  if (!context) {
+    throw new Error('useNotification must be used within NotificationProvider');
+  }
+  return context;
 }
 
 interface NotificationProviderProps {
-    children: ReactNode;
+  children: ReactNode;
 }
 
 export function NotificationProvider({ children }: NotificationProviderProps) {
-    const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
 
-    const removeNotification = useCallback((id: string) => {
-        setNotifications((prev) => prev.filter((n) => n.id !== id));
-    }, []);
+  const removeNotification = useCallback((id: string) => {
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
+  }, []);
 
-    const showNotification = useCallback(
-        (type: NotificationType, title: string, message?: string, duration = 5000, onClick?: () => void) => {
-            const id = `${Date.now()}-${Math.random()}`;
-            const notification: NotificationItem = {
-                id,
-                type,
-                title,
-                message,
-                duration,
-                onClick,
-            };
+  const showNotification = useCallback(
+    (
+      type: NotificationType,
+      title: string,
+      message?: string,
+      duration = 5000,
+      onClick?: () => void,
+    ) => {
+      const id = `${Date.now()}-${Math.random()}`;
+      const notification: NotificationItem = {
+        id,
+        type,
+        title,
+        message,
+        duration,
+        onClick,
+      };
 
-            setNotifications((prev) => [...prev, notification]);
-        },
-        []
-    );
+      setNotifications((prev) => [...prev, notification]);
+    },
+    [],
+  );
 
-    const showSuccess = useCallback(
-        (title: string, message?: string, onClick?: () => void) => {
-            showNotification('success', title, message, undefined, onClick);
-        },
-        [showNotification]
-    );
+  const showSuccess = useCallback(
+    (title: string, message?: string, onClick?: () => void) => {
+      showNotification('success', title, message, undefined, onClick);
+    },
+    [showNotification],
+  );
 
-    const showError = useCallback(
-        (title: string, message?: string) => {
-            showNotification('error', title, message, 7000); // Errors stay longer
-        },
-        [showNotification]
-    );
+  const showError = useCallback(
+    (title: string, message?: string) => {
+      showNotification('error', title, message, 7000); // Errors stay longer
+    },
+    [showNotification],
+  );
 
-    const showWarning = useCallback(
-        (title: string, message?: string) => {
-            showNotification('warning', title, message);
-        },
-        [showNotification]
-    );
+  const showWarning = useCallback(
+    (title: string, message?: string) => {
+      showNotification('warning', title, message);
+    },
+    [showNotification],
+  );
 
-    const showInfo = useCallback(
-        (title: string, message?: string, onClick?: () => void) => {
-            showNotification('info', title, message, undefined, onClick);
-        },
-        [showNotification]
-    );
+  const showInfo = useCallback(
+    (title: string, message?: string, onClick?: () => void) => {
+      showNotification('info', title, message, undefined, onClick);
+    },
+    [showNotification],
+  );
 
-    return (
-        <NotificationContext.Provider
-            value={{
-                showNotification,
-                showSuccess,
-                showError,
-                showWarning,
-                showInfo,
-            }}
-        >
-            {children}
-            <div className="notification-container">
-                {notifications.map((notification) => (
-                    <Notification
-                        key={notification.id}
-                        {...notification}
-                        onClose={() => removeNotification(notification.id)}
-                    />
-                ))}
-            </div>
-        </NotificationContext.Provider>
-    );
+  return (
+    <NotificationContext.Provider
+      value={{
+        showNotification,
+        showSuccess,
+        showError,
+        showWarning,
+        showInfo,
+      }}
+    >
+      {children}
+      <div className="notification-container">
+        {notifications.map((notification) => (
+          <Notification
+            key={notification.id}
+            {...notification}
+            onClose={() => removeNotification(notification.id)}
+          />
+        ))}
+      </div>
+    </NotificationContext.Provider>
+  );
 }

@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { WorkspacePanel } from './components/WorkspacePanel';
 import { TerminalView } from './components/TerminalView';
-import { SupervisorChat } from './components/SupervisorChat';
 import { ProjectPicker } from './components/ProjectPicker';
 import { SettingsMenu } from './components/SettingsMenu';
 import { GlobalVoiceManager } from './components/GlobalVoiceManager';
@@ -20,7 +19,6 @@ import { useTaskStore } from './stores/taskStore';
 import {
   Terminal,
   Settings,
-  MessageCircle,
   X,
   RefreshCw,
   RotateCcw,
@@ -30,7 +28,6 @@ import {
   Smartphone,
   ArrowLeft,
   Minimize2,
-  Mic,
   Bell,
   BellOff,
   BarChart3,
@@ -55,8 +52,6 @@ function useIsMobile(breakpoint = 768) {
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
 const SIDEBAR_COLLAPSED_KEY = 'claudia-sidebar-collapsed';
 const DEFAULT_SIDEBAR_WIDTH = 640;
-const CHAT_PANEL_WIDTH_KEY = 'claudia-chat-panel-width';
-const DEFAULT_CHAT_PANEL_WIDTH = 380;
 
 function App() {
   const isMobile = useIsMobile();
@@ -74,8 +69,6 @@ function App() {
     openFolder,
     openTerminal,
     setSystemPrompt,
-    sendChatMessage,
-    clearChatHistory,
     requestArchivedTasks,
     restoreArchivedTask,
     deleteArchivedTask,
@@ -97,12 +90,9 @@ function App() {
     tasks,
     workspaces,
     setShowProjectPicker,
-    chatMessages,
-    chatTyping,
     isConnected,
     isServerReloading,
     isOffline,
-    supervisorEnabled,
     aiCoreConfigured,
     showSystemStats,
     errorNotification,
@@ -163,14 +153,6 @@ function App() {
       return DEFAULT_SIDEBAR_WIDTH;
     }
   });
-  const [chatPanelWidth, setChatPanelWidth] = useState(() => {
-    try {
-      const savedWidth = localStorage.getItem(CHAT_PANEL_WIDTH_KEY);
-      return savedWidth ? parseInt(savedWidth, 10) : DEFAULT_CHAT_PANEL_WIDTH;
-    } catch {
-      return DEFAULT_CHAT_PANEL_WIDTH;
-    }
-  });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
       return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
@@ -187,12 +169,10 @@ function App() {
       return next;
     });
   const [isResizing, setIsResizing] = useState(false);
-  const [isResizingChat, setIsResizingChat] = useState(false);
   const [terminalRefreshCounter, setTerminalRefreshCounter] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [showUsageDashboard, setShowUsageDashboard] = useState(false);
   const [settingsInitialPanel, setSettingsInitialPanel] = useState<string | undefined>(undefined);
-  const [showChatPanel, setShowChatPanel] = useState(false);
   const [showMobileAccess, setShowMobileAccess] = useState(false);
   const [showActivityPanel, setShowActivityPanel] = useState(false);
   const [soundMuted, setSoundMuted] = useState(() => !isSoundEnabled());
@@ -238,10 +218,6 @@ function App() {
     setIsResizing(true);
   };
 
-  const handleChatResizeMouseDown = () => {
-    setIsResizingChat(true);
-  };
-
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (isResizing) {
@@ -253,22 +229,13 @@ function App() {
           setSidebarWidth(newWidth);
         }
       }
-      if (isResizingChat) {
-        const newWidth = window.innerWidth - e.clientX;
-        const minWidth = 300;
-        const maxWidth = 600;
-        if (newWidth >= minWidth && newWidth <= maxWidth) {
-          setChatPanelWidth(newWidth);
-        }
-      }
     };
 
     const handleMouseUp = () => {
       setIsResizing(false);
-      setIsResizingChat(false);
     };
 
-    if (isResizing || isResizingChat) {
+    if (isResizing) {
       document.addEventListener('mousemove', handleMouseMove);
       document.addEventListener('mouseup', handleMouseUp);
     }
@@ -277,7 +244,7 @@ function App() {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isResizing, isResizingChat]);
+  }, [isResizing]);
 
   useEffect(() => {
     try {
@@ -286,14 +253,6 @@ function App() {
       // Silently fail
     }
   }, [sidebarWidth]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(CHAT_PANEL_WIDTH_KEY, chatPanelWidth.toString());
-    } catch {
-      // Silently fail
-    }
-  }, [chatPanelWidth]);
 
   // Generate or retrieve a unique user ID for usage tracking and send to backend
   useEffect(() => {
@@ -388,17 +347,7 @@ function App() {
     setMobileShowTerminal(false);
   }, []);
 
-  // Count unread messages indicator
-  const hasUnreadMessages = chatMessages.length > 0 && !showChatPanel;
-
-  // Close chat panel if supervisor is disabled
-  useEffect(() => {
-    if (!supervisorEnabled && showChatPanel) {
-      setShowChatPanel(false);
-    }
-  }, [supervisorEnabled, showChatPanel]);
-
-  // Open settings to AI Core panel if credentials are not configured (only once on startup)
+// Open settings to AI Core panel if credentials are not configured (only once on startup)
   // Skip if tasks already exist (workspace was reloaded, so API key is already set)
   useEffect(() => {
     if (aiCoreConfigured === false && !aiCoreCheckDoneRef.current && tasks.size === 0) {
@@ -438,25 +387,6 @@ function App() {
     }
   };
 
-  // Open voice agent in new tab
-  const handleOpenVoiceAgent = useCallback(async () => {
-    try {
-      const res = await fetch(`${getApiBaseUrl()}/api/tunnel/status`);
-      const data = await res.json();
-      let token = data.token;
-
-      // If no tunnel token, generate a temporary local token
-      if (!token) {
-        token = 'local-' + Math.random().toString(36).substring(2, 15);
-      }
-
-      const voiceUrl = `${getApiBaseUrl()}/voice?token=${token}`;
-      window.open(voiceUrl, '_blank');
-    } catch (error) {
-      console.error('Failed to open voice agent:', error);
-      alert('Failed to open voice agent. Please try again.');
-    }
-  }, []);
 
   // Check tunnel status on mount
   useEffect(() => {
@@ -570,17 +500,6 @@ function App() {
           </button>
 
           {showSystemStats && <SystemStats />}
-          {!isMobile && supervisorEnabled && (
-            <button
-              className={`chat-toggle-button ${showChatPanel ? 'active' : ''} ${hasUnreadMessages ? 'has-messages' : ''}`}
-              onClick={() => setShowChatPanel(!showChatPanel)}
-              title={showChatPanel ? 'Close Chat' : 'Open Chat'}
-            >
-              <MessageCircle size={18} />
-              <span className="btn-label">Chat</span>
-              {hasUnreadMessages && <span className="message-badge">{chatMessages.length}</span>}
-            </button>
-          )}
           {!isMobile && (
             <button
               className={`chat-toggle-button mobile-tunnel-btn ${tunnelActive ? 'tunnel-active' : ''} ${tunnelLoading ? 'loading' : ''}`}
@@ -593,16 +512,7 @@ function App() {
               {tunnelActive && <span className="tunnel-active-dot" />}
             </button>
           )}
-          {!isMobile && (
-            <button
-              className="chat-toggle-button voice-agent-button"
-              onClick={handleOpenVoiceAgent}
-              title="Open Voice Agent"
-            >
-              <Mic size={18} />
-              <span className="btn-label">Voice Agent</span>
-            </button>
-          )}
+
           <GlobalVoiceToggle />
           <button
             className={`notification-toggle-button ${soundMuted ? 'muted' : ''}`}
@@ -801,37 +711,6 @@ function App() {
               workspacePath={selectedWorkspace?.id}
               workspaceName={selectedWorkspace?.displayName || selectedWorkspace?.name}
             />
-
-            {showChatPanel && (
-              <>
-                <div
-                  className={`resize-handle chat-resize ${isResizingChat ? 'resizing' : ''}`}
-                  onMouseDown={handleChatResizeMouseDown}
-                />
-                <aside
-                  className="chat-panel-sidebar"
-                  style={{ width: `${chatPanelWidth}px`, minWidth: `${chatPanelWidth}px` }}
-                >
-                  <div className="chat-panel-header">
-                    <span>AI Supervisor</span>
-                    <button
-                      className="chat-close-button"
-                      onClick={() => setShowChatPanel(false)}
-                      title="Close chat"
-                    >
-                      <X size={18} />
-                    </button>
-                  </div>
-                  <SupervisorChat
-                    messages={chatMessages}
-                    isTyping={chatTyping}
-                    selectedTaskId={selectedTaskId}
-                    onSendMessage={sendChatMessage}
-                    onClearHistory={clearChatHistory}
-                  />
-                </aside>
-              </>
-            )}
           </>
         )}
       </main>

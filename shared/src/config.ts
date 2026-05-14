@@ -3,12 +3,12 @@
  */
 
 export const PORTS = {
-    /** Backend API server port */
-    BACKEND: 4001,
-    /** Frontend dev server port */
-    FRONTEND: 5173,
-    /** Internal OpenCode server port */
-    OPENCODE: 4097,
+  /** Backend API server port */
+  BACKEND: 4001,
+  /** Frontend dev server port */
+  FRONTEND: 5173,
+  /** Internal OpenCode server port */
+  OPENCODE: 4097,
 };
 
 export const BACKEND_URL = `http://localhost:${PORTS.BACKEND}`;

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "data": {
+    "entries": [
+      {
+        "id": "1778727669083-ugfusw",
+        "taskId": "task-1778687105029-3e420339b7",
+        "workspaceId": "/Users/I850333/experiments/claudia",
+        "model": "sonnet",
+        "inputTokens": 5,
+        "outputTokens": 0,
+        "cacheCreationTokens": 0,
+        "cacheReadTokens": 0,
+        "cost": 0.000015000000000000002,
+        "timestamp": "2026-05-14T03:01:09.083Z"
+      },
+      {
+        "id": "1778729381191-c9n4gv",
+        "taskId": "task-1778687105029-3e420339b7",
+        "workspaceId": "/Users/I850333/experiments/claudia",
+        "model": "sonnet",
+        "inputTokens": 5,
+        "outputTokens": 0,
+        "cacheCreationTokens": 0,
+        "cacheReadTokens": 0,
+        "cost": 0.000015000000000000002,
+        "timestamp": "2026-05-14T03:29:41.191Z"
+      }
+    ]
+  }
+}

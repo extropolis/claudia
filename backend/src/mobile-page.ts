@@ -7,7 +7,7 @@
  */
 
 export function getMobilePageHtml(wsUrl: string, token: string): string {
-    return `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
