@@ -73,13 +73,15 @@ $env:NODE_OPTIONS = "--max-old-space-size=8192"
 
 # Start backend and frontend concurrently
 # Using npm.cmd to avoid the PowerShell strict mode bug with npm.ps1
-# Use dev (tsx watch) for auto-reload on file changes, matching start.sh behavior
+# Use dev:no-watch (no tsx watch) to prevent spurious restarts from file changes
+# (e.g., Claude Code tasks editing source files, antivirus, Windows indexer).
+# For active claudia development, change to 'npm.cmd run dev' to enable auto-reload.
 $backendJob = Start-Job -ScriptBlock {
     param($dir, $port, $nodeOpts)
     Set-Location $dir
     $env:CLAUDIA_BACKEND_PORT = $port
     $env:NODE_OPTIONS = $nodeOpts
-    & npm.cmd run dev -w backend 2>&1
+    & npm.cmd run dev:no-watch -w backend 2>&1
 } -ArgumentList $PSScriptRoot, $BACKEND_PORT, $env:NODE_OPTIONS
 
 $frontendJob = Start-Job -ScriptBlock {

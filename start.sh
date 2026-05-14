@@ -113,7 +113,9 @@ export CLAUDIA_BACKEND_PORT=$BACKEND_PORT
 export NODE_OPTIONS="--max-old-space-size=8192"
 
 # Start backend and frontend
-# Backend: tsx watch - auto-reloads on file changes (or use restart button in UI)
+# Backend: no-watch mode to prevent spurious restarts from file changes
+# (e.g., Claude Code tasks editing source files, antivirus, Windows indexer).
+# For active claudia development, change dev:no-watch to dev for auto-reload.
 # Frontend: Vite HMR auto-reloads on file changes
-npm run dev -w backend & npm run dev -w frontend
+npm run dev:no-watch -w backend & npm run dev -w frontend
 

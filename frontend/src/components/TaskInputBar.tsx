@@ -241,9 +241,12 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
         setIsUploading(false);
     };
 
+    // Pending message ref: when WebSocket is not open, store the message
+    // and retry when the connection is re-established.
+    const pendingMessageRef = useRef<string | null>(null);
+
     const sendMessage = useCallback(() => {
         if (!message.trim() && images.length === 0) return;
-        if (wsRef.current?.readyState !== WebSocket.OPEN) return;
 
         // Clear any pending voice transcript
         if (globalVoiceEnabled) {
@@ -260,12 +263,20 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
             fullMessage = message + imageText;
         }
 
-        // Send the message followed by Enter key to submit it to Claude
         const messageWithEnter = fullMessage + '\r';
-        wsRef.current.send(JSON.stringify({
-            type: 'task:input',
-            payload: { taskId: task.id, input: messageWithEnter }
-        }));
+
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            // WebSocket is open — send immediately
+            wsRef.current.send(JSON.stringify({
+                type: 'task:input',
+                payload: { taskId: task.id, input: messageWithEnter }
+            }));
+            pendingMessageRef.current = null;
+        } else {
+            // WebSocket is not open — queue for retry when it reconnects
+            console.log(`[TaskInputBar] WebSocket not open, queuing message for ${task.id}`);
+            pendingMessageRef.current = messageWithEnter;
+        }
 
         // Scroll terminal to bottom so user sees latest output
         window.dispatchEvent(new CustomEvent('terminal:scrollToBottom', {
@@ -277,6 +288,23 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
         images.forEach(img => URL.revokeObjectURL(img.previewUrl));
         setImages([]);
     }, [message, images, wsRef, task.id, globalVoiceEnabled, clearVoiceTranscript, clearTaskDraftInput]);
+
+    // Retry sending pending message when WebSocket reconnects
+    useEffect(() => {
+        const checkPending = () => {
+            if (pendingMessageRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+                console.log(`[TaskInputBar] WebSocket reconnected, sending queued message for ${task.id}`);
+                wsRef.current.send(JSON.stringify({
+                    type: 'task:input',
+                    payload: { taskId: task.id, input: pendingMessageRef.current }
+                }));
+                pendingMessageRef.current = null;
+            }
+        };
+        // Poll for reconnection every 500ms while there's a pending message
+        const interval = setInterval(checkPending, 500);
+        return () => clearInterval(interval);
+    }, [wsRef, task.id]);
 
     // Listen for auto-send event
     useEffect(() => {
