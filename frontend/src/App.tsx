@@ -13,12 +13,12 @@ import { SystemStats } from './components/SystemStats';
 import { MobileAccessModal } from './components/MobileAccessModal';
 import { FileExplorer } from './components/FileExplorer';
 import { ShellTerminalView } from './components/ShellTerminalView';
-import { PreviewPanel } from './components/PreviewPanel';
 import { ActivityPanel } from './components/ActivityPanel';
 import { useTheme } from './hooks/useTheme';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Bell, BellOff } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff, BarChart3, ChevronRight } from 'lucide-react';
+import { UsageDashboard } from './components/UsageDashboard';
 import { getApiBaseUrl } from './config/api-config';
 import { isSoundEnabled, setSoundEnabled } from './utils/browserCapabilities';
 
@@ -35,6 +35,7 @@ function useIsMobile(breakpoint = 768) {
 }
 
 const SIDEBAR_WIDTH_KEY = 'claudia-sidebar-width';
+const SIDEBAR_COLLAPSED_KEY = 'claudia-sidebar-collapsed';
 const DEFAULT_SIDEBAR_WIDTH = 640;
 const CHAT_PANEL_WIDTH_KEY = 'claudia-chat-panel-width';
 const DEFAULT_CHAT_PANEL_WIDTH = 380;
@@ -50,11 +51,11 @@ function App() {
         createWorkspace,
         deleteWorkspace,
         reorderWorkspaces,
+        setWorkspaceOrder,
         reorderTasks: reorderTasksOnServer,
         openFolder,
         openTerminal,
         setSystemPrompt,
-        setPreviewPort,
         sendChatMessage,
         clearChatHistory,
         requestArchivedTasks,
@@ -95,9 +96,6 @@ function App() {
     const [showingShell, setShowingShell] = useState(false);
     const activeShellWorkspace = activeShellWorkspaceId ? workspaces.find(w => w.id === activeShellWorkspaceId) : undefined;
 
-    // Preview panel state
-    const [previewState, setPreviewState] = useState<{ workspaceId: string; name: string; port: number } | null>(null);
-
     // Count tasks that have running processes (not disconnected or archived)
     const activeTasks = Array.from(tasks.values()).filter(t =>
         t.state !== 'disconnected' &&
@@ -134,10 +132,19 @@ function App() {
             return DEFAULT_CHAT_PANEL_WIDTH;
         }
     });
+    const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+        try { return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true'; } catch { return false; }
+    });
+    const toggleSidebar = () => setSidebarCollapsed(c => {
+        const next = !c;
+        try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next)); } catch {}
+        return next;
+    });
     const [isResizing, setIsResizing] = useState(false);
     const [isResizingChat, setIsResizingChat] = useState(false);
     const [terminalRefreshCounter, setTerminalRefreshCounter] = useState(0);
     const [showSettings, setShowSettings] = useState(false);
+    const [showUsageDashboard, setShowUsageDashboard] = useState(false);
     const [settingsInitialPanel, setSettingsInitialPanel] = useState<string | undefined>(undefined);
     const [showChatPanel, setShowChatPanel] = useState(false);
     const [showMobileAccess, setShowMobileAccess] = useState(false);
@@ -283,38 +290,6 @@ function App() {
         setShowingShell(false);
     }, []);
 
-    const handleOpenPreview = useCallback((workspaceId: string) => {
-        const ws = workspaces.find(w => w.id === workspaceId);
-        if (!ws) return;
-        const name = ws.displayName || ws.name;
-        if (ws.previewPort) {
-            setPreviewState({ workspaceId, name, port: ws.previewPort });
-        } else {
-            const input = window.prompt(`Enter the dev server port for "${name}":`);
-            if (!input) return;
-            const port = parseInt(input, 10);
-            if (isNaN(port) || port < 1 || port > 65535) {
-                window.alert('Invalid port number');
-                return;
-            }
-            setPreviewPort(workspaceId, port);
-            setPreviewState({ workspaceId, name, port });
-        }
-    }, [workspaces, setPreviewPort]);
-
-    const handleChangePreviewPort = useCallback(() => {
-        if (!previewState) return;
-        const input = window.prompt('Enter new port:', String(previewState.port));
-        if (!input) return;
-        const port = parseInt(input, 10);
-        if (isNaN(port) || port < 1 || port > 65535) {
-            window.alert('Invalid port number');
-            return;
-        }
-        setPreviewPort(previewState.workspaceId, port);
-        setPreviewState({ ...previewState, port });
-    }, [previewState, setPreviewPort]);
-
     const handleShowShell = useCallback(() => {
         setShowingShell(true);
     }, []);
@@ -409,6 +384,26 @@ function App() {
             console.log('Server restart triggered');
         }
     };
+
+    // Open voice agent in new tab
+    const handleOpenVoiceAgent = useCallback(async () => {
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/tunnel/status`);
+            const data = await res.json();
+            let token = data.token;
+
+            // If no tunnel token, generate a temporary local token
+            if (!token) {
+                token = 'local-' + Math.random().toString(36).substring(2, 15);
+            }
+
+            const voiceUrl = `${getApiBaseUrl()}/voice?token=${token}`;
+            window.open(voiceUrl, '_blank');
+        } catch (error) {
+            console.error('Failed to open voice agent:', error);
+            alert('Failed to open voice agent. Please try again.');
+        }
+    }, []);
 
     // Check tunnel status on mount
     useEffect(() => {
@@ -547,6 +542,16 @@ function App() {
                             {tunnelActive && <span className="tunnel-active-dot" />}
                         </button>
                     )}
+                    {!isMobile && (
+                        <button
+                            className="chat-toggle-button voice-agent-button"
+                            onClick={handleOpenVoiceAgent}
+                            title="Open Voice Agent"
+                        >
+                            <Mic size={18} />
+                            <span className="btn-label">Voice Agent</span>
+                        </button>
+                    )}
                     <GlobalVoiceToggle />
                     <button
                         className={`notification-toggle-button ${soundMuted ? 'muted' : ''}`}
@@ -565,6 +570,13 @@ function App() {
                         title="Restart Server"
                     >
                         <RotateCcw size={isMobile ? 18 : 20} />
+                    </button>
+                    <button
+                        className="settings-button"
+                        onClick={() => setShowUsageDashboard(true)}
+                        title="Token Usage"
+                    >
+                        <BarChart3 size={isMobile ? 18 : 20} />
                     </button>
                     <button
                         className="settings-button"
@@ -607,11 +619,11 @@ function App() {
                                 onCreateWorkspace={createWorkspace}
                                 onDeleteWorkspace={deleteWorkspace}
                                 onReorderWorkspaces={reorderWorkspaces}
+                                onSetWorkspaceOrder={setWorkspaceOrder}
                                 onReorderTasksOnServer={reorderTasksOnServer}
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
                                 onOpenShell={handleOpenShell}
-                                onOpenPreview={handleOpenPreview}
                                 onPushToGithub={pushToGithub}
                                 onSetSystemPrompt={setSystemPrompt}
                                 onCreateTask={createTask}
@@ -632,6 +644,18 @@ function App() {
                 ) : (
                     /* ===== DESKTOP LAYOUT (unchanged) ===== */
                     <>
+                        {sidebarCollapsed ? (
+                            <aside className="sidebar collapsed">
+                                <button
+                                    className="sidebar-expand-btn"
+                                    onClick={toggleSidebar}
+                                    title="Show workspaces"
+                                >
+                                    <ChevronRight size={14} />
+                                    <span className="sidebar-expand-label">Workspaces</span>
+                                </button>
+                            </aside>
+                        ) : (
                         <aside
                             className="sidebar"
                             ref={sidebarRef}
@@ -645,11 +669,11 @@ function App() {
                                 onCreateWorkspace={createWorkspace}
                                 onDeleteWorkspace={deleteWorkspace}
                                 onReorderWorkspaces={reorderWorkspaces}
+                                onSetWorkspaceOrder={setWorkspaceOrder}
                                 onReorderTasksOnServer={reorderTasksOnServer}
                                 onOpenFolder={openFolder}
                                 onOpenTerminal={openTerminal}
                                 onOpenShell={handleOpenShell}
-                                onOpenPreview={handleOpenPreview}
                                 onPushToGithub={pushToGithub}
                                 onSetSystemPrompt={setSystemPrompt}
                                 onCreateTask={createTask}
@@ -664,13 +688,17 @@ function App() {
                                 onAddCustomReference={addCustomReference}
                                 onRemoveReference={removeReference}
                                 onResetWorkspace={resetWorkspace}
+                                onCollapse={toggleSidebar}
                             />
                         </aside>
+                        )}
 
-                        <div
-                            className={`resize-handle ${isResizing ? 'resizing' : ''}`}
-                            onMouseDown={handleMouseDown}
-                        />
+                        {!sidebarCollapsed && (
+                            <div
+                                className={`resize-handle ${isResizing ? 'resizing' : ''}`}
+                                onMouseDown={handleMouseDown}
+                            />
+                        )}
 
                         <section className="main-panel">
                             {/* Shell terminal - always mounted when active, hidden via CSS to preserve xterm state */}
@@ -757,16 +785,9 @@ function App() {
             </main>
 
             <ProjectPicker onSelect={handleProjectSelect} wsRef={wsRef} requestRecentWorkspaces={requestRecentWorkspaces} clearRecentWorkspace={clearRecentWorkspace} />
-            <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} wsRef={wsRef} />
+            <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
+            <UsageDashboard isOpen={showUsageDashboard} onClose={() => setShowUsageDashboard(false)} />
             {!isMobile && <MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} error={tunnelError} tunnelActive={tunnelActive} tunnelLoading={tunnelLoading} onStopTunnel={handleStopTunnel} onStartTunnel={startTunnel} />}
-            {previewState && (
-                <PreviewPanel
-                    workspaceName={previewState.name}
-                    port={previewState.port}
-                    onClose={() => setPreviewState(null)}
-                    onChangePort={handleChangePreviewPort}
-                />
-            )}
             <GlobalVoiceManager />
             <ThinkingSoundManager />
             <TaskCompletionVoiceManager />

@@ -40,6 +40,11 @@ const WORKSPACE_ID = process.env.CLAUDIA_WORKSPACE_ID || '';
 // This agent's own task ID (set by task-spawner, used for self-rename)
 const SELF_TASK_ID = process.env.CLAUDIA_TASK_ID || '';
 
+// Whether complexity-based model tiering is enabled. Set by task-spawner when
+// the operator turns on the toggle in Settings. Controls whether the
+// `complexity` parameter is exposed on claudia_create_task.
+const MODEL_TIERING_ENABLED = process.env.CLAUDIA_MODEL_TIERING_ENABLED === '1';
+
 /**
  * Format a duration in milliseconds to a human-readable string
  */
@@ -364,84 +369,118 @@ server.tool(
 // ============================================================================
 // Tool: claudia_create_task
 // ============================================================================
-server.tool(
-    'claudia_create_task',
-    `Create a new task in Claudia. The task will be assigned to a Claude Code agent in the current workspace (${WORKSPACE_ID || 'unknown'}). Use this to delegate work to other agents running in parallel.`,
-    {
-        prompt: z.string().describe('The prompt/instructions for the new task'),
-        displayName: z.string().optional().describe('Optional short display name for the task in the Claudia sidebar (e.g., "Build API endpoint", "Write tests")'),
-    },
-    async ({ prompt, displayName }) => {
-        if (!WORKSPACE_ID) {
-            return {
-                content: [{
-                    type: 'text',
-                    text: 'Error: No workspace ID configured. The CLAUDIA_WORKSPACE_ID environment variable is not set.'
-                }]
-            };
+const createTaskBaseDescription = `Create a new task in Claudia. The task will be assigned to a Claude Code agent in the current workspace (${WORKSPACE_ID || 'unknown'}). Use this to delegate work to other agents running in parallel.`;
+
+const createTaskTieringSuffix = `
+
+You can pass an optional \`complexity\` hint to control the cost of the spawned task. The operator has mapped each tier to a specific model:
+- \`low\` — trivial lookups, formatting, single-file reads, mechanical edits.
+- \`medium\` — normal coding, refactors, writing tests.
+- \`high\` — tricky architecture, gnarly debugging, work that needs careful multi-step reasoning.
+
+Be conservative — pick \`low\` when the work is genuinely simple. Omit the parameter to use the workspace's default model.`;
+
+async function handleCreateTask(args: { prompt: string; displayName?: string; complexity?: 'low' | 'medium' | 'high' }) {
+    const { prompt, displayName, complexity } = args;
+    if (!WORKSPACE_ID) {
+        return {
+            content: [{
+                type: 'text' as const,
+                text: 'Error: No workspace ID configured. The CLAUDIA_WORKSPACE_ID environment variable is not set.'
+            }]
+        };
+    }
+
+    try {
+        log.info(`Creating task in workspace: ${WORKSPACE_ID}${complexity ? ` (complexity=${complexity})` : ''}`);
+        log.info(`Prompt: ${prompt.substring(0, 100)}...`);
+
+        const payload: Record<string, unknown> = {
+            prompt,
+            workspaceId: WORKSPACE_ID,
+            source: 'mcp',
+        };
+        if (MODEL_TIERING_ENABLED && complexity) {
+            payload.complexity = complexity;
         }
+        const result = await sendWSMessage('task:create', payload);
 
-        try {
-            log.info(`Creating task in workspace: ${WORKSPACE_ID}`);
-            log.info(`Prompt: ${prompt.substring(0, 100)}...`);
+        const task = (result as any)?.task;
+        if (task) {
+            log.info(`Task created: ${task.id}`);
 
-            const result = await sendWSMessage('task:create', {
-                prompt,
-                workspaceId: WORKSPACE_ID,
-                source: 'mcp',
-            });
-
-            const task = (result as any)?.task;
-            if (task) {
-                log.info(`Task created: ${task.id}`);
-
-                // Rename the task if displayName was provided
-                if (displayName) {
-                    try {
-                        await sendWSMessage('task:rename', { taskId: task.id, displayName, source: 'agent' });
-                        log.info(`Task renamed to: ${displayName}`);
-                    } catch (renameErr) {
-                        log.error('Failed to rename task after creation:', renameErr);
-                    }
+            // Rename the task if displayName was provided
+            if (displayName) {
+                try {
+                    await sendWSMessage('task:rename', { taskId: task.id, displayName, source: 'agent' });
+                    log.info(`Task renamed to: ${displayName}`);
+                } catch (renameErr) {
+                    log.error('Failed to rename task after creation:', renameErr);
                 }
-
-                return {
-                    content: [{
-                        type: 'text',
-                        text: JSON.stringify({
-                            success: true,
-                            taskId: task.id,
-                            displayName: displayName || null,
-                            state: task.state,
-                            workspace: task.workspaceId,
-                            prompt: task.prompt?.substring(0, 200),
-                            message: `Task '${task.id}'${displayName ? ` (${displayName})` : ''} created successfully. It is now running in workspace '${WORKSPACE_ID}'.`
-                        }, null, 2)
-                    }]
-                };
             }
 
             return {
                 content: [{
-                    type: 'text',
+                    type: 'text' as const,
                     text: JSON.stringify({
                         success: true,
-                        message: 'Task creation request sent. Check claudia_list_tasks for the new task.',
-                        result
+                        taskId: task.id,
+                        displayName: displayName || null,
+                        state: task.state,
+                        workspace: task.workspaceId,
+                        prompt: task.prompt?.substring(0, 200),
+                        complexity: complexity || null,
+                        message: `Task '${task.id}'${displayName ? ` (${displayName})` : ''} created successfully. It is now running in workspace '${WORKSPACE_ID}'.`
                     }, null, 2)
                 }]
             };
-        } catch (error) {
-            log.error('Failed to create task:', error);
-            return {
-                content: [{
-                    type: 'text',
-                    text: `Error creating task: ${error instanceof Error ? error.message : String(error)}`
-                }]
-            };
         }
+
+        return {
+            content: [{
+                type: 'text' as const,
+                text: JSON.stringify({
+                    success: true,
+                    message: 'Task creation request sent. Check claudia_list_tasks for the new task.',
+                    result
+                }, null, 2)
+            }]
+        };
+    } catch (error) {
+        log.error('Failed to create task:', error);
+        return {
+            content: [{
+                type: 'text' as const,
+                text: `Error creating task: ${error instanceof Error ? error.message : String(error)}`
+            }]
+        };
     }
-);
+}
+
+if (MODEL_TIERING_ENABLED) {
+    server.tool(
+        'claudia_create_task',
+        createTaskBaseDescription + createTaskTieringSuffix,
+        {
+            prompt: z.string().describe('The prompt/instructions for the new task'),
+            displayName: z.string().optional().describe('Optional short display name for the task in the Claudia sidebar (e.g., "Build API endpoint", "Write tests")'),
+            complexity: z.enum(['low', 'medium', 'high']).optional().describe(
+                'Cost/capability tier for the spawned task. Use "low" for trivial work, "medium" for normal coding, "high" for hard reasoning. Omit to use the workspace default model.'
+            ),
+        },
+        async (args) => handleCreateTask(args)
+    );
+} else {
+    server.tool(
+        'claudia_create_task',
+        createTaskBaseDescription,
+        {
+            prompt: z.string().describe('The prompt/instructions for the new task'),
+            displayName: z.string().optional().describe('Optional short display name for the task in the Claudia sidebar (e.g., "Build API endpoint", "Write tests")'),
+        },
+        async (args) => handleCreateTask(args)
+    );
+}
 
 // ============================================================================
 // Tool: claudia_send_input

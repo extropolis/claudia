@@ -1,9 +1,9 @@
 import { spawn, IPty } from 'node-pty';
 import { EventEmitter } from 'events';
-import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS } from '@claudia/shared';
+import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, TaskTokenUsage } from '@claudia/shared';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
+import { dirname, join, resolve } from 'path';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
@@ -14,6 +14,7 @@ import { createLogger } from './logger.js';
 import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
+import { getTaskTokenUsage } from './token-parser.js';
 import { randomBytes } from 'crypto';
 
 const logger = createLogger('[TaskSpawner]');
@@ -40,7 +41,7 @@ const PERMISSION_MODE_MAP: Record<string, string> = {
  * Build CLI args from ClaudeCodeSwitches config.
  * Returns args to push into the claudeArgs array.
  */
-function buildClaudeCodeSwitchArgs(switches: ClaudeCodeSwitches): string[] {
+export function buildClaudeCodeSwitchArgs(switches: ClaudeCodeSwitches): string[] {
     const args: string[] = [];
 
     if (switches.verbose) {
@@ -149,6 +150,7 @@ interface PersistedTask {
     displayNameEditedByUser?: boolean; // True if the user manually edited the display name
     processStartedAt?: string; // When the current processing run started (preserved across reconnect)
     order?: number;            // Display order within workspace (lower = higher in list)
+    tokenUsage?: TaskTokenUsage; // Aggregated token usage for this task
 }
 
 // Lightweight metadata for archived tasks (no outputHistory - loaded lazily from disk)
@@ -282,6 +284,18 @@ export class TaskSpawner extends EventEmitter {
     /** After rotation, how many bytes of the tail we keep. */
     private readonly historyFileKeepBytes: number;
 
+    /** Wall-clock time when this TaskSpawner instance was created. Used by the
+     *  idle reaper to avoid disconnecting tasks that were already idle before
+     *  this server session started — their lastActivity timestamp predates the
+     *  server, so the 24h window would fire immediately on every restart. */
+    private readonly startedAt: Date = new Date();
+
+    /** Timestamp of the last polling tick. Used to detect system sleep/wake —
+     *  if more than SLEEP_DETECTION_GAP_MS has elapsed between ticks, the OS
+     *  was likely suspended and PTY child processes may have died. */
+    private lastPollTime: number = Date.now();
+    private static readonly SLEEP_DETECTION_GAP_MS = 30_000; // 30 seconds
+
     // Backend abstraction for multi-backend support (Claude Code, OpenCode, etc.)
     private backend: CodeBackend | null = null;
     private backendType: BackendType = 'claude-code';
@@ -320,18 +334,18 @@ export class TaskSpawner extends EventEmitter {
             ? envReapInterval
             : 10 * 60 * 1000;
 
-        // History file cap config. Default: rotate at 5MB, keep last 2MB tail.
-        // The 2MB floor matches MAX_HISTORY_SIZE for in-memory outputHistory,
-        // so a reconnect that reads the file has roughly the same context as
-        // a task that never disconnected.
+        // History file cap config. Default: rotate at 10MB, keep last 5MB tail.
+        // Files on disk are kept large to preserve full scrollback history.
+        // Memory loading on reconnect is capped separately (MAX_RECONNECT_HISTORY
+        // = 512KB) so large files don't cause OOM.
         const envMaxBytes = parseInt(process.env.HISTORY_FILE_MAX_BYTES || '', 10);
         this.historyFileMaxBytes = !isNaN(envMaxBytes) && envMaxBytes >= 0
             ? envMaxBytes
-            : 5 * 1024 * 1024;
+            : 10 * 1024 * 1024;
         const envKeepBytes = parseInt(process.env.HISTORY_FILE_KEEP_BYTES || '', 10);
         this.historyFileKeepBytes = !isNaN(envKeepBytes) && envKeepBytes > 0
             ? envKeepBytes
-            : 2 * 1024 * 1024;
+            : 5 * 1024 * 1024;
 
         // Initialize backend based on config
         this.backendType = configStore?.getBackend() || 'claude-code';
@@ -531,6 +545,11 @@ export class TaskSpawner extends EventEmitter {
             const mcpEnv: Record<string, string> = {};
             if (workspaceId) mcpEnv.CLAUDIA_WORKSPACE_ID = workspaceId;
             if (taskId) mcpEnv.CLAUDIA_TASK_ID = taskId;
+            // Signal to the MCP server whether the complexity-tiering parameter
+            // should be exposed on claudia_create_task.
+            if (this.configStore?.getModelTiering().enabled) {
+                mcpEnv.CLAUDIA_MODEL_TIERING_ENABLED = '1';
+            }
             if (Object.keys(mcpEnv).length > 0) {
                 claudiaConfig.env = mcpEnv;
             }
@@ -606,9 +625,17 @@ export class TaskSpawner extends EventEmitter {
             enabledMcpjsonServers: serverNames
         };
 
+        // The Claudia project root — skip syncing to our own directory to avoid
+        // triggering tsx watch restarts from file writes in the project tree.
+        const selfRoot = resolve(join(__dirname, '..', '..'));
+
         for (const workspaceId of workspaceIds) {
             if (!existsSync(workspaceId)) {
                 logger.warn('Workspace does not exist, skipping MCP sync', { workspaceId });
+                continue;
+            }
+            if (resolve(workspaceId) === selfRoot) {
+                logger.info('Skipping MCP sync for Claudia\'s own workspace (prevents tsx watch restart)', { workspaceId });
                 continue;
             }
 
@@ -698,6 +725,66 @@ export class TaskSpawner extends EventEmitter {
      */
     private getTaskHistoryPath(taskId: string): string {
         return join(this.getHistoryDir(), `${taskId}.txt`);
+    }
+
+    /**
+     * Read a byte range of a task's persisted history. Returns the slice
+     * `[max(0, endBefore - maxBytes), endBefore)` plus metadata so the frontend
+     * can lazy-load earlier content as the user scrolls up.
+     *
+     * Legacy histories were written as base64. For those, byte-range reads
+     * don't map cleanly to decoded characters, so we report
+     * `isBase64Legacy: true` and the caller should fall back to the full-load
+     * path (via `task:reconnect`/`task:restore`).
+     *
+     * Call with `maxBytes: 0` to fetch just the metadata (file size / format).
+     */
+    readTaskHistoryRange(
+        taskId: string,
+        endBefore: number,
+        maxBytes: number
+    ): { data: string; startOffset: number; totalSize: number; isBase64Legacy: boolean } {
+        const historyPath = this.getTaskHistoryPath(taskId);
+        if (!existsSync(historyPath)) {
+            return { data: '', startOffset: 0, totalSize: 0, isBase64Legacy: false };
+        }
+        const totalSize = statSync(historyPath).size;
+        const fd = openSync(historyPath, 'r');
+        try {
+            // Detect on-disk format from the first 100 bytes — same heuristic used
+            // in `reconnectDisconnectedTask`. base64 files contain neither ANSI
+            // escapes nor whitespace nor brackets.
+            const sampleLen = Math.min(100, totalSize);
+            const sampleBuf = Buffer.alloc(sampleLen);
+            readSync(fd, sampleBuf, 0, sampleLen, 0);
+            const sample = sampleBuf.toString('utf8');
+            const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
+            if (!isRawText) {
+                return { data: '', startOffset: 0, totalSize, isBase64Legacy: true };
+            }
+
+            const safeMax = Math.max(0, Math.min(maxBytes, totalSize));
+            const safeEnd = Math.max(0, Math.min(endBefore, totalSize));
+            const startOffset = Math.max(0, safeEnd - safeMax);
+            const length = safeEnd - startOffset;
+            if (length <= 0) {
+                return { data: '', startOffset, totalSize, isBase64Legacy: false };
+            }
+            const buf = Buffer.alloc(length);
+            readSync(fd, buf, 0, length, startOffset);
+            // Skip leading bytes that are UTF-8 continuation bytes (10xxxxxx) to
+            // avoid producing replacement characters from a multi-byte char that
+            // was split at the read boundary. E.g., the '─' char is 3 bytes
+            // (E2 94 80); if startOffset lands on byte 2 (0x94), skip it.
+            let skipBytes = 0;
+            while (skipBytes < buf.length && (buf[skipBytes] & 0xC0) === 0x80) {
+                skipBytes++;
+            }
+            const cleanBuf = skipBytes > 0 ? buf.subarray(skipBytes) : buf;
+            return { data: cleanBuf.toString('utf8'), startOffset: startOffset + skipBytes, totalSize, isBase64Legacy: false };
+        } finally {
+            try { closeSync(fd); } catch { /* best effort */ }
+        }
     }
 
     /**
@@ -834,6 +921,9 @@ export class TaskSpawner extends EventEmitter {
 
         const keep = this.historyFileKeepBytes;
         try {
+            // Read into memory then close the fd before renaming — on Windows
+            // a file cannot be renamed while it has an open file descriptor.
+            let payload: Buffer;
             const fd = openSync(historyPath, 'r');
             try {
                 const start = Math.max(0, stat.size - keep);
@@ -843,21 +933,21 @@ export class TaskSpawner extends EventEmitter {
                 // Align to first newline within the first 1KB if possible, to
                 // drop a likely-partial opening line. Fall back to raw cut.
                 let offset = 0;
-                const scan = Math.min(1024, buf.length);
                 const nl = buf.indexOf(0x0a, 0);
-                if (nl >= 0 && nl < scan) offset = nl + 1;
+                if (nl >= 0 && nl < Math.min(1024, buf.length)) offset = nl + 1;
 
                 const marker = Buffer.from(`\x1b[90m── history trimmed (${Math.round((stat.size - start) / 1024)} KB shown of ${Math.round(stat.size / 1024)} KB) ──\x1b[0m\r\n`);
-                const payload = Buffer.concat([marker, buf.subarray(offset)]);
-                this.atomicWriteHistorySync(historyPath, payload.toString('utf8'));
-                logger.info('Rotated history file', {
-                    file: historyPath,
-                    originalBytes: stat.size,
-                    newBytes: payload.length,
-                });
+                payload = Buffer.concat([marker, buf.subarray(offset)]);
             } finally {
-                closeSync(fd);
+                closeSync(fd);  // Close before rename — critical on Windows
             }
+
+            this.atomicWriteHistorySync(historyPath, payload.toString('utf8'));
+            logger.info('Rotated history file', {
+                file: historyPath,
+                originalBytes: stat.size,
+                newBytes: payload.length,
+            });
         } catch (e) {
             logger.warn('Failed to rotate history file', { file: historyPath, error: (e as Error).message });
         }
@@ -899,6 +989,11 @@ export class TaskSpawner extends EventEmitter {
         const toReap: string[] = [];
         for (const task of this.tasks.values()) {
             if (task.state !== 'idle') continue;
+            // Only reap tasks that went idle during this server session. A task
+            // whose lastActivity predates startedAt was already idle when the
+            // server started; its age would immediately exceed the 24h threshold
+            // on every restart, disconnecting tasks the user hasn't touched yet.
+            if (task.lastActivity < this.startedAt) continue;
             const age = now - task.lastActivity.getTime();
             if (age >= this.idleReapMs) toReap.push(task.id);
         }
@@ -925,6 +1020,63 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * After detecting a system wake from sleep, reconnect tasks whose PTY
+     * processes died during the suspension. Only reconnects tasks that are
+     * now 'exited' but were alive (idle/busy/waiting_input) before sleep.
+     */
+    private async reconnectAfterSleep(): Promise<void> {
+        // Collect exited tasks that should be reconnected
+        const exitedTasks: string[] = [];
+        for (const task of this.tasks.values()) {
+            if (task.state === 'exited' && task.sessionId) {
+                exitedTasks.push(task.id);
+            }
+        }
+        // Also check disconnected tasks that were recently active
+        const disconnectedTasks: string[] = [];
+        for (const [id, task] of this.disconnectedTasks) {
+            if (task.sessionId && task.wasInterrupted) {
+                const lastActive = task.lastActivity ? new Date(task.lastActivity).getTime() : 0;
+                // Only reconnect tasks that were active in the last 2 hours
+                if (Date.now() - lastActive < 2 * 60 * 60 * 1000) {
+                    disconnectedTasks.push(id);
+                }
+            }
+        }
+
+        const total = exitedTasks.length + disconnectedTasks.length;
+        if (total === 0) return;
+
+        logger.info('Reconnecting tasks after system wake', {
+            exited: exitedTasks.length,
+            disconnected: disconnectedTasks.length,
+        });
+
+        // Disconnect exited tasks first (moves them to disconnectedTasks with session info)
+        for (const id of exitedTasks) {
+            try {
+                this.disconnectTask(id);
+            } catch (e) {
+                logger.warn('Failed to disconnect exited task for sleep reconnect', { taskId: id });
+            }
+        }
+
+        // Reconnect all in batches of 2
+        const allIds = [...exitedTasks, ...disconnectedTasks];
+        for (let i = 0; i < allIds.length; i++) {
+            try {
+                await this.reconnectTask(allIds[i]);
+                logger.info('Reconnected task after sleep', { taskId: allIds[i], index: i + 1, total: allIds.length });
+            } catch (e) {
+                logger.warn('Failed to reconnect task after sleep', { taskId: allIds[i], error: (e as Error).message });
+            }
+            if (i < allIds.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+        }
+    }
+
+    /**
      * Start polling to check task states at the configured interval
      */
     private startStatePolling(): void {
@@ -942,6 +1094,18 @@ export class TaskSpawner extends EventEmitter {
      * Uses a per-task lock to prevent race conditions from concurrent state transitions.
      */
     private checkTaskStates(): void {
+        // Detect system sleep/wake: if the gap since last poll is much larger than
+        // the polling interval, the OS was suspended. PTY child processes often die
+        // during sleep, so we schedule auto-reconnect for any exited tasks.
+        const now = Date.now();
+        const gap = now - this.lastPollTime;
+        this.lastPollTime = now;
+        if (gap > TaskSpawner.SLEEP_DETECTION_GAP_MS) {
+            logger.info('System wake detected', { gapMs: gap, gapMinutes: Math.round(gap / 60_000) });
+            // Give PTY processes a moment to report their exit, then reconnect
+            setTimeout(() => this.reconnectAfterSleep(), 3000);
+        }
+
         // Number of consecutive polls with output changes required to transition idle → busy
         // This prevents spurious transitions from one-time terminal redraws (resize, focus, etc.)
         const CONSECUTIVE_CHANGES_FOR_BUSY = 2;
@@ -999,7 +1163,19 @@ export class TaskSpawner extends EventEmitter {
                         this.transitionTaskState(task, 'waiting_input', inputType, `polling: detected ${inputType}`);
                         this.emit('taskWaitingInput', task.id, inputType, recentOutput);
                     } else {
-                        this.transitionTaskState(task, 'idle', undefined, 'polling: output stable');
+                        // Capture token usage before transitioning to idle so the save
+                        // triggered by transitionTaskState includes the latest costs.
+                        // Guard: only transition to idle if the task is still in 'busy' state when
+                        // captureTokenUsage resolves — a new user turn may have started in the meantime.
+                        this.captureTokenUsage(task.id)
+                            .catch(err => {
+                                logger.error('Unhandled error in captureTokenUsage', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+                            })
+                            .finally(() => {
+                                if (task.state === 'busy') {
+                                    this.transitionTaskState(task, 'idle', undefined, 'polling: output stable');
+                                }
+                            });
                         this.captureGitStateAfterTask(task.id).catch(err => {
                             logger.error('Unhandled error in captureGitStateAfterTask', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
                         });
@@ -1078,13 +1254,15 @@ export class TaskSpawner extends EventEmitter {
             return;
         }
 
-        // Only auto-reconnect tasks that were recently interrupted (busy) or have shouldContinue set.
-        // Skip tasks that were last active more than 1 hour ago — they're stale.
+        // Only auto-reconnect tasks that were mid-turn (shouldContinue=true) when the server
+        // restarted. Idle tasks still have wasInterrupted=true for display purposes but
+        // reconnect on-demand (when the user clicks them) to avoid spawning too many PTY
+        // processes and MCP servers on startup.
         const MAX_STALE_AGE_MS = 60 * 60 * 1000; // 1 hour
         const now = Date.now();
         const tasksToReconnect = disconnectedIds.filter(id => {
             const task = this.disconnectedTasks.get(id);
-            if (!task || (!task.wasInterrupted && !task.shouldContinue)) return false;
+            if (!task || !task.shouldContinue) return false;
             // Skip stale tasks — they were interrupted long ago and should reconnect on-demand
             const lastActive = task.lastActivity ? new Date(task.lastActivity).getTime() : 0;
             if (now - lastActive > MAX_STALE_AGE_MS) {
@@ -1096,41 +1274,42 @@ export class TaskSpawner extends EventEmitter {
             return true;
         });
 
-        // Limit to 2 concurrent reconnects to prevent resource exhaustion
-        // (each task starts 2 MCP servers — too many at once overwhelms the system)
-        const MAX_AUTO_RECONNECT = 2;
-        const capped = tasksToReconnect.slice(0, MAX_AUTO_RECONNECT);
-        if (tasksToReconnect.length > MAX_AUTO_RECONNECT) {
-            console.log(`[TaskSpawner] Capping auto-reconnect to ${MAX_AUTO_RECONNECT} of ${tasksToReconnect.length} eligible tasks. Remaining will reconnect on-demand.`);
-            // Clear shouldContinue on tasks we're skipping so they don't retry next restart
-            for (let i = MAX_AUTO_RECONNECT; i < tasksToReconnect.length; i++) {
-                const task = this.disconnectedTasks.get(tasksToReconnect[i]);
-                if (task) {
-                    task.shouldContinue = false;
-                    task.wasInterrupted = false;
-                }
-            }
-        }
-
-        if (capped.length === 0) {
+        if (tasksToReconnect.length === 0) {
             console.log(`[TaskSpawner] No eligible tasks to auto-reconnect. ${disconnectedIds.length} tasks in lazy load.`);
             this.autoReconnectPromise = null;
             this.scheduleSave(); // Persist cleared shouldContinue flags
             return;
         }
 
+        // Sort by most recently active first so the most important tasks reconnect first
+        tasksToReconnect.sort((a, b) => {
+            const taskA = this.disconnectedTasks.get(a);
+            const taskB = this.disconnectedTasks.get(b);
+            const timeA = taskA?.lastActivity ? new Date(taskA.lastActivity).getTime() : 0;
+            const timeB = taskB?.lastActivity ? new Date(taskB.lastActivity).getTime() : 0;
+            return timeB - timeA; // most recent first
+        });
+
+        // Reconnect in batches of BATCH_SIZE to prevent resource exhaustion
+        // (each task starts 2 MCP servers — too many at once overwhelms the system).
+        // Unlike the old approach which abandoned tasks beyond the cap, this
+        // processes ALL eligible tasks in staggered batches.
+        const BATCH_SIZE = 2;
+
         this.isReconnecting = true;
-        this.emit('reconnectStart', capped.length);
-        console.log(`[TaskSpawner] Auto-reconnecting ${capped.length} tasks (of ${disconnectedIds.length} total)...`);
+        this.emit('reconnectStart', tasksToReconnect.length);
+        console.log(`[TaskSpawner] Auto-reconnecting ${tasksToReconnect.length} tasks in batches of ${BATCH_SIZE}...`);
 
         const failedTasks: string[] = [];
 
-        for (let i = 0; i < capped.length; i++) {
-            const taskId = capped[i];
+        for (let i = 0; i < tasksToReconnect.length; i++) {
+            const taskId = tasksToReconnect[i];
             const persisted = this.disconnectedTasks.get(taskId);
             if (!persisted) continue;
 
-            console.log(`[TaskSpawner] Auto-reconnecting task ${i + 1}/${capped.length}: ${taskId}`);
+            const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+            const totalBatches = Math.ceil(tasksToReconnect.length / BATCH_SIZE);
+            console.log(`[TaskSpawner] Auto-reconnecting task ${i + 1}/${tasksToReconnect.length} (batch ${batchNum}/${totalBatches}): ${taskId}`);
 
             let success = false;
             try {
@@ -1152,24 +1331,26 @@ export class TaskSpawner extends EventEmitter {
                 }
             }
 
-            // 5-second delay between reconnects to let MCP servers initialize
-            if (i < capped.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 5000));
+            // 5-second delay between reconnects to let MCP servers initialize.
+            // Extra 3-second pause between batches for system recovery.
+            if (i < tasksToReconnect.length - 1) {
+                const isBatchBoundary = (i + 1) % BATCH_SIZE === 0;
+                await new Promise(resolve => setTimeout(resolve, isBatchBoundary ? 8000 : 5000));
             }
         }
 
         this.isReconnecting = false;
         this.autoReconnectPromise = null;
         this.emit('reconnectComplete', {
-            total: disconnectedIds.length,
+            total: tasksToReconnect.length,
             failed: failedTasks.length,
             failedIds: failedTasks
         });
 
         if (failedTasks.length > 0) {
-            console.log(`[TaskSpawner] Auto-reconnect complete. ${failedTasks.length} task(s) failed to reconnect.`);
+            console.log(`[TaskSpawner] Auto-reconnect complete. ${failedTasks.length}/${tasksToReconnect.length} task(s) failed to reconnect.`);
         } else {
-            console.log(`[TaskSpawner] Auto-reconnect complete. All tasks reconnected successfully.`);
+            console.log(`[TaskSpawner] Auto-reconnect complete. All ${tasksToReconnect.length} tasks reconnected successfully.`);
         }
     }
 
@@ -1393,10 +1574,12 @@ export class TaskSpawner extends EventEmitter {
                     console.error(`[TaskSpawner] Failed to save history for task ${task.id}:`, e);
                 }
 
-                // Track if task was busy when being saved (will be interrupted)
-                const wasInterrupted = task.state === 'busy' || task.state === 'starting';
-                // Tasks that were busy should auto-continue on restart
-                const shouldContinue = wasInterrupted && task.sessionId != null;
+                // All live tasks are interrupted by a server restart (their PTY is killed).
+                // idle/waiting_input tasks also get their PTY destroyed, so they should reconnect too.
+                const wasInterrupted = true;
+                // Only auto-continue tasks that were actively mid-turn (busy/starting)
+                const wasMidTurn = task.state === 'busy' || task.state === 'starting';
+                const shouldContinue = wasMidTurn && task.sessionId != null;
 
                 // Get the backend type for this task (needed for correct reconnection)
                 const taskBackendType = this.taskBackends.get(task.id);
@@ -1418,6 +1601,7 @@ export class TaskSpawner extends EventEmitter {
                     displayNameEditedByUser: task.displayNameEditedByUser,
                     processStartedAt: task.processStartedAt?.toISOString(),
                     order: task.order,
+                    tokenUsage: task.tokenUsage,
                 });
             }
 
@@ -1657,6 +1841,8 @@ export class TaskSpawner extends EventEmitter {
     private isReadyForInitialInput(str: string): boolean {
         return str.includes('Try "') ||
             str.includes('? for shortcuts') ||
+            str.includes('bypass permissions') ||
+            str.includes('shift+tab') ||
             (str.includes('───') && str.includes('❯'));
     }
 
@@ -1887,20 +2073,13 @@ export class TaskSpawner extends EventEmitter {
         return task.state;
     }
 
-    getTaskWorkspaceId(taskId: string): string | null {
-        const task = this.tasks.get(taskId);
-        if (task) return task.workspaceId;
-        const disconnected = this.disconnectedTasks.get(taskId);
-        return disconnected ? disconnected.workspaceId : null;
-    }
-
     private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 5): void {
         // Guard: abort if PTY has exited — writing to a dead native handle causes segfaults
         if (task.state === 'exited' || !this.tasks.has(task.id)) {
             console.log(`[TaskSpawner] Aborting prompt write: task ${task.id} is no longer alive`);
             return;
         }
-        console.log(`[TaskSpawner] Writing prompt to PTY: "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}"`);
+        console.log(`[TaskSpawner] Writing prompt to PTY: "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}" (${prompt.length} chars, retries left: ${maxRetries})`);
 
         // For small messages (≤200 chars), type character by character
         // This gives the TUI time to process and makes Enter more reliable
@@ -1921,13 +2100,44 @@ export class TaskSpawner extends EventEmitter {
             };
             writeNextChar();
         } else {
+            // Record output size BEFORE writing prompt so we can verify TUI accepted it
+            const outputBeforeWrite = task.totalOutputSize;
+
             // Paste the entire prompt at once, then use retry mechanism to ensure Enter is accepted
             task.process.write(prompt);
             task.promptSubmitAttempts = 0;
-            // Give more time for longer prompts to be written before sending Enter
-            const delayMs = Math.min(500 + Math.floor(prompt.length / 100) * 50, 1000);
-            console.log(`[TaskSpawner] Waiting ${delayMs}ms before sending Enter for prompt of ${prompt.length} chars`);
-            setTimeout(() => this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true }), delayMs);
+            // Give more time for longer prompts to be written before sending Enter.
+            // Scale: base 500ms + 50ms per 100 chars, capped at 2500ms (aligned with writeToTask).
+            const delayMs = Math.min(500 + Math.floor(prompt.length / 100) * 50, 2500);
+            console.log(`[TaskSpawner] Waiting ${delayMs}ms before verifying prompt write for ${prompt.length} chars`);
+
+            setTimeout(() => {
+                if (task.state === 'exited' || !this.tasks.has(task.id)) return;
+
+                // Verify the TUI actually accepted the prompt by checking for output growth.
+                // When text is typed/pasted into Claude Code's TUI, it re-renders the input
+                // area which produces output. If output didn't grow, the TUI likely wasn't
+                // ready (e.g., MCP servers loading, notification blocking input) and we need
+                // to retry the entire write.
+                const outputAfterWrite = task.totalOutputSize;
+                const outputGrew = outputAfterWrite > outputBeforeWrite + 20;
+
+                if (!outputGrew && maxRetries > 0) {
+                    console.log(`[TaskSpawner] Prompt write NOT accepted by TUI (outputDelta=${outputAfterWrite - outputBeforeWrite}), retrying in 1500ms (retries left: ${maxRetries - 1})`);
+                    // Clear whatever partial state might be in the input and retry
+                    // Send Ctrl+U to clear the input line before retrying
+                    task.process.write('\x15'); // Ctrl+U: kill line
+                    setTimeout(() => this.sendPromptWithRetry(task, prompt, maxRetries - 1), 1500);
+                    return;
+                }
+
+                if (!outputGrew) {
+                    console.log(`[TaskSpawner] WARNING: Prompt write may not have been accepted (outputDelta=${outputAfterWrite - outputBeforeWrite}), but no retries left. Proceeding with Enter anyway.`);
+                }
+
+                console.log(`[TaskSpawner] Prompt write verified (outputDelta=${outputAfterWrite - outputBeforeWrite}), sending Enter`);
+                this.sendEnterWithRetry(task, 5, { isInitialPrompt: true });
+            }, delayMs);
         }
     }
 
@@ -2028,7 +2238,7 @@ export class TaskSpawner extends EventEmitter {
      * @param systemPrompt - Optional system prompt override
      * @returns The created task object
      */
-    async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number): Promise<Task> {
+    async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number, modelOverride?: string): Promise<Task> {
         // Sanitize prompt to prevent command injection and other issues
         const sanitizedPrompt = sanitizePrompt(prompt);
         let sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
@@ -2071,6 +2281,9 @@ export class TaskSpawner extends EventEmitter {
         let task: Task;
         if (this.backendType === 'opencode' && this.backend) {
             logger.info('Using OpenCode backend for task creation');
+            if (modelOverride) {
+                logger.debug('modelOverride ignored on opencode backend', { modelOverride });
+            }
             // OpenCode needs git state synchronously — await here since it uses HTTP not PTY
             const gitStateBefore = await gitStatePromise;
             task = await this.createTaskWithOpenCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStateBefore);
@@ -2079,7 +2292,7 @@ export class TaskSpawner extends EventEmitter {
             // Pass the git state promise — the PTY spawns immediately, git result is stored
             // on the task once resolved (non-blocking).
             logger.info('Using Claude Code backend for task creation');
-            task = await this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStatePromise, initialCols, initialRows);
+            task = await this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStatePromise, initialCols, initialRows, modelOverride);
         }
 
         // Resolve learnings and inject into system prompt / track after task is created
@@ -2186,7 +2399,8 @@ export class TaskSpawner extends EventEmitter {
         systemPrompt: string | undefined,
         gitStatePromise: Promise<Partial<TaskGitState> | null>,
         initialCols?: number,
-        initialRows?: number
+        initialRows?: number,
+        modelOverride?: string
     ): Promise<Task> {
         console.log(`[TaskSpawner] createTaskWithClaudeCode called with workspaceId: "${workspaceId}"`);
         const id = `task-${Date.now()}-${randomBytes(5).toString('hex')}`;
@@ -2296,7 +2510,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
         // Add Claude Code CLI switches from settings
         if (this.configStore) {
-            const switches = this.configStore.getClaudeCodeSwitches();
+            let switches = this.configStore.getClaudeCodeSwitches();
+            if (modelOverride && modelOverride.trim()) {
+                switches = { ...switches, defaultModel: modelOverride.trim() };
+                logger.info('Per-task model override applied', { taskId: id, model: modelOverride.trim() });
+            }
             const switchArgs = buildClaudeCodeSwitchArgs(switches);
             if (switchArgs.length > 0) {
                 claudeArgs.push(...switchArgs);
@@ -2476,7 +2694,16 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 return;
             }
             task.state = 'exited';
-            this.scheduleSave();
+
+            // Capture token usage before saving so the persisted record has costs.
+            // Run async but schedule save only after it resolves.
+            this.captureTokenUsage(task.id)
+                .catch(err => {
+                    logger.error('Unhandled error in captureTokenUsage (onExit)', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+                })
+                .finally(() => {
+                    this.scheduleSave();
+                });
             this.emit('taskStateChanged', this.toPublicTask(task));
             this.emit('taskExit', task.id, exitCode);
         });
@@ -2502,6 +2729,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             displayName: task.displayName,
             displayNameEditedByUser: task.displayNameEditedByUser,
             order: task.order,
+            tokenUsage: task.tokenUsage,
         };
     }
 
@@ -2517,6 +2745,27 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             this.emit('taskStateChanged', this.toPublicTask(task));
         } catch (error) {
             console.error(`[TaskSpawner] Failed to capture git state:`, error);
+        }
+    }
+
+    private async captureTokenUsage(taskId: string): Promise<void> {
+        if (!this.configStore?.getTokenTrackingEnabled()) return;
+        const task = this.tasks.get(taskId);
+        if (!task?.sessionId) return;
+
+        try {
+            const pricingMap = this.configStore?.getTokenPricing();
+            const usage = await getTaskTokenUsage(task.workspaceId, task.sessionId, pricingMap);
+            if (!usage) return;
+
+            task.tokenUsage = usage;
+            this.emit('taskTokenUsage', taskId, usage);
+            this.scheduleSave();
+        } catch (err) {
+            logger.error('Failed to capture token usage', {
+                taskId,
+                error: err instanceof Error ? err.message : String(err)
+            });
         }
     }
 
@@ -2827,7 +3076,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
      * decoded only when the task is actually selected.
      */
     private getCombinedHistory(task: InternalTask): string | null {
-        // Limit history sent to frontend to prevent memory exhaustion
+        // Limit history sent to frontend. Smaller = faster xterm rendering.
+        // 512KB is ~128 full terminal screens, well beyond what's visually useful.
         const MAX_HISTORY_TO_SEND = 2 * 1024 * 1024; // 2MB max
 
         // Handle lazy loading from file
@@ -2897,7 +3147,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
                     // Add truncation message if we only loaded partial history
                     if (fileSize > maxBase64Size) {
-                        const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n');
+                        const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 512KB] ───\x1b[0m\r\n');
                         task.previousHistory = Buffer.concat([truncationMessage, decoded]);
                     } else {
                         task.previousHistory = decoded;
@@ -2914,7 +3164,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 const fullHistory = Buffer.from(task.lazyHistoryBase64, 'base64');
                 if (fullHistory.length > MAX_HISTORY_TO_SEND) {
                     // Only keep the last 2MB
-                    const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n');
+                    const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 512KB] ───\x1b[0m\r\n');
                     task.previousHistory = Buffer.concat([
                         truncationMessage,
                         fullHistory.slice(fullHistory.length - MAX_HISTORY_TO_SEND)
@@ -2950,7 +3200,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             if (task.previousHistory.length <= MAX_HISTORY_TO_SEND) {
                 parts.push(task.previousHistory);
             } else {
-                const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 2MB] ───\x1b[0m\r\n');
+                const truncationMessage = Buffer.from('\r\n\x1b[90m─── [History truncated - showing last 512KB] ───\x1b[0m\r\n');
                 parts.push(truncationMessage);
                 parts.push(task.previousHistory.slice(task.previousHistory.length - MAX_HISTORY_TO_SEND));
             }
@@ -3219,6 +3469,29 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     stopTask(taskId: string): boolean {
         const task = this.tasks.get(taskId);
         if (!task) {
+            // Check if it's a disconnected task (zombie)
+            const disconnected = this.disconnectedTasks.get(taskId);
+            if (disconnected) {
+                logger.info(`stopTask: task is disconnected, transitioning to disconnected state`, { taskId });
+                // Clear stale flags
+                disconnected.wasInterrupted = false;
+                disconnected.shouldContinue = false;
+                disconnected.lastState = 'disconnected';
+                this.scheduleSave();
+                this.emit('taskStateChanged', {
+                    id: disconnected.id,
+                    prompt: disconnected.prompt,
+                    state: 'disconnected' as TaskState,
+                    workspaceId: disconnected.workspaceId,
+                    createdAt: new Date(disconnected.createdAt),
+                    lastActivity: new Date(disconnected.lastActivity),
+                    displayName: disconnected.displayName,
+                    displayNameEditedByUser: disconnected.displayNameEditedByUser,
+                    sessionId: disconnected.sessionId || undefined,
+                    backendType: disconnected.backendType || 'claude-code',
+                });
+                return true;
+            }
             logger.info(`stopTask: task not found`, { taskId });
             return false;
         }
@@ -3601,9 +3874,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         const disconnectedTasks = Array.from(this.disconnectedTasks.values()).map(persisted => ({
             id: persisted.id,
             prompt: persisted.prompt,
-            // Show 'interrupted' state if task was busy when killed, otherwise show the original state
-            // This makes the UI show tasks in their proper state rather than all showing "disconnected"
-            state: (persisted.wasInterrupted ? 'interrupted' : persisted.lastState) as TaskState,
+            // Show 'interrupted' if task was mid-turn (busy/starting) when killed, otherwise 'disconnected'.
+            // wasInterrupted=true now applies to all live tasks killed by a server restart, so use
+            // lastState to distinguish mid-turn interruptions from idle reconnects.
+            state: ((persisted.wasInterrupted && (persisted.lastState === 'busy' || persisted.lastState === 'starting')) ? 'interrupted' : 'disconnected') as TaskState,
             workspaceId: persisted.workspaceId,
             createdAt: new Date(persisted.createdAt),
             lastActivity: new Date(persisted.lastActivity),
@@ -3614,6 +3888,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             systemPrompt: persisted.systemPrompt,
             backendType: this.taskBackends.get(persisted.id) || 'claude-code' as const,
             order: persisted.order,
+            tokenUsage: persisted.tokenUsage,
         }));
 
         return [...liveTasks, ...disconnectedTasks];
@@ -3644,6 +3919,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 displayName: existing.displayName,
                 displayNameEditedByUser: existing.displayNameEditedByUser,
                 order: existing.order,
+                tokenUsage: existing.tokenUsage,
             };
             this.disconnectedTasks.set(taskId, persisted);
             this.tasks.delete(taskId);
@@ -3696,10 +3972,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 console.log(`[TaskSpawner] Reconnecting OpenCode task ${taskId} (fresh start)`);
             }
 
+            const pendingSizeOC = this.pendingResizes.get(taskId);
             ptyProcess = spawn(exe('opencode'), opencodeArgs, {
                 name: 'xterm-256color',
-                cols: 120,
-                rows: 40,
+                cols: pendingSizeOC?.cols || 120,
+                rows: pendingSizeOC?.rows || 40,
                 cwd: persisted.workspaceId,
                 env: taskEnv,
             });
@@ -3745,15 +4022,17 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 console.log(`[TaskSpawner] Reconnecting Claude Code task ${taskId} (fresh start)`);
             }
 
-            // Add -- to terminate argument parsing (workaround for Claude CLI bug with --mcp-config)
-            // See: https://github.com/anthropics/claude-code/issues/22404
-            claudeArgs.push('--');
-
+            // Use pending resize dimensions if the frontend already sent them while the
+            // task was disconnected — avoids spawning at 120x40 then immediately resizing,
+            // which causes Claude Code's initial TUI render to use the wrong width.
+            const pendingSize = this.pendingResizes.get(taskId);
+            const spawnCols = pendingSize?.cols || 120;
+            const spawnRows = pendingSize?.rows || 40;
             const { command: claudeCmd2, prefixArgs: claudePrefix2 } = resolveClaudeSpawn();
             ptyProcess = spawn(claudeCmd2, [...claudePrefix2, ...claudeArgs], {
                 name: 'xterm-256color',
-                cols: 120,
-                rows: 40,
+                cols: spawnCols,
+                rows: spawnRows,
                 cwd: persisted.workspaceId,
                 env: taskEnv,
             });
@@ -3766,23 +4045,32 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         const now = new Date();
 
         // Preserve previous history so it can be shown when the task is selected.
-        // Load from disk file (primary) or in-memory persisted data (fallback).
+        // Only load the TAIL of the file (512KB max) since getCombinedHistory caps
+        // at 512KB when sending to clients anyway. Loading entire 5MB files wastes
+        // memory and can cause OOM with many active tasks.
+        const MAX_RECONNECT_HISTORY = 512 * 1024; // 512KB — matches MAX_HISTORY_TO_SEND
         let previousHistory: Buffer | undefined;
         try {
             const historyPath = this.getTaskHistoryPath(taskId);
             if (existsSync(historyPath)) {
-                const fileContent = readFileSync(historyPath, 'utf-8');
-                // Detect format (base64 vs raw text) using same heuristic as getCombinedHistory
-                const sample = fileContent.substring(0, 100);
-                const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
-                if (isRawText) {
-                    previousHistory = Buffer.from(fileContent, 'utf-8');
+                const stat = statSync(historyPath);
+                if (stat.size <= MAX_RECONNECT_HISTORY) {
+                    const fileContent = readFileSync(historyPath, 'utf-8');
+                    const sample = fileContent.substring(0, 100);
+                    const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
+                    previousHistory = isRawText
+                        ? Buffer.from(fileContent, 'utf-8')
+                        : Buffer.from(fileContent, 'base64');
                 } else {
-                    previousHistory = Buffer.from(fileContent, 'base64');
+                    // Large file — read only the tail
+                    const fd = openSync(historyPath, 'r');
+                    const buf = Buffer.alloc(MAX_RECONNECT_HISTORY);
+                    const offset = stat.size - MAX_RECONNECT_HISTORY;
+                    readSync(fd, buf, 0, MAX_RECONNECT_HISTORY, offset);
+                    closeSync(fd);
+                    previousHistory = buf;
+                    console.log(`[TaskSpawner] Large history file (${stat.size} bytes), loaded tail ${MAX_RECONNECT_HISTORY} bytes for ${taskId}`);
                 }
-                // Keep the file on disk until saveTasks() overwrites it.
-                // Deleting here creates a data loss window if the server crashes
-                // before saveTasks() runs.
                 console.log(`[TaskSpawner] Preserved ${previousHistory.length} bytes of history for ${taskId} on reconnect`);
             }
         } catch (e) {
@@ -3839,6 +4127,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             displayNameEditedByUser: persisted.displayNameEditedByUser,  // Preserve user-edit flag
             systemPrompt: persisted.systemPrompt,  // Preserve custom system prompt
             gitStateBefore: persisted.gitState ? persisted.gitState : undefined,  // Preserve git state
+            tokenUsage: persisted.tokenUsage,  // Preserve token usage across reconnection
         };
 
         // Remove from disconnectedTasks FIRST before registering handlers or emitting events.

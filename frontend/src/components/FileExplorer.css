@@ -64,6 +64,8 @@
     letter-spacing: 0.5px;
     height: 100%;
     width: 28px;
+    justify-content: flex-start;
+    padding-top: 12px;
 }
 
 .file-explorer-toggle:hover {

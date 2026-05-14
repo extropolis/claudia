@@ -82,7 +82,14 @@ export interface ConfigUpdatePayload {
         timeoutMs?: number;
     };
     claudiaMcpServerEnabled?: boolean;
-    autoReloadEnabled?: boolean;
+    modelTiering?: {
+        enabled?: boolean;
+        tiers?: {
+            low?: string;
+            medium?: string;
+            high?: string;
+        };
+    };
 }
 
 /**
@@ -190,8 +197,7 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
         'skipPermissions',
         'autoFocusOnInput',
         'supervisorEnabled',
-        'claudiaMcpServerEnabled',
-        'autoReloadEnabled'
+        'claudiaMcpServerEnabled'
     ];
 
     for (const field of booleanFields) {
@@ -424,6 +430,42 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
                 return { valid: false, error: 'sapAiCore.timeoutMs must be a non-negative number' };
             }
             result.sapAiCore.timeoutMs = config.timeoutMs;
+        }
+    }
+
+    // Validate modelTiering (optional object)
+    if (payload.modelTiering !== undefined) {
+        if (typeof payload.modelTiering !== 'object' || payload.modelTiering === null) {
+            return { valid: false, error: 'modelTiering must be an object' };
+        }
+        const cfg = payload.modelTiering as Record<string, unknown>;
+        result.modelTiering = {};
+
+        if (cfg.enabled !== undefined) {
+            if (typeof cfg.enabled !== 'boolean') {
+                return { valid: false, error: 'modelTiering.enabled must be a boolean' };
+            }
+            result.modelTiering.enabled = cfg.enabled;
+        }
+
+        if (cfg.tiers !== undefined) {
+            if (typeof cfg.tiers !== 'object' || cfg.tiers === null) {
+                return { valid: false, error: 'modelTiering.tiers must be an object' };
+            }
+            const tiers = cfg.tiers as Record<string, unknown>;
+            result.modelTiering.tiers = {};
+            for (const key of ['low', 'medium', 'high'] as const) {
+                if (tiers[key] !== undefined) {
+                    if (typeof tiers[key] !== 'string') {
+                        return { valid: false, error: `modelTiering.tiers.${key} must be a string` };
+                    }
+                    const value = (tiers[key] as string).trim();
+                    if (value.length > 200) {
+                        return { valid: false, error: `modelTiering.tiers.${key} too long (max 200 chars)` };
+                    }
+                    result.modelTiering.tiers[key] = value;
+                }
+            }
         }
     }
 

@@ -18,6 +18,7 @@ export function FileContentModal({ workspacePath, filePath, isDiff = false, stag
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [content, setContent] = useState('');
+    const [isImage, setIsImage] = useState(false);
     const [editedContent, setEditedContent] = useState('');
     const [isEditing, setIsEditing] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -40,6 +41,7 @@ export function FileContentModal({ workspacePath, filePath, isDiff = false, stag
     const loadContent = async () => {
         setLoading(true);
         setError(null);
+        setIsImage(false);
         try {
             const params = new URLSearchParams({ workspace: workspacePath, file: filePath });
             if (isDiff) {
@@ -51,6 +53,7 @@ export function FileContentModal({ workspacePath, filePath, isDiff = false, stag
             if (res.ok) {
                 const data = await res.json();
                 setContent(isDiff ? data.diff : data.content);
+                setIsImage(data.isImage === true);
             } else {
                 const errData = await res.json().catch(() => ({ error: 'Failed to load content' }));
                 setError(errData.error || 'Failed to load content');
@@ -173,7 +176,7 @@ export function FileContentModal({ workspacePath, filePath, isDiff = false, stag
                                 {showRendered ? <Code size={14} /> : <Eye size={14} />}
                             </button>
                         )}
-                        {!isDiff && !isEditing && (
+                        {!isDiff && !isEditing && !isImage && (
                             <button
                                 className="file-content-action-btn"
                                 onClick={handleEdit}
@@ -203,14 +206,16 @@ export function FileContentModal({ workspacePath, filePath, isDiff = false, stag
                                 </button>
                             </>
                         )}
-                        <button
-                            className="file-content-action-btn"
-                            onClick={handleCopy}
-                            title="Copy to clipboard"
-                            disabled={loading || !!error}
-                        >
-                            {copied ? <Check size={14} /> : <Copy size={14} />}
-                        </button>
+                        {!isImage && (
+                            <button
+                                className="file-content-action-btn"
+                                onClick={handleCopy}
+                                title="Copy to clipboard"
+                                disabled={loading || !!error}
+                            >
+                                {copied ? <Check size={14} /> : <Copy size={14} />}
+                            </button>
+                        )}
                         <button
                             className="file-content-action-btn"
                             onClick={handleDownload}
@@ -243,12 +248,17 @@ export function FileContentModal({ workspacePath, filePath, isDiff = false, stag
                             autoFocus
                         />
                     )}
-                    {!loading && !error && !isEditing && content && isMarkdownFile && showRendered && !isDiff && (
+                    {!loading && !error && !isEditing && content && isImage && (
+                        <div className="file-content-image-container">
+                            <img src={content} alt={filePath.split('/').pop()} className="file-content-image" />
+                        </div>
+                    )}
+                    {!loading && !error && !isEditing && content && !isImage && isMarkdownFile && showRendered && !isDiff && (
                         <div className="file-content-markdown-rendered">
                             <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
                         </div>
                     )}
-                    {!loading && !error && !isEditing && content && !(isMarkdownFile && showRendered && !isDiff) && (
+                    {!loading && !error && !isEditing && content && !isImage && !(isMarkdownFile && showRendered && !isDiff) && (
                         <pre className={`file-content-pre ${isDiff ? 'diff-view' : ''}`}>
                             {isDiff ? (
                                 <code className="file-content-code">

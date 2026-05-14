@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask } from '@claudia/shared';
+import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask, TaskTokenUsage } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
 import { ThemePreference } from '../types/theme';
 
@@ -47,7 +47,7 @@ interface TaskStore {
     expandedWorkspacesInitialized: boolean;  // True once persisted state is loaded or first workspaces set
     showProjectPicker: boolean;
     workspaceColumns: number; // 0 = auto, 1-4 = fixed column count
-    workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical'; // How to sort workspaces
+    workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
     taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
 
     // Voice state
@@ -105,6 +105,7 @@ interface TaskStore {
     voiceProgressUpdatesEnabled: boolean; // Announce periodic progress for long-running tasks
     voiceProgressUpdateInterval: number; // milliseconds between progress updates
     themePreference: ThemePreference;
+    tokenCostEnabled: boolean;
 
     // Actions
     setConnected: (connected: boolean) => void;
@@ -116,6 +117,7 @@ interface TaskStore {
     setTasks: (tasks: Task[]) => void;
     addTask: (task: Task) => void;
     updateTask: (task: Task) => void;
+    updateTaskTokenUsage: (taskId: string, tokenUsage: TaskTokenUsage) => void;
     deleteTask: (taskId: string) => void;
 
     // Archived tasks actions
@@ -182,7 +184,7 @@ interface TaskStore {
 
     // Layout actions
     setWorkspaceColumns: (columns: number) => void;
-    setWorkspaceSortBy: (sortBy: 'date-created' | 'last-modified' | 'alphabetical') => void;
+    setWorkspaceSortBy: (sortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual') => void;
     setTaskSortBy: (sortBy: 'date-created' | 'last-modified') => void;
 
     // Settings actions
@@ -199,6 +201,7 @@ interface TaskStore {
     setVoiceProgressUpdatesEnabled: (enabled: boolean) => void;
     setVoiceProgressUpdateInterval: (interval: number) => void;
     setThemePreference: (pref: ThemePreference) => void;
+    setTokenCostEnabled: (enabled: boolean) => void;
 }
 
 // Storage key for localStorage
@@ -211,7 +214,7 @@ interface PersistedState {
     expandedWorkspaces: string[];  // Stored as array, converted to Set
     expandedWorkspacesInitialized: boolean;  // Track if user has interacted with workspaces
     workspaceColumns: number; // 0 = auto, 1-4 = fixed
-    workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical'; // How to sort workspaces
+    workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
     taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
     voiceEnabled: boolean;
     autoSpeakResponses: boolean;
@@ -237,6 +240,7 @@ interface PersistedState {
     voiceProgressUpdatesEnabled: boolean;
     voiceProgressUpdateInterval: number;
     themePreference: ThemePreference;
+    tokenCostEnabled: boolean;
     taskSummaries: [string, TaskSummary][];  // Stored as entries array
     chatMessages: ChatMessage[];
 }
@@ -317,6 +321,7 @@ export const useTaskStore = create<TaskStore>()(
             voiceProgressUpdatesEnabled: false,
             voiceProgressUpdateInterval: 180000, // 3 minutes (180 seconds)
             themePreference: 'system' as ThemePreference,
+            tokenCostEnabled: false,
 
             // Actions
             setConnected: (connected) => {
@@ -435,6 +440,16 @@ export const useTaskStore = create<TaskStore>()(
                 const newTasks = new Map(tasks);
                 newTasks.set(task.id, mergedTask);
                 set({ tasks: newTasks });
+            },
+
+            updateTaskTokenUsage: (taskId, tokenUsage) => {
+                const { tasks } = get();
+                const task = tasks.get(taskId);
+                if (task) {
+                    const newTasks = new Map(tasks);
+                    newTasks.set(taskId, { ...task, tokenUsage });
+                    set({ tasks: newTasks });
+                }
             },
 
             deleteTask: (taskId) => {
@@ -769,7 +784,8 @@ export const useTaskStore = create<TaskStore>()(
             setVoiceSummaryOnCompletion: (enabled) => set({ voiceSummaryOnCompletion: enabled }),
             setVoiceProgressUpdatesEnabled: (enabled) => set({ voiceProgressUpdatesEnabled: enabled }),
             setVoiceProgressUpdateInterval: (interval) => set({ voiceProgressUpdateInterval: interval }),
-            setThemePreference: (pref) => set({ themePreference: pref })
+            setThemePreference: (pref) => set({ themePreference: pref }),
+            setTokenCostEnabled: (enabled) => set({ tokenCostEnabled: enabled })
         }),
         {
             name: STORAGE_KEY,
@@ -807,6 +823,7 @@ export const useTaskStore = create<TaskStore>()(
                 voiceProgressUpdatesEnabled: state.voiceProgressUpdatesEnabled,
                 voiceProgressUpdateInterval: state.voiceProgressUpdateInterval,
                 themePreference: state.themePreference,
+                tokenCostEnabled: state.tokenCostEnabled,
                 taskSummaries: Array.from(state.taskSummaries.entries()),
                 chatMessages: state.chatMessages,
             }),
@@ -860,6 +877,7 @@ export const useTaskStore = create<TaskStore>()(
                     voiceProgressUpdatesEnabled: persisted.voiceProgressUpdatesEnabled ?? currentState.voiceProgressUpdatesEnabled,
                     voiceProgressUpdateInterval: persisted.voiceProgressUpdateInterval ?? currentState.voiceProgressUpdateInterval,
                     themePreference: persisted.themePreference ?? currentState.themePreference,
+                    tokenCostEnabled: persisted.tokenCostEnabled ?? currentState.tokenCostEnabled,
                     taskSummaries: persisted.taskSummaries
                         ? new Map(persisted.taskSummaries)
                         : currentState.taskSummaries,

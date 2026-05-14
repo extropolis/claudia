@@ -199,6 +199,11 @@ export function useWebSocket() {
                                 );
                                 useTaskStore.getState().setAiCoreConfigured(aiCoreConfigured);
 
+                                // Sync token cost display setting
+                                if (config.tokenCostEnabled !== undefined) {
+                                    useTaskStore.getState().setTokenCostEnabled(config.tokenCostEnabled);
+                                }
+
                                 // Sync Deepgram API key from backend (for mobile/tunnel clients)
                                 if (config.deepgramApiKey && !useTaskStore.getState().deepgramApiKey) {
                                     useTaskStore.setState({ deepgramApiKey: config.deepgramApiKey });
@@ -461,6 +466,11 @@ export function useWebSocket() {
                         setServerReloading(true);
                         break;
                     }
+                    case 'task:tokenUsage': {
+                        const payload = message.payload as { taskId: string; tokenUsage: import('@claudia/shared').TaskTokenUsage };
+                        useTaskStore.getState().updateTaskTokenUsage(payload.taskId, payload.tokenUsage);
+                        break;
+                    }
                     case 'task:archived:list': {
                         const payload = message.payload as { tasks: Task[] };
                         console.log('[WebSocket] Archived tasks received:', payload.tasks.length);
@@ -688,6 +698,10 @@ export function useWebSocket() {
         sendMessage('workspace:reorder', { fromIndex, toIndex });
     }, [sendMessage]);
 
+    const setWorkspaceOrder = useCallback((orderedIds: string[]) => {
+        sendMessage('workspace:setOrder', { orderedIds });
+    }, [sendMessage]);
+
     const reorderTasks = useCallback((taskOrders: { taskId: string; order: number }[]) => {
         sendMessage('task:reorder', { taskOrders });
     }, [sendMessage]);
@@ -817,6 +831,7 @@ export function useWebSocket() {
         createWorkspace,
         deleteWorkspace,
         reorderWorkspaces,
+        setWorkspaceOrder,
         reorderTasks,
         openFolder,
         openTerminal,

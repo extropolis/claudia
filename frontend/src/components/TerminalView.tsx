@@ -3,13 +3,12 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Task, Workspace } from '@claudia/shared';
-import { Copy, Check, Play, BookOpen, ArrowDown, Layers } from 'lucide-react';
+import { Copy, Check, Play, BookOpen, ArrowDown } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
-import { ToolWidgets } from './ToolWidgets';
-import { CheckpointTimeline } from './CheckpointTimeline';
-import { parseToolCalls, ParsedSegment } from '../utils/parseToolCalls';
+import { TaskTokenStats } from './TaskTokenStats';
 import { useEffectiveTheme } from '../hooks/useTheme';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
+import { getApiBaseUrl } from '../config/api-config';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
 
@@ -58,9 +57,17 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     const [isLoadingHistory, setIsLoadingHistory] = useState(true);
     const [showSpinner, setShowSpinner] = useState(false);
     const historyLoadedRef = useRef(false);
-    const [viewMode, setViewMode] = useState<'raw' | 'rich'>('raw');
-    const [richSegments, setRichSegments] = useState<ParsedSegment[]>([]);
-    const rawBufferRef = useRef('');
+
+    // Chunked history scrollback: we keep the loaded portion of the on-disk
+    // history file as a string and lazy-load earlier chunks when the user
+    // scrolls within ~100px of the top. `topOffsetRef` is the byte offset
+    // where the currently-loaded content starts in the full history file.
+    // When `topOffsetRef.current === 0` we've loaded everything.
+    const loadedHistoryRef = useRef<string>('');
+    const topOffsetRef = useRef<number>(0);
+    const totalSizeRef = useRef<number>(0);
+    const isLoadingChunkRef = useRef<boolean>(false);
+    const historyChunkUnavailableRef = useRef<boolean>(false); // true for legacy base64 histories
 
     // Show spinner after a short delay to avoid flash for fast loads
     useEffect(() => {
@@ -74,14 +81,14 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             }
         }, 300); // 300ms delay before showing spinner
 
-        // Safety timeout - hide spinner after 10s even if no restore received
+        // Safety timeout - hide spinner after 5s even if no restore received
         const safetyTimeout = setTimeout(() => {
             if (!historyLoadedRef.current) {
                 console.log(`[TerminalView] Safety timeout: hiding loading spinner for ${task.id}`);
                 historyLoadedRef.current = true;
                 setIsLoadingHistory(false);
             }
-        }, 10000);
+        }, 5000);
 
         return () => {
             clearTimeout(spinnerDelay);
@@ -249,18 +256,10 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
         // Handle input BEFORE open
         term.onData((data) => {
-            // Filter out terminal device attribute responses (DA1/DA2/DA3) that xterm.js
-            // auto-generates. If sent to the PTY, Claude Code echoes them as visible garbage.
-            // DA1: \x1b[?1;2c  DA2: \x1b[>...c  DA3: \x1b[=...c
-            const filtered = data
-                .replace(/\x1b\[\?[\d;]*c/g, '')
-                .replace(/\x1b\[>[\d;]*c/g, '')
-                .replace(/\x1b\[=[\d;]*c/g, '');
-            if (!filtered) return;
             if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({
                     type: 'task:input',
-                    payload: { taskId: task.id, input: filtered }
+                    payload: { taskId: task.id, input: data }
                 }));
             }
         });
@@ -269,9 +268,64 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // that trigger Claude TUI redraws interleaving with history output.
         let initPhase = true;
 
+        // Track last sent dimensions to prevent resize oscillation.
+        // When a scrollbar appears/disappears, the container width changes by ~15px
+        // which flips cols by 1-2. This causes Claude Code's TUI to re-render at
+        // alternating widths, producing garbled overlapping text. We suppress resizes
+        // that change cols by <= 2 to break this feedback loop.
+        let lastSentCols = 0;
+        let lastSentRows = 0;
+
+        // Resize output buffer: after sending a resize to the backend, buffer all
+        // incoming PTY output for RESIZE_BUFFER_MS. This gives the PTY time to
+        // process SIGWINCH and start rendering at the new width. Without this,
+        // output rendered at the OLD width arrives at xterm which is already at
+        // the NEW width, causing ANSI cursor positioning to misalign.
+        const RESIZE_BUFFER_MS = 250;
+        let resizeBuffering = false;
+        let resizeBuffer: string[] = [];
+        let resizeBufferTimer: number | undefined;
+
+        const flushResizeBuffer = () => {
+            resizeBuffering = false;
+            if (resizeBuffer.length > 0) {
+                const combined = resizeBuffer.join('');
+                resizeBuffer = [];
+                term.write(combined);
+            }
+        };
+
+        // Guard: suppress task:output writes during task:restore processing.
+        // Between term.reset() and the completion of term.write(history),
+        // any live output written would be interleaved/overwritten by the
+        // history replay, causing garbled text. Buffer output during restore
+        // and flush after the history write completes.
+        let restoreInProgress = false;
+        let restoreOutputBuffer: string[] = [];
+
+        const flushRestoreBuffer = () => {
+            restoreInProgress = false;
+            if (restoreOutputBuffer.length > 0) {
+                const combined = restoreOutputBuffer.join('');
+                restoreOutputBuffer = [];
+                term.write(combined);
+            }
+        };
+
         // Handle resize - sync to backend
         term.onResize(({ cols, rows }) => {
             if (initPhase) return; // Skip during init — we send one resize after fit
+            // Suppress small col changes (scrollbar oscillation)
+            if (Math.abs(cols - lastSentCols) <= 2 && rows === lastSentRows) return;
+            lastSentCols = cols;
+            lastSentRows = rows;
+
+            // Start buffering output during the resize transition
+            if (resizeBufferTimer) window.clearTimeout(resizeBufferTimer);
+            resizeBuffering = true;
+            resizeBuffer = [];
+            resizeBufferTimer = window.setTimeout(flushResizeBuffer, RESIZE_BUFFER_MS);
+
             if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({
                     type: 'task:resize',
@@ -318,10 +372,78 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // xterm native auto-scroll only works when viewport is exactly at bottom;
         // fitAddon.fit() can shift scrollTop slightly and break it.
         const viewport = terminalRef.current.querySelector('.xterm-viewport') as HTMLElement | null;
+
+        // Lazy-load earlier history when the user scrolls within 200px of the top.
+        // Re-entrancy guard: `isLoadingChunkRef` plus a no-op when we've already
+        // loaded everything (topOffsetRef === 0) or the on-disk file is legacy base64.
+        const loadEarlierChunkIfNeeded = async () => {
+            if (programmaticScrollRef.current) return;
+            if (isLoadingChunkRef.current) return;
+            if (historyChunkUnavailableRef.current) return;
+            if (topOffsetRef.current <= 0) return;
+            if (!viewport || viewport.scrollTop > 200) return;
+
+            const requestEndBefore = topOffsetRef.current;
+            const CHUNK_SIZE = 256 * 1024;
+            isLoadingChunkRef.current = true;
+            try {
+                const r = await fetch(
+                    `${getApiBaseUrl()}/api/task/${task.id}/history?endBefore=${requestEndBefore}&maxBytes=${CHUNK_SIZE}`
+                );
+                if (!r.ok) {
+                    console.warn('[TerminalView] history chunk fetch failed', r.status);
+                    return;
+                }
+                const { data, startOffset, totalSize, isBase64Legacy } = await r.json() as {
+                    data: string; startOffset: number; totalSize: number; isBase64Legacy: boolean;
+                };
+                if (isBase64Legacy) {
+                    historyChunkUnavailableRef.current = true;
+                    return;
+                }
+                if (!data) {
+                    // Reached the beginning of the file
+                    topOffsetRef.current = 0;
+                    return;
+                }
+                // Prepend the new chunk to the loaded buffer, then reset + rewrite.
+                // We must reset because xterm.write only appends — there's no insert API.
+                const cleanedChunk = stripScreenClears(data);
+                loadedHistoryRef.current = cleanedChunk + loadedHistoryRef.current;
+                topOffsetRef.current = startOffset;
+                totalSizeRef.current = totalSize;
+
+                // Capture viewport position relative to the bottom so we can restore
+                // it after rewrite (user expects to keep looking at the same content).
+                const oldTotalLines = term.buffer.active.length;
+                const oldViewportY = term.buffer.active.viewportY;
+                const linesFromBottom = oldTotalLines - oldViewportY;
+
+                // Block live output during the reset+rewrite to prevent interleaving
+                restoreInProgress = true;
+                restoreOutputBuffer = [];
+                programmaticScrollRef.current = true;
+                term.reset();
+                term.write(loadedHistoryRef.current, () => {
+                    flushRestoreBuffer();
+                    const newTotal = term.buffer.active.length;
+                    const targetViewportY = Math.max(0, newTotal - linesFromBottom);
+                    term.scrollToLine(targetViewportY);
+                    setTimeout(() => { programmaticScrollRef.current = false; }, 50);
+                });
+            } catch (err) {
+                console.warn('[TerminalView] history chunk fetch error', err);
+            } finally {
+                isLoadingChunkRef.current = false;
+            }
+        };
+
         const handleViewportScroll = () => {
             if (!viewport) return;
             const atBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 50;
             userHasScrolledRef.current = !atBottom;
+            // Fire-and-forget; loadEarlierChunkIfNeeded guards re-entrancy itself.
+            loadEarlierChunkIfNeeded();
         };
         if (viewport) {
             viewport.addEventListener('scroll', handleViewportScroll, { passive: true });
@@ -379,23 +501,14 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
                 // Send ONE definitive resize to the backend with the correct dimensions
                 const { cols, rows } = term;
+                lastSentCols = cols;
+                lastSentRows = rows;
                 if (wsRef.current?.readyState === WebSocket.OPEN) {
                     wsRef.current.send(JSON.stringify({
                         type: 'task:resize',
                         payload: { taskId: task.id, cols, rows }
                     }));
                 }
-
-                // Re-send resize after delay — catches cases where Claude Code's
-                // Ink TUI hasn't yet installed its SIGWINCH handler.
-                setTimeout(() => {
-                    if (wsRef.current?.readyState === WebSocket.OPEN) {
-                        wsRef.current.send(JSON.stringify({
-                            type: 'task:resize',
-                            payload: { taskId: task.id, cols: term.cols, rows: term.rows }
-                        }));
-                    }
-                }, 500);
 
                 // NOW request history — terminal is properly sized, so history
                 // will render correctly without reflow.
@@ -408,14 +521,13 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             });
         });
 
-        // ResizeObserver for container changes
+        // ResizeObserver for container changes — use fitTerminal() which does
+        // fit() + refresh() to clear rendering artifacts from the previous width.
+        // 150ms debounce prevents rapid-fire resizes during layout transitions.
         let resizeTimeout: number;
         const resizeObserver = new ResizeObserver(() => {
-            // Debounce resize
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
-            resizeTimeout = window.setTimeout(() => {
-                fitTerminal();
-            }, 50);
+            resizeTimeout = window.setTimeout(fitTerminal, 150);
         });
 
         resizeObserver.observe(terminalRef.current);
@@ -423,37 +535,32 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // Window resize fallback
         const handleWindowResize = () => {
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
-            resizeTimeout = window.setTimeout(() => {
-                fitTerminal();
-            }, 50);
+            resizeTimeout = window.setTimeout(fitTerminal, 150);
         };
         window.addEventListener('resize', handleWindowResize);
 
-        // Refit when tab becomes visible (xterm can accumulate render artifacts while hidden)
-        const handleVisibilityChange = () => {
-            if (document.visibilityState === 'visible') {
-                setTimeout(fitTerminal, 100);
-            }
-        };
-        document.addEventListener('visibilitychange', handleVisibilityChange);
-
         // Message handler
-        let refreshTimer: number | undefined;
-        const scheduleRefresh = () => {
-            // Debounced refresh: after output stops for 150ms, force a full re-render
-            // to fix any rendering artifacts from rapid cursor-positioned TUI output.
-            if (refreshTimer) window.clearTimeout(refreshTimer);
-            refreshTimer = window.setTimeout(() => {
-                if (xtermRef.current) {
-                    xtermRef.current.refresh(0, xtermRef.current.rows - 1);
-                }
-            }, 150);
-        };
-
         const handleMessage = (event: MessageEvent) => {
             try {
                 const message = JSON.parse(event.data);
                 if (message.type === 'task:output' && message.payload.taskId === task.id) {
+                    const data = message.payload.data;
+
+                    // Buffer output during resize transitions and history restores
+                    // to prevent garbled text from interleaving.
+                    if (resizeBuffering || restoreInProgress) {
+                        if (resizeBuffering) resizeBuffer.push(data);
+                        if (restoreInProgress) restoreOutputBuffer.push(data);
+                        // Still track history so scroll-up loading stays current
+                        if (loadedHistoryRef.current !== '') {
+                            loadedHistoryRef.current += data;
+                        }
+                        if (totalSizeRef.current > 0) {
+                            totalSizeRef.current += data.length;
+                        }
+                        return;
+                    }
+
                     // Check if user is at bottom BEFORE writing
                     const viewport = term.buffer.active.viewportY;
                     const totalRows = term.buffer.active.length;
@@ -461,16 +568,28 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
                     // Update userHasScrolledRef based on current position
                     if (!wasAtBottom && !userHasScrolledRef.current) {
+                        console.log(`[TerminalView] User has scrolled up, disabling auto-scroll for ${task.id}`);
                         userHasScrolledRef.current = true;
                     }
 
-                    term.write(message.payload.data);
+                    console.log(`[TerminalView] Writing output, wasAtBottom: ${wasAtBottom}, userHasScrolled: ${userHasScrolledRef.current}, viewport: ${viewport}`);
 
-                    // Accumulate raw output for rich view
-                    rawBufferRef.current += message.payload.data;
-                    if (viewMode === 'rich') {
-                        setRichSegments(parseToolCalls(rawBufferRef.current));
+                    term.write(data);
+                    // Keep our loaded-history snapshot current so a later
+                    // scroll-up rewrite (loadEarlierChunkIfNeeded) doesn't lose
+                    // live output that arrived after the initial restore.
+                    if (loadedHistoryRef.current !== '') {
+                        loadedHistoryRef.current += message.payload.data;
                     }
+                    if (totalSizeRef.current > 0) {
+                        // Match the byte count the backend file is growing by so
+                        // future chunk requests use the right end-of-file anchor.
+                        const bytes = typeof message.payload.data === 'string'
+                            ? new TextEncoder().encode(message.payload.data).length
+                            : 0;
+                        totalSizeRef.current += bytes;
+                    }
+
                     // Only auto-scroll if user was at bottom
                     if (wasAtBottom) {
                         programmaticScrollRef.current = true;
@@ -482,40 +601,64 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                                 programmaticScrollRef.current = false;
                             }, 100);
                         });
+                    } else {
+                        // User was scrolled up - maintain their position
+                        programmaticScrollRef.current = true;
+                        term.scrollToLine(viewport);
+                        setTimeout(() => {
+                            programmaticScrollRef.current = false;
+                        }, 100);
                     }
-                    // When user has scrolled up, don't manipulate scroll position at all —
-                    // xterm.js preserves viewport position naturally when new content
-                    // is appended below the visible area.
-
-                    // Schedule a debounced refresh to fix rendering artifacts
-                    scheduleRefresh();
 
                     // Clear loading state on first output (task is live)
                     if (!historyLoadedRef.current) {
+                        console.log(`[TerminalView] First output received, clearing loading state for ${task.id}`);
                         historyLoadedRef.current = true;
                         setIsLoadingHistory(false);
                     }
                 } else if (message.type === 'task:restore' && message.payload.taskId === task.id) {
                     const { history } = message.payload;
+                    console.log(`[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}, alreadyLoaded: ${historyLoadedRef.current}`);
                     if (history && history.length > 0) {
+                        // Block task:output writes until the history replay completes.
+                        // Without this, live output arriving between reset() and write()
+                        // completion gets interleaved with history, causing garbled text.
+                        restoreInProgress = true;
+                        restoreOutputBuffer = [];
                         term.reset();
                         const cleaned = stripScreenClears(history);
-                        rawBufferRef.current = cleaned;
-                        if (viewMode === 'rich') {
-                            setRichSegments(parseToolCalls(cleaned));
-                        }
                         programmaticScrollRef.current = true;
                         term.write(cleaned, () => {
+                            // History fully written — flush any output that arrived during restore
+                            flushRestoreBuffer();
                             term.scrollToBottom();
-                            // Refresh after history write to fix any artifacts
-                            term.refresh(0, term.rows - 1);
                             setTimeout(() => {
                                 programmaticScrollRef.current = false;
                             }, 50);
                         });
+                        // Seed the chunked-scrollback buffer with the cleaned tail we
+                        // just wrote. We can't fully reconstruct the original byte
+                        // offset (cleaned !== raw history due to stripScreenClears),
+                        // so we ask the backend for metadata and assume the
+                        // restored tail starts at `totalSize - rawHistory.length`.
+                        loadedHistoryRef.current = cleaned;
+                        fetch(`${getApiBaseUrl()}/api/task/${task.id}/history?endBefore=0&maxBytes=0`)
+                            .then(r => r.json())
+                            .then((meta: { totalSize: number; isBase64Legacy: boolean }) => {
+                                totalSizeRef.current = meta.totalSize;
+                                topOffsetRef.current = Math.max(0, meta.totalSize - history.length);
+                                historyChunkUnavailableRef.current = !!meta.isBase64Legacy;
+                                console.log(`[TerminalView] history metadata: total=${meta.totalSize} topOffset=${topOffsetRef.current} legacy=${meta.isBase64Legacy}`);
+                            })
+                            .catch(err => {
+                                console.warn('[TerminalView] failed to fetch history metadata', err);
+                                historyChunkUnavailableRef.current = true;
+                            });
+                        console.log(`[TerminalView] History written for ${task.id} (original: ${history.length}, cleaned: ${cleaned.length})`);
                     } else {
                         term.reset();
                         term.write('\x1b[90m── Session history not available ──\x1b[0m\r\n');
+                        console.log(`[TerminalView] Empty history for ${task.id}`);
                     }
                     // Clear loading state - history has been restored
                     historyLoadedRef.current = true;
@@ -535,10 +678,9 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
         return () => {
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
-            if (refreshTimer) window.clearTimeout(refreshTimer);
+            if (resizeBufferTimer) window.clearTimeout(resizeBufferTimer);
             resizeObserver.disconnect();
             window.removeEventListener('resize', handleWindowResize);
-            document.removeEventListener('visibilitychange', handleVisibilityChange);
             if (viewport) {
                 viewport.removeEventListener('scroll', handleViewportScroll);
             }
@@ -580,20 +722,6 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         }
     };
 
-    const handleToggleViewMode = () => {
-        const next = viewMode === 'raw' ? 'rich' : 'raw';
-        if (next === 'rich') {
-            setRichSegments(parseToolCalls(rawBufferRef.current));
-        }
-        setViewMode(next);
-        // When switching back to raw terminal, refit after it becomes visible
-        if (next === 'raw') {
-            requestAnimationFrame(() => {
-                fitTerminal();
-            });
-        }
-    };
-
     return (
         <div className="terminal-view">
             <div className="terminal-header">
@@ -615,14 +743,6 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                         Learn
                     </button>
                 )}
-                <button
-                    className={`learn-button ${viewMode === 'rich' ? 'active' : ''}`}
-                    onClick={handleToggleViewMode}
-                    title={viewMode === 'raw' ? 'Switch to Rich View' : 'Switch to Raw Terminal'}
-                >
-                    <Layers size={14} />
-                    {viewMode === 'raw' ? 'Rich' : 'Raw'}
-                </button>
                 {showResumeButton && (
                     <button
                         className="terminal-resume-button"
@@ -636,12 +756,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 <span className={`terminal-state ${task.state}`}>{stateLabel}</span>
             </div>
             <div className="terminal-container-wrapper">
-                <div ref={terminalRef} className="terminal-container" style={{ display: viewMode === 'raw' ? 'block' : 'none' }} />
-                {viewMode === 'rich' && (
-                    <div className="terminal-container">
-                        <ToolWidgets segments={richSegments} />
-                    </div>
-                )}
+                <div ref={terminalRef} className="terminal-container" />
                 {showSpinner && (
                     <div className="terminal-loading-overlay">
                         <div className="terminal-loading-spinner" />
@@ -675,9 +790,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 )}
             </div>
             <TaskInputBar task={task} wsRef={wsRef} />
-            {workspace && (
-                <CheckpointTimeline taskId={task.id} workspaceId={workspace.id} wsRef={wsRef} />
-            )}
+            <TaskTokenStats taskId={task.id} />
 
         </div>
     );

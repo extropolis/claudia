@@ -44,6 +44,7 @@ export interface Task {
     backendType?: BackendType; // Which backend created this task (for conversation lookup)
     displayName?: string;    // User-editable display name (shown instead of prompt when set)
     displayNameEditedByUser?: boolean; // True if the user manually edited the display name (prevents agent auto-title)
+    tokenUsage?: TaskTokenUsage; // Token usage data for this task
 }
 
 export interface WorkspaceReference {
@@ -60,7 +61,6 @@ export interface Workspace {
     systemPrompt?: string;   // Custom system prompt for this workspace
     displayName?: string;    // User-editable display name (shown instead of folder name when set)
     references?: WorkspaceReference[];  // Referenced workspaces/folders for cross-workspace context
-    previewPort?: number;    // Dev server port for live preview
 }
 
 export interface RecentWorkspace {
@@ -121,23 +121,6 @@ export interface ScheduledTask {
     fireCount: number;             // How many times it has fired
 }
 
-// Checkpoint/Timeline types
-export interface Checkpoint {
-    id: string;                    // Unique identifier
-    taskId: string;                // Which task this checkpoint belongs to
-    workspaceId: string;           // Which workspace
-    name: string;                  // User-provided or auto-generated name
-    description?: string;          // Optional description
-    timestamp: string;             // ISO timestamp when created
-    gitRef?: string;               // Git commit SHA at checkpoint time
-    gitBranch?: string;            // Current branch at checkpoint time
-    gitDiff?: string;              // Uncommitted changes (unified diff) at checkpoint time
-    metadata?: {
-        filesModified?: number;    // Number of uncommitted modified files
-        isCurrent?: boolean;       // Whether this is the "current" position
-    };
-}
-
 // WebSocket message types
 export type WSMessageType =
     // Task lifecycle
@@ -188,16 +171,8 @@ export type WSMessageType =
     | 'cron:fired'
     | 'cron:ran'
     | 'cron:updated'
-    // Checkpoints/Timeline
-    | 'checkpoint:created'
-    | 'checkpoint:list'
-    | 'checkpoint:restored'
-    | 'checkpoint:deleted'
-    | 'checkpoint:forked'
-    | 'checkpoint:error'
-    // Usage/Cost tracking
-    | 'usage:summary'
-    | 'usage:recorded'
+    // Token usage
+    | 'task:tokenUsage'
     // Server status
     | 'server:reloading'
     | 'server:reconnecting'
@@ -212,35 +187,6 @@ export interface WSMessage {
     payload: unknown;
 }
 
-// Usage/Cost tracking types
-export interface UsageEntry {
-    id: string;
-    taskId: string;
-    workspaceId: string;
-    model: string;
-    inputTokens: number;
-    outputTokens: number;
-    cacheCreationTokens: number;
-    cacheReadTokens: number;
-    cost: number;
-    timestamp: string;
-}
-
-export interface UsageSummary {
-    totalCost: number;
-    totalInputTokens: number;
-    totalOutputTokens: number;
-    totalCacheCreationTokens: number;
-    totalCacheReadTokens: number;
-    byModel: Record<string, { cost: number; inputTokens: number; outputTokens: number }>;
-    byTask: Record<string, { cost: number; totalTokens: number; taskPrompt?: string }>;
-    byWorkspace: Record<string, { cost: number; totalTokens: number }>;
-    entryCount: number;
-    totalEntryCount: number;      // Total entries across all time (for comparison)
-    oldestEntryDate?: string;     // ISO timestamp of oldest entry in the filtered set
-    newestEntryDate?: string;     // ISO timestamp of newest entry in the filtered set
-}
-
 /**
  * Error payload structure for WebSocket error messages
  */
@@ -250,22 +196,48 @@ export interface WSErrorPayload {
     originalType?: string;
 }
 
-/**
- * Autonomous mode status payload (sent via voice:autonomous_status WS message)
- */
-export interface AutonomousStatusPayload {
-    state: string;
-    goalDescription: string;
-    currentPhase: string;
-    totalSteps: number;
-    completedSteps: number;
-    failedSteps: number;
-    currentStepDescription: string;
-    activeTasks: Array<{ taskId: string; description: string; state: string }>;
-    steps: Array<{ id: string; description: string; status: string; phase: string }>;
-    iteration: number;
-    maxIterations: number;
-    recentTestResults: Array<{ type: string; passed: boolean; details: string }>;
-    startedAt: string;
-    elapsedMs: number;
+// Token usage tracking types
+export interface ModelPricing {
+    inputPer1MTokens: number;
+    outputPer1MTokens: number;
+    cacheCreatePer1MTokens: number;
+    cacheReadPer1MTokens: number;
+}
+
+export interface ModelTokenUsage {
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+    costUsd: number;
+}
+
+export interface TaskTokenUsage {
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+    totalCostUsd: number;
+    modelBreakdown: Record<string, ModelTokenUsage>;
+    lastUpdated: string;
+}
+
+export interface UsageDashboardData {
+    totalCostUsd: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCacheCreationTokens: number;
+    totalCacheReadTokens: number;
+    byWorkspace: Record<string, {
+        name: string;
+        costUsd: number;
+        inputTokens: number;
+        outputTokens: number;
+        cacheCreationTokens: number;
+        cacheReadTokens: number;
+        taskCount: number;
+    }>;
+    byModel: Record<string, ModelTokenUsage>;
+    taskCount: number;
+    lastUpdated: string;
 }

@@ -76,6 +76,7 @@ interface TestConfig {
     cronId: string | null;            // Cron ID for --cron-delete/--cron-pause
     cronRecurring: boolean;           // Whether the cron is recurring (default true)
     cronPause: boolean | null;        // true to pause, false to resume, null = not set
+    complexity: string | null;        // Optional complexity tier for task:create (low/medium/high)
 }
 
 class TestCLI {
@@ -323,18 +324,25 @@ class TestCLI {
         }
 
         // Server expects 'prompt' and 'workspaceId' fields
+        const payload: Record<string, unknown> = {
+            prompt: description,
+            workspaceId: this.config.workspaceId || process.cwd()
+        };
+        if (this.config.complexity) {
+            payload.complexity = this.config.complexity;
+        }
         const message = {
             type: 'task:create',
-            payload: {
-                prompt: description,
-                workspaceId: this.config.workspaceId || process.cwd()
-            }
+            payload
         };
 
         console.log(`📤 Creating task: "${name}"`);
         console.log(`   Prompt: ${description}`);
         if (this.config.workspaceId) {
             console.log(`   Workspace: ${this.config.workspaceId}`);
+        }
+        if (this.config.complexity) {
+            console.log(`   Complexity: ${this.config.complexity}`);
         }
         this.ws.send(JSON.stringify(message));
     }
@@ -1348,6 +1356,7 @@ function parseArgs(): TestConfig {
     let cronId: string | null = null;
     let cronRecurring = true;
     let cronPause: boolean | null = null;
+    let complexity: string | null = null;
 
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
@@ -1554,6 +1563,15 @@ function parseArgs(): TestConfig {
             case '--cron-resume':
                 cronPause = false;
                 break;
+            case '--complexity': {
+                const value = args[++i];
+                if (!['low', 'medium', 'high'].includes(value)) {
+                    console.error(`❌ --complexity must be one of: low, medium, high (got '${value}')`);
+                    process.exit(1);
+                }
+                complexity = value;
+                break;
+            }
             case '--help':
             case '-h':
                 console.log(`
@@ -1574,6 +1592,8 @@ CHAT OPERATIONS:
 TASK OPERATIONS:
   --task                   Create task directly (like frontend task:create)
   --task-name, -n <name>   Name for the task when using --task
+  --complexity <tier>      Pass a complexity tier (low|medium|high) on task:create.
+                           Requires "Model tiering" enabled in Settings; otherwise ignored.
   --task-id <id>           Task ID for operations (stop, delete, input, view-files)
   --task-input             Send input to a task (requires --task-id and --message)
   --stop-task              Stop a running task (requires --task-id)
@@ -1821,6 +1841,7 @@ Examples:
         cronId,
         cronRecurring,
         cronPause,
+        complexity,
     };
 }
 

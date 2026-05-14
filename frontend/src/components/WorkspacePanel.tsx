@@ -2,8 +2,8 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace } from '@claudia/shared';
 import {
-    Loader2, Circle, ChevronRight, ChevronDown,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp, Eye
+    Loader2, Circle, ChevronRight, ChevronDown, ChevronLeft,
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { SystemPromptModal } from './SystemPromptModal';
@@ -360,7 +360,6 @@ interface WorkspaceSectionProps {
     onOpenFolder: () => void;
     onOpenTerminal: () => void;
     onOpenShell: () => void;
-    onOpenPreview: () => void;
     onPushToGithub: () => void;
     onSystemPrompt: () => void;
     onToggleMenu: () => void;
@@ -407,7 +406,6 @@ function WorkspaceSection({
     onOpenFolder,
     onOpenTerminal,
     onOpenShell,
-    onOpenPreview,
     onPushToGithub,
     onSystemPrompt,
     onToggleMenu,
@@ -437,9 +435,6 @@ function WorkspaceSection({
 
     const [showResetConfirm, setShowResetConfirm] = useState(false);
     const [branchName, setBranchName] = useState<string | null>(null);
-    const [hideBranch, setHideBranch] = useState(false);
-    const workspaceNameRef = useRef<HTMLSpanElement>(null);
-    const headerLeftRef = useRef<HTMLDivElement>(null);
 
     // Reset submenu state when parent menu closes, and cleanup timeout on unmount
     useEffect(() => {
@@ -457,8 +452,12 @@ function WorkspaceSection({
         };
     }, [isMenuOpen]);
 
-    // Fetch current git branch for this workspace (and poll every 30s to stay fresh)
-    // Only fetch when WebSocket is connected to avoid ERR_CONNECTION_RESET during server restarts
+    // Fetch current git branch for this workspace.
+    // Only POLL (every 60s) for the workspace that has the selected task — other workspaces
+    // fetch once when mounted/expanded. This prevents a storm of git processes on enterprise
+    // machines with slow auth (Okta/GCM) where 7 workspaces × 4 git commands = 28 processes
+    // every polling interval.
+    const isActiveWorkspace = selectedTaskId != null && tasks.some(t => t.id === selectedTaskId);
     useEffect(() => {
         if (!isConnected) return;
         const fetchBranch = async () => {
@@ -474,33 +473,11 @@ function WorkspaceSection({
             }
         };
         fetchBranch();
-        const interval = setInterval(fetchBranch, 30_000);
-        return () => clearInterval(interval);
-    }, [workspace.id, isConnected]);
-
-    // Hide branch label when workspace title would be truncated
-    useEffect(() => {
-        const nameEl = workspaceNameRef.current;
-        const headerEl = headerLeftRef.current;
-        if (!nameEl || !headerEl) return;
-        const checkOverflow = () => {
-            // If the name text needs more space than available, hide the branch.
-            // Use a buffer (~150px) so the branch doesn't pop back in only to cause truncation again.
-            const nameNeeds = nameEl.scrollWidth;
-            const nameHas = nameEl.clientWidth;
-            if (nameNeeds > nameHas) {
-                // Name is truncated right now — hide branch
-                setHideBranch(true);
-            } else if (nameHas - nameNeeds > 150) {
-                // Name has plenty of spare room — safe to show branch again
-                setHideBranch(false);
-            }
-        };
-        checkOverflow();
-        const observer = new ResizeObserver(checkOverflow);
-        observer.observe(headerEl);
-        return () => observer.disconnect();
-    }, [workspace.displayName, workspace.name, branchName]);
+        if (isActiveWorkspace) {
+            const interval = setInterval(fetchBranch, 60_000);
+            return () => clearInterval(interval);
+        }
+    }, [workspace.id, isConnected, isActiveWorkspace]);
 
     const [images, setImages] = useState<UploadedImage[]>([]);
     const [isImageDragging, setIsImageDragging] = useState(false);
@@ -750,7 +727,14 @@ function WorkspaceSection({
                     : `\n\n[Attached images:\n${imagePaths}]`;
                 fullMessage = inputValue + imageText;
             }
-            onCreateTask(fullMessage.trim());
+            // Estimate terminal size from the actual main panel container width
+            // rather than guessing sidebar offset. Falls back to window-based estimate.
+            const mainPanel = document.querySelector('.main-panel');
+            const panelWidth = mainPanel?.clientWidth || (window.innerWidth - 640);
+            const panelHeight = mainPanel?.clientHeight || (window.innerHeight - 100);
+            const cols = Math.max(80, Math.floor(panelWidth / 9)); // ~9px per char
+            const rows = Math.max(24, Math.floor(panelHeight / 18)); // ~18px per line
+            onCreateTask(fullMessage.trim(), cols, rows);
             setInputValue('');
             // Clear images after sending
             images.forEach(img => URL.revokeObjectURL(img.previewUrl));
@@ -867,7 +851,7 @@ function WorkspaceSection({
                 >
                     <GripVertical size={14} />
                 </div>
-                <div className="workspace-header-left" ref={headerLeftRef} onClick={() => !isEditingWorkspaceName && onToggleExpand()}>
+                <div className="workspace-header-left" onClick={() => !isEditingWorkspaceName && onToggleExpand()}>
                     {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                     <Briefcase size={16} className="workspace-icon" />
                     {isEditingWorkspaceName ? (
@@ -884,7 +868,6 @@ function WorkspaceSection({
                         <>
                             <span
                                 className="workspace-name"
-                                ref={workspaceNameRef}
                                 title={workspace.id}
                             >
                                 {workspaceDisplayName}
@@ -900,7 +883,7 @@ function WorkspaceSection({
                             )}
                         </>
                     )}
-                    {branchName && !hideBranch && (
+                    {branchName && (
                         <span
                             className="workspace-branch-label"
                             title={`Click to copy: ${branchName}`}
@@ -919,26 +902,6 @@ function WorkspaceSection({
                     {tasks.length > 0 && (
                         <>
                             <span className="workspace-task-count">{tasks.length}</span>
-                            {tasks.length > 1 && (
-                                <div
-                                    className="task-sort-selector"
-                                    title="Sort tasks by"
-                                    onClick={(e) => e.stopPropagation()}
-                                >
-                                    <ArrowDownUp size={11} className="task-sort-icon" />
-                                    <select
-                                        className="task-sort-select"
-                                        value={taskSortBy}
-                                        onChange={(e) => {
-                                            e.stopPropagation();
-                                            setTaskSortBy(e.target.value as 'date-created' | 'last-modified');
-                                        }}
-                                    >
-                                        <option value="date-created">Newest</option>
-                                        <option value="last-modified">Recent</option>
-                                    </select>
-                                </div>
-                            )}
                         </>
                     )}
                     {workspace.references && workspace.references.length > 0 && (
@@ -957,16 +920,6 @@ function WorkspaceSection({
                         </span>
                     )}
                 </div>
-                <button
-                    className="workspace-action-button preview"
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        onOpenPreview();
-                    }}
-                    title="Preview app"
-                >
-                    <Eye size={14} />
-                </button>
                 <div className="workspace-menu-container">
                     <button
                         className={`workspace-action-button menu ${isMenuOpen ? 'active' : ''}`}
@@ -1206,6 +1159,25 @@ function WorkspaceSection({
                                 <Search size={14} />
                                 <span>Code Review</span>
                             </button>
+                            {tasks.length > 1 && (
+                                <>
+                                    <div className="workspace-dropdown-divider" />
+                                    <div className="workspace-dropdown-item sort-row" onClick={(e) => e.stopPropagation()}>
+                                        <ArrowDownUp size={14} />
+                                        <span>Sort by</span>
+                                        <div className="sort-toggle">
+                                            <button
+                                                className={`sort-toggle-btn${taskSortBy === 'date-created' ? ' active' : ''}`}
+                                                onClick={(e) => { e.stopPropagation(); setTaskSortBy('date-created'); }}
+                                            >Newest</button>
+                                            <button
+                                                className={`sort-toggle-btn${taskSortBy === 'last-modified' ? ' active' : ''}`}
+                                                onClick={(e) => { e.stopPropagation(); setTaskSortBy('last-modified'); }}
+                                            >Recent</button>
+                                        </div>
+                                    </div>
+                                </>
+                            )}
                             <div className="workspace-dropdown-divider" />
                             <button
                                 className="workspace-dropdown-item reset"
@@ -1478,11 +1450,11 @@ interface WorkspacePanelProps {
     onCreateWorkspace: (path: string) => void;
     onDeleteWorkspace: (workspaceId: string) => void;
     onReorderWorkspaces: (fromIndex: number, toIndex: number) => void;
+    onSetWorkspaceOrder: (orderedIds: string[]) => void;
     onReorderTasksOnServer: (taskOrders: { taskId: string; order: number }[]) => void;
     onOpenFolder: (workspaceId: string) => void;
     onOpenTerminal: (workspaceId: string) => void;
     onOpenShell: (workspaceId: string) => void;
-    onOpenPreview: (workspaceId: string) => void;
     onPushToGithub: (workspaceId: string) => void;
     onSetSystemPrompt: (workspaceId: string, systemPrompt: string) => void;
     onCreateTask: (prompt: string, workspaceId: string, initialCols?: number, initialRows?: number) => void;
@@ -1497,6 +1469,7 @@ interface WorkspacePanelProps {
     onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
     onResetWorkspace?: (workspaceId: string) => void;
+    onCollapse?: () => void;
 }
 
 export function WorkspacePanel({
@@ -1507,11 +1480,11 @@ export function WorkspacePanel({
     onCreateWorkspace,
     onDeleteWorkspace,
     onReorderWorkspaces,
+    onSetWorkspaceOrder,
     onReorderTasksOnServer,
     onOpenFolder,
     onOpenTerminal,
     onOpenShell,
-    onOpenPreview,
     onPushToGithub,
     onSetSystemPrompt,
     onCreateTask,
@@ -1525,7 +1498,8 @@ export function WorkspacePanel({
     onToggleReference,
     onAddCustomReference,
     onRemoveReference,
-    onResetWorkspace
+    onResetWorkspace,
+    onCollapse
 }: WorkspacePanelProps) {
     const {
         tasks,
@@ -1565,9 +1539,6 @@ export function WorkspacePanel({
     // Workspace manager modal state
     const [showWorkspaceManager, setShowWorkspaceManager] = useState(false);
 
-    // Workspace filter state
-    const [workspaceFilter, setWorkspaceFilter] = useState('');
-
     // Close menu when clicking outside (capture phase so stopPropagation on child elements doesn't block it)
     useEffect(() => {
         if (!openMenuId) return;
@@ -1583,6 +1554,41 @@ export function WorkspacePanel({
         return () => document.removeEventListener('mousedown', handleClickOutside, true);
     }, [openMenuId]);
 
+    // Get last modified time for a workspace (most recent task activity).
+    // Defined here (above drag handlers) because handleDragEnd needs sortedWorkspaces.
+    const getWorkspaceLastModified = (workspaceId: string): Date => {
+        const workspaceTasks = Array.from(tasks.values()).filter(t => t.workspaceId === workspaceId);
+        if (workspaceTasks.length === 0) {
+            const workspace = workspaces.find(w => w.id === workspaceId);
+            return workspace ? new Date(workspace.createdAt) : new Date(0);
+        }
+        const mostRecent = workspaceTasks.reduce((latest, task) => {
+            const taskTime = new Date(task.lastActivity || task.createdAt).getTime();
+            return taskTime > latest ? taskTime : latest;
+        }, 0);
+        return new Date(mostRecent);
+    };
+
+    // Sort workspaces based on user preference. 'manual' preserves the
+    // backend-persisted order — drag-drop only has visible effect in this mode.
+    const sortedWorkspaces = workspaceSortBy === 'manual'
+        ? workspaces
+        : [...workspaces].sort((a, b) => {
+            switch (workspaceSortBy) {
+                case 'alphabetical':
+                    const nameA = (a.displayName || a.name).toLowerCase();
+                    const nameB = (b.displayName || b.name).toLowerCase();
+                    return nameA.localeCompare(nameB);
+                case 'last-modified':
+                    const timeA = getWorkspaceLastModified(a.id).getTime();
+                    const timeB = getWorkspaceLastModified(b.id).getTime();
+                    return timeB - timeA;
+                case 'date-created':
+                default:
+                    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+            }
+        });
+
     const handleDragStart = useCallback((index: number) => {
         setDragIndex(index);
         setDragOverIndex(index);
@@ -1596,12 +1602,24 @@ export function WorkspacePanel({
 
     const handleDragEnd = useCallback(() => {
         if (dragIndex !== null && dragOverIndex !== null && dragIndex !== dragOverIndex) {
-            // Send to backend - it will broadcast back to update local state
-            onReorderWorkspaces(dragIndex, dragOverIndex);
+            if (workspaceSortBy === 'manual') {
+                // Indices line up with the underlying stored array — use the cheap reorder.
+                onReorderWorkspaces(dragIndex, dragOverIndex);
+            } else {
+                // Indices are positions in the rendered (sorted) list, not the stored
+                // array. Send the rendered order verbatim so the backend adopts it,
+                // then auto-switch to manual so the user actually sees the result —
+                // otherwise the broadcast gets re-sorted away.
+                const reordered = [...sortedWorkspaces];
+                const [moved] = reordered.splice(dragIndex, 1);
+                reordered.splice(dragOverIndex, 0, moved);
+                onSetWorkspaceOrder(reordered.map(w => w.id));
+                setWorkspaceSortBy('manual');
+            }
         }
         setDragIndex(null);
         setDragOverIndex(null);
-    }, [dragIndex, dragOverIndex, onReorderWorkspaces]);
+    }, [dragIndex, dragOverIndex, onReorderWorkspaces, onSetWorkspaceOrder, workspaceSortBy, sortedWorkspaces, setWorkspaceSortBy]);
 
     const prevWaitingRef = useRef<Set<string>>(new Set());
 
@@ -1665,71 +1683,54 @@ export function WorkspacePanel({
         });
     };
 
-    // Get last modified time for a workspace (most recent task activity)
-    const getWorkspaceLastModified = (workspaceId: string): Date => {
-        const workspaceTasks = Array.from(tasks.values()).filter(t => t.workspaceId === workspaceId);
-        if (workspaceTasks.length === 0) {
-            // No tasks, use workspace createdAt
-            const workspace = workspaces.find(w => w.id === workspaceId);
-            return workspace ? new Date(workspace.createdAt) : new Date(0);
+
+    // External drag-and-drop (from OS file explorer) to add workspaces.
+    // Only activates when dataTransfer contains files — internal workspace
+    // reordering drags don't have files so they pass through unaffected.
+    const [isDragOver, setIsDragOver] = useState(false);
+    const isExternalDrag = (e: React.DragEvent) => e.dataTransfer.types.includes('Files');
+    const handleDragOver = (e: React.DragEvent) => {
+        if (!isExternalDrag(e)) return; // let internal drags pass through
+        e.preventDefault();
+        setIsDragOver(true);
+    };
+    const handleDragLeave = (e: React.DragEvent) => {
+        if (!isExternalDrag(e)) return;
+        setIsDragOver(false);
+    };
+    const handleDrop = (e: React.DragEvent) => {
+        if (!isExternalDrag(e)) return; // let internal drops pass through
+        e.preventDefault();
+        setIsDragOver(false);
+        // Electron gives full paths via file.path
+        const files = e.dataTransfer.files;
+        if (files.length > 0) {
+            const file = files[0] as any;
+            const fullPath = file.path; // Electron only
+            if (fullPath) {
+                onCreateWorkspace(fullPath);
+                return;
+            }
         }
-        // Find most recent task activity
-        const mostRecent = workspaceTasks.reduce((latest, task) => {
-            const taskTime = new Date(task.lastActivity || task.createdAt).getTime();
-            return taskTime > latest ? taskTime : latest;
-        }, 0);
-        return new Date(mostRecent);
+        // Browser fallback: open the path input modal
+        handleAddWorkspace();
     };
 
-    // Sort workspaces based on user preference
-    const sortedWorkspaces = [...workspaces].sort((a, b) => {
-        switch (workspaceSortBy) {
-            case 'alphabetical':
-                const nameA = (a.displayName || a.name).toLowerCase();
-                const nameB = (b.displayName || b.name).toLowerCase();
-                return nameA.localeCompare(nameB);
-            case 'last-modified':
-                const timeA = getWorkspaceLastModified(a.id).getTime();
-                const timeB = getWorkspaceLastModified(b.id).getTime();
-                return timeB - timeA; // Most recent first
-            case 'date-created':
-            default:
-                // Most recently created first
-                return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-        }
-    });
-
-    // Filter workspaces by name
-    const filteredWorkspaces = workspaceFilter
-        ? sortedWorkspaces.filter(w => {
-            const name = (w.displayName || w.name).toLowerCase();
-            return name.startsWith(workspaceFilter.toLowerCase());
-        })
-        : sortedWorkspaces;
-
     return (
-        <div className="workspace-panel">
+        <div
+            className={`workspace-panel${isDragOver ? ' drag-over' : ''}`}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+        >
+            {isDragOver && (
+                <div className="workspace-drop-overlay">
+                    <FolderPlus size={32} />
+                    <span>Drop folder to add workspace</span>
+                </div>
+            )}
             <div className="workspace-panel-header">
                 <h2>Workspaces</h2>
-                <div className="workspace-filter-container">
-                    <Search size={12} className="workspace-filter-icon" />
-                    <input
-                        type="text"
-                        className="workspace-filter-input"
-                        placeholder="Filter..."
-                        value={workspaceFilter}
-                        onChange={(e) => setWorkspaceFilter(e.target.value)}
-                    />
-                    {workspaceFilter && (
-                        <button
-                            className="workspace-filter-clear"
-                            onClick={() => setWorkspaceFilter('')}
-                            title="Clear filter"
-                        >
-                            <X size={12} />
-                        </button>
-                    )}
-                </div>
                 <div className="workspace-panel-header-actions">
                     <button
                         className={`archived-toggle-button ${showArchivedTasks ? 'active' : ''}`}
@@ -1743,11 +1744,12 @@ export function WorkspacePanel({
                         <select
                             className="column-selector-select"
                             value={workspaceSortBy}
-                            onChange={(e) => setWorkspaceSortBy(e.target.value as 'date-created' | 'last-modified' | 'alphabetical')}
+                            onChange={(e) => setWorkspaceSortBy(e.target.value as 'date-created' | 'last-modified' | 'alphabetical' | 'manual')}
                         >
                             <option value="date-created">Date Created</option>
                             <option value="last-modified">Last Modified</option>
                             <option value="alphabetical">Alphabetical</option>
+                            <option value="manual">Manual (drag to reorder)</option>
                         </select>
                     </div>
                     <div className="column-selector" title="Workspace columns">
@@ -1778,6 +1780,15 @@ export function WorkspacePanel({
                     >
                         <Plus size={16} />
                     </button>
+                    {onCollapse && (
+                        <button
+                            className="archived-toggle-button"
+                            onClick={onCollapse}
+                            title="Hide workspaces"
+                        >
+                            <ChevronLeft size={16} />
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -1816,24 +1827,18 @@ export function WorkspacePanel({
                 className="workspace-panel-content"
                 style={workspaceColumns > 0 ? { gridTemplateColumns: `repeat(${workspaceColumns}, 1fr)` } : undefined}
             >
-                {filteredWorkspaces.length === 0 ? (
+                {sortedWorkspaces.length === 0 ? (
                     <div className="empty-state">
-                        {workspaceFilter ? (
-                            <p>No workspaces matching "{workspaceFilter}"</p>
-                        ) : (
-                            <>
-                                <p>No workspaces yet.</p>
-                                <button
-                                    className="create-first-workspace-btn"
-                                    onClick={handleAddWorkspace}
-                                >
-                                    <FolderOpen size={14} /> Add Workspace
-                                </button>
-                            </>
-                        )}
+                        <p>No workspaces yet.</p>
+                        <button
+                            className="create-first-workspace-btn"
+                            onClick={handleAddWorkspace}
+                        >
+                            <FolderOpen size={14} /> Add Workspace
+                        </button>
                     </div>
                 ) : (
-                    filteredWorkspaces.map((workspace, index) => (
+                    sortedWorkspaces.map((workspace, index) => (
                         <WorkspaceSection
                             key={workspace.id}
                             workspace={workspace}
@@ -1857,7 +1862,6 @@ export function WorkspacePanel({
                             onOpenFolder={() => onOpenFolder(workspace.id)}
                             onOpenTerminal={() => onOpenTerminal(workspace.id)}
                             onOpenShell={() => onOpenShell(workspace.id)}
-                            onOpenPreview={() => onOpenPreview(workspace.id)}
                             onPushToGithub={() => onPushToGithub(workspace.id)}
                             onSystemPrompt={() => setSystemPromptWorkspace(workspace)}
                             onToggleMenu={() => setOpenMenuId(openMenuId === workspace.id ? null : workspace.id)}

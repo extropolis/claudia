@@ -16,7 +16,7 @@ import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS } from '@claudia/shared';
+import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { UsageStore } from './usage-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
@@ -63,6 +63,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:create',
     'workspace:delete',
     'workspace:reorder',
+    'workspace:setOrder',
     'workspace:rename',
     'workspace:browseFolder',
     'workspace:openFolder',
@@ -973,6 +974,10 @@ export async function createApp(basePath?: string) {
         broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
     });
 
+    taskSpawner.on('taskTokenUsage', (taskId: string, tokenUsage: TaskTokenUsage) => {
+        broadcast({ type: 'task:tokenUsage' as WSMessageType, payload: { taskId, tokenUsage } });
+    });
+
     // Wire up SupervisorChat events (handles both auto-analysis and user chat)
     supervisorChat.on('message', (message: ChatMessage) => {
         broadcast({ type: 'supervisor:chat:response' as WSMessageType, payload: { message } });
@@ -1106,10 +1111,16 @@ export async function createApp(basePath?: string) {
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId, initialCols, initialRows, source } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string };
+                        const { prompt, workspaceId, initialCols, initialRows, source, complexity } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string; complexity?: string };
                         if (!prompt || !workspaceId) {
                             logger.error('task:create requires prompt and workspaceId');
                             sendWSError(ws, 'task:create requires prompt and workspaceId', message.type, 'MISSING_PARAMS');
+                            return;
+                        }
+                        // Validate complexity if provided (defense in depth — MCP layer also enforces).
+                        if (complexity !== undefined && !['low', 'medium', 'high'].includes(complexity)) {
+                            logger.error('task:create rejected: invalid complexity', { complexity });
+                            sendWSError(ws, `Invalid complexity '${complexity}'. Expected one of: low, medium, high.`, message.type, 'INVALID_COMPLEXITY');
                             return;
                         }
                         // Validate workspace path
@@ -1149,9 +1160,22 @@ export async function createApp(basePath?: string) {
 
                         logger.info(`Creating task with system prompt`, { hasSystemPrompt: !!systemPrompt, source: workspaceSystemPrompt ? 'workspace' : (rules ? 'rules' : 'none'), references: validRefs.length });
 
+                        // Resolve complexity → concrete model string (undefined if disabled or omitted).
+                        const modelOverride = configStore.resolveModelForComplexity(complexity as 'low' | 'medium' | 'high' | undefined);
+                        if (complexity && !modelOverride) {
+                            const cfg = configStore.getModelTiering();
+                            if (!cfg.enabled) {
+                                logger.debug('complexity ignored (model tiering disabled)', { complexity });
+                            } else {
+                                logger.warn('complexity has empty mapping; using default model', { complexity });
+                            }
+                        } else if (modelOverride) {
+                            logger.info('complexity → model resolved', { complexity, model: modelOverride, workspaceId: validatedPath });
+                        }
+
                         // Pass initial dimensions if provided
                         try {
-                            const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows);
+                            const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows, modelOverride);
                             // Broadcast task:created to all clients (UI sidebar update).
                             // Done here (not in the taskCreated event handler) so the source
                             // field is always correct even with concurrent creates.
@@ -1581,6 +1605,23 @@ export async function createApp(basePath?: string) {
                         if (typeof fromIndex !== 'number' || typeof toIndex !== 'number') break;
                         if (workspaceStore.reorderWorkspaces(fromIndex, toIndex)) {
                             // Broadcast updated workspace list to all clients
+                            const workspaces = workspaceStore.getWorkspaces();
+                            broadcast({ type: 'workspace:reordered' as WSMessageType, payload: { workspaces } });
+                        }
+                        break;
+                    }
+
+                    case 'workspace:setOrder': {
+                        // Set explicit workspace order from a client's rendered (sorted) view.
+                        // Used when a user drags-to-reorder while in a non-manual sort mode —
+                        // the client sends the visible order, we adopt it, and the client
+                        // switches its local sort mode to 'manual' on receipt.
+                        const { orderedIds } = payload as { orderedIds?: unknown };
+                        if (!Array.isArray(orderedIds) || !orderedIds.every(id => typeof id === 'string')) {
+                            sendWSError(ws, 'workspace:setOrder requires orderedIds: string[]', message.type, 'INVALID_PARAMS');
+                            break;
+                        }
+                        if (workspaceStore.setWorkspaceOrder(orderedIds as string[])) {
                             const workspaces = workspaceStore.getWorkspaces();
                             broadcast({ type: 'workspace:reordered' as WSMessageType, payload: { workspaces } });
                         }
@@ -2353,23 +2394,68 @@ export async function createApp(basePath?: string) {
         res.json({ status: 'ok' });
     });
 
+    // Byte-range read of a task's history file. Used by the terminal's
+    // scroll-up handler to lazy-load earlier output beyond the initial
+    // 512KB sent with `task:restore`. Returns { data, startOffset, totalSize,
+    // isBase64Legacy }. Pass `maxBytes=0` to fetch only the metadata.
+    app.get('/api/task/:taskId/history', (req, res) => {
+        const { taskId } = req.params;
+        const endBefore = parseInt(req.query.endBefore as string, 10);
+        const maxBytes = parseInt(req.query.maxBytes as string, 10);
+        // 2 MB hard cap so a misbehaving client can't request gigabytes per scroll
+        const MAX_CHUNK = 2 * 1024 * 1024;
+        if (!taskId || !Number.isFinite(endBefore) || !Number.isFinite(maxBytes)) {
+            res.status(400).json({ error: 'taskId, endBefore (int), maxBytes (int) required' });
+            return;
+        }
+        if (endBefore < 0 || maxBytes < 0 || maxBytes > MAX_CHUNK) {
+            res.status(400).json({ error: `maxBytes must be 0..${MAX_CHUNK}, endBefore >= 0` });
+            return;
+        }
+        try {
+            const result = taskSpawner.readTaskHistoryRange(taskId, endBefore, maxBytes);
+            res.json(result);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error('history read failed', { taskId, error: msg });
+            res.status(500).json({ error: msg });
+        }
+    });
+
     // Native folder picker dialog
     app.post('/api/browse-folder', async (_req, res) => {
         try {
             const platform = process.platform;
             let cmd: string;
             let args: string[];
+            const lastBrowsed = workspaceStore.getLastBrowsedPath();
 
             if (platform === 'darwin') {
+                const scriptParts = ['POSIX path of (choose folder with prompt "Select a workspace folder"'];
+                if (lastBrowsed) {
+                    const safe = lastBrowsed.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                    scriptParts.push(` default location POSIX file "${safe}"`);
+                }
+                scriptParts.push(')');
                 cmd = 'osascript';
-                args = ['-e', 'POSIX path of (choose folder with prompt "Select reference folder")'];
+                args = ['-e', scriptParts.join('')];
             } else if (platform === 'win32') {
+                const initialDir = lastBrowsed
+                    ? `$f.SelectedPath = [System.IO.Path]::GetFullPath("${lastBrowsed.replace(/"/g, '')}"); `
+                    : '';
                 cmd = 'powershell';
-                args = ['-Command', `Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Select reference folder'; if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }`];
+                args = ['-STA', '-NoProfile', '-Command', `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Application]::EnableVisualStyles(); $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Select a workspace folder'; $f.ShowNewFolderButton = $true; ${initialDir}if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }`];
             } else {
-                // Linux - try zenity, then kdialog
-                cmd = 'zenity';
-                args = ['--file-selection', '--directory', '--title=Select reference folder'];
+                // Linux - try zenity first, fall back to kdialog
+                try {
+                    require('child_process').execFileSync('which', ['zenity'], { stdio: 'ignore' });
+                    cmd = 'zenity';
+                    args = ['--file-selection', '--directory', '--title=Select a workspace folder'];
+                    if (lastBrowsed) args.push(`--filename=${lastBrowsed}/`);
+                } catch {
+                    cmd = 'kdialog';
+                    args = ['--getexistingdirectory', lastBrowsed || process.env['HOME'] || '/', '--title', 'Select a workspace folder'];
+                }
             }
 
             const child = spawn(cmd, args);
@@ -2380,6 +2466,7 @@ export async function createApp(basePath?: string) {
             child.on('close', (code: number | null) => {
                 const path = stdout.trim();
                 if (code === 0 && path) {
+                    workspaceStore.setLastBrowsedPath(path);
                     res.json({ success: true, path });
                 } else {
                     // User cancelled or error
@@ -4368,7 +4455,22 @@ export async function createApp(basePath?: string) {
                 return res.status(400).json({ error: 'Path is not a file' });
             }
 
-            // Read file contents
+            // For binary image files, return base64-encoded content
+            const imageExtensions = /\.(png|jpg|jpeg|gif|webp|bmp|ico|svg)$/i;
+            if (imageExtensions.test(resolvedPath)) {
+                const buffer = await readFile(resolvedPath);
+                const base64 = buffer.toString('base64');
+                const ext = resolvedPath.split('.').pop()!.toLowerCase();
+                const mimeType = ext === 'svg' ? 'image/svg+xml' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : `image/${ext}`;
+                return res.json({
+                    path: filePath,
+                    content: `data:${mimeType};base64,${base64}`,
+                    isImage: true,
+                    size: stats.size
+                });
+            }
+
+            // Read file contents as text
             const content = await readFile(resolvedPath, 'utf-8');
             res.json({
                 path: filePath,
@@ -5433,6 +5535,112 @@ Guidelines:
         } catch (error) {
             console.error('[Server] Failed to save learnings:', error);
             res.status(500).json({ error: 'Failed to save learnings' });
+        }
+    });
+
+    // ===== Token Usage / Dashboard Endpoints =====
+
+    app.get('/api/usage/dashboard', (_req, res) => {
+        try {
+            const allTasks = taskSpawner.getAllTasks();
+            const workspaces = workspaceStore.getWorkspaces();
+            const workspaceNames: Record<string, string> = {};
+            for (const ws of workspaces) {
+                workspaceNames[ws.id] = ws.displayName || ws.name;
+            }
+
+            const dashboard: UsageDashboardData = {
+                totalCostUsd: 0,
+                totalInputTokens: 0,
+                totalOutputTokens: 0,
+                totalCacheCreationTokens: 0,
+                totalCacheReadTokens: 0,
+                byWorkspace: {},
+                byModel: {},
+                taskCount: 0,
+                lastUpdated: new Date().toISOString(),
+            };
+
+            for (const task of allTasks) {
+                if (!task.tokenUsage) continue;
+                dashboard.taskCount++;
+
+                const usage = task.tokenUsage;
+                dashboard.totalCostUsd += usage.totalCostUsd || 0;
+                dashboard.totalInputTokens += usage.inputTokens || 0;
+                dashboard.totalOutputTokens += usage.outputTokens || 0;
+                dashboard.totalCacheCreationTokens += usage.cacheCreationTokens || 0;
+                dashboard.totalCacheReadTokens += usage.cacheReadTokens || 0;
+
+                // Group by workspace
+                if (!dashboard.byWorkspace[task.workspaceId]) {
+                    dashboard.byWorkspace[task.workspaceId] = {
+                        name: workspaceNames[task.workspaceId] || task.workspaceId,
+                        costUsd: 0,
+                        inputTokens: 0,
+                        outputTokens: 0,
+                        cacheCreationTokens: 0,
+                        cacheReadTokens: 0,
+                        taskCount: 0,
+                    };
+                }
+                const wsData = dashboard.byWorkspace[task.workspaceId];
+                wsData.costUsd += usage.totalCostUsd || 0;
+                wsData.inputTokens += usage.inputTokens || 0;
+                wsData.outputTokens += usage.outputTokens || 0;
+                wsData.cacheCreationTokens += usage.cacheCreationTokens || 0;
+                wsData.cacheReadTokens += usage.cacheReadTokens || 0;
+                wsData.taskCount++;
+
+                // Group by model
+                for (const [model, modelUsage] of Object.entries(usage.modelBreakdown)) {
+                    if (!dashboard.byModel[model]) {
+                        dashboard.byModel[model] = {
+                            inputTokens: 0,
+                            outputTokens: 0,
+                            cacheCreationTokens: 0,
+                            cacheReadTokens: 0,
+                            costUsd: 0,
+                        };
+                    }
+                    const m = dashboard.byModel[model];
+                    m.inputTokens += modelUsage.inputTokens || 0;
+                    m.outputTokens += modelUsage.outputTokens || 0;
+                    m.cacheCreationTokens += modelUsage.cacheCreationTokens || 0;
+                    m.cacheReadTokens += modelUsage.cacheReadTokens || 0;
+                    m.costUsd += modelUsage.costUsd || 0;
+                }
+            }
+
+            res.json(dashboard);
+        } catch (error) {
+            logger.error('Failed to get usage dashboard', { error });
+            res.status(500).json({ error: 'Failed to get usage dashboard' });
+        }
+    });
+
+    app.get('/api/usage/config', (_req, res) => {
+        try {
+            res.json({
+                pricing: configStore.getTokenPricing(),
+                enabled: configStore.getTokenTrackingEnabled(),
+            });
+        } catch (error) {
+            logger.error('Failed to get usage config', { error });
+            res.status(500).json({ error: 'Failed to get usage config' });
+        }
+    });
+
+    app.put('/api/usage/config', (req, res) => {
+        try {
+            const { pricing } = req.body;
+            if (pricing) {
+                configStore.setTokenPricing(pricing);
+            }
+            res.json({ ok: true });
+        } catch (error) {
+            logger.error('Failed to update usage config', { error });
+            res.status(500).json({ error: 'Failed to update usage config' });
         }
     });
 

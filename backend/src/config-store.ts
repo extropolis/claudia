@@ -6,6 +6,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { BackendType } from './backends/types.js';
 import { loadVersioned, saveVersioned } from './utils/schema-version.js';
+import { ModelPricing } from '@claudia/shared';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -40,7 +41,7 @@ export interface ClaudeCodeSwitches {
     disallowedTools: string;       // --disallowedTools TOOLS (empty = not set)
     appendSystemPrompt: string;    // --append-system-prompt TEXT (empty = not set)
     effortLevel: string;           // CLAUDE_CODE_EFFORT_LEVEL env var ('low' | 'medium' | 'high')
-    defaultModel: string;          // --model MODEL (e.g. 'claude-opus-latest')
+    defaultModel: string;          // --model MODEL (empty = use Claude's default)
 }
 
 // Hyperspace AI Proxy configuration
@@ -51,6 +52,24 @@ export interface HyperspaceProxyConfig {
     alwaysThinkingEnabled: boolean;
 }
 
+// Model tiering: lets MCP-spawned tasks pick a cheaper model based on a
+// complexity hint passed by the spawning agent.
+export type ComplexityTier = 'low' | 'medium' | 'high';
+
+export interface ModelTieringConfig {
+    enabled: boolean;
+    tiers: {
+        low: string;
+        medium: string;
+        high: string;
+    };
+}
+
+export const DEFAULT_MODEL_TIERING: ModelTieringConfig = {
+    enabled: false,
+    tiers: { low: 'haiku', medium: 'sonnet', high: 'opus' },
+};
+
 export const DEFAULT_CLAUDE_CODE_SWITCHES: ClaudeCodeSwitches = {
     verbose: false,
     maxTurns: null,
@@ -60,7 +79,7 @@ export const DEFAULT_CLAUDE_CODE_SWITCHES: ClaudeCodeSwitches = {
     disallowedTools: '',
     appendSystemPrompt: '',
     effortLevel: 'high',
-    defaultModel: 'claude-opus-latest'
+    defaultModel: ''
 };
 
 const DEFAULT_HYPERSPACE_PROXY: HyperspaceProxyConfig = {
@@ -94,9 +113,12 @@ export interface AppConfig {
         timeoutMs?: number;
     };
     enabledPlugins?: string[];  // List of enabled plugin names (all disabled by default)
-    claudiaMcpServerEnabled: boolean;  // [Experimental] Enable Claudia MCP server for Claude Code sessions
+    claudiaMcpServerEnabled: boolean;  // Enable Claudia MCP server for Claude Code sessions
+    tokenPricing?: Record<string, ModelPricing>;  // Custom token pricing per model
+    tokenTrackingEnabled?: boolean;  // Enable token usage tracking
+    tokenCostEnabled?: boolean;  // Enable cost calculation display (default: false)
     defaultBaseDirectory?: string;  // Default base directory for new workspaces (optional)
-    autoReloadEnabled: boolean;  // Whether dev watcher auto-reloads on file changes
+    modelTiering?: ModelTieringConfig;  // Complexity-based model selection for MCP-spawned tasks
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
@@ -140,6 +162,30 @@ const DEFAULT_MCP_SERVERS: MCPServerConfig[] = [
     }
 ];
 
+// Default pricing per Anthropic's current (2026) API rates:
+// https://platform.claude.com/docs/en/about-claude/pricing
+// Cache write = 1.25x input, Cache read = 0.1x input
+export const DEFAULT_TOKEN_PRICING: Record<string, ModelPricing> = {
+    'claude-sonnet-4-6': {
+        inputPer1MTokens: 3.00,
+        outputPer1MTokens: 15.00,
+        cacheCreatePer1MTokens: 3.75,
+        cacheReadPer1MTokens: 0.30,
+    },
+    'claude-opus-4-6': {
+        inputPer1MTokens: 5.00,
+        outputPer1MTokens: 25.00,
+        cacheCreatePer1MTokens: 6.25,
+        cacheReadPer1MTokens: 0.50,
+    },
+    'claude-haiku-4-5': {
+        inputPer1MTokens: 1.00,
+        outputPer1MTokens: 5.00,
+        cacheCreatePer1MTokens: 1.25,
+        cacheReadPer1MTokens: 0.10,
+    },
+};
+
 const DEFAULT_CONFIG: AppConfig = {
     mcpServers: DEFAULT_MCP_SERVERS,
     skipPermissions: false,
@@ -154,9 +200,10 @@ const DEFAULT_CONFIG: AppConfig = {
     claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
     hyperspaceProxy: DEFAULT_HYPERSPACE_PROXY,
     enabledPlugins: [],  // All plugins disabled by default
-    claudiaMcpServerEnabled: true,  // Enabled by default - provides task orchestration tools to Claude Code sessions
+    claudiaMcpServerEnabled: true,  // Enabled by default
+    tokenTrackingEnabled: true,  // Token usage tracking enabled by default
     defaultBaseDirectory: undefined,  // No default base directory set
-    autoReloadEnabled: true
+    modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } }
 };
 
 export class ConfigStore {
@@ -191,16 +238,24 @@ export class ConfigStore {
             backend: loaded.backend ?? 'claude-code',
             opencodePort: loaded.opencodePort ?? 4096,
             useLearnings: loaded.useLearnings ?? false,
-            claudeCodeSwitches: {
-                ...DEFAULT_CLAUDE_CODE_SWITCHES,
-                ...(loaded.claudeCodeSwitches || {})
-            },
+            claudeCodeSwitches: (() => {
+                const sw = loaded.claudeCodeSwitches || {} as any;
+                // Migrate old 'model' field to 'defaultModel' if present
+                const defaultModel = sw.defaultModel || (sw as any).model || DEFAULT_CLAUDE_CODE_SWITCHES.defaultModel;
+                return { ...DEFAULT_CLAUDE_CODE_SWITCHES, ...sw, defaultModel };
+            })(),
             hyperspaceProxy: loaded.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY,
             aiCoreCredentials: loaded.aiCoreCredentials,
             enabledPlugins: loaded.enabledPlugins ?? [],
-            claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? false,
+            claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? true,
+            tokenTrackingEnabled: loaded.tokenTrackingEnabled ?? true,
+            tokenCostEnabled: loaded.tokenCostEnabled ?? false,
+            tokenPricing: loaded.tokenPricing,
             defaultBaseDirectory: loaded.defaultBaseDirectory,
-            autoReloadEnabled: loaded.autoReloadEnabled ?? true
+            modelTiering: {
+                enabled: loaded.modelTiering?.enabled ?? DEFAULT_MODEL_TIERING.enabled,
+                tiers: { ...DEFAULT_MODEL_TIERING.tiers, ...(loaded.modelTiering?.tiers || {}) }
+            }
         };
     }
 
@@ -292,11 +347,26 @@ export class ConfigStore {
         if (updates.claudiaMcpServerEnabled !== undefined) {
             this.config.claudiaMcpServerEnabled = updates.claudiaMcpServerEnabled;
         }
+        if (updates.tokenTrackingEnabled !== undefined) {
+            this.config.tokenTrackingEnabled = updates.tokenTrackingEnabled;
+        }
+        if (updates.tokenCostEnabled !== undefined) {
+            this.config.tokenCostEnabled = updates.tokenCostEnabled;
+        }
+        if (updates.tokenPricing !== undefined) {
+            this.config.tokenPricing = updates.tokenPricing;
+        }
         if (updates.defaultBaseDirectory !== undefined) {
             this.config.defaultBaseDirectory = updates.defaultBaseDirectory;
         }
-        if (updates.autoReloadEnabled !== undefined) {
-            this.config.autoReloadEnabled = updates.autoReloadEnabled;
+        if (updates.modelTiering !== undefined) {
+            // Merge against existing config (not just defaults) so partial updates
+            // — e.g., flipping only `enabled` — don't blow away custom tier mappings.
+            const existing = this.config.modelTiering ?? DEFAULT_MODEL_TIERING;
+            this.config.modelTiering = {
+                enabled: updates.modelTiering.enabled ?? existing.enabled,
+                tiers: { ...existing.tiers, ...(updates.modelTiering.tiers || {}) }
+            };
         }
         this.saveConfig();
         return this.getConfig();
@@ -354,9 +424,12 @@ export class ConfigStore {
             useLearnings: false,
             claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
             hyperspaceProxy: { ...DEFAULT_HYPERSPACE_PROXY },
-            claudiaMcpServerEnabled: false,
+            claudiaMcpServerEnabled: true,
+            tokenTrackingEnabled: true,
+            tokenCostEnabled: false,
+            tokenPricing: { ...DEFAULT_TOKEN_PRICING },
             defaultBaseDirectory: undefined,
-            autoReloadEnabled: true
+            modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } }
         };
         this.saveConfig();
         return this.getConfig();
@@ -407,6 +480,35 @@ export class ConfigStore {
         this.saveConfig();
     }
 
+    getModelTiering(): ModelTieringConfig {
+        return {
+            enabled: this.config.modelTiering?.enabled ?? DEFAULT_MODEL_TIERING.enabled,
+            tiers: { ...DEFAULT_MODEL_TIERING.tiers, ...(this.config.modelTiering?.tiers || {}) }
+        };
+    }
+
+    setModelTiering(config: ModelTieringConfig): void {
+        this.config.modelTiering = {
+            enabled: config.enabled,
+            tiers: { ...DEFAULT_MODEL_TIERING.tiers, ...config.tiers }
+        };
+        this.saveConfig();
+    }
+
+    /**
+     * Resolve a complexity tier to a concrete model string for `--model`.
+     * Returns undefined if tiering is disabled, no complexity was provided,
+     * or the configured tier maps to an empty string (caller falls back to default).
+     */
+    resolveModelForComplexity(complexity: ComplexityTier | undefined): string | undefined {
+        if (!complexity) return undefined;
+        const cfg = this.getModelTiering();
+        if (!cfg.enabled) return undefined;
+        const model = cfg.tiers[complexity];
+        if (!model || !model.trim()) return undefined;
+        return model.trim();
+    }
+
     getEnabledPlugins(): string[] {
         return this.config.enabledPlugins ?? [];
     }
@@ -438,6 +540,33 @@ export class ConfigStore {
 
     setClaudioMcpServerEnabled(enabled: boolean): void {
         this.config.claudiaMcpServerEnabled = enabled;
+        this.saveConfig();
+    }
+
+    getTokenTrackingEnabled(): boolean {
+        return this.config.tokenTrackingEnabled ?? true;
+    }
+
+    setTokenTrackingEnabled(enabled: boolean): void {
+        this.config.tokenTrackingEnabled = enabled;
+        this.saveConfig();
+    }
+
+    getTokenCostEnabled(): boolean {
+        return this.config.tokenCostEnabled ?? false;
+    }
+
+    setTokenCostEnabled(enabled: boolean): void {
+        this.config.tokenCostEnabled = enabled;
+        this.saveConfig();
+    }
+
+    getTokenPricing(): Record<string, ModelPricing> {
+        return this.config.tokenPricing ?? DEFAULT_TOKEN_PRICING;
+    }
+
+    setTokenPricing(pricing: Record<string, ModelPricing>): void {
+        this.config.tokenPricing = pricing;
         this.saveConfig();
     }
 
