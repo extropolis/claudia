@@ -4237,13 +4237,16 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     const disconnectedTasks = Array.from(this.disconnectedTasks.values()).map((persisted) => ({
       id: persisted.id,
       prompt: persisted.prompt,
-      // Show 'interrupted' if task was mid-turn (busy/starting) when killed, otherwise 'disconnected'.
-      // wasInterrupted=true now applies to all live tasks killed by a server restart, so use
-      // lastState to distinguish mid-turn interruptions from idle reconnects.
+      // Restore the appropriate state based on what the task was doing before the server restart:
+      // - busy/starting → 'interrupted' (was mid-turn, needs recovery)
+      // - idle → 'idle' (task completed its work, preserve green check)
+      // - anything else → 'disconnected' (needs reconnection)
       state: (persisted.wasInterrupted &&
       (persisted.lastState === 'busy' || persisted.lastState === 'starting')
         ? 'interrupted'
-        : 'disconnected') as TaskState,
+        : persisted.lastState === 'idle'
+          ? 'idle'
+          : 'disconnected') as TaskState,
       workspaceId: persisted.workspaceId,
       createdAt: new Date(persisted.createdAt),
       lastActivity: new Date(persisted.lastActivity),

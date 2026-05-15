@@ -85,17 +85,6 @@ export interface FileNode {
   children?: FileNode[]; // For directories (loaded lazily)
 }
 
-// Supervisor Chat types
-export interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  timestamp: string;
-  taskId?: string; // Optional: associated task for context
-  workspaceId?: string; // Optional: workspace this message belongs to
-}
-
-// Task Supervisor types
 export interface SuggestedAction {
   id: string;
   label: string;
@@ -111,6 +100,23 @@ export interface TaskSummary {
   lastAction?: string;
   suggestedActions: SuggestedAction[];
   timestamp: Date;
+}
+
+// Checkpoint/Timeline types
+export interface Checkpoint {
+  id: string;                    // Unique identifier
+  taskId: string;                // Which task this checkpoint belongs to
+  workspaceId: string;           // Which workspace
+  name: string;                  // User-provided or auto-generated name
+  description?: string;          // Optional description
+  timestamp: string;             // ISO timestamp when created
+  gitRef?: string;               // Git commit SHA at checkpoint time
+  gitBranch?: string;            // Current branch at checkpoint time
+  gitDiff?: string;              // Uncommitted changes (unified diff) at checkpoint time
+  metadata?: {
+    filesTracked?: number;
+    linesChanged?: number;
+  };
 }
 
 // Scheduled task (cron) for recurring/one-shot prompts
@@ -167,11 +173,7 @@ export type WSMessageType =
   | 'shell:output'
   | 'shell:exited'
   | 'shell:closed'
-  // Supervisor/Chat
   | 'task:summary'
-  | 'supervisor:chat:response'
-  | 'supervisor:chat:history'
-  | 'supervisor:chat:typing'
   // Scheduled tasks (cron)
   | 'cron:created'
   | 'cron:deleted'
@@ -179,6 +181,13 @@ export type WSMessageType =
   | 'cron:fired'
   | 'cron:ran'
   | 'cron:updated'
+  // Checkpoints/Timeline
+  | 'checkpoint:created'
+  | 'checkpoint:list'
+  | 'checkpoint:restored'
+  | 'checkpoint:deleted'
+  | 'checkpoint:forked'
+  | 'checkpoint:error'
   // Token usage
   | 'task:tokenUsage'
   // Server status

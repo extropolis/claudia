@@ -167,7 +167,7 @@ export function MobileAccessModal({
         <div className="mobile-instructions">
           <ol>
             <li>Scan the QR code with your phone's camera</li>
-            <li>Tap the mic button to talk to the AI Supervisor</li>
+            <li>Tap the mic button to use voice commands</li>
             <li>You can also type messages using the text input</li>
           </ol>
         </div>

@@ -942,119 +942,6 @@
     cursor: not-allowed;
 }
 
-/* AI Supervisor Panel Styles */
-.supervisor-content {
-    padding: 16px 20px;
-}
-
-.supervisor-toggle-item {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-    padding-bottom: 16px;
-    margin-bottom: 16px;
-    border-bottom: 1px solid var(--border-color);
-}
-
-.supervisor-toggle-info {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    flex: 1;
-}
-
-.supervisor-toggle-label {
-    font-size: 0.9rem;
-    font-weight: 500;
-    color: var(--text-primary);
-}
-
-.supervisor-toggle-description {
-    font-size: 0.8rem;
-    color: var(--text-muted);
-    line-height: 1.4;
-}
-
-.supervisor-prompt-section {
-    animation: fadeIn 0.2s ease;
-}
-
-.supervisor-description {
-    font-size: 0.8rem;
-    color: var(--text-muted);
-    margin: 0 0 12px 0;
-    line-height: 1.4;
-}
-
-.supervisor-textarea {
-    width: 100%;
-    min-height: 200px;
-    padding: 12px;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    font-size: 0.875rem;
-    font-family: inherit;
-    line-height: 1.5;
-    resize: vertical;
-    outline: none;
-    transition: border-color 0.2s ease;
-}
-
-.supervisor-textarea:focus {
-    border-color: var(--accent-secondary);
-}
-
-.supervisor-textarea::placeholder {
-    color: var(--text-muted);
-}
-
-.supervisor-actions {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-top: 12px;
-}
-
-.supervisor-status {
-    font-size: 0.75rem;
-    padding: 4px 8px;
-    border-radius: 4px;
-}
-
-.supervisor-status.saved {
-    color: var(--accent-green);
-    background: rgba(63, 185, 80, 0.1);
-}
-
-.supervisor-status.unsaved {
-    color: var(--accent-yellow);
-    background: rgba(255, 193, 7, 0.1);
-}
-
-.supervisor-save-btn {
-    padding: 8px 16px;
-    border-radius: 6px;
-    font-size: 0.875rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    background: var(--accent-secondary);
-    border: 1px solid var(--accent-secondary);
-    color: var(--bg-primary);
-}
-
-.supervisor-save-btn:hover:not(:disabled) {
-    filter: brightness(1.1);
-}
-
-.supervisor-save-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
 /* API Field Styles (used by custom API key form) */
 .aicore-field {
     display: flex;
@@ -1524,7 +1411,6 @@
     /* Ensure inputs don't zoom on iOS */
     .mcp-input,
     .rules-textarea,
-    .supervisor-textarea,
     .aicore-input,
     .mcp-json-textarea {
         font-size: 16px;

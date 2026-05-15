@@ -2009,14 +2009,6 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
               <CircleDot size={13} />
               <span>Issues</span>
             </button>
-            <button
-              className={`fe-tab ${activeTab === 'issues' ? 'active' : ''}`}
-              onClick={() => setActiveTab('issues')}
-              title="GitHub Issues"
-            >
-              <GitPullRequest size={13} />
-              <span>Issues</span>
-            </button>
           </div>
 
           {/* Tab content */}

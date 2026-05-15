@@ -1263,8 +1263,6 @@ server.tool(
           })) || [],
         rules: config.rules || '',
         skipPermissions: config.skipPermissions ?? false,
-        supervisorEnabled: config.supervisorEnabled ?? false,
-        supervisorSystemPrompt: config.supervisorSystemPrompt || '',
         autoFocusOnInput: config.autoFocusOnInput ?? false,
         claudiaMcpServerEnabled: config.claudiaMcpServerEnabled ?? false,
         useLearnings: config.useLearnings ?? false,
@@ -1295,7 +1293,7 @@ server.tool(
     settings: z
       .string()
       .describe(
-        'JSON string of settings to update. Allowed fields: rules (string), skipPermissions (boolean), supervisorEnabled (boolean), supervisorSystemPrompt (string), autoFocusOnInput (boolean), claudiaMcpServerEnabled (boolean), autoReloadEnabled (boolean), claudeCodeSwitches (object with: verbose, maxTurns, maxBudgetUsd, permissionMode, allowedTools, disallowedTools, appendSystemPrompt, defaultModel, effortLevel)',
+        'JSON string of settings to update. Allowed fields: rules (string), skipPermissions (boolean), autoFocusOnInput (boolean), claudiaMcpServerEnabled (boolean), autoReloadEnabled (boolean), claudeCodeSwitches (object with: verbose, maxTurns, maxBudgetUsd, permissionMode, allowedTools, disallowedTools, appendSystemPrompt, defaultModel, effortLevel)',
       ),
   },
   async ({ settings }) => {
@@ -1311,8 +1309,6 @@ server.tool(
       const allowedFields = [
         'rules',
         'skipPermissions',
-        'supervisorEnabled',
-        'supervisorSystemPrompt',
         'autoFocusOnInput',
         'claudiaMcpServerEnabled',
         'claudeCodeSwitches',

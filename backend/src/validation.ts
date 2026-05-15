@@ -39,8 +39,6 @@ export interface ConfigUpdatePayload {
   mcpServers?: MCPServerConfig[];
   skipPermissions?: boolean;
   autoFocusOnInput?: boolean;
-  supervisorEnabled?: boolean;
-  supervisorSystemPrompt?: string;
   apiMode?: 'default' | 'custom-anthropic' | 'sap-ai-core' | 'hyperspace-proxy';
   customAnthropicApiKey?: string;
   backend?: 'claude-code' | 'opencode';
@@ -218,7 +216,6 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
   const booleanFields: (keyof ConfigUpdatePayload)[] = [
     'skipPermissions',
     'autoFocusOnInput',
-    'supervisorEnabled',
     'claudiaMcpServerEnabled',
   ];
 
@@ -229,14 +226,6 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
       }
       (result as Record<string, unknown>)[field] = payload[field];
     }
-  }
-
-  // Validate supervisorSystemPrompt (optional string)
-  if (payload.supervisorSystemPrompt !== undefined) {
-    if (typeof payload.supervisorSystemPrompt !== 'string') {
-      return { valid: false, error: 'supervisorSystemPrompt must be a string' };
-    }
-    result.supervisorSystemPrompt = payload.supervisorSystemPrompt;
   }
 
   // Validate apiMode (optional enum)

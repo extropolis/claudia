@@ -36,10 +36,10 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 14px 16px;
+    padding: 10px 12px;
+    gap: 8px;
     border-bottom: 1px solid var(--border-color);
     position: relative;
-    z-index: 2; /* Stay above scrolling content and dropdowns */
 }
 
 .workspace-panel-header h2 {
@@ -49,6 +49,78 @@
     letter-spacing: 0.05em;
     color: var(--text-secondary);
     margin: 0;
+}
+
+.workspace-filter-container {
+    display: flex;
+    align-items: center;
+}
+
+.workspace-filter-container.expanded {
+    gap: 4px;
+    padding: 2px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    flex: 1;
+    max-width: 140px;
+    min-width: 60px;
+}
+
+.workspace-filter-container.expanded:focus-within {
+    border-color: var(--accent-secondary);
+}
+
+.workspace-filter-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+}
+
+.workspace-filter-button:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+.workspace-filter-icon {
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.workspace-filter-input {
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 0.75rem;
+    width: 100%;
+    outline: none;
+    padding: 2px 0;
+}
+
+.workspace-filter-input::placeholder {
+    color: var(--text-muted);
+}
+
+.workspace-filter-clear {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+}
+
+.workspace-filter-clear:hover {
+    color: var(--text-primary);
 }
 
 .add-workspace-button {
@@ -76,7 +148,6 @@
     overflow-y: auto;
     padding: 8px 8px;
     position: relative;
-    z-index: 1; /* Establish stacking context so scrollbar stays on top of children */
     /* CSS Grid with auto-fit columns for multi-column workspace layout.
        auto-fit collapses empty tracks so workspace cards expand to fill width.
        A second column only appears once the sidebar exceeds ~960px.
@@ -309,37 +380,124 @@
     color: var(--accent-secondary);
 }
 
-.workspace-branch-label {
+.workspace-branch-container {
+    position: relative;
     display: inline-flex;
     align-items: center;
-    gap: 3px;
-    padding: 1px 6px;
-    border-radius: 8px;
-    background: rgba(139, 148, 158, 0.1);
-    color: var(--text-muted);
-    font-size: 0.625rem;
-    font-weight: 400;
     flex-shrink: 0;
-    max-width: 140px;
-    overflow: hidden;
-    cursor: pointer;
-    transition: background 0.15s ease, color 0.15s ease;
 }
 
-.workspace-branch-label:hover {
+.workspace-branch-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border: none;
+    border-radius: 4px;
+    background: rgba(139, 148, 158, 0.1);
+    color: var(--text-muted);
+    flex-shrink: 0;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+    padding: 0;
+}
+
+.workspace-branch-button:hover {
     background: rgba(139, 148, 158, 0.2);
     color: var(--text-secondary);
 }
 
-.workspace-branch-label.copied {
-    background: rgba(63, 185, 80, 0.15);
-    color: var(--accent-green);
+.workspace-branch-button.active {
+    background: rgba(0, 212, 255, 0.12);
+    color: var(--accent-secondary);
 }
 
-.workspace-branch-label .branch-name {
+.workspace-branch-dropdown {
+    min-width: 180px;
+    max-width: 280px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    z-index: 10000;
+    overflow: hidden;
+    animation: dropdownFadeIn 0.15s ease;
+}
+
+.branch-dropdown-current {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+}
+
+.branch-dropdown-current-name {
+    flex: 1;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--accent-secondary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.branch-copy-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all 0.15s ease;
+}
+
+.branch-copy-btn:hover {
+    background: rgba(0, 212, 255, 0.15);
+    color: var(--accent-secondary);
+}
+
+.branch-dropdown-list {
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+
+.branch-dropdown-item {
+    display: block;
+    width: 100%;
+    padding: 6px 12px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s ease;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.branch-dropdown-item:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.branch-dropdown-loading {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
 }
 
 .workspace-action-button {
@@ -383,10 +541,8 @@
 
 /* Workspace Dropdown Menu */
 .workspace-dropdown-menu {
-    position: absolute;
-    top: 100%;
-    right: 0;
-    margin-top: 4px;
+    position: fixed;
+    margin-top: 0;
     min-width: 180px;
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
@@ -1242,7 +1398,7 @@
 .workspace-panel-header-actions {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
 }
 
 .archived-toggle-button {
@@ -1292,13 +1448,14 @@
     color: var(--text-primary);
 }
 
-/* Column Selector */
+/* Column Selector — icon-only button with hidden select overlay */
 .column-selector {
     display: flex;
     align-items: center;
-    gap: 4px;
+    justify-content: center;
+    position: relative;
+    width: 26px;
     height: 26px;
-    padding: 0 4px 0 6px;
     border: 1px solid var(--border-color);
     border-radius: 6px;
     background: transparent;
@@ -1319,27 +1476,34 @@
 }
 
 .column-selector-select {
-    background: transparent;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
     border: none;
-    color: inherit;
+    background: transparent;
     font-size: 0.6875rem;
     font-family: inherit;
-    cursor: pointer;
     outline: none;
-    padding: 0;
-    /* Hide default arrow and use a compact appearance */
     -webkit-appearance: none;
     -moz-appearance: none;
     appearance: none;
-    padding-right: 12px;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 0 center;
 }
 
 .column-selector-select option {
     background: var(--bg-secondary);
     color: var(--text-primary);
+}
+
+/* Task sort selector in workspace header */
+.task-sort-selector {
+    width: 22px;
+    height: 22px;
+    margin-left: auto;
+    margin-right: 4px;
+    border-radius: 4px;
 }
 
 /* Archived Tasks Section */
@@ -1647,8 +1811,8 @@
         overflow: hidden; /* Prevent header row from exceeding card width */
     }
 
-    /* Hide branch label and ref indicator on mobile — saves ~170px in the header row */
-    .workspace-branch-label,
+    /* Hide branch button and ref indicator on mobile — saves space in the header row */
+    .workspace-branch-container,
     .workspace-ref-indicator {
         display: none;
     }

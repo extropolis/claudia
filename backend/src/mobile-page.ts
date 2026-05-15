@@ -1240,16 +1240,6 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
                     }
                     break;
 
-                case 'supervisor:chat:response':
-                    // Used for voice summaries — check if tagged with a taskId
-                    if (p.message && p.message.taskId && pendingVoiceSummaries[p.message.taskId]) {
-                        delete pendingVoiceSummaries[p.message.taskId];
-                        if (ttsEnabled && p.message.content) {
-                            speak(p.message.content);
-                        }
-                    }
-                    break;
-
                 case 'server:reconnecting':
                     emptyState.textContent = 'Reconnecting tasks...';
                     break;

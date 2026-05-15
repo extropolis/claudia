@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useTaskStore } from '../stores/taskStore';
-import { Task, Workspace, TaskSummary, ChatMessage } from '@claudia/shared';
+import { Task, Workspace, TaskSummary } from '@claudia/shared';
 
 describe('taskStore', () => {
   beforeEach(() => {
@@ -33,12 +33,9 @@ describe('taskStore', () => {
       autoSendDelayMs: 3000,
       deepgramApiKey: '',
       taskSummaries: new Map(),
-      chatMessages: [],
-      chatTyping: false,
       waitingInputNotifications: new Map(),
       taskDraftInputs: new Map(),
       autoFocusOnInput: false,
-      supervisorEnabled: false,
       aiCoreConfigured: null,
       showSystemStats: false,
       browserNotificationsEnabled: false,
@@ -373,46 +370,6 @@ describe('taskStore', () => {
     });
   });
 
-  describe('chat', () => {
-    const mockMessage: ChatMessage = {
-      id: 'msg-1',
-      role: 'user',
-      content: 'Hello',
-      timestamp: new Date().toISOString(),
-    };
-
-    it('should add chat message', () => {
-      useTaskStore.getState().addChatMessage(mockMessage);
-      expect(useTaskStore.getState().chatMessages).toContainEqual(mockMessage);
-    });
-
-    it('should not add duplicate message', () => {
-      useTaskStore.getState().addChatMessage(mockMessage);
-      useTaskStore.getState().addChatMessage(mockMessage);
-
-      expect(useTaskStore.getState().chatMessages).toHaveLength(1);
-    });
-
-    it('should set chat messages', () => {
-      const messages = [mockMessage, { ...mockMessage, id: 'msg-2' }];
-      useTaskStore.getState().setChatMessages(messages);
-
-      expect(useTaskStore.getState().chatMessages).toHaveLength(2);
-    });
-
-    it('should set chat typing', () => {
-      useTaskStore.getState().setChatTyping(true);
-      expect(useTaskStore.getState().chatTyping).toBe(true);
-    });
-
-    it('should clear chat messages', () => {
-      useTaskStore.getState().addChatMessage(mockMessage);
-      useTaskStore.getState().clearChatMessages();
-
-      expect(useTaskStore.getState().chatMessages).toHaveLength(0);
-    });
-  });
-
   describe('waiting input notifications', () => {
     it('should set waiting input', () => {
       useTaskStore.getState().setWaitingInput({
@@ -468,11 +425,6 @@ describe('taskStore', () => {
     it('should set auto focus on input', () => {
       useTaskStore.getState().setAutoFocusOnInput(true);
       expect(useTaskStore.getState().autoFocusOnInput).toBe(true);
-    });
-
-    it('should set supervisor enabled', () => {
-      useTaskStore.getState().setSupervisorEnabled(true);
-      expect(useTaskStore.getState().supervisorEnabled).toBe(true);
     });
 
     it('should set AI Core configured', () => {

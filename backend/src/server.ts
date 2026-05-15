@@ -1334,6 +1334,22 @@ export async function createApp(basePath?: string) {
               // Done here (not in the taskCreated event handler) so the source
               // field is always correct even with concurrent creates.
               broadcast({ type: 'task:created', payload: { task: newTask, source } });
+              // Create initial checkpoint capturing state before any changes
+              checkpointStore
+                .createCheckpoint(newTask.id, validatedPath, 'Initial state')
+                .then((cp) => {
+                  logger.info('Initial checkpoint created for new task', {
+                    taskId: newTask.id,
+                    checkpointId: cp.id,
+                  });
+                  broadcast({ type: 'checkpoint:created', payload: cp });
+                })
+                .catch((err) => {
+                  logger.warn('Failed to create initial checkpoint', {
+                    taskId: newTask.id,
+                    error: String(err),
+                  });
+                });
               // Track which references were injected so we can detect changes on follow-ups
               const internalTask = taskSpawner.getTask(newTask.id);
               if (internalTask) {
@@ -2345,7 +2361,23 @@ export async function createApp(basePath?: string) {
             const rules = configStore.getRules();
             const systemPrompt = rules?.trim() || undefined;
             logger.info('Creating git push task', { workspaceId });
-            taskSpawner.createTask(pushPrompt, validatedPath, systemPrompt);
+            taskSpawner.createTask(pushPrompt, validatedPath, systemPrompt).then((pushTask) => {
+              checkpointStore
+                .createCheckpoint(pushTask.id, validatedPath, 'Initial state')
+                .then((cp) => {
+                  logger.info('Initial checkpoint created for git push task', {
+                    taskId: pushTask.id,
+                    checkpointId: cp.id,
+                  });
+                  broadcast({ type: 'checkpoint:created', payload: cp });
+                })
+                .catch((err) => {
+                  logger.warn('Failed to create initial checkpoint for git push task', {
+                    taskId: pushTask.id,
+                    error: String(err),
+                  });
+                });
+            });
             break;
           }
 
@@ -4380,6 +4412,88 @@ export async function createApp(basePath?: string) {
         error: err instanceof Error ? err.message : String(err),
       });
       res.status(500).json({ error: 'Failed to get git status' });
+    }
+  });
+
+  // Git branches endpoint - list local branches
+  app.get('/api/workspaces/git-branches', async (req, res) => {
+    const workspacePath = req.query.workspace as string;
+    if (!workspacePath) {
+      return res.status(400).json({ error: 'workspace query parameter is required' });
+    }
+    if (!existsSync(workspacePath)) {
+      return res.status(404).json({ error: 'Workspace not found' });
+    }
+
+    try {
+      const { execFile: execFileGit } = await import('child_process');
+      const { promisify } = await import('util');
+      const execFileAsync = promisify(execFileGit);
+      const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo' };
+      const gitOpts = { cwd: workspacePath, env: gitEnv, timeout: 5000 };
+
+      // Check if it's a git repo
+      try {
+        await execFileAsync('git', ['rev-parse', '--git-dir'], gitOpts);
+      } catch {
+        return res.json({ branches: [], current: null });
+      }
+
+      // Get current branch
+      let current = '';
+      try {
+        const { stdout } = await execFileAsync('git', ['branch', '--show-current'], gitOpts);
+        current = stdout.trim();
+      } catch {
+        current = 'HEAD';
+      }
+
+      // Get all local branches
+      const { stdout: branchOutput } = await execFileAsync(
+        'git',
+        ['branch', '--format=%(refname:short)'],
+        gitOpts,
+      );
+      const branches = branchOutput
+        .split('\n')
+        .map((b) => b.trim())
+        .filter(Boolean);
+
+      res.json({ branches, current });
+    } catch (err) {
+      logger.error('Failed to list git branches', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      res.status(500).json({ error: 'Failed to list git branches' });
+    }
+  });
+
+  // Git checkout endpoint - switch branch
+  app.post('/api/workspaces/git-checkout', async (req, res) => {
+    const { workspace: workspacePath, branch } = req.body;
+    if (!workspacePath || !branch) {
+      return res.status(400).json({ error: 'workspace and branch are required' });
+    }
+    if (!existsSync(workspacePath)) {
+      return res.status(404).json({ error: 'Workspace not found' });
+    }
+
+    try {
+      const { execFile: execFileGit } = await import('child_process');
+      const { promisify } = await import('util');
+      const execFileAsync = promisify(execFileGit);
+      const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo' };
+      const gitOpts = { cwd: workspacePath, env: gitEnv, timeout: 10000 };
+
+      await execFileAsync('git', ['checkout', branch], gitOpts);
+
+      // Return the new current branch
+      const { stdout } = await execFileAsync('git', ['branch', '--show-current'], gitOpts);
+      res.json({ success: true, branch: stdout.trim() });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error('Failed to checkout branch', { error: message });
+      res.status(500).json({ error: message });
     }
   });
 

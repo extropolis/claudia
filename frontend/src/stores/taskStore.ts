@@ -4,7 +4,6 @@ import {
   Task,
   Workspace,
   TaskSummary,
-  ChatMessage,
   WaitingInputType,
   ScheduledTask,
   TaskTokenUsage,
@@ -56,7 +55,7 @@ interface TaskStore {
   showProjectPicker: boolean;
   workspaceColumns: number; // 0 = auto, 1-4 = fixed column count
   workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
-  taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
+  taskSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort tasks within workspaces
 
   // Voice state
   voiceEnabled: boolean;
@@ -79,12 +78,8 @@ interface TaskStore {
   autoSendDelayMs: number;
   deepgramApiKey: string;
 
-  // Supervisor state
+  // Task summaries
   taskSummaries: Map<string, TaskSummary>;
-
-  // Chat state
-  chatMessages: ChatMessage[];
-  chatTyping: boolean;
 
   // Waiting input notifications
   waitingInputNotifications: Map<string, WaitingInputInfo>;
@@ -101,7 +96,6 @@ interface TaskStore {
 
   // Settings
   autoFocusOnInput: boolean;
-  supervisorEnabled: boolean;
   aiCoreConfigured: boolean | null; // null = not checked yet, false = not configured, true = configured
   showSystemStats: boolean;
   browserNotificationsEnabled: boolean;
@@ -160,15 +154,9 @@ interface TaskStore {
   setAutoSendSettings: (enabled: boolean, delayMs: number) => void;
   setDeepgramApiKey: (key: string) => void;
 
-  // Supervisor actions
+  // Task summary actions
   setTaskSummary: (summary: TaskSummary) => void;
   clearTaskSummary: (taskId: string) => void;
-
-  // Chat actions
-  addChatMessage: (message: ChatMessage) => void;
-  setChatMessages: (messages: ChatMessage[]) => void;
-  setChatTyping: (isTyping: boolean) => void;
-  clearChatMessages: () => void;
 
   // Waiting input actions
   setWaitingInput: (info: WaitingInputInfo) => void;
@@ -195,11 +183,10 @@ interface TaskStore {
   setWorkspaceSortBy: (
     sortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual',
   ) => void;
-  setTaskSortBy: (sortBy: 'date-created' | 'last-modified') => void;
+  setTaskSortBy: (sortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual') => void;
 
   // Settings actions
   setAutoFocusOnInput: (enabled: boolean) => void;
-  setSupervisorEnabled: (enabled: boolean) => void;
   setAiCoreConfigured: (configured: boolean | null) => void;
   setShowSystemStats: (show: boolean) => void;
   setBrowserNotificationsEnabled: (enabled: boolean) => void;
@@ -225,7 +212,7 @@ interface PersistedState {
   expandedWorkspacesInitialized: boolean; // Track if user has interacted with workspaces
   workspaceColumns: number; // 0 = auto, 1-4 = fixed
   workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
-  taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
+  taskSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort tasks within workspaces
   voiceEnabled: boolean;
   autoSpeakResponses: boolean;
   selectedVoiceName: string | null;
@@ -239,7 +226,6 @@ interface PersistedState {
   autoSendDelayMs: number;
   deepgramApiKey: string;
   autoFocusOnInput: boolean;
-  supervisorEnabled: boolean;
   showSystemStats: boolean;
   browserNotificationsEnabled: boolean;
   notifyOnCompletion: boolean;
@@ -252,7 +238,6 @@ interface PersistedState {
   themePreference: ThemePreference;
   tokenCostEnabled: boolean;
   taskSummaries: [string, TaskSummary][]; // Stored as entries array
-  chatMessages: ChatMessage[];
 }
 
 export const useTaskStore = create<TaskStore>()(
@@ -297,12 +282,8 @@ export const useTaskStore = create<TaskStore>()(
       autoSendDelayMs: 3000,
       deepgramApiKey: '',
 
-      // Supervisor initial state
+      // Task summary initial state
       taskSummaries: new Map(),
-
-      // Chat initial state
-      chatMessages: [],
-      chatTyping: false,
 
       // Waiting input initial state
       waitingInputNotifications: new Map(),
@@ -319,7 +300,6 @@ export const useTaskStore = create<TaskStore>()(
 
       // Settings initial state
       autoFocusOnInput: false,
-      supervisorEnabled: false,
       aiCoreConfigured: null,
       showSystemStats: false,
       browserNotificationsEnabled: false,
@@ -747,7 +727,7 @@ export const useTaskStore = create<TaskStore>()(
         );
       },
 
-      // Supervisor actions
+      // Task summary actions
       setTaskSummary: (summary) => {
         const { taskSummaries } = get();
         const newSummaries = new Map(taskSummaries);
@@ -760,18 +740,6 @@ export const useTaskStore = create<TaskStore>()(
         newSummaries.delete(taskId);
         set({ taskSummaries: newSummaries });
       },
-
-      // Chat actions
-      addChatMessage: (message) => {
-        const { chatMessages } = get();
-        // Avoid duplicates by checking if message already exists
-        if (!chatMessages.some((m) => m.id === message.id)) {
-          set({ chatMessages: [...chatMessages, message] });
-        }
-      },
-      setChatMessages: (messages) => set({ chatMessages: messages }),
-      setChatTyping: (isTyping) => set({ chatTyping: isTyping }),
-      clearChatMessages: () => set({ chatMessages: [] }),
 
       // Waiting input actions
       setWaitingInput: (info) => {
@@ -811,7 +779,6 @@ export const useTaskStore = create<TaskStore>()(
 
       // Settings actions
       setAutoFocusOnInput: (enabled) => set({ autoFocusOnInput: enabled }),
-      setSupervisorEnabled: (enabled) => set({ supervisorEnabled: enabled }),
       setAiCoreConfigured: (configured) => set({ aiCoreConfigured: configured }),
       setShowSystemStats: (show) => set({ showSystemStats: show }),
       setBrowserNotificationsEnabled: (enabled) => set({ browserNotificationsEnabled: enabled }),
@@ -850,7 +817,6 @@ export const useTaskStore = create<TaskStore>()(
         autoSendDelayMs: state.autoSendDelayMs,
         deepgramApiKey: state.deepgramApiKey,
         autoFocusOnInput: state.autoFocusOnInput,
-        supervisorEnabled: state.supervisorEnabled,
         showSystemStats: state.showSystemStats,
         browserNotificationsEnabled: state.browserNotificationsEnabled,
         notifyOnCompletion: state.notifyOnCompletion,
@@ -863,7 +829,6 @@ export const useTaskStore = create<TaskStore>()(
         themePreference: state.themePreference,
         tokenCostEnabled: state.tokenCostEnabled,
         taskSummaries: Array.from(state.taskSummaries.entries()),
-        chatMessages: state.chatMessages,
       }),
       // Merge persisted state with initial state, converting arrays back to Set/Map
       merge: (persistedState, currentState) => {
@@ -904,7 +869,6 @@ export const useTaskStore = create<TaskStore>()(
           autoSendDelayMs: persisted.autoSendDelayMs ?? currentState.autoSendDelayMs,
           deepgramApiKey: persisted.deepgramApiKey ?? currentState.deepgramApiKey,
           autoFocusOnInput: persisted.autoFocusOnInput ?? currentState.autoFocusOnInput,
-          supervisorEnabled: persisted.supervisorEnabled ?? currentState.supervisorEnabled,
           showSystemStats: persisted.showSystemStats ?? currentState.showSystemStats,
           browserNotificationsEnabled:
             persisted.browserNotificationsEnabled ?? currentState.browserNotificationsEnabled,
@@ -924,7 +888,6 @@ export const useTaskStore = create<TaskStore>()(
           taskSummaries: persisted.taskSummaries
             ? new Map(persisted.taskSummaries)
             : currentState.taskSummaries,
-          chatMessages: persisted.chatMessages ?? currentState.chatMessages,
         };
       },
     },

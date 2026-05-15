@@ -6,8 +6,6 @@ import {
   Task,
   Workspace,
   TaskSummary,
-  SuggestedAction,
-  ChatMessage,
   WaitingInputType,
 } from '@claudia/shared';
 import { getWebSocketUrl, getApiBaseUrl, isTunnelAccess } from '../config/api-config';
@@ -108,9 +106,6 @@ export function useWebSocket() {
     addWorkspace,
     removeWorkspace,
     setTaskSummary,
-    addChatMessage,
-    setChatMessages,
-    setChatTyping,
     setWaitingInput,
     clearWaitingInput,
     setArchivedTasks,
@@ -185,8 +180,7 @@ export function useWebSocket() {
         const msgType = message.type as string;
         if (
           msgType !== 'task:output' &&
-          msgType !== 'shell:output' &&
-          msgType !== 'supervisor:chat:typing'
+          msgType !== 'shell:output'
         ) {
           console.log('[WebSocket] Received:', message.type);
         }
@@ -217,9 +211,6 @@ export function useWebSocket() {
               .then((config) => {
                 if (config.autoFocusOnInput !== undefined) {
                   useTaskStore.getState().setAutoFocusOnInput(config.autoFocusOnInput);
-                }
-                if (config.supervisorEnabled !== undefined) {
-                  useTaskStore.getState().setSupervisorEnabled(config.supervisorEnabled);
                 }
                 // Check if AI Core credentials are configured
                 // Prefer env vars (aiCoreConfiguredFromEnv) over config file credentials
@@ -323,23 +314,6 @@ export function useWebSocket() {
             const payload = message.payload as { summary: TaskSummary };
             console.log('[WebSocket] Task summary received:', payload.summary);
             setTaskSummary(payload.summary);
-            break;
-          }
-          case 'supervisor:chat:response': {
-            const payload = message.payload as { message: ChatMessage };
-            console.log('[WebSocket] Chat message received:', payload.message.role);
-            addChatMessage(payload.message);
-            break;
-          }
-          case 'supervisor:chat:history': {
-            const payload = message.payload as { messages: ChatMessage[] };
-            console.log('[WebSocket] Chat history received:', payload.messages.length, 'messages');
-            setChatMessages(payload.messages);
-            break;
-          }
-          case 'supervisor:chat:typing': {
-            const payload = message.payload as { isTyping: boolean };
-            setChatTyping(payload.isTyping);
             break;
           }
           case 'task:waitingInput': {
@@ -683,9 +657,6 @@ export function useWebSocket() {
     addWorkspace,
     removeWorkspace,
     setTaskSummary,
-    addChatMessage,
-    setChatMessages,
-    setChatTyping,
     setWaitingInput,
     clearWaitingInput,
     setArchivedTasks,
@@ -907,37 +878,6 @@ export function useWebSocket() {
     [sendMessage],
   );
 
-  // Supervisor actions
-  const executeSupervisorAction = useCallback(
-    (taskId: string, action: SuggestedAction) => {
-      sendMessage('supervisor:action', { taskId, action });
-    },
-    [sendMessage],
-  );
-
-  const requestTaskAnalysis = useCallback(
-    (taskId: string) => {
-      sendMessage('supervisor:analyze', { taskId });
-    },
-    [sendMessage],
-  );
-
-  // Chat actions
-  const sendChatMessage = useCallback(
-    (content: string, taskId?: string) => {
-      sendMessage('supervisor:chat:message', { content, taskId });
-    },
-    [sendMessage],
-  );
-
-  const requestChatHistory = useCallback(() => {
-    sendMessage('supervisor:chat:history', {});
-  }, [sendMessage]);
-
-  const clearChatHistory = useCallback(() => {
-    sendMessage('supervisor:chat:clear', {});
-  }, [sendMessage]);
-
   // Archived task actions
   const requestArchivedTasks = useCallback(() => {
     sendMessage('task:archived:list', {});
@@ -1075,11 +1015,6 @@ export function useWebSocket() {
     setPreviewPort,
     requestRecentWorkspaces,
     clearRecentWorkspace,
-    executeSupervisorAction,
-    requestTaskAnalysis,
-    sendChatMessage,
-    requestChatHistory,
-    clearChatHistory,
     requestArchivedTasks,
     restoreArchivedTask,
     deleteArchivedTask,

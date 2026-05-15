@@ -10,7 +10,6 @@ import {
   Trash2,
   Shield,
   FileText,
-  Bot,
   MousePointer,
   CheckCircle,
   AlertCircle,
@@ -127,7 +126,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     permissions: false,
     cliSwitches: false,
     rules: false,
-    supervisor: false,
     learnings: false,
     claudiaMcp: false,
     usage: false,
@@ -179,8 +177,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
   const [jsonEditorError, setJsonEditorError] = useState<string | null>(null);
   const [skipPermissions, setSkipPermissions] = useState(false);
   const [rules, setRules] = useState('');
-  const [supervisorEnabled, setSupervisorEnabled] = useState(false);
-  const [supervisorSystemPrompt, setSupervisorSystemPrompt] = useState('');
   const [autoFocusOnInput, setAutoFocusOnInput] = useState(false);
   const [autoReloadEnabled, setAutoReloadEnabled] = useState(true);
   const [useLearnings, setUseLearnings] = useState(false);
@@ -210,7 +206,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
 
   // Debounce timers
   const rulesTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const supervisorPromptTimerRef = useRef<NodeJS.Timeout | null>(null);
   const mcpJsonTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // API Mode state
@@ -401,8 +396,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         const config = await response.json();
         setSkipPermissions(config.skipPermissions || false);
         setRules(config.rules || '');
-        setSupervisorEnabled(config.supervisorEnabled || false);
-        setSupervisorSystemPrompt(config.supervisorSystemPrompt || '');
         setAutoFocusOnInput(config.autoFocusOnInput || false);
         setAutoReloadEnabled(config.autoReloadEnabled !== false);
         setApiMode(config.apiMode || 'default');
@@ -749,48 +742,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     }
     rulesTimerRef.current = setTimeout(() => {
       saveRules(value);
-    }, 1000);
-  };
-
-  const saveSupervisorEnabled = async (value: boolean) => {
-    try {
-      const response = await fetch(`${getApiBaseUrl()}/api/config`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ supervisorEnabled: value }),
-      });
-      if (response.ok) {
-        setSupervisorEnabled(value);
-      }
-    } catch (error) {
-      console.error('Failed to save supervisor enabled:', error);
-    }
-  };
-
-  const saveSupervisorPrompt = useCallback(async (promptText: string) => {
-    try {
-      const response = await fetch(`${getApiBaseUrl()}/api/config`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ supervisorSystemPrompt: promptText }),
-      });
-      if (!response.ok) {
-        console.error('Failed to save supervisor prompt');
-      }
-    } catch (error) {
-      console.error('Failed to save supervisor prompt:', error);
-    }
-  }, []);
-
-  const handleSupervisorPromptChange = (value: string) => {
-    setSupervisorSystemPrompt(value);
-
-    // Auto-save with debounce
-    if (supervisorPromptTimerRef.current) {
-      clearTimeout(supervisorPromptTimerRef.current);
-    }
-    supervisorPromptTimerRef.current = setTimeout(() => {
-      saveSupervisorPrompt(value);
     }, 1000);
   };
 
@@ -2845,51 +2796,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
           </CollapsiblePanel>
 
           <CollapsiblePanel
-            title="AI Supervisor"
-            icon={<Bot size={18} />}
-            isExpanded={expandedPanels.supervisor}
-            onToggle={() => togglePanel('supervisor')}
-          >
-            <div className="supervisor-content">
-              <div className="supervisor-toggle-item">
-                <div className="supervisor-toggle-info">
-                  <span className="supervisor-toggle-label">Enable AI Supervisor</span>
-                  <span className="supervisor-toggle-description">
-                    When enabled, the AI will automatically analyze tasks when they complete and
-                    provide feedback in the Chat panel.
-                  </span>
-                </div>
-                <label className="toggle-switch">
-                  <input
-                    type="checkbox"
-                    checked={supervisorEnabled}
-                    onChange={(e) => saveSupervisorEnabled(e.target.checked)}
-                  />
-                  <span className="toggle-slider"></span>
-                </label>
-              </div>
-
-              {supervisorEnabled && (
-                <>
-                  <div className="supervisor-prompt-section">
-                    <p className="supervisor-description">
-                      Configure how the AI supervisor analyzes completed tasks. This prompt guides
-                      the supervisor when tasks finish.
-                    </p>
-                    <textarea
-                      className="supervisor-textarea"
-                      value={supervisorSystemPrompt}
-                      onChange={(e) => handleSupervisorPromptChange(e.target.value)}
-                      placeholder="Enter system prompt for the AI supervisor...&#10;&#10;Example:&#10;Make sure tasks complete without errors and are tested."
-                      rows={10}
-                    />
-                  </div>
-                </>
-              )}
-            </div>
-          </CollapsiblePanel>
-
-          <CollapsiblePanel
             title="Learnings (RAG)"
             icon={<Brain size={18} />}
             isExpanded={expandedPanels.learnings}
@@ -2969,10 +2875,6 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
               if (rulesTimerRef.current) {
                 clearTimeout(rulesTimerRef.current);
                 saveRules(rules);
-              }
-              if (supervisorPromptTimerRef.current) {
-                clearTimeout(supervisorPromptTimerRef.current);
-                saveSupervisorPrompt(supervisorSystemPrompt);
               }
               if (mcpJsonTimerRef.current) {
                 clearTimeout(mcpJsonTimerRef.current);

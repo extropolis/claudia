@@ -6,6 +6,7 @@ import { Task, Workspace } from '@claudia/shared';
 import { Copy, Check, Play, BookOpen, ArrowDown } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
 import { TaskTokenStats } from './TaskTokenStats';
+import { CheckpointTimeline } from './CheckpointTimeline';
 import { useEffectiveTheme } from '../hooks/useTheme';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
 import { getApiBaseUrl } from '../config/api-config';
@@ -839,6 +840,9 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         )}
       </div>
       <TaskInputBar task={task} wsRef={wsRef} />
+      {workspace && (
+        <CheckpointTimeline taskId={task.id} workspaceId={workspace.id} wsRef={wsRef} />
+      )}
       <TaskTokenStats taskId={task.id} />
     </div>
   );

@@ -512,6 +512,11 @@ function WorkspaceSection({
 
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [branchName, setBranchName] = useState<string | null>(null);
+  const [showBranch, setShowBranch] = useState(false);
+  const [availableBranches, setAvailableBranches] = useState<string[]>([]);
+  const [branchesLoading, setBranchesLoading] = useState(false);
+  const [branchDropdownPos, setBranchDropdownPos] = useState<{ top: number; left: number } | null>(null);
+  const branchButtonRef = useRef<HTMLButtonElement>(null);
 
   // Reset submenu state when parent menu closes, and cleanup timeout on unmount
   useEffect(() => {
@@ -556,6 +561,55 @@ function WorkspaceSection({
     }
   }, [workspace.id, isConnected, isActiveWorkspace]);
 
+  const fetchBranches = async () => {
+    setBranchesLoading(true);
+    try {
+      const params = new URLSearchParams({ workspace: workspace.id });
+      const res = await fetch(`${getApiBaseUrl()}/api/workspaces/git-branches?${params}`);
+      if (res.ok) {
+        const data = await res.json();
+        setAvailableBranches(data.branches || []);
+      }
+    } catch {
+      // silently ignore
+    } finally {
+      setBranchesLoading(false);
+    }
+  };
+
+  const handleCheckoutBranch = async (branch: string) => {
+    try {
+      const res = await fetch(`${getApiBaseUrl()}/api/workspaces/git-checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace: workspace.id, branch }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setBranchName(data.branch || branch);
+        setShowBranch(false);
+      } else {
+        const err = await res.json();
+        alert(`Failed to switch branch: ${err.error || 'Unknown error'}`);
+      }
+    } catch (err) {
+      alert(`Failed to switch branch: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  // Close branch dropdown when clicking outside
+  useEffect(() => {
+    if (!showBranch) return;
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.workspace-branch-container')) {
+        setShowBranch(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick, true);
+    return () => document.removeEventListener('mousedown', handleClick, true);
+  }, [showBranch]);
+
   const [images, setImages] = useState<UploadedImage[]>([]);
   const [isImageDragging, setIsImageDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -571,6 +625,8 @@ function WorkspaceSection({
   // Task drag state (separate from workspace drag)
   const [taskDragIndex, setTaskDragIndex] = useState<number | null>(null);
   const [taskDragOverIndex, setTaskDragOverIndex] = useState<number | null>(null);
+
+  const { taskSortBy, setTaskSortBy } = useTaskStore();
 
   const handleTaskDragStart = useCallback((idx: number) => {
     setTaskDragIndex(idx);
@@ -593,10 +649,14 @@ function WorkspaceSection({
       taskDragIndex !== taskDragOverIndex
     ) {
       onReorderTasks(taskDragIndex, taskDragOverIndex);
+      // Auto-switch to manual sort so the drag result is visible
+      if (taskSortBy !== 'manual') {
+        setTaskSortBy('manual');
+      }
     }
     setTaskDragIndex(null);
     setTaskDragOverIndex(null);
-  }, [taskDragIndex, taskDragOverIndex, onReorderTasks]);
+  }, [taskDragIndex, taskDragOverIndex, onReorderTasks, taskSortBy, setTaskSortBy]);
 
   // Task list resize handlers
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
@@ -630,8 +690,6 @@ function WorkspaceSection({
     setFocusedInputId,
     consumeVoiceTranscript,
     clearVoiceTranscript,
-    taskSortBy,
-    setTaskSortBy,
   } = useTaskStore();
 
   const inputId = `new-task-${workspace.id}`;
@@ -974,20 +1032,74 @@ function WorkspaceSection({
             </>
           )}
           {branchName && (
-            <span
-              className="workspace-branch-label"
-              title={`Click to copy: ${branchName}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                navigator.clipboard.writeText(branchName);
-                const el = e.currentTarget;
-                el.classList.add('copied');
-                setTimeout(() => el.classList.remove('copied'), 1000);
-              }}
-            >
-              <GitBranch size={11} />
-              <span className="branch-name">{branchName}</span>
-            </span>
+            <div className="workspace-branch-container">
+              <button
+                className={`workspace-branch-button${showBranch ? ' active' : ''}`}
+                title={branchName}
+                ref={branchButtonRef}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const opening = !showBranch;
+                  setShowBranch(opening);
+                  if (opening) {
+                    fetchBranches();
+                    if (branchButtonRef.current) {
+                      const rect = branchButtonRef.current.getBoundingClientRect();
+                      setBranchDropdownPos({ top: rect.bottom + 4, left: rect.left });
+                    }
+                  }
+                }}
+              >
+                <GitBranch size={12} />
+              </button>
+              {showBranch && branchDropdownPos && (
+                <div
+                  className="workspace-branch-dropdown"
+                  style={{
+                    position: 'fixed',
+                    top: branchDropdownPos.top,
+                    left: branchDropdownPos.left,
+                  }}
+                >
+                  <div className="branch-dropdown-current">
+                    <span className="branch-dropdown-current-name">{branchName}</span>
+                    <button
+                      className="branch-copy-btn"
+                      title="Copy branch name"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigator.clipboard.writeText(branchName);
+                      }}
+                    >
+                      <Copy size={10} />
+                    </button>
+                  </div>
+                  {availableBranches.length > 1 && (
+                    <div className="branch-dropdown-list">
+                      {availableBranches
+                        .filter((b) => b !== branchName)
+                        .map((b) => (
+                          <button
+                            key={b}
+                            className="branch-dropdown-item"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCheckoutBranch(b);
+                            }}
+                          >
+                            {b}
+                          </button>
+                        ))}
+                    </div>
+                  )}
+                  {branchesLoading && (
+                    <div className="branch-dropdown-loading">
+                      <Loader2 size={12} className="spinning" /> Loading...
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           )}
           {tasks.length > 0 && (
             <>
@@ -1009,6 +1121,27 @@ function WorkspaceSection({
             </span>
           )}
         </div>
+        {isExpanded && tasks.length > 1 && (
+          <div className="column-selector task-sort-selector" title="Sort tasks by">
+            <ArrowDownUp size={12} className="column-selector-icon" />
+            <select
+              className="column-selector-select"
+              value={taskSortBy}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                e.stopPropagation();
+                setTaskSortBy(
+                  e.target.value as 'date-created' | 'last-modified' | 'alphabetical' | 'manual',
+                );
+              }}
+            >
+              <option value="date-created">Date Created</option>
+              <option value="last-modified">Last Modified</option>
+              <option value="alphabetical">Alphabetical</option>
+              <option value="manual">Manual (drag)</option>
+            </select>
+          </div>
+        )}
         <div className="workspace-menu-container">
           <button
             className={`workspace-action-button menu ${isMenuOpen ? 'active' : ''}`}
@@ -1025,12 +1158,25 @@ function WorkspaceSection({
               className="workspace-dropdown-menu"
               ref={(el) => {
                 if (el) {
-                  const rect = el.getBoundingClientRect();
-                  if (rect.bottom > window.innerHeight - 8) {
-                    el.style.top = 'auto';
-                    el.style.bottom = '100%';
-                    el.style.marginTop = '0';
-                    el.style.marginBottom = '4px';
+                  // Position the dropdown using fixed positioning relative to the menu button.
+                  // This ensures the dropdown escapes any overflow:hidden/auto scroll containers.
+                  const container = el.parentElement;
+                  const button = container?.querySelector('.workspace-action-button.menu');
+                  if (button) {
+                    const btnRect = button.getBoundingClientRect();
+                    const elRect = el.getBoundingClientRect();
+                    let top = btnRect.bottom + 4;
+                    let right = window.innerWidth - btnRect.right;
+
+                    // Flip above if it would overflow the viewport bottom
+                    if (top + elRect.height > window.innerHeight - 8) {
+                      top = btnRect.top - elRect.height - 4;
+                    }
+
+                    el.style.position = 'fixed';
+                    el.style.top = `${top}px`;
+                    el.style.right = `${right}px`;
+                    el.style.left = 'auto';
                   }
                 }
               }}
@@ -1277,38 +1423,6 @@ function WorkspaceSection({
                 <Search size={14} />
                 <span>Code Review</span>
               </button>
-              {tasks.length > 1 && (
-                <>
-                  <div className="workspace-dropdown-divider" />
-                  <div
-                    className="workspace-dropdown-item sort-row"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <ArrowDownUp size={14} />
-                    <span>Sort by</span>
-                    <div className="sort-toggle">
-                      <button
-                        className={`sort-toggle-btn${taskSortBy === 'date-created' ? ' active' : ''}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setTaskSortBy('date-created');
-                        }}
-                      >
-                        Newest
-                      </button>
-                      <button
-                        className={`sort-toggle-btn${taskSortBy === 'last-modified' ? ' active' : ''}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setTaskSortBy('last-modified');
-                        }}
-                      >
-                        Recent
-                      </button>
-                    </div>
-                  </div>
-                </>
-              )}
               <div className="workspace-dropdown-divider" />
               <button
                 className="workspace-dropdown-item reset"
@@ -1696,6 +1810,36 @@ export function WorkspacePanel({
   // Workspace manager modal state
   const [showWorkspaceManager, setShowWorkspaceManager] = useState(false);
 
+  // Workspace filter state
+  const [workspaceFilter, setWorkspaceFilter] = useState('');
+  const [showWorkspaceFilter, setShowWorkspaceFilter] = useState(false);
+  const workspaceFilterInputRef = useRef<HTMLInputElement>(null);
+
+  // Focus filter input when it becomes visible
+  useEffect(() => {
+    if (showWorkspaceFilter && workspaceFilterInputRef.current) {
+      workspaceFilterInputRef.current.focus();
+    }
+  }, [showWorkspaceFilter]);
+
+  // Close filter when clicking outside
+  useEffect(() => {
+    if (!showWorkspaceFilter) return;
+
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.workspace-filter-container')) {
+        // Only close if the filter is empty
+        if (!workspaceFilter) {
+          setShowWorkspaceFilter(false);
+        }
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside, true);
+    return () => document.removeEventListener('mousedown', handleClickOutside, true);
+  }, [showWorkspaceFilter, workspaceFilter]);
+
   // Close menu when clicking outside (capture phase so stopPropagation on child elements doesn't block it)
   useEffect(() => {
     if (!openMenuId) return;
@@ -1746,6 +1890,14 @@ export function WorkspacePanel({
               return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
           }
         });
+
+  // Filter workspaces by name
+  const filteredWorkspaces = workspaceFilter
+    ? sortedWorkspaces.filter((w) => {
+        const name = (w.displayName || w.name).toLowerCase();
+        return name.startsWith(workspaceFilter.toLowerCase());
+      })
+    : sortedWorkspaces;
 
   const handleDragStart = useCallback((index: number) => {
     setDragIndex(index);
@@ -1828,8 +1980,21 @@ export function WorkspacePanel({
   const getTasksForWorkspace = (workspaceId: string): Task[] => {
     const workspaceTasks = Array.from(tasks.values()).filter((t) => t.workspaceId === workspaceId);
 
+    // In manual mode, sort purely by the persisted order field
+    if (taskSortBy === 'manual') {
+      return workspaceTasks.sort((a, b) => {
+        if (a.order !== undefined && b.order !== undefined) {
+          return a.order - b.order;
+        }
+        if (a.order !== undefined) return -1;
+        if (b.order !== undefined) return 1;
+        // Fallback: newest first for tasks without manual order
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+    }
+
     return workspaceTasks.sort((a, b) => {
-      // If both have manual order, sort by order (ascending)
+      // If both have manual order and sort is not overridden, still respect it
       if (a.order !== undefined && b.order !== undefined) {
         return a.order - b.order;
       }
@@ -1839,11 +2004,17 @@ export function WorkspacePanel({
 
       // Neither has manual order, apply user's sort preference
       switch (taskSortBy) {
-        case 'last-modified':
+        case 'last-modified': {
           // Sort by most recent activity
           const timeA = new Date(a.lastActivity || a.createdAt).getTime();
           const timeB = new Date(b.lastActivity || b.createdAt).getTime();
           return timeB - timeA; // Most recent first
+        }
+        case 'alphabetical': {
+          const nameA = (a.displayName || a.prompt || '').toLowerCase();
+          const nameB = (b.displayName || b.prompt || '').toLowerCase();
+          return nameA.localeCompare(nameB);
+        }
         case 'date-created':
         default:
           // Sort by creation time (newest first)
@@ -1907,6 +2078,45 @@ export function WorkspacePanel({
           >
             <Plus size={16} />
           </button>
+          <div className={`workspace-filter-container ${showWorkspaceFilter ? 'expanded' : ''}`}>
+            {showWorkspaceFilter ? (
+              <>
+                <Search size={12} className="workspace-filter-icon" />
+                <input
+                  ref={workspaceFilterInputRef}
+                  type="text"
+                  className="workspace-filter-input"
+                  placeholder="Filter..."
+                  value={workspaceFilter}
+                  onChange={(e) => setWorkspaceFilter(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      setWorkspaceFilter('');
+                      setShowWorkspaceFilter(false);
+                    }
+                  }}
+                />
+                <button
+                  className="workspace-filter-clear"
+                  onClick={() => {
+                    setWorkspaceFilter('');
+                    setShowWorkspaceFilter(false);
+                  }}
+                  title="Close filter"
+                >
+                  <X size={12} />
+                </button>
+              </>
+            ) : (
+              <button
+                className="workspace-filter-button"
+                onClick={() => setShowWorkspaceFilter(true)}
+                title="Filter workspaces"
+              >
+                <Search size={14} />
+              </button>
+            )}
+          </div>
           <button
             className={`archived-toggle-button ${showArchivedTasks ? 'active' : ''}`}
             onClick={handleToggleArchivedTasks}
@@ -1919,11 +2129,19 @@ export function WorkspacePanel({
             <select
               className="column-selector-select"
               value={workspaceSortBy}
-              onChange={(e) =>
-                setWorkspaceSortBy(
-                  e.target.value as 'date-created' | 'last-modified' | 'alphabetical' | 'manual',
-                )
-              }
+              onChange={(e) => {
+                const newSort = e.target.value as
+                  | 'date-created'
+                  | 'last-modified'
+                  | 'alphabetical'
+                  | 'manual';
+                if (newSort === 'manual' && workspaceSortBy !== 'manual') {
+                  // Persist the current visible order so switching to manual
+                  // keeps whatever order the user was already seeing.
+                  onSetWorkspaceOrder(sortedWorkspaces.map((w) => w.id));
+                }
+                setWorkspaceSortBy(newSort);
+              }}
             >
               <option value="date-created">Date Created</option>
               <option value="last-modified">Last Modified</option>
@@ -2007,15 +2225,21 @@ export function WorkspacePanel({
             : undefined
         }
       >
-        {sortedWorkspaces.length === 0 ? (
+        {filteredWorkspaces.length === 0 ? (
           <div className="empty-state">
-            <p>No workspaces yet.</p>
-            <button className="create-first-workspace-btn" onClick={handleAddWorkspace}>
-              <FolderOpen size={14} /> Add Workspace
-            </button>
+            {workspaceFilter ? (
+              <p>No workspaces matching &quot;{workspaceFilter}&quot;</p>
+            ) : (
+              <>
+                <p>No workspaces yet.</p>
+                <button className="create-first-workspace-btn" onClick={handleAddWorkspace}>
+                  <FolderOpen size={14} /> Add Workspace
+                </button>
+              </>
+            )}
           </div>
         ) : (
-          sortedWorkspaces.map((workspace, index) => (
+          filteredWorkspaces.map((workspace, index) => (
             <WorkspaceSection
               key={workspace.id}
               workspace={workspace}

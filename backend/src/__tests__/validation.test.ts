@@ -65,9 +65,6 @@ describe('validateConfigUpdate', () => {
 
     expect(validateConfigUpdate({ autoFocusOnInput: true }).valid).toBe(true);
     expect(validateConfigUpdate({ autoFocusOnInput: 1 }).valid).toBe(false);
-
-    expect(validateConfigUpdate({ supervisorEnabled: false }).valid).toBe(true);
-    expect(validateConfigUpdate({ supervisorEnabled: null }).valid).toBe(false);
   });
 
   it('should validate apiMode enum', () => {
@@ -110,15 +107,6 @@ describe('validateConfigUpdate', () => {
     expect(validateConfigUpdate({ opencodePort: 'not-a-number' }).valid).toBe(false);
     expect(validateConfigUpdate({ opencodePort: 'not-a-number' }).error).toContain(
       'opencodePort must be a number',
-    );
-  });
-
-  it('should validate supervisorSystemPrompt', () => {
-    expect(validateConfigUpdate({ supervisorSystemPrompt: 'Custom prompt' }).valid).toBe(true);
-    expect(validateConfigUpdate({ supervisorSystemPrompt: '' }).valid).toBe(true);
-    expect(validateConfigUpdate({ supervisorSystemPrompt: 123 }).valid).toBe(false);
-    expect(validateConfigUpdate({ supervisorSystemPrompt: 123 }).error).toBe(
-      'supervisorSystemPrompt must be a string',
     );
   });
 
@@ -283,7 +271,6 @@ describe('validateConfigUpdate', () => {
       apiMode: 'default',
       backend: 'claude-code',
       opencodePort: 4096,
-      supervisorEnabled: false,
     });
     expect(result.valid).toBe(true);
     expect(result.data?.rules).toBe('test rules');
