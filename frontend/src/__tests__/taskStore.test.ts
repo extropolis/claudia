@@ -19,6 +19,9 @@ describe('taskStore', () => {
       expandedWorkspaces: new Set(),
       expandedWorkspacesInitialized: false,
       showProjectPicker: false,
+      workspaceColumns: 0,
+      workspaceSortBy: 'date-created',
+      taskSortBy: 'date-created',
       voiceEnabled: false,
       autoSpeakResponses: false,
       selectedVoiceName: null,
@@ -671,6 +674,131 @@ describe('taskStore', () => {
       // which will fail in test env (expected, tested for state only)
       useTaskStore.getState().setDeepgramApiKey('test-key-123');
       expect(useTaskStore.getState().deepgramApiKey).toBe('test-key-123');
+    });
+  });
+
+  describe('task sort options', () => {
+    it('should default taskSortBy to date-created', () => {
+      expect(useTaskStore.getState().taskSortBy).toBe('date-created');
+    });
+
+    it('should set taskSortBy to last-modified', () => {
+      useTaskStore.getState().setTaskSortBy('last-modified');
+      expect(useTaskStore.getState().taskSortBy).toBe('last-modified');
+    });
+
+    it('should set taskSortBy to alphabetical', () => {
+      useTaskStore.getState().setTaskSortBy('alphabetical');
+      expect(useTaskStore.getState().taskSortBy).toBe('alphabetical');
+    });
+
+    it('should set taskSortBy to manual', () => {
+      useTaskStore.getState().setTaskSortBy('manual');
+      expect(useTaskStore.getState().taskSortBy).toBe('manual');
+    });
+  });
+
+  describe('workspace sort options', () => {
+    it('should default workspaceSortBy to date-created', () => {
+      expect(useTaskStore.getState().workspaceSortBy).toBe('date-created');
+    });
+
+    it('should set workspaceSortBy to alphabetical', () => {
+      useTaskStore.getState().setWorkspaceSortBy('alphabetical');
+      expect(useTaskStore.getState().workspaceSortBy).toBe('alphabetical');
+    });
+
+    it('should set workspaceSortBy to manual', () => {
+      useTaskStore.getState().setWorkspaceSortBy('manual');
+      expect(useTaskStore.getState().workspaceSortBy).toBe('manual');
+    });
+
+    it('should set workspaceSortBy to last-modified', () => {
+      useTaskStore.getState().setWorkspaceSortBy('last-modified');
+      expect(useTaskStore.getState().workspaceSortBy).toBe('last-modified');
+    });
+  });
+
+  describe('workspace columns', () => {
+    it('should default workspaceColumns to 0 (auto)', () => {
+      expect(useTaskStore.getState().workspaceColumns).toBe(0);
+    });
+
+    it('should set workspace columns', () => {
+      useTaskStore.getState().setWorkspaceColumns(2);
+      expect(useTaskStore.getState().workspaceColumns).toBe(2);
+
+      useTaskStore.getState().setWorkspaceColumns(4);
+      expect(useTaskStore.getState().workspaceColumns).toBe(4);
+    });
+  });
+
+  describe('removed supervisor/chat features', () => {
+    it('should not have supervisorEnabled property', () => {
+      const state = useTaskStore.getState();
+      expect('supervisorEnabled' in state).toBe(false);
+    });
+
+    it('should not have chat-related properties', () => {
+      const state = useTaskStore.getState();
+      expect('chatMessages' in state).toBe(false);
+      expect('chatTyping' in state).toBe(false);
+    });
+
+    it('should not have chat-related actions', () => {
+      const state = useTaskStore.getState();
+      expect('addChatMessage' in state).toBe(false);
+      expect('setChatMessages' in state).toBe(false);
+      expect('setChatTyping' in state).toBe(false);
+      expect('clearChatMessages' in state).toBe(false);
+    });
+
+    it('should not have setSupervisorEnabled action', () => {
+      const state = useTaskStore.getState();
+      expect('setSupervisorEnabled' in state).toBe(false);
+    });
+  });
+
+  describe('task summaries (formerly supervisor)', () => {
+    const mockSummary: TaskSummary = {
+      taskId: 'task-1',
+      status: 'completed',
+      summary: 'Task completed successfully',
+      suggestedActions: [],
+      timestamp: new Date(),
+    };
+
+    it('should still support task summaries after supervisor removal', () => {
+      useTaskStore.getState().setTaskSummary(mockSummary);
+      const summaries = useTaskStore.getState().taskSummaries;
+      expect(summaries.get('task-1')).toEqual(mockSummary);
+    });
+
+    it('should update an existing task summary', () => {
+      useTaskStore.getState().setTaskSummary(mockSummary);
+
+      const updatedSummary: TaskSummary = {
+        ...mockSummary,
+        status: 'in_progress',
+        summary: 'Still working...',
+      };
+      useTaskStore.getState().setTaskSummary(updatedSummary);
+
+      const summaries = useTaskStore.getState().taskSummaries;
+      expect(summaries.get('task-1')?.status).toBe('in_progress');
+      expect(summaries.get('task-1')?.summary).toBe('Still working...');
+    });
+
+    it('should handle multiple task summaries', () => {
+      useTaskStore.getState().setTaskSummary(mockSummary);
+      useTaskStore.getState().setTaskSummary({
+        ...mockSummary,
+        taskId: 'task-2',
+        summary: 'Second task',
+      });
+
+      const summaries = useTaskStore.getState().taskSummaries;
+      expect(summaries.size).toBe(2);
     });
   });
 });

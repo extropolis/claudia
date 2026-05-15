@@ -25,9 +25,9 @@ interface CheckpointData {
   checkpoints: Checkpoint[];
 }
 
-const DEFAULT_DATA: CheckpointData = {
-  checkpoints: [],
-};
+function getDefaultData(): CheckpointData {
+  return { checkpoints: [] };
+}
 
 export class CheckpointStore {
   private data: CheckpointData;
@@ -54,12 +54,12 @@ export class CheckpointStore {
     try {
       return loadVersioned<CheckpointData>(this.filePath, {
         currentVersion: CHECKPOINT_SCHEMA_VERSION,
-        defaultData: { ...DEFAULT_DATA },
-        legacyLoader: (raw) => (raw as CheckpointData) ?? { ...DEFAULT_DATA },
+        defaultData: getDefaultData(),
+        legacyLoader: (raw) => (raw as CheckpointData) ?? getDefaultData(),
       });
     } catch (error) {
       console.error('[CheckpointStore] Error loading data:', error);
-      return { ...DEFAULT_DATA };
+      return getDefaultData();
     }
   }
 
