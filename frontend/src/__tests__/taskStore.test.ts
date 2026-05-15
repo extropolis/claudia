@@ -779,13 +779,13 @@ describe('taskStore', () => {
 
       const updatedSummary: TaskSummary = {
         ...mockSummary,
-        status: 'in_progress',
+        status: 'needs_input',
         summary: 'Still working...',
       };
       useTaskStore.getState().setTaskSummary(updatedSummary);
 
       const summaries = useTaskStore.getState().taskSummaries;
-      expect(summaries.get('task-1')?.status).toBe('in_progress');
+      expect(summaries.get('task-1')?.status).toBe('needs_input');
       expect(summaries.get('task-1')?.summary).toBe('Still working...');
     });
 

@@ -69,6 +69,7 @@ export interface Workspace {
   systemPrompt?: string; // Custom system prompt for this workspace
   displayName?: string; // User-editable display name (shown instead of folder name when set)
   references?: WorkspaceReference[]; // Referenced workspaces/folders for cross-workspace context
+  previewPort?: number; // Port for web preview (dev server)
 }
 
 export interface RecentWorkspace {
@@ -114,8 +115,8 @@ export interface Checkpoint {
   gitBranch?: string;            // Current branch at checkpoint time
   gitDiff?: string;              // Uncommitted changes (unified diff) at checkpoint time
   metadata?: {
-    filesTracked?: number;
-    linesChanged?: number;
+    filesModified?: number;
+    isCurrent?: boolean;
   };
 }
 
