@@ -16,6 +16,16 @@ export default defineConfig({
                 'dist/',
                 '**/*.d.ts',
             ],
+            // Per-file regression gate: floors set just below achieved
+            // coverage. Only listed modules are gated, so new UI work is
+            // not blocked. Raise as coverage improves; never lower.
+            thresholds: {
+                'src/config/api-config.ts': { lines: 95 },
+                'src/hooks/useTheme.ts': { lines: 95 },
+                'src/services/filePickerService.ts': { lines: 85 },
+                'src/utils/browserCapabilities.ts': { lines: 85 },
+                'src/stores/taskStore.ts': { lines: 70 },
+            },
         },
     },
 });

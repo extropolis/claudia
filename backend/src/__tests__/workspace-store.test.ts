@@ -428,4 +428,196 @@ describe('WorkspaceStore', () => {
             expect(found?.displayName).toBe('Listed Name');
         });
     });
+
+    describe('addWorkspace directory creation', () => {
+        it('should create a directory that does not yet exist', () => {
+            const newDir = join(testBaseDir, 'created-by-store');
+            expect(existsSync(newDir)).toBe(false);
+
+            const workspace = store.addWorkspace(newDir);
+            expect(existsSync(newDir)).toBe(true);
+            expect(workspace.id).toBe(newDir);
+            expect(workspace.name).toBe('created-by-store');
+        });
+    });
+
+    describe('setWorkspaceOrder', () => {
+        it('should apply an explicit order', () => {
+            store.addWorkspace(testWorkspace1);
+            store.addWorkspace(testWorkspace2);
+
+            const result = store.setWorkspaceOrder([testWorkspace2, testWorkspace1]);
+            expect(result).toBe(true);
+
+            const order = store.getWorkspaces().map(w => w.id);
+            expect(order).toEqual([testWorkspace2, testWorkspace1]);
+        });
+
+        it('should append unknown workspaces at the end preserving them', () => {
+            store.addWorkspace(testWorkspace1);
+            store.addWorkspace(testWorkspace2);
+
+            // Client only knows about testWorkspace2; testWorkspace1 should be preserved.
+            const result = store.setWorkspaceOrder([testWorkspace2]);
+            expect(result).toBe(true);
+
+            const order = store.getWorkspaces().map(w => w.id);
+            expect(order[0]).toBe(testWorkspace2);
+            expect(order).toContain(testWorkspace1);
+            expect(order.length).toBe(2);
+        });
+
+        it('should ignore unknown ids and duplicates in input', () => {
+            store.addWorkspace(testWorkspace1);
+            store.addWorkspace(testWorkspace2);
+
+            const result = store.setWorkspaceOrder([
+                testWorkspace2,
+                '/unknown/path',
+                testWorkspace2, // duplicate
+                testWorkspace1,
+            ]);
+            expect(result).toBe(true);
+
+            const order = store.getWorkspaces().map(w => w.id);
+            expect(order).toEqual([testWorkspace2, testWorkspace1]);
+        });
+
+        it('should persist the explicit order', () => {
+            store.addWorkspace(testWorkspace1);
+            store.addWorkspace(testWorkspace2);
+            store.setWorkspaceOrder([testWorkspace2, testWorkspace1]);
+
+            const newStore = new WorkspaceStore(testBaseDir);
+            const order = newStore.getWorkspaces().map(w => w.id);
+            expect(order).toEqual([testWorkspace2, testWorkspace1]);
+        });
+    });
+
+    describe('lastBrowsedPath', () => {
+        it('should return undefined by default', () => {
+            expect(store.getLastBrowsedPath()).toBeUndefined();
+        });
+
+        it('should set and get the last browsed path', () => {
+            store.setLastBrowsedPath('/some/browsed/dir');
+            expect(store.getLastBrowsedPath()).toBe('/some/browsed/dir');
+        });
+
+        it('should persist the last browsed path', () => {
+            store.setLastBrowsedPath('/persisted/dir');
+            const newStore = new WorkspaceStore(testBaseDir);
+            expect(newStore.getLastBrowsedPath()).toBe('/persisted/dir');
+        });
+    });
+
+    describe('references', () => {
+        it('should return empty references for a workspace with none', () => {
+            store.addWorkspace(testWorkspace1);
+            expect(store.getReferences(testWorkspace1)).toEqual([]);
+        });
+
+        it('should return empty references for non-existent workspace', () => {
+            expect(store.getReferences('/non/existent')).toEqual([]);
+        });
+
+        it('should add a reference', () => {
+            store.addWorkspace(testWorkspace1);
+            const ref = store.addReference(testWorkspace1, testWorkspace2, 'shared lib');
+
+            expect(ref.id).toBeDefined();
+            expect(ref.path).toBe(testWorkspace2);
+            expect(ref.name).toBe('workspace2');
+            expect(ref.description).toBe('shared lib');
+
+            const refs = store.getReferences(testWorkspace1);
+            expect(refs.length).toBe(1);
+            expect(refs[0].path).toBe(testWorkspace2);
+        });
+
+        it('should throw when adding reference to non-existent workspace', () => {
+            expect(() => {
+                store.addReference('/non/existent', testWorkspace2);
+            }).toThrow('Workspace not found');
+        });
+
+        it('should throw when referenced directory does not exist', () => {
+            store.addWorkspace(testWorkspace1);
+            expect(() => {
+                store.addReference(testWorkspace1, join(testBaseDir, 'no-such-dir'));
+            }).toThrow('Directory does not exist');
+        });
+
+        it('should throw on duplicate reference', () => {
+            store.addWorkspace(testWorkspace1);
+            store.addReference(testWorkspace1, testWorkspace2);
+            expect(() => {
+                store.addReference(testWorkspace1, testWorkspace2);
+            }).toThrow('Reference already exists');
+        });
+
+        it('should throw when referencing itself', () => {
+            store.addWorkspace(testWorkspace1);
+            expect(() => {
+                store.addReference(testWorkspace1, testWorkspace1);
+            }).toThrow('Cannot reference the same workspace');
+        });
+
+        it('should remove a reference by id', () => {
+            store.addWorkspace(testWorkspace1);
+            const ref = store.addReference(testWorkspace1, testWorkspace2);
+
+            const result = store.removeReference(testWorkspace1, ref.id);
+            expect(result).toBe(true);
+            expect(store.getReferences(testWorkspace1)).toEqual([]);
+        });
+
+        it('should return false removing reference from workspace with none', () => {
+            store.addWorkspace(testWorkspace1);
+            expect(store.removeReference(testWorkspace1, 'no-id')).toBe(false);
+        });
+
+        it('should return false removing reference with unknown id', () => {
+            store.addWorkspace(testWorkspace1);
+            store.addReference(testWorkspace1, testWorkspace2);
+            expect(store.removeReference(testWorkspace1, 'unknown-id')).toBe(false);
+        });
+
+        it('should return false removing reference from non-existent workspace', () => {
+            expect(store.removeReference('/non/existent', 'id')).toBe(false);
+        });
+
+        it('should remove a reference by path', () => {
+            store.addWorkspace(testWorkspace1);
+            store.addReference(testWorkspace1, testWorkspace2);
+
+            const result = store.removeReferenceByPath(testWorkspace1, testWorkspace2);
+            expect(result).toBe(true);
+            expect(store.getReferences(testWorkspace1)).toEqual([]);
+        });
+
+        it('should return false removing by path when not present', () => {
+            store.addWorkspace(testWorkspace1);
+            store.addReference(testWorkspace1, testWorkspace2);
+            const otherDir = join(testBaseDir, 'workspace3');
+            mkdirSync(otherDir, { recursive: true });
+            expect(store.removeReferenceByPath(testWorkspace1, otherDir)).toBe(false);
+        });
+
+        it('should return false removing by path from workspace with no references', () => {
+            store.addWorkspace(testWorkspace1);
+            expect(store.removeReferenceByPath(testWorkspace1, testWorkspace2)).toBe(false);
+        });
+
+        it('should persist references to file', () => {
+            store.addWorkspace(testWorkspace1);
+            store.addReference(testWorkspace1, testWorkspace2, 'desc');
+
+            const newStore = new WorkspaceStore(testBaseDir);
+            const refs = newStore.getReferences(testWorkspace1);
+            expect(refs.length).toBe(1);
+            expect(refs[0].path).toBe(testWorkspace2);
+            expect(refs[0].description).toBe('desc');
+        });
+    });
 });
