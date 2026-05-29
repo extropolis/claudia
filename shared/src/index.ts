@@ -61,6 +61,23 @@ export interface Workspace {
     systemPrompt?: string;   // Custom system prompt for this workspace
     displayName?: string;    // User-editable display name (shown instead of folder name when set)
     references?: WorkspaceReference[];  // Referenced workspaces/folders for cross-workspace context
+
+    // Worktree fields (optional — only set for worktree workspaces)
+    worktreeParentId?: string;   // If this workspace IS a worktree, the parent workspace's id (absolute path)
+    worktreeBranch?: string;     // Branch checked out in this worktree
+    autoWorktree?: boolean;      // If true, new tasks auto-create an isolated worktree
+}
+
+// Metadata about a single git worktree (from `git worktree list --porcelain`)
+export interface WorktreeInfo {
+    path: string;            // Absolute path to the worktree directory
+    branch: string;          // Branch checked out (e.g. "refs/heads/feature/foo" or detached hash)
+    commitHash: string;      // Current HEAD commit hash
+    isMain: boolean;         // True for the primary working tree
+    isLocked: boolean;       // True if the worktree is locked
+    lockedReason?: string;   // Why it's locked (if locked)
+    prunable: boolean;       // True if the directory no longer exists (stale)
+    taskCount?: number;      // Number of active Claudia tasks in this worktree (enriched by server)
 }
 
 export interface RecentWorkspace {
@@ -152,6 +169,16 @@ export type WSMessageType =
     | 'workspace:renamed'
     | 'workspace:recent:list'
     | 'workspace:resetResult'
+    // Worktree management
+    | 'worktree:list'
+    | 'worktree:listed'
+    | 'worktree:create'
+    | 'worktree:created'
+    | 'worktree:remove'
+    | 'worktree:removed'
+    | 'worktree:prune'
+    | 'worktree:pruned'
+    | 'worktree:error'
     // Task reordering
     | 'tasks:reordered'
     // Embedded shell terminals

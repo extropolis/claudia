@@ -245,6 +245,45 @@ export async function captureGitStateAfter(
 const MAX_REVERT_COMMITS = 5;
 
 /**
+ * Detect if a directory is a git-linked worktree (not the main working tree).
+ * In a linked worktree, `.git` is a FILE; in the main working tree it is a DIRECTORY.
+ */
+export async function isLinkedWorktree(cwd: string): Promise<boolean> {
+    try {
+        const { lstatSync, existsSync } = await import('fs');
+        const { join } = await import('path');
+        const gitPath = join(cwd, '.git');
+        if (!existsSync(gitPath)) return false;
+        return lstatSync(gitPath).isFile();
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Get the absolute path to the main working tree from any worktree.
+ * Uses `git rev-parse --path-format=absolute --git-common-dir` which works in both
+ * the main working tree and in linked worktrees.
+ */
+export async function getMainWorktreePath(cwd: string): Promise<string | null> {
+    try {
+        const { execFile } = await import('child_process');
+        const { promisify } = await import('util');
+        const { resolve } = await import('path');
+        const execFileA = promisify(execFile);
+        const { stdout } = await execFileA(
+            'git',
+            ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+            { cwd }
+        );
+        // Strip trailing /.git[/] to get the main worktree directory
+        return resolve(stdout.trim().replace(/[\/\\]\.git[\/\\]?$/, ''));
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Revert changes made by a task
  * This will:
  * 1. Reset to the commit before the task started

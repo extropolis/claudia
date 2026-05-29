@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import { Workspace, RecentWorkspace, WorkspaceReference } from '@claudia/shared';
 import { randomUUID } from 'crypto';
 import { loadVersioned, saveVersioned } from './utils/schema-version.js';
+import { isLinkedWorktree, getMainWorktreePath, getCurrentBranch } from './git-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -137,6 +138,79 @@ export class WorkspaceStore {
 
         this.saveConfig();
         return workspace;
+    }
+
+    /**
+     * Add a worktree workspace — like addWorkspace but also sets worktree metadata
+     * (worktreeParentId, worktreeBranch, displayName) and positions it after its parent.
+     */
+    async addWorktreeWorkspace(worktreePath: string, parentId: string, branch: string): Promise<Workspace> {
+        const resolvedPath = resolve(worktreePath);
+
+        if (!existsSync(resolvedPath)) {
+            throw new Error(`Worktree directory does not exist: ${resolvedPath}`);
+        }
+        if (this.config.workspaces.some(w => w.id === resolvedPath)) {
+            throw new Error(`Workspace already exists: ${resolvedPath}`);
+        }
+
+        const parentWorkspace = this.getWorkspace(parentId);
+        const parentDisplayName = parentWorkspace?.displayName ?? parentWorkspace?.name ?? basename(parentId);
+        const shortBranch = branch.replace(/^refs\/heads\//, '');
+
+        const workspace: Workspace = {
+            id: resolvedPath,
+            name: basename(resolvedPath),
+            createdAt: new Date().toISOString(),
+            displayName: `${parentDisplayName} › ${shortBranch}`,
+            worktreeParentId: parentId,
+            worktreeBranch: shortBranch,
+            // Inherit parent's system prompt and references
+            systemPrompt: parentWorkspace?.systemPrompt,
+            references: parentWorkspace?.references ? [...parentWorkspace.references] : undefined,
+        };
+
+        // Insert worktree after its parent (or after the last sibling worktree)
+        const parentIdx = this.config.workspaces.findIndex(w => w.id === parentId);
+        if (parentIdx === -1) {
+            // Parent not registered — append at end
+            this.config.workspaces.push(workspace);
+            this.config.recentWorkspaces = this.config.recentWorkspaces.filter(w => w.id !== resolvedPath);
+            this.saveConfig();
+            console.log(`[WorkspaceStore] Added worktree workspace ${resolvedPath} (parent not found, appended)`);
+            return workspace;
+        }
+        // Find the last sibling worktree already under this parent
+        let insertAt = parentIdx + 1;
+        while (insertAt < this.config.workspaces.length &&
+               this.config.workspaces[insertAt].worktreeParentId === parentId) {
+            insertAt++;
+        }
+        this.config.workspaces.splice(insertAt, 0, workspace);
+
+        this.config.recentWorkspaces = this.config.recentWorkspaces.filter(w => w.id !== resolvedPath);
+        this.saveConfig();
+        console.log(`[WorkspaceStore] Added worktree workspace ${resolvedPath} (parent=${parentId}, branch=${shortBranch})`);
+        return workspace;
+    }
+
+    /**
+     * Return all worktree child workspaces for a given parent workspace ID.
+     */
+    getWorktreeChildren(parentId: string): Workspace[] {
+        return this.config.workspaces.filter(w => w.worktreeParentId === parentId);
+    }
+
+    /**
+     * Set the autoWorktree flag on a workspace.
+     */
+    setAutoWorktree(workspaceId: string, enabled: boolean): boolean {
+        const workspace = this.config.workspaces.find(w => w.id === workspaceId);
+        if (!workspace) return false;
+        workspace.autoWorktree = enabled;
+        this.saveConfig();
+        console.log(`[WorkspaceStore] Set autoWorktree=${enabled} for ${workspaceId}`);
+        return true;
     }
 
     deleteWorkspace(id: string): boolean {

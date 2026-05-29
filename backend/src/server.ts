@@ -20,6 +20,7 @@ import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorP
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch } from './git-utils.js';
+import { WorktreeManager } from './worktree-manager.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
@@ -94,6 +95,11 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'cron:update',
     'cron:list',
     'cron:run',
+    'worktree:list',
+    'worktree:create',
+    'worktree:remove',
+    'worktree:prune',
+    'workspace:autoWorktree',
 ]);
 
 // WebSocket message validation
@@ -1089,7 +1095,7 @@ export async function createApp(basePath?: string) {
                         }
 
                         // Auto-add workspace if it doesn't exist yet
-                        const validatedPath = workspaceValidation.data!;
+                        let validatedPath = workspaceValidation.data!;
                         if (!workspaceStore.getWorkspace(validatedPath)) {
                             try {
                                 const workspace = workspaceStore.addWorkspace(validatedPath);
@@ -1098,6 +1104,31 @@ export async function createApp(basePath?: string) {
                             } catch (error) {
                                 logger.error('Failed to auto-add workspace', { error });
                                 // Continue anyway - task creation shouldn't fail if workspace can't be added
+                            }
+                        }
+
+                        // AUTO-WORKTREE: if workspace has autoWorktree enabled, create an isolated worktree
+                        const wsConfig = workspaceStore.getWorkspace(validatedPath);
+                        if (wsConfig?.autoWorktree && !wsConfig.worktreeParentId) {
+                            // Only auto-worktree on parent workspaces (not on existing worktrees)
+                            try {
+                                const { randomBytes } = await import('crypto');
+                                const shortId = randomBytes(4).toString('hex');
+                                const autoBranch = `claudia/task-${shortId}`;
+                                const manager = new WorktreeManager();
+                                const wt = await manager.createWorktree({
+                                    repoPath: validatedPath,
+                                    branch: autoBranch,
+                                    createBranch: true,
+                                });
+                                const wtWorkspace = await workspaceStore.addWorktreeWorkspace(wt.path, validatedPath, autoBranch);
+                                broadcast({ type: 'workspace:created' as WSMessageType, payload: { workspace: wtWorkspace } });
+                                validatedPath = wt.path; // task runs in the new worktree
+                                logger.info('Auto-created worktree for task', { worktreePath: wt.path, branch: autoBranch });
+                            } catch (wtErr) {
+                                logger.warn('Auto-worktree creation failed, falling back to parent workspace', {
+                                    error: wtErr instanceof Error ? wtErr.message : String(wtErr)
+                                });
                             }
                         }
 
@@ -2137,6 +2168,127 @@ export async function createApp(basePath?: string) {
                         } else {
                             sendWSError(ws, `Failed to fire scheduled task '${cronId}'`, message.type, 'CRON_FIRE_FAILED');
                         }
+                        break;
+                    }
+
+                    // ── Worktree WS handlers ──────────────────────────────
+
+                    case 'worktree:list': {
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) {
+                            sendWSError(ws, 'worktree:list requires workspaceId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        try {
+                            const manager = new WorktreeManager();
+                            const worktrees = await manager.listWorktrees(workspaceId);
+                            for (const wt of worktrees) {
+                                const tasks = taskSpawner.getAllTasks().filter(t => t.workspaceId === wt.path);
+                                wt.taskCount = tasks.length;
+                            }
+                            ws.send(JSON.stringify({ type: 'worktree:listed', payload: { workspaceId, worktrees } }));
+                        } catch (err) {
+                            sendWSError(ws, err instanceof Error ? err.message : String(err), message.type, 'WORKTREE_LIST_FAILED');
+                        }
+                        break;
+                    }
+
+                    case 'worktree:create': {
+                        const { workspaceId, branch, baseBranch, createBranch = true } = payload as {
+                            workspaceId?: string;
+                            branch?: string;
+                            baseBranch?: string;
+                            createBranch?: boolean;
+                        };
+                        if (!workspaceId || !branch) {
+                            sendWSError(ws, 'worktree:create requires workspaceId and branch', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        try {
+                            const manager = new WorktreeManager();
+                            const result = await manager.createWorktree({ repoPath: workspaceId, branch, baseBranch, createBranch });
+                            const workspace = await workspaceStore.addWorktreeWorkspace(result.path, workspaceId, branch);
+                            broadcast({ type: 'workspace:created' as WSMessageType, payload: { workspace } });
+                            ws.send(JSON.stringify({ type: 'worktree:created', payload: { workspace, worktreePath: result.path, branch: result.branch } }));
+                            logger.info('Worktree created via WS', { path: result.path, branch });
+                        } catch (err) {
+                            sendWSError(ws, err instanceof Error ? err.message : String(err), message.type, 'WORKTREE_CREATE_FAILED');
+                        }
+                        break;
+                    }
+
+                    case 'worktree:remove': {
+                        const { workspaceId, worktreePath, force = false } = payload as {
+                            workspaceId?: string;
+                            worktreePath?: string;
+                            force?: boolean;
+                        };
+                        if (!workspaceId || !worktreePath) {
+                            sendWSError(ws, 'worktree:remove requires workspaceId and worktreePath', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        // Safety: check for active tasks
+                        const activeTasks = taskSpawner.getAllTasks().filter(
+                            t => t.workspaceId === worktreePath && ['busy', 'starting', 'waiting_input'].includes(t.state)
+                        );
+                        if (activeTasks.length > 0 && !force) {
+                            ws.send(JSON.stringify({
+                                type: 'worktree:error',
+                                payload: {
+                                    error: `Cannot remove: ${activeTasks.length} active task(s) still running`,
+                                    activeTasks: activeTasks.map(t => t.id),
+                                }
+                            }));
+                            break;
+                        }
+                        try {
+                            const manager = new WorktreeManager();
+                            await manager.removeWorktree({ repoPath: workspaceId, worktreePath, force });
+                            workspaceStore.deleteWorkspace(worktreePath);
+                            broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: worktreePath } });
+                            ws.send(JSON.stringify({ type: 'worktree:removed', payload: { worktreePath } }));
+                            logger.info('Worktree removed via WS', { worktreePath });
+                        } catch (err) {
+                            sendWSError(ws, err instanceof Error ? err.message : String(err), message.type, 'WORKTREE_REMOVE_FAILED');
+                        }
+                        break;
+                    }
+
+                    case 'worktree:prune': {
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) {
+                            sendWSError(ws, 'worktree:prune requires workspaceId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        try {
+                            const manager = new WorktreeManager();
+                            const pruned = await manager.pruneWorktrees(workspaceId);
+                            for (const p of pruned) {
+                                if (workspaceStore.getWorkspace(p)) {
+                                    workspaceStore.deleteWorkspace(p);
+                                    broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: p } });
+                                }
+                            }
+                            ws.send(JSON.stringify({ type: 'worktree:pruned', payload: { workspaceId, pruned } }));
+                        } catch (err) {
+                            sendWSError(ws, err instanceof Error ? err.message : String(err), message.type, 'WORKTREE_PRUNE_FAILED');
+                        }
+                        break;
+                    }
+
+                    case 'workspace:autoWorktree': {
+                        const { workspaceId, enabled } = payload as { workspaceId?: string; enabled?: boolean };
+                        if (!workspaceId || typeof enabled !== 'boolean') {
+                            sendWSError(ws, 'workspace:autoWorktree requires workspaceId and enabled', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const ok = workspaceStore.setAutoWorktree(workspaceId, enabled);
+                        if (!ok) {
+                            sendWSError(ws, 'Workspace not found', message.type, 'NOT_FOUND');
+                            break;
+                        }
+                        const updatedWs = workspaceStore.getWorkspace(workspaceId);
+                        broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updatedWs } });
                         break;
                     }
                 }
@@ -3759,6 +3911,165 @@ export async function createApp(basePath?: string) {
             logger.error('Failed to get git status', { error: err instanceof Error ? err.message : String(err) });
             res.status(500).json({ error: 'Failed to get git status' });
         }
+    });
+
+    // ── Worktree REST endpoints (query-param routing for Windows path compat) ──
+
+    // GET /api/worktrees?workspace=<path>  — list worktrees for a repo
+    app.get('/api/worktrees', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+        try {
+            const manager = new WorktreeManager();
+            const worktrees = await manager.listWorktrees(workspacePath);
+            // Enrich with Claudia task counts
+            for (const wt of worktrees) {
+                const tasks = taskSpawner.getAllTasks().filter(t => t.workspaceId === wt.path);
+                wt.taskCount = tasks.length;
+            }
+            return res.json({ worktrees });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error('GET /api/worktrees failed', { error: msg });
+            return res.status(500).json({ error: msg });
+        }
+    });
+
+    // POST /api/worktrees?workspace=<path>  — create a worktree
+    app.post('/api/worktrees', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+        const { branch, baseBranch, createBranch = true } = req.body as {
+            branch?: string;
+            baseBranch?: string;
+            createBranch?: boolean;
+        };
+        if (!branch) {
+            return res.status(400).json({ error: 'branch is required' });
+        }
+        try {
+            const manager = new WorktreeManager();
+            const result = await manager.createWorktree({ repoPath: workspacePath, branch, baseBranch, createBranch });
+            // Register as workspace and insert after parent
+            const workspace = await workspaceStore.addWorktreeWorkspace(result.path, workspacePath, branch);
+            broadcast({ type: 'workspace:created' as WSMessageType, payload: { workspace } });
+            logger.info('Worktree created', { path: result.path, branch });
+            return res.json({ workspace, worktreePath: result.path, branch: result.branch });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error('POST /api/worktrees failed', { error: msg });
+            return res.status(400).json({ error: msg });
+        }
+    });
+
+    // DELETE /api/worktrees?workspace=<path>&worktreePath=<path>&force=true
+    app.delete('/api/worktrees', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        const worktreePath = req.query.worktreePath as string;
+        const force = req.query.force === 'true';
+        if (!workspacePath || !worktreePath) {
+            return res.status(400).json({ error: 'workspace and worktreePath query parameters are required' });
+        }
+        // Safety: don't allow removing the workspace that is the parent
+        if (worktreePath === workspacePath) {
+            return res.status(400).json({ error: 'Cannot remove the primary workspace' });
+        }
+        // Safety: check for active tasks
+        const activeTasks = taskSpawner.getAllTasks().filter(
+            t => t.workspaceId === worktreePath && ['busy', 'starting', 'waiting_input'].includes(t.state)
+        );
+        if (activeTasks.length > 0 && !force) {
+            return res.status(409).json({
+                error: `Cannot remove: ${activeTasks.length} active task(s) still running in this worktree`,
+                activeTasks: activeTasks.map(t => t.id),
+            });
+        }
+        try {
+            const manager = new WorktreeManager();
+            await manager.removeWorktree({ repoPath: workspacePath, worktreePath, force });
+            // Remove from workspace store
+            workspaceStore.deleteWorkspace(worktreePath);
+            broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: worktreePath } });
+            logger.info('Worktree removed', { worktreePath });
+            return res.json({ success: true });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error('DELETE /api/worktrees failed', { error: msg });
+            return res.status(400).json({ error: msg });
+        }
+    });
+
+    // POST /api/worktrees/prune?workspace=<path>  — prune stale worktrees
+    app.post('/api/worktrees/prune', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+        try {
+            const manager = new WorktreeManager();
+            const pruned = await manager.pruneWorktrees(workspacePath);
+            // Remove any pruned paths from workspace store
+            for (const p of pruned) {
+                if (workspaceStore.getWorkspace(p)) {
+                    workspaceStore.deleteWorkspace(p);
+                    broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: p } });
+                }
+            }
+            logger.info('Worktrees pruned', { count: pruned.length, pruned });
+            return res.json({ pruned });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error('POST /api/worktrees/prune failed', { error: msg });
+            return res.status(500).json({ error: msg });
+        }
+    });
+
+    // GET /api/worktrees/branches?workspace=<path>  — list local + remote branches for autocomplete
+    app.get('/api/worktrees/branches', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        try {
+            const manager = new WorktreeManager();
+            const [local, remote] = await Promise.all([
+                manager.getLocalBranches(workspacePath),
+                manager.getRemoteBranches(workspacePath),
+            ]);
+            return res.json({ local, remote });
+        } catch (err) {
+            return res.json({ local: [], remote: [] });
+        }
+    });
+
+    // PATCH /api/worktrees/auto?workspace=<path>  — toggle autoWorktree on a workspace
+    app.patch('/api/worktrees/auto', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        const { enabled } = req.body as { enabled?: boolean };
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (typeof enabled !== 'boolean') {
+            return res.status(400).json({ error: 'enabled (boolean) is required in body' });
+        }
+        const ok = workspaceStore.setAutoWorktree(workspacePath, enabled);
+        if (!ok) return res.status(404).json({ error: 'Workspace not found' });
+        const workspace = workspaceStore.getWorkspace(workspacePath);
+        broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace } });
+        return res.json({ success: true, autoWorktree: enabled });
     });
 
     // Git log endpoint - get commit history

@@ -337,6 +337,231 @@ interface UploadedImage {
     previewUrl: string;
 }
 
+// ── Worktree Components ───────────────────────────────────────────────────────
+
+interface WorktreeCreateModalProps {
+    workspace: Workspace;
+    onClose: () => void;
+    onCreated: () => void;
+    onCreateWorktree: (workspaceId: string, branch: string, baseBranch?: string, createBranch?: boolean) => Promise<void>;
+}
+
+function WorktreeCreateModal({ workspace, onClose, onCreated, onCreateWorktree }: WorktreeCreateModalProps) {
+    const [branchName, setBranchName] = useState('');
+    const [baseBranch, setBaseBranch] = useState('');
+    const [createNew, setCreateNew] = useState(true);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const handleCreate = async () => {
+        if (!branchName.trim()) { setError('Branch name is required'); return; }
+        setError(null);
+        setLoading(true);
+        try {
+            await onCreateWorktree(workspace.id, branchName.trim(), baseBranch.trim() || undefined, createNew);
+            onCreated();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="worktree-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+            <div className="worktree-modal">
+                <div className="worktree-modal-header">
+                    <h3><GitBranch size={16} /> New Worktree</h3>
+                    <button className="worktree-modal-close" onClick={onClose}><X size={16} /></button>
+                </div>
+                <div className="worktree-modal-body">
+                    <p className="worktree-modal-subtitle">
+                        Creates an isolated git working directory for <strong>{workspace.displayName || workspace.name}</strong>.
+                    </p>
+                    <div className="worktree-modal-field">
+                        <label>
+                            <input type="radio" checked={createNew} onChange={() => setCreateNew(true)} />
+                            {' '}Create new branch
+                        </label>
+                        <label>
+                            <input type="radio" checked={!createNew} onChange={() => setCreateNew(false)} />
+                            {' '}Checkout existing branch
+                        </label>
+                    </div>
+                    <div className="worktree-modal-field">
+                        <label htmlFor="wt-branch">Branch name</label>
+                        <input
+                            id="wt-branch"
+                            className="worktree-modal-input"
+                            type="text"
+                            value={branchName}
+                            onChange={(e) => setBranchName(e.target.value)}
+                            placeholder={createNew ? 'feature/my-feature' : 'existing-branch-name'}
+                            autoFocus
+                            onKeyDown={(e) => { if (e.key === 'Enter') handleCreate(); if (e.key === 'Escape') onClose(); }}
+                        />
+                    </div>
+                    {createNew && (
+                        <div className="worktree-modal-field">
+                            <label htmlFor="wt-base">Base branch <span className="optional">(optional, defaults to HEAD)</span></label>
+                            <input
+                                id="wt-base"
+                                className="worktree-modal-input"
+                                type="text"
+                                value={baseBranch}
+                                onChange={(e) => setBaseBranch(e.target.value)}
+                                placeholder="main"
+                            />
+                        </div>
+                    )}
+                    {error && <div className="worktree-modal-error"><AlertCircle size={13} /> {error}</div>}
+                </div>
+                <div className="worktree-modal-footer">
+                    <button className="worktree-modal-btn secondary" onClick={onClose} disabled={loading}>Cancel</button>
+                    <button className="worktree-modal-btn primary" onClick={handleCreate} disabled={loading || !branchName.trim()}>
+                        {loading ? <><Loader2 size={13} className="spinning" /> Creating…</> : 'Create Worktree'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+interface WorktreeManagerPanelProps {
+    workspace: Workspace;
+    allWorkspaces: Workspace[];
+    onClose: () => void;
+    onRemoveWorktree?: (workspaceId: string, force?: boolean) => Promise<void>;
+    onSelectWorkspace?: (workspaceId: string) => void;
+    onCreateWorktree: () => void;
+}
+
+function WorktreeManagerPanel({ workspace, allWorkspaces, onClose, onRemoveWorktree, onSelectWorkspace, onCreateWorktree }: WorktreeManagerPanelProps) {
+    const [worktrees, setWorktrees] = useState<Array<{ path: string; branch: string; isMain: boolean; prunable: boolean; taskCount?: number }>>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [pruning, setPruning] = useState(false);
+
+    const apiBase = getApiBaseUrl();
+    const parentId = workspace.worktreeParentId ?? workspace.id;
+
+    const loadWorktrees = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        try {
+            const params = new URLSearchParams({ workspace: parentId });
+            const res = await fetch(`${apiBase}/api/worktrees?${params}`);
+            if (res.ok) {
+                const data = await res.json();
+                setWorktrees(data.worktrees || []);
+            } else {
+                const d = await res.json().catch(() => ({}));
+                setError(d.error || 'Failed to load worktrees');
+            }
+        } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
+        } finally {
+            setLoading(false);
+        }
+    }, [parentId, apiBase]);
+
+    useEffect(() => { loadWorktrees(); }, [loadWorktrees]);
+
+    const handlePruneAll = async () => {
+        setPruning(true);
+        try {
+            const params = new URLSearchParams({ workspace: parentId });
+            await fetch(`${apiBase}/api/worktrees/prune?${params}`, { method: 'POST' });
+            await loadWorktrees();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
+        } finally {
+            setPruning(false);
+        }
+    };
+
+    const staleCount = worktrees.filter(wt => wt.prunable && !wt.isMain).length;
+    const linkedWorktrees = worktrees.filter(wt => !wt.isMain);
+
+    return (
+        <div className="worktree-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+            <div className="worktree-modal worktree-manager">
+                <div className="worktree-modal-header">
+                    <h3><GitBranch size={16} /> Worktrees — {workspace.displayName || workspace.name}</h3>
+                    <button className="worktree-modal-close" onClick={onClose}><X size={16} /></button>
+                </div>
+                <div className="worktree-modal-body">
+                    {loading && <div className="worktree-loading"><Loader2 size={16} className="spinning" /> Loading…</div>}
+                    {error && <div className="worktree-modal-error"><AlertCircle size={13} /> {error}</div>}
+                    {!loading && worktrees.map(wt => {
+                        const shortBranch = wt.branch.replace('refs/heads/', '');
+                        const claudiaWs = allWorkspaces.find(w => w.id === wt.path);
+                        return (
+                            <div key={wt.path} className={`worktree-row${wt.prunable ? ' stale' : ''}`}>
+                                <div className="worktree-row-info">
+                                    <span className={`worktree-row-badge${wt.isMain ? ' main' : ''}`}>
+                                        {wt.isMain ? 'main' : <GitBranch size={11} />}
+                                    </span>
+                                    <span className="worktree-row-branch">{shortBranch}</span>
+                                    {wt.prunable && <span className="worktree-row-stale">stale</span>}
+                                    {(wt.taskCount ?? 0) > 0 && (
+                                        <span className="worktree-row-tasks">{wt.taskCount} task{wt.taskCount !== 1 ? 's' : ''}</span>
+                                    )}
+                                </div>
+                                <div className="worktree-row-actions">
+                                    {!wt.isMain && claudiaWs && onSelectWorkspace && (
+                                        <button className="worktree-row-btn" onClick={() => { onSelectWorkspace(wt.path); onClose(); }} title="Open this worktree">
+                                            Open
+                                        </button>
+                                    )}
+                                    {!wt.isMain && onRemoveWorktree && (
+                                        <button
+                                            className="worktree-row-btn danger"
+                                            disabled={(wt.taskCount ?? 0) > 0}
+                                            title={(wt.taskCount ?? 0) > 0 ? 'Archive tasks first' : 'Remove worktree'}
+                                            onClick={async () => {
+                                                if (window.confirm(`Remove worktree "${shortBranch}"? The directory and branch will be deleted.`)) {
+                                                    try {
+                                                        await onRemoveWorktree(wt.path, false);
+                                                        await loadWorktrees();
+                                                    } catch (err) {
+                                                        setError(err instanceof Error ? err.message : String(err));
+                                                    }
+                                                }
+                                            }}
+                                        >
+                                            Remove
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        );
+                    })}
+                    {!loading && linkedWorktrees.length === 0 && (
+                        <p className="worktree-empty">No worktrees yet. Create one to start isolated development.</p>
+                    )}
+                    {staleCount > 0 && (
+                        <div className="worktree-stale-warning">
+                            <AlertCircle size={13} /> {staleCount} stale worktree reference{staleCount !== 1 ? 's' : ''} (directory deleted)
+                            <button className="worktree-row-btn" onClick={handlePruneAll} disabled={pruning}>
+                                {pruning ? 'Pruning…' : 'Prune All'}
+                            </button>
+                        </div>
+                    )}
+                </div>
+                <div className="worktree-modal-footer">
+                    <button className="worktree-modal-btn secondary" onClick={onClose}>Close</button>
+                    <button className="worktree-modal-btn primary" onClick={onCreateWorktree}>
+                        <FolderPlus size={13} /> New Worktree
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 interface WorkspaceSectionProps {
     workspace: Workspace;
     tasks: Task[];
@@ -382,6 +607,12 @@ interface WorkspaceSectionProps {
     onResetWorkspace?: () => void;
     // Scheduled tasks
     onOpenScheduledTasks?: (taskId: string) => void;
+    // Worktree handlers
+    worktreeCount?: number;    // Number of linked worktrees for this parent workspace
+    onCreateWorktree?: (workspaceId: string, branch: string, baseBranch?: string, createBranch?: boolean) => Promise<void>;
+    onRemoveWorktree?: (workspaceId: string, force?: boolean) => Promise<void>;
+    onToggleAutoWorktree?: (workspaceId: string, enabled: boolean) => void;
+    onSelectWorkspace?: (workspaceId: string) => void; // navigate to a different workspace
 }
 
 function WorkspaceSection({
@@ -421,7 +652,12 @@ function WorkspaceSection({
     onAddCustomReference,
     onRemoveReference,
     onResetWorkspace,
-    onOpenScheduledTasks
+    onOpenScheduledTasks,
+    worktreeCount = 0,
+    onCreateWorktree,
+    onRemoveWorktree,
+    onToggleAutoWorktree,
+    onSelectWorkspace,
 }: WorkspaceSectionProps) {
     const isConnected = useTaskStore(s => s.isConnected);
     const [inputValue, setInputValue] = useState('');
@@ -435,6 +671,10 @@ function WorkspaceSection({
 
     const [showResetConfirm, setShowResetConfirm] = useState(false);
     const [branchName, setBranchName] = useState<string | null>(null);
+    const [showWorktreeModal, setShowWorktreeModal] = useState(false);
+    const [showWorktreeManager, setShowWorktreeManager] = useState(false);
+    const [worktreeError, setWorktreeError] = useState<string | null>(null);
+    const isWorktree = !!workspace.worktreeParentId;
 
     // Reset submenu state when parent menu closes, and cleanup timeout on unmount
     useEffect(() => {
@@ -853,7 +1093,10 @@ function WorkspaceSection({
                 </div>
                 <div className="workspace-header-left" onClick={() => !isEditingWorkspaceName && onToggleExpand()}>
                     {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    <Briefcase size={16} className="workspace-icon" />
+                    {isWorktree
+                        ? <span aria-label="Git worktree"><GitBranch size={16} className="workspace-icon worktree-icon" /></span>
+                        : <Briefcase size={16} className="workspace-icon" />
+                    }
                     {isEditingWorkspaceName ? (
                         <input
                             ref={workspaceEditRef}
@@ -903,6 +1146,24 @@ function WorkspaceSection({
                         <>
                             <span className="workspace-task-count">{tasks.length}</span>
                         </>
+                    )}
+                    {!isWorktree && worktreeCount > 0 && (
+                        <span
+                            className="workspace-worktree-count"
+                            title={`${worktreeCount} worktree${worktreeCount !== 1 ? 's' : ''} — click to manage`}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setShowWorktreeManager(true);
+                            }}
+                        >
+                            <GitBranch size={11} />
+                            <span>{worktreeCount}</span>
+                        </span>
+                    )}
+                    {workspace.autoWorktree && !isWorktree && (
+                        <span className="workspace-auto-worktree-badge" title="New tasks auto-create isolated worktrees">
+                            auto-isolate
+                        </span>
                     )}
                     {workspace.references && workspace.references.length > 0 && (
                         <span
@@ -1178,30 +1439,119 @@ function WorkspaceSection({
                                     </div>
                                 </>
                             )}
+                            {/* Worktree actions for parent workspaces */}
+                            {!isWorktree && onCreateWorktree && (
+                                <>
+                                    <div className="workspace-dropdown-divider" />
+                                    <button
+                                        className="workspace-dropdown-item"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setShowWorktreeModal(true);
+                                            onToggleMenu();
+                                        }}
+                                    >
+                                        <FolderPlus size={14} />
+                                        <span>New Worktree…</span>
+                                    </button>
+                                    {worktreeCount > 0 && (
+                                        <button
+                                            className="workspace-dropdown-item"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setShowWorktreeManager(true);
+                                                onToggleMenu();
+                                            }}
+                                        >
+                                            <GitBranch size={14} />
+                                            <span>Manage Worktrees ({worktreeCount})</span>
+                                        </button>
+                                    )}
+                                    <button
+                                        className={`workspace-dropdown-item${workspace.autoWorktree ? ' active' : ''}`}
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            onToggleAutoWorktree?.(workspace.id, !workspace.autoWorktree);
+                                            onToggleMenu();
+                                        }}
+                                        title="When enabled, each new task automatically gets its own isolated git worktree"
+                                    >
+                                        <Columns2 size={14} />
+                                        <span>Auto-isolate tasks {workspace.autoWorktree ? '✓' : ''}</span>
+                                    </button>
+                                </>
+                            )}
+                            {/* Worktree-specific actions — shown when this workspace IS a worktree */}
+                            {isWorktree && (
+                                <>
+                                    <div className="workspace-dropdown-divider" />
+                                    {workspace.worktreeParentId && onSelectWorkspace && (
+                                        <button
+                                            className="workspace-dropdown-item"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                onSelectWorkspace(workspace.worktreeParentId!);
+                                                onToggleMenu();
+                                            }}
+                                        >
+                                            <ChevronLeft size={14} />
+                                            <span>Go to Parent Workspace</span>
+                                        </button>
+                                    )}
+                                    {onRemoveWorktree && (
+                                        <button
+                                            className="workspace-dropdown-item delete"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                const hasTasks = tasks.length > 0;
+                                                const confirmMsg = hasTasks
+                                                    ? `Remove worktree "${workspace.displayName || workspace.name}"? It has ${tasks.length} task(s). Archive them first, or force-remove.`
+                                                    : `Remove worktree "${workspace.displayName || workspace.name}"? The branch and worktree directory will be deleted.`;
+                                                if (window.confirm(confirmMsg)) {
+                                                    onRemoveWorktree(workspace.id, false).catch(err => {
+                                                        setWorktreeError(err instanceof Error ? err.message : String(err));
+                                                    });
+                                                }
+                                                onToggleMenu();
+                                            }}
+                                        >
+                                            <Trash2 size={14} />
+                                            <span>Remove Worktree</span>
+                                        </button>
+                                    )}
+                                </>
+                            )}
                             <div className="workspace-dropdown-divider" />
-                            <button
-                                className="workspace-dropdown-item reset"
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    setShowResetConfirm(true);
-                                    onToggleMenu();
-                                }}
-                            >
-                                <RotateCcw size={14} />
-                                <span>Reset Workspace</span>
-                            </button>
+                            {!isWorktree && (
+                                <button
+                                    className="workspace-dropdown-item reset"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        setShowResetConfirm(true);
+                                        onToggleMenu();
+                                    }}
+                                >
+                                    <RotateCcw size={14} />
+                                    <span>Reset Workspace</span>
+                                </button>
+                            )}
                             <button
                                 className="workspace-dropdown-item delete"
                                 onClick={(e) => {
                                     e.stopPropagation();
-                                    if (window.confirm(`Remove workspace "${workspace.name}"? Tasks will not be deleted.`)) {
+                                    if (isWorktree) {
+                                        // For worktrees, removal is handled by "Remove Worktree" above
+                                        if (window.confirm(`Unlink worktree workspace "${workspace.displayName || workspace.name}" from Claudia? The worktree directory on disk will NOT be deleted.`)) {
+                                            onDeleteWorkspace();
+                                        }
+                                    } else if (window.confirm(`Remove workspace "${workspace.name}"? Tasks will not be deleted.`)) {
                                         onDeleteWorkspace();
                                     }
                                     onToggleMenu();
                                 }}
                             >
                                 <Trash2 size={14} />
-                                <span>Remove Workspace</span>
+                                <span>{isWorktree ? 'Unlink Workspace' : 'Remove Workspace'}</span>
                             </button>
                         </div>
                     )}
@@ -1342,6 +1692,37 @@ function WorkspaceSection({
                             </div>
                         </div>
                     )}
+                </div>
+            )}
+
+            {/* Worktree Create Modal */}
+            {showWorktreeModal && onCreateWorktree && (
+                <WorktreeCreateModal
+                    workspace={workspace}
+                    onClose={() => { setShowWorktreeModal(false); setWorktreeError(null); }}
+                    onCreated={() => { setShowWorktreeModal(false); setWorktreeError(null); }}
+                    onCreateWorktree={onCreateWorktree}
+                />
+            )}
+
+            {/* Worktree Manager Panel */}
+            {showWorktreeManager && (
+                <WorktreeManagerPanel
+                    workspace={workspace}
+                    allWorkspaces={allWorkspaces}
+                    onClose={() => setShowWorktreeManager(false)}
+                    onRemoveWorktree={onRemoveWorktree}
+                    onSelectWorkspace={onSelectWorkspace}
+                    onCreateWorktree={() => { setShowWorktreeManager(false); setShowWorktreeModal(true); }}
+                />
+            )}
+
+            {/* Worktree error toast */}
+            {worktreeError && (
+                <div className="worktree-error-toast" onClick={() => setWorktreeError(null)}>
+                    <AlertCircle size={14} />
+                    <span>{worktreeError}</span>
+                    <X size={12} />
                 </div>
             )}
 
@@ -1571,23 +1952,54 @@ export function WorkspacePanel({
 
     // Sort workspaces based on user preference. 'manual' preserves the
     // backend-persisted order — drag-drop only has visible effect in this mode.
-    const sortedWorkspaces = workspaceSortBy === 'manual'
-        ? workspaces
-        : [...workspaces].sort((a, b) => {
-            switch (workspaceSortBy) {
-                case 'alphabetical':
-                    const nameA = (a.displayName || a.name).toLowerCase();
-                    const nameB = (b.displayName || b.name).toLowerCase();
-                    return nameA.localeCompare(nameB);
-                case 'last-modified':
-                    const timeA = getWorkspaceLastModified(a.id).getTime();
-                    const timeB = getWorkspaceLastModified(b.id).getTime();
-                    return timeB - timeA;
-                case 'date-created':
-                default:
-                    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    // After sorting, worktrees are always grouped immediately after their parent.
+    const sortedWorkspaces = (() => {
+        const baseOrder = workspaceSortBy === 'manual'
+            ? workspaces
+            : [...workspaces].sort((a, b) => {
+                switch (workspaceSortBy) {
+                    case 'alphabetical': {
+                        const nameA = (a.displayName || a.name).toLowerCase();
+                        const nameB = (b.displayName || b.name).toLowerCase();
+                        return nameA.localeCompare(nameB);
+                    }
+                    case 'last-modified': {
+                        const timeA = getWorkspaceLastModified(a.id).getTime();
+                        const timeB = getWorkspaceLastModified(b.id).getTime();
+                        return timeB - timeA;
+                    }
+                    case 'date-created':
+                    default:
+                        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+                }
+            });
+
+        // Group worktrees after their parent in the final list
+        const childMap = new Map<string, Workspace[]>();
+        const parents: Workspace[] = [];
+        for (const ws of baseOrder) {
+            if (ws.worktreeParentId) {
+                const siblings = childMap.get(ws.worktreeParentId) ?? [];
+                siblings.push(ws);
+                childMap.set(ws.worktreeParentId, siblings);
+            } else {
+                parents.push(ws);
             }
-        });
+        }
+        const result: Workspace[] = [];
+        for (const parent of parents) {
+            result.push(parent);
+            const children = childMap.get(parent.id) ?? [];
+            result.push(...children);
+        }
+        // Any worktrees whose parent is not in the list (orphaned) go at the end
+        for (const ws of baseOrder) {
+            if (ws.worktreeParentId && !workspaces.some(w => w.id === ws.worktreeParentId)) {
+                result.push(ws);
+            }
+        }
+        return result;
+    })();
 
     const handleDragStart = useCallback((index: number) => {
         setDragIndex(index);
@@ -1683,6 +2095,50 @@ export function WorkspacePanel({
         });
     };
 
+
+    // Worktree handlers
+    const apiBase = getApiBaseUrl();
+
+    const handleCreateWorktree = useCallback(async (workspaceId: string, branch: string, baseBranch?: string, createBranch = true) => {
+        const params = new URLSearchParams({ workspace: workspaceId });
+        const res = await fetch(`${apiBase}/api/worktrees?${params}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ branch, baseBranch, createBranch }),
+        });
+        if (!res.ok) {
+            const d = await res.json().catch(() => ({}));
+            throw new Error(d.error || 'Failed to create worktree');
+        }
+    }, [apiBase]);
+
+    const handleRemoveWorktree = useCallback(async (worktreePath: string, force = false) => {
+        // Find the parent workspace for this worktree
+        const worktreeWs = workspaces.find(w => w.id === worktreePath);
+        const parentId = worktreeWs?.worktreeParentId ?? '';
+        const params = new URLSearchParams({ workspace: parentId, worktreePath, force: String(force) });
+        const res = await fetch(`${apiBase}/api/worktrees?${params}`, { method: 'DELETE' });
+        if (!res.ok) {
+            const d = await res.json().catch(() => ({}));
+            throw new Error(d.error || 'Failed to remove worktree');
+        }
+    }, [apiBase, workspaces]);
+
+    const handleToggleAutoWorktree = useCallback((workspaceId: string, enabled: boolean) => {
+        const params = new URLSearchParams({ workspace: workspaceId });
+        fetch(`${apiBase}/api/worktrees/auto?${params}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled }),
+        }).catch(err => console.error('[WorkspacePanel] autoWorktree toggle failed:', err));
+    }, [apiBase]);
+
+    const handleSelectWorkspace = useCallback((workspaceId: string) => {
+        // Expand the target workspace and select its last task (or just expand it)
+        toggleWorkspaceExpanded(workspaceId);
+        const lastTask = lastSelectedTaskByWorkspace.get(workspaceId);
+        if (lastTask) onSelectTask(lastTask);
+    }, [toggleWorkspaceExpanded, lastSelectedTaskByWorkspace, onSelectTask]);
 
     // External drag-and-drop (from OS file explorer) to add workspaces.
     // Only activates when dataTransfer contains files — internal workspace
@@ -1888,6 +2344,11 @@ export function WorkspacePanel({
                             onRemoveReference={onRemoveReference}
                             onResetWorkspace={() => onResetWorkspace?.(workspace.id)}
                             onOpenScheduledTasks={(taskId) => setScheduledTasksForTaskId(taskId)}
+                            worktreeCount={workspaces.filter(w => w.worktreeParentId === workspace.id).length}
+                            onCreateWorktree={handleCreateWorktree}
+                            onRemoveWorktree={handleRemoveWorktree}
+                            onToggleAutoWorktree={handleToggleAutoWorktree}
+                            onSelectWorkspace={handleSelectWorkspace}
                         />
                     ))
                 )}
