@@ -641,8 +641,8 @@ export function useWebSocket() {
     }, []);
 
     // Task actions
-    const createTask = useCallback((prompt: string, workspaceId: string, initialCols?: number, initialRows?: number) => {
-        sendMessage('task:create', { prompt, workspaceId, initialCols, initialRows });
+    const createTask = useCallback((prompt: string, workspaceId: string, initialCols?: number, initialRows?: number, isolate?: boolean) => {
+        sendMessage('task:create', { prompt, workspaceId, initialCols, initialRows, ...(isolate ? { isolate: true } : {}) });
     }, [sendMessage]);
 
     const selectTaskOnServer = useCallback((taskId: string) => {

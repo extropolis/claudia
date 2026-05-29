@@ -2415,10 +2415,19 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - When you need to research multiple topics simultaneously
 - When building a feature that has separable components
 
+**Git worktree isolation:**
+- When spawning tasks that will **modify files or commit changes**, pass \`isolate: true\` to \`claudia_create_task\`. This creates an isolated git worktree branch so the task's changes don't conflict with other tasks or the main workspace.
+- Use \`isolate: true\` especially when:
+  - Multiple parallel tasks will edit code in the same repository
+  - A task will commit, create branches, or run destructive git operations
+  - Tasks work on independent features that should stay separated until reviewed
+- Do NOT use \`isolate: true\` for read-only tasks (research, analysis, status checks) — they don't need isolation.
+- Isolated tasks appear under the parent workspace grouped by their worktree branch.
+
 **How to orchestrate:**
 1. Check existing tasks first — call \`claudia_list_tasks\` to see what's already running
 2. Plan — break remaining work into independent, parallelizable pieces
-3. Spawn — use \`claudia_create_task\` for each piece with a clear, self-contained prompt that includes all necessary context
+3. Spawn — use \`claudia_create_task\` for each piece with a clear, self-contained prompt that includes all necessary context. Use \`isolate: true\` for tasks that modify files.
 4. Wait and monitor — poll \`claudia_get_task_status\` periodically (every 30-60s) until tasks complete. Handle any that need input via \`claudia_send_input\`
 5. Review — use \`claudia_get_task_output\` to read results from completed tasks
 6. Integrate — review the combined changes for conflicts or integration issues, then fix any problems yourself

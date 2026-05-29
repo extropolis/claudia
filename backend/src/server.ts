@@ -1074,7 +1074,7 @@ export async function createApp(basePath?: string) {
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId, initialCols, initialRows, source, complexity } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string; complexity?: string };
+                        const { prompt, workspaceId, initialCols, initialRows, source, complexity, isolate } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string; complexity?: string; isolate?: boolean };
                         if (!prompt || !workspaceId) {
                             logger.error('task:create requires prompt and workspaceId');
                             sendWSError(ws, 'task:create requires prompt and workspaceId', message.type, 'MISSING_PARAMS');
@@ -1107,9 +1107,9 @@ export async function createApp(basePath?: string) {
                             }
                         }
 
-                        // AUTO-WORKTREE: if workspace has autoWorktree enabled, create an isolated worktree
+                        // AUTO-WORKTREE: if workspace has autoWorktree enabled OR isolate flag set, create an isolated worktree
                         const wsConfig = workspaceStore.getWorkspace(validatedPath);
-                        if (wsConfig?.autoWorktree && !wsConfig.worktreeParentId) {
+                        if ((wsConfig?.autoWorktree || isolate) && !wsConfig?.worktreeParentId) {
                             // Only auto-worktree on parent workspaces (not on existing worktrees)
                             try {
                                 const { randomBytes } = await import('crypto');
@@ -1126,9 +1126,9 @@ export async function createApp(basePath?: string) {
                                 validatedPath = wt.path; // task runs in the new worktree
                                 logger.info('Auto-created worktree for task', { worktreePath: wt.path, branch: autoBranch });
                             } catch (wtErr) {
-                                logger.warn('Auto-worktree creation failed, falling back to parent workspace', {
-                                    error: wtErr instanceof Error ? wtErr.message : String(wtErr)
-                                });
+                                const wtErrMsg = wtErr instanceof Error ? wtErr.message : String(wtErr);
+                                logger.warn('Auto-worktree creation failed, falling back to parent workspace', { error: wtErrMsg });
+                                ws.send(JSON.stringify({ type: 'error', payload: { message: `Worktree creation failed, task running in parent workspace: ${wtErrMsg}` } }));
                             }
                         }
 
@@ -1376,6 +1376,20 @@ export async function createApp(basePath?: string) {
                         const renamed = taskSpawner.renameTask(taskId, displayName, source || 'user');
                         if (renamed) {
                             broadcast({ type: 'tasks:updated' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
+                            // If this task lives in a worktree workspace, update the workspace displayName
+                            // so the inline group header shows a human-readable label instead of the branch slug.
+                            // worktreeBranch (the git branch) remains unchanged.
+                            if (displayName) {
+                                const task = taskSpawner.getTask(taskId);
+                                if (task) {
+                                    const taskWs = workspaceStore.getWorkspaces().find(w => w.id === task.workspaceId);
+                                    if (taskWs?.worktreeParentId) {
+                                        if (workspaceStore.renameWorkspace(taskWs.id, displayName.substring(0, 60))) {
+                                            broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces: workspaceStore.getWorkspaces() } });
+                                        }
+                                    }
+                                }
+                            }
                         }
                         break;
                     }

@@ -562,9 +562,102 @@ function WorktreeManagerPanel({ workspace, allWorkspaces, onClose, onRemoveWorkt
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+interface WorktreeGroup {
+    workspace: Workspace;
+    branch: string; // short branch name
+    tasks: Task[];
+}
+
+interface WorktreeGroupSectionProps {
+    group: WorktreeGroup;
+    selectedTaskId: string | null;
+    lastSelectedTaskId: string | null;
+    waitingInputTaskIds: Set<string>;
+    unreadTaskIds: Set<string>;
+    onDeleteTask: (taskId: string) => void;
+    onInterruptTask: (taskId: string) => void;
+    onArchiveTask: (taskId: string) => void;
+    onRevertTask: (taskId: string) => void;
+    onSelectTask: (taskId: string) => void;
+    onRenameTask?: (taskId: string, displayName: string) => void;
+    onOpenScheduledTasks?: (taskId: string) => void;
+    onRemoveWorktree?: (workspaceId: string, force?: boolean) => Promise<void>;
+}
+
+function WorktreeGroupSection({ group, selectedTaskId, lastSelectedTaskId, waitingInputTaskIds, unreadTaskIds, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, onOpenScheduledTasks, onRemoveWorktree }: WorktreeGroupSectionProps) {
+    const [collapsed, setCollapsed] = useState(false);
+    const [removing, setRemoving] = useState(false);
+
+    const hasActive = group.tasks.some(t => t.state === 'busy' || t.state === 'starting' || t.state === 'waiting_input');
+
+    const handleRemove = async (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!onRemoveWorktree) return;
+        if (!window.confirm(`Remove worktree branch "${group.branch}"? The directory and branch will be deleted.`)) return;
+        setRemoving(true);
+        try {
+            await onRemoveWorktree(group.workspace.id, false);
+        } catch (err) {
+            console.error('[WorktreeGroupSection] remove failed:', err);
+        } finally {
+            setRemoving(false);
+        }
+    };
+
+    return (
+        <div className={`worktree-group${collapsed ? ' collapsed' : ''}`}>
+            <div className="worktree-group-header" onClick={() => setCollapsed(c => !c)}>
+                {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+                <GitBranch size={12} />
+                <span className="worktree-group-branch" title={group.workspace.worktreeBranch || group.branch}>{group.branch}</span>
+                {hasActive && <span className="worktree-group-active-dot" title="Has active tasks" />}
+                {!collapsed && onRemoveWorktree && (
+                    <button
+                        className="worktree-group-remove"
+                        title={hasActive ? 'Archive tasks first' : 'Remove worktree'}
+                        disabled={removing || hasActive}
+                        onClick={handleRemove}
+                    >
+                        <Trash2 size={10} />
+                    </button>
+                )}
+            </div>
+            {!collapsed && (
+                <div className="worktree-group-tasks">
+                    {group.tasks.map((task, idx) => (
+                        <TaskItem
+                            key={task.id}
+                            task={task}
+                            index={idx}
+                            isSelected={selectedTaskId === task.id}
+                            isLastSelected={lastSelectedTaskId === task.id}
+                            hasActiveQuestion={waitingInputTaskIds.has(task.id)}
+                            hasUnreadActivity={unreadTaskIds.has(task.id)}
+                            onDeleteTask={onDeleteTask}
+                            onInterruptTask={onInterruptTask}
+                            onArchiveTask={onArchiveTask}
+                            onRevertTask={onRevertTask}
+                            onSelectTask={onSelectTask}
+                            onRenameTask={onRenameTask}
+                            onOpenScheduledTasks={onOpenScheduledTasks}
+                            isDragging={false}
+                            dragIndex={null}
+                            dragOverIndex={null}
+                            onDragStart={() => {}}
+                            onDragEnter={() => {}}
+                            onDragEnd={() => {}}
+                        />
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
+
 interface WorkspaceSectionProps {
     workspace: Workspace;
     tasks: Task[];
+    worktreeGroups?: WorktreeGroup[]; // Inline worktree sub-sections
     waitingInputTaskIds: Set<string>;
     unreadTaskIds: Set<string>;
     selectedTaskId: string | null;
@@ -588,7 +681,7 @@ interface WorkspaceSectionProps {
     onPushToGithub: () => void;
     onSystemPrompt: () => void;
     onToggleMenu: () => void;
-    onCreateTask: (prompt: string, initialCols?: number, initialRows?: number) => void;
+    onCreateTask: (prompt: string, initialCols?: number, initialRows?: number, isolate?: boolean) => void;
     // Workspace drag handlers
     onDragStart: (index: number) => void;
     onDragEnter: (index: number) => void;
@@ -618,6 +711,7 @@ interface WorkspaceSectionProps {
 function WorkspaceSection({
     workspace,
     tasks,
+    worktreeGroups = [],
     waitingInputTaskIds,
     unreadTaskIds,
     selectedTaskId,
@@ -661,6 +755,7 @@ function WorkspaceSection({
 }: WorkspaceSectionProps) {
     const isConnected = useTaskStore(s => s.isConnected);
     const [inputValue, setInputValue] = useState('');
+    const [isolate, setIsolate] = useState(!!workspace.autoWorktree);
     const [isEditingWorkspaceName, setIsEditingWorkspaceName] = useState(false);
     const [showReferencesSubmenu, setShowReferencesSubmenu] = useState(false);
     const [submenuPosition, setSubmenuPosition] = useState<{ top: number; left: number } | null>(null);
@@ -974,13 +1069,15 @@ function WorkspaceSection({
             const panelHeight = mainPanel?.clientHeight || (window.innerHeight - 100);
             const cols = Math.max(80, Math.floor(panelWidth / 9)); // ~9px per char
             const rows = Math.max(24, Math.floor(panelHeight / 18)); // ~18px per line
-            onCreateTask(fullMessage.trim(), cols, rows);
+            onCreateTask(fullMessage.trim(), cols, rows, isolate);
             setInputValue('');
+            // Reset isolate to workspace default after sending
+            setIsolate(!!workspace.autoWorktree);
             // Clear images after sending
             images.forEach(img => URL.revokeObjectURL(img.previewUrl));
             setImages([]);
         }
-    }, [inputValue, images, globalVoiceEnabled, clearVoiceTranscript, onCreateTask]);
+    }, [inputValue, images, isolate, workspace.autoWorktree, globalVoiceEnabled, clearVoiceTranscript, onCreateTask]);
 
     // Listen for auto-send event
     useEffect(() => {
@@ -1640,6 +1737,16 @@ function WorkspaceSection({
                                 onChange={(e) => handleFileSelect(e.target.files)}
                                 style={{ display: 'none' }}
                             />
+                            {!isWorktree && (
+                                <button
+                                    type="button"
+                                    className={`task-isolate-button${isolate ? ' active' : ''}`}
+                                    title={isolate ? 'Isolate in worktree: ON — click to disable' : 'Isolate in worktree: OFF — click to enable'}
+                                    onClick={() => setIsolate(v => !v)}
+                                >
+                                    <GitBranch size={14} />
+                                </button>
+                            )}
                             <button
                                 type="submit"
                                 className="task-submit-button"
@@ -1649,7 +1756,7 @@ function WorkspaceSection({
                             </button>
                         </div>
                     </form>
-                    {tasks.length === 0 ? (
+                    {tasks.length === 0 && worktreeGroups.length === 0 ? (
                         <div className="empty-tasks">No tasks yet</div>
                     ) : (
                         <div className="task-list-container">
@@ -1680,6 +1787,24 @@ function WorkspaceSection({
                                         onDragStart={handleTaskDragStart}
                                         onDragEnter={handleTaskDragEnter}
                                         onDragEnd={handleTaskDragEnd}
+                                    />
+                                ))}
+                                {worktreeGroups.map((group) => (
+                                    <WorktreeGroupSection
+                                        key={group.workspace.id}
+                                        group={group}
+                                        selectedTaskId={selectedTaskId}
+                                        lastSelectedTaskId={lastSelectedTaskId}
+                                        waitingInputTaskIds={waitingInputTaskIds}
+                                        unreadTaskIds={unreadTaskIds}
+                                        onDeleteTask={onDeleteTask}
+                                        onInterruptTask={onInterruptTask}
+                                        onArchiveTask={onArchiveTask}
+                                        onRevertTask={onRevertTask}
+                                        onSelectTask={onSelectTask}
+                                        onRenameTask={onRenameTask}
+                                        onOpenScheduledTasks={onOpenScheduledTasks}
+                                        onRemoveWorktree={onRemoveWorktree}
                                     />
                                 ))}
                             </div>
@@ -1838,7 +1963,7 @@ interface WorkspacePanelProps {
     onOpenShell: (workspaceId: string) => void;
     onPushToGithub: (workspaceId: string) => void;
     onSetSystemPrompt: (workspaceId: string, systemPrompt: string) => void;
-    onCreateTask: (prompt: string, workspaceId: string, initialCols?: number, initialRows?: number) => void;
+    onCreateTask: (prompt: string, workspaceId: string, initialCols?: number, initialRows?: number, isolate?: boolean) => void;
     onSelectTask: (taskId: string) => void;
     onRequestArchivedTasks?: () => void;
     onRestoreArchivedTask?: (taskId: string) => void;
@@ -1952,53 +2077,28 @@ export function WorkspacePanel({
 
     // Sort workspaces based on user preference. 'manual' preserves the
     // backend-persisted order — drag-drop only has visible effect in this mode.
-    // After sorting, worktrees are always grouped immediately after their parent.
+    // Worktree child workspaces are excluded from the top-level list and rendered
+    // inline within their parent WorkspaceSection instead.
     const sortedWorkspaces = (() => {
-        const baseOrder = workspaceSortBy === 'manual'
-            ? workspaces
-            : [...workspaces].sort((a, b) => {
-                switch (workspaceSortBy) {
-                    case 'alphabetical': {
-                        const nameA = (a.displayName || a.name).toLowerCase();
-                        const nameB = (b.displayName || b.name).toLowerCase();
-                        return nameA.localeCompare(nameB);
-                    }
-                    case 'last-modified': {
-                        const timeA = getWorkspaceLastModified(a.id).getTime();
-                        const timeB = getWorkspaceLastModified(b.id).getTime();
-                        return timeB - timeA;
-                    }
-                    case 'date-created':
-                    default:
-                        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        const parentWorkspaces = workspaces.filter(w => !w.worktreeParentId);
+        if (workspaceSortBy === 'manual') return parentWorkspaces;
+        return [...parentWorkspaces].sort((a, b) => {
+            switch (workspaceSortBy) {
+                case 'alphabetical': {
+                    const nameA = (a.displayName || a.name).toLowerCase();
+                    const nameB = (b.displayName || b.name).toLowerCase();
+                    return nameA.localeCompare(nameB);
                 }
-            });
-
-        // Group worktrees after their parent in the final list
-        const childMap = new Map<string, Workspace[]>();
-        const parents: Workspace[] = [];
-        for (const ws of baseOrder) {
-            if (ws.worktreeParentId) {
-                const siblings = childMap.get(ws.worktreeParentId) ?? [];
-                siblings.push(ws);
-                childMap.set(ws.worktreeParentId, siblings);
-            } else {
-                parents.push(ws);
+                case 'last-modified': {
+                    const timeA = getWorkspaceLastModified(a.id).getTime();
+                    const timeB = getWorkspaceLastModified(b.id).getTime();
+                    return timeB - timeA;
+                }
+                case 'date-created':
+                default:
+                    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
             }
-        }
-        const result: Workspace[] = [];
-        for (const parent of parents) {
-            result.push(parent);
-            const children = childMap.get(parent.id) ?? [];
-            result.push(...children);
-        }
-        // Any worktrees whose parent is not in the list (orphaned) go at the end
-        for (const ws of baseOrder) {
-            if (ws.worktreeParentId && !workspaces.some(w => w.id === ws.worktreeParentId)) {
-                result.push(ws);
-            }
-        }
-        return result;
+        });
     })();
 
     const handleDragStart = useCallback((index: number) => {
@@ -2067,32 +2167,39 @@ export function WorkspacePanel({
     // Get task IDs that have active questions
     const waitingInputTaskIds = new Set(waitingInputNotifications.keys());
 
-    // Group tasks by workspace, sorted by user preference
-    const getTasksForWorkspace = (workspaceId: string): Task[] => {
-        const workspaceTasks = Array.from(tasks.values()).filter(t => t.workspaceId === workspaceId);
-
-        return workspaceTasks.sort((a, b) => {
-            // If both have manual order, sort by order (ascending)
-            if (a.order !== undefined && b.order !== undefined) {
-                return a.order - b.order;
-            }
-            // If only one has order, it comes first (manual order takes precedence)
+    // Sort tasks by user preference
+    const sortTasks = (taskList: Task[]): Task[] => {
+        return taskList.sort((a, b) => {
+            if (a.order !== undefined && b.order !== undefined) return a.order - b.order;
             if (a.order !== undefined) return -1;
             if (b.order !== undefined) return 1;
-
-            // Neither has manual order, apply user's sort preference
             switch (taskSortBy) {
-                case 'last-modified':
-                    // Sort by most recent activity
+                case 'last-modified': {
                     const timeA = new Date(a.lastActivity || a.createdAt).getTime();
                     const timeB = new Date(b.lastActivity || b.createdAt).getTime();
-                    return timeB - timeA; // Most recent first
+                    return timeB - timeA;
+                }
                 case 'date-created':
                 default:
-                    // Sort by creation time (newest first)
                     return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
             }
         });
+    };
+
+    // Direct tasks for a workspace (excludes tasks in child worktrees)
+    const getTasksForWorkspace = (workspaceId: string): Task[] => {
+        return sortTasks(Array.from(tasks.values()).filter(t => t.workspaceId === workspaceId));
+    };
+
+    // Build inline worktree groups for a parent workspace
+    const getWorktreeGroupsForWorkspace = (parentId: string): WorktreeGroup[] => {
+        const childWorkspaces = workspaces.filter(w => w.worktreeParentId === parentId);
+        return childWorkspaces.map(ws => ({
+            workspace: ws,
+            // Show human-readable name if task has been named, otherwise fall back to branch
+            branch: ws.displayName || ws.worktreeBranch || ws.name,
+            tasks: sortTasks(Array.from(tasks.values()).filter(t => t.workspaceId === ws.id)),
+        })).filter(g => g.tasks.length > 0); // only show groups that have tasks
     };
 
 
@@ -2299,6 +2406,7 @@ export function WorkspacePanel({
                             key={workspace.id}
                             workspace={workspace}
                             tasks={getTasksForWorkspace(workspace.id)}
+                            worktreeGroups={getWorktreeGroupsForWorkspace(workspace.id)}
                             waitingInputTaskIds={waitingInputTaskIds}
                             unreadTaskIds={unreadTaskIds}
                             selectedTaskId={selectedTaskId}
@@ -2321,7 +2429,7 @@ export function WorkspacePanel({
                             onPushToGithub={() => onPushToGithub(workspace.id)}
                             onSystemPrompt={() => setSystemPromptWorkspace(workspace)}
                             onToggleMenu={() => setOpenMenuId(openMenuId === workspace.id ? null : workspace.id)}
-                            onCreateTask={(prompt, cols, rows) => onCreateTask(prompt, workspace.id, cols, rows)}
+                            onCreateTask={(prompt, cols, rows, isolate) => onCreateTask(prompt, workspace.id, cols, rows, isolate)}
                             onDragStart={handleDragStart}
                             onDragEnter={handleDragEnter}
                             onDragEnd={handleDragEnd}

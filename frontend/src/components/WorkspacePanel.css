@@ -1675,6 +1675,7 @@
 
     .task-submit-button,
     .task-image-button,
+    .task-isolate-button,
     .task-voice-button {
         width: 36px;
         height: 36px;
@@ -2243,4 +2244,109 @@
     font-size: 12px;
     margin: 6px 8px;
     cursor: pointer;
+}
+
+/* ── Isolate-in-worktree toggle button ─────────────────────────────────────── */
+.task-isolate-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+}
+
+.task-isolate-button:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--accent-secondary);
+    color: var(--accent-secondary);
+}
+
+.task-isolate-button.active {
+    background: var(--bg-tertiary);
+    border-color: var(--accent-secondary);
+    color: var(--accent-secondary);
+}
+
+/* ── Inline worktree group section ──────────────────────────────────────────── */
+.worktree-group {
+    margin-top: 4px;
+    border-top: 1px solid rgba(88, 166, 255, 0.12);
+}
+
+.worktree-group-header {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 6px;
+    cursor: pointer;
+    color: var(--accent-blue, #58a6ff);
+    font-size: 11px;
+    opacity: 0.75;
+    border-radius: 4px;
+    transition: opacity 0.15s, background 0.15s;
+    user-select: none;
+}
+
+.worktree-group-header:hover {
+    opacity: 1;
+    background: rgba(88, 166, 255, 0.06);
+}
+
+.worktree-group-branch {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono, monospace);
+}
+
+.worktree-group-active-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-green, #3fb950);
+    flex-shrink: 0;
+}
+
+.worktree-group-remove {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 3px;
+    color: var(--text-muted, #8b949e);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s, background 0.15s;
+}
+
+.worktree-group-header:hover .worktree-group-remove {
+    opacity: 0.6;
+}
+
+.worktree-group-remove:hover {
+    opacity: 1 !important;
+    background: rgba(248, 81, 73, 0.15);
+    color: var(--accent-red, #f85149);
+}
+
+.worktree-group-remove:disabled {
+    opacity: 0.2 !important;
+    cursor: not-allowed;
+}
+
+.worktree-group-tasks {
+    padding-left: 12px;
 }
