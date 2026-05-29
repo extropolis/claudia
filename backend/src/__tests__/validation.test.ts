@@ -534,7 +534,12 @@ describe('validateWorkspacePath', () => {
     it('should reject /usr non-local system path', () => {
         const res = validateWorkspacePath('/usr/bin');
         expect(res.valid).toBe(false);
-        expect(res.error).toContain('not allowed');
+        // On Unix /usr/bin exists and is blocked as a system path ('not
+        // allowed'). On Windows it does not exist, so it is rejected earlier
+        // with 'Path does not exist' — both are valid rejections.
+        if (existsSync('/usr/bin')) {
+            expect(res.error).toContain('not allowed');
+        }
     });
 
     it('should allow /usr/local paths', () => {
