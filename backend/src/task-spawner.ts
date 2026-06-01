@@ -9,7 +9,7 @@ import { execSync } from 'child_process';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
-import { sanitizePrompt } from './validation.js';
+import { sanitizePrompt, decodeHtmlEntities } from './validation.js';
 import { createLogger } from './logger.js';
 import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
@@ -96,7 +96,18 @@ function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } {
     if (!isWindows) return { command: 'claude', prefixArgs: [] };
     const appData = process.env['APPDATA'];
     if (appData) {
-        const cliPath = join(appData, 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
+        const pkgDir = join(appData, 'npm', 'node_modules', '@anthropic-ai', 'claude-code');
+        // Newer claude-code ships a native bin/claude.exe (no cli.js). Spawn it
+        // directly so multiline args like --system-prompt are passed verbatim.
+        // The cmd.exe /c claude.cmd fallback re-parses the command line and
+        // corrupts long/multiline args (e.g. dropping --model after the prompt).
+        const exePath = join(pkgDir, 'bin', 'claude.exe');
+        if (existsSync(exePath)) {
+            console.log(`[TaskSpawner] Resolved Claude CLI exe via APPDATA: ${exePath}`);
+            return { command: exePath, prefixArgs: [] };
+        }
+        // Older layout: cli.js run via node.
+        const cliPath = join(pkgDir, 'cli.js');
         if (existsSync(cliPath)) {
             console.log(`[TaskSpawner] Resolved Claude CLI via APPDATA: ${process.execPath} ${cliPath}`);
             return { command: process.execPath, prefixArgs: [cliPath] };
@@ -1909,17 +1920,7 @@ export class TaskSpawner extends EventEmitter {
             taskEnv['ANTHROPIC_API_KEY'] = 'hyperspace-proxy';
             console.log(`[TaskSpawner] Using Hyperspace proxy at ${proxyUrl}`);
         }
-        // 'default' mode: don't set any API routing env vars, let the backend use its own settings
-
-        // The configured default model must win over any ANTHROPIC_MODEL inherited
-        // from the shell that launched the server (e.g. a corporate proxy profile
-        // that exports ANTHROPIC_MODEL). Without this, spawned tasks silently fall
-        // back to the inherited model regardless of the Claudia setting.
-        const defaultModel = this.configStore.getClaudeCodeSwitches().defaultModel?.trim();
-        if (defaultModel) {
-            taskEnv['ANTHROPIC_MODEL'] = defaultModel;
-            console.log(`[TaskSpawner] Overriding ANTHROPIC_MODEL with configured default: ${defaultModel}`);
-        }
+        // 'default' mode: don't set any env vars, let the backend use its own settings
 
         return taskEnv;
     }
@@ -2726,7 +2727,9 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             systemPrompt: task.systemPrompt,
             sessionId: task.sessionId || undefined,
             backendType,
-            displayName: task.displayName,
+            // Decode entities so legacy names stored with HTML entities (e.g.
+            // "release notes &amp; agent CI") render as plain text.
+            displayName: task.displayName ? decodeHtmlEntities(task.displayName) : task.displayName,
             displayNameEditedByUser: task.displayNameEditedByUser,
             order: task.order,
             tokenUsage: task.tokenUsage,
@@ -2833,7 +2836,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
      * @param source - 'user' if renamed by user in UI (locks title from agent edits), 'agent' if renamed by MCP agent
      */
     renameTask(taskId: string, displayName: string, source: 'user' | 'agent' = 'user'): boolean {
-        const trimmed = displayName.trim();
+        const trimmed = decodeHtmlEntities(displayName.trim());
 
         // Try active tasks first
         const task = this.tasks.get(taskId);

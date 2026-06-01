@@ -585,3 +585,24 @@ export function sanitizePrompt(prompt: string): string {
 
     return sanitized;
 }
+
+/**
+ * Decode common HTML entities to plain text. Agents sometimes derive task
+ * titles from already-encoded sources (PR titles, rendered HTML, web pages),
+ * producing names like "release notes &amp; agent CI". Titles are rendered as
+ * plain text in the UI, so decode them at the storage choke point.
+ */
+export function decodeHtmlEntities(text: string): string {
+    return text
+        // Numeric: &#39; and &#x27;
+        .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+        .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+        // Named (common subset)
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/&nbsp;/g, ' ')
+        // &amp; LAST so we don't double-decode (e.g. "&amp;lt;" -> "&lt;", not "<")
+        .replace(/&amp;/g, '&');
+}

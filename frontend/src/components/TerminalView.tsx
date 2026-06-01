@@ -603,8 +603,10 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                                 programmaticScrollRef.current = false;
                             }, 100);
                         });
-                    } else {
-                        // User was scrolled up - maintain their position
+                    } else if (Number.isInteger(viewport)) {
+                        // User was scrolled up - maintain their position.
+                        // Guard against a non-finite viewportY (xterm's scrollToLine
+                        // throws "This API only accepts integers" on NaN).
                         programmaticScrollRef.current = true;
                         term.scrollToLine(viewport);
                         setTimeout(() => {
