@@ -1909,7 +1909,17 @@ export class TaskSpawner extends EventEmitter {
             taskEnv['ANTHROPIC_API_KEY'] = 'hyperspace-proxy';
             console.log(`[TaskSpawner] Using Hyperspace proxy at ${proxyUrl}`);
         }
-        // 'default' mode: don't set any env vars, let the backend use its own settings
+        // 'default' mode: don't set any API routing env vars, let the backend use its own settings
+
+        // The configured default model must win over any ANTHROPIC_MODEL inherited
+        // from the shell that launched the server (e.g. a corporate proxy profile
+        // that exports ANTHROPIC_MODEL). Without this, spawned tasks silently fall
+        // back to the inherited model regardless of the Claudia setting.
+        const defaultModel = this.configStore.getClaudeCodeSwitches().defaultModel?.trim();
+        if (defaultModel) {
+            taskEnv['ANTHROPIC_MODEL'] = defaultModel;
+            console.log(`[TaskSpawner] Overriding ANTHROPIC_MODEL with configured default: ${defaultModel}`);
+        }
 
         return taskEnv;
     }

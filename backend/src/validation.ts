@@ -53,7 +53,9 @@ export interface ConfigUpdatePayload {
         allowedTools?: string;
         disallowedTools?: string;
         appendSystemPrompt?: string;
+        effortLevel?: string;
         model?: string;
+        defaultModel?: string;
     };
     deepgramApiKey?: string;
     hyperspaceProxy?: {
@@ -335,6 +337,20 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
                 return { valid: false, error: 'claudeCodeSwitches.model must be a string' };
             }
             result.claudeCodeSwitches.model = switches.model;
+        }
+
+        if (switches.defaultModel !== undefined) {
+            if (typeof switches.defaultModel !== 'string') {
+                return { valid: false, error: 'claudeCodeSwitches.defaultModel must be a string' };
+            }
+            result.claudeCodeSwitches.defaultModel = switches.defaultModel;
+        }
+
+        if (switches.effortLevel !== undefined) {
+            if (typeof switches.effortLevel !== 'string') {
+                return { valid: false, error: 'claudeCodeSwitches.effortLevel must be a string' };
+            }
+            result.claudeCodeSwitches.effortLevel = switches.effortLevel;
         }
     }
 

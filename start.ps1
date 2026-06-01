@@ -1,4 +1,12 @@
 # Claudia - Start Script (PowerShell)
+#
+# Usage:
+#   .\start.ps1          # backend runs no-watch (default; stable, no spurious restarts)
+#   .\start.ps1 -Watch   # backend runs tsx watch (auto-reload on backend/src edits)
+
+param(
+    [switch]$Watch
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -73,16 +81,18 @@ $env:NODE_OPTIONS = "--max-old-space-size=8192"
 
 # Start backend and frontend concurrently
 # Using npm.cmd to avoid the PowerShell strict mode bug with npm.ps1
-# Use dev:no-watch (no tsx watch) to prevent spurious restarts from file changes
-# (e.g., Claude Code tasks editing source files, antivirus, Windows indexer).
-# For active claudia development, change to 'npm.cmd run dev' to enable auto-reload.
+# -Watch selects 'dev' (tsx watch, auto-reload) over the default 'dev:no-watch'.
+# no-watch is the default because spurious restarts can occur when Claude Code
+# tasks edit source files, antivirus scans, or the Windows indexer touch backend/src.
+$backendScript = if ($Watch) { "dev" } else { "dev:no-watch" }
+Write-Host "Backend mode: $backendScript$(if ($Watch) { ' (auto-reload enabled)' } else { '' })"
 $backendJob = Start-Job -ScriptBlock {
-    param($dir, $port, $nodeOpts)
+    param($dir, $port, $nodeOpts, $script)
     Set-Location $dir
     $env:CLAUDIA_BACKEND_PORT = $port
     $env:NODE_OPTIONS = $nodeOpts
-    & npm.cmd run dev:no-watch -w backend 2>&1
-} -ArgumentList $PSScriptRoot, $BACKEND_PORT, $env:NODE_OPTIONS
+    & npm.cmd run $script -w backend 2>&1
+} -ArgumentList $PSScriptRoot, $BACKEND_PORT, $env:NODE_OPTIONS, $backendScript
 
 $frontendJob = Start-Job -ScriptBlock {
     param($dir)
