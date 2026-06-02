@@ -761,6 +761,62 @@ export async function createApp(basePath?: string) {
     // Kick off an initial pass shortly after startup.
     setTimeout(() => { void refreshActiveWorkspacePrInfo(); }, 5_000);
 
+    // ===== Worktree discovery =====
+    // A task may create a git worktree itself (raw `git worktree add`) instead of
+    // going through Claudia's auto-worktree path. Those aren't registered as
+    // workspaces, so they never appear in the sidebar. Detect worktrees in repos
+    // that have Claudia tasks and register any we don't know about yet.
+    let worktreeScanInFlight = false;
+    async function discoverWorktrees(): Promise<void> {
+        if (worktreeScanInFlight) return;
+        worktreeScanInFlight = true;
+        try {
+            const known = new Set(workspaceStore.getWorkspaces().map(w => resolve(w.id)));
+            // Only scan repos that are registered, non-worktree workspaces with tasks.
+            const tasks = taskSpawner.getAllTasks();
+            const workspacesWithTasks = new Set(tasks.map(t => t.workspaceId));
+            const reposToScan = workspaceStore.getWorkspaces().filter(
+                w => !w.worktreeParentId && workspacesWithTasks.has(w.id)
+            );
+            const manager = new WorktreeManager();
+            let added = false;
+            for (const repo of reposToScan) {
+                let worktrees: Awaited<ReturnType<WorktreeManager['listWorktrees']>>;
+                try {
+                    worktrees = await manager.listWorktrees(repo.id);
+                } catch {
+                    continue; // not a git repo or git error — skip
+                }
+                for (const wt of worktrees) {
+                    if (wt.isMain) continue;
+                    const wtPath = resolve(wt.path);
+                    if (known.has(wtPath)) continue;
+                    if (!existsSync(wtPath)) continue;
+                    const branch = wt.branch.replace(/^refs\/heads\//, '');
+                    try {
+                        const wtWorkspace = await workspaceStore.addWorktreeWorkspace(wtPath, repo.id, branch);
+                        known.add(wtPath);
+                        broadcast({ type: 'workspace:created' as WSMessageType, payload: { workspace: wtWorkspace } });
+                        logger.info('Discovered externally-created worktree', { path: wtPath, branch, parent: repo.id });
+                        added = true;
+                    } catch (err) {
+                        logger.debug('Failed to register discovered worktree', { path: wtPath, error: err instanceof Error ? err.message : String(err) });
+                    }
+                }
+            }
+            if (added) {
+                broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces: workspaceStore.getWorkspaces() } });
+            }
+        } finally {
+            worktreeScanInFlight = false;
+        }
+    }
+
+    // Periodic sweep + initial pass shortly after startup.
+    const WORKTREE_SCAN_INTERVAL_MS = 60_000;
+    const worktreeScanInterval = setInterval(() => { void discoverWorktrees(); }, WORKTREE_SCAN_INTERVAL_MS);
+    setTimeout(() => { void discoverWorktrees(); }, 6_000);
+
     // ===== Embedded Shell Terminal Management =====
     const isWindows = process.platform === 'win32';
     const shellProcesses: Map<string, IPty> = new Map(); // workspaceId → PTY
@@ -848,6 +904,12 @@ export async function createApp(basePath?: string) {
     taskSpawner.on('taskStateChanged', (task: Task) => {
         console.log(`[Server] taskStateChanged event: task=${task.id} state=${task.state}`);
         queueTaskStateChange(task); // Batched - deduplicates rapid state changes
+
+        // When a task goes idle it may have just created a worktree (raw git) —
+        // scan so it shows up in the sidebar. Guarded against concurrent scans.
+        if (task.state === 'idle') {
+            void discoverWorktrees();
+        }
 
         // Deliver pending reference notifications when a task becomes idle
         if (task.state === 'idle') {
@@ -6103,6 +6165,7 @@ Guidelines:
         // Clear heartbeat interval
         clearInterval(heartbeatInterval);
         clearInterval(prInfoInterval);
+        clearInterval(worktreeScanInterval);
 
         // Notify all connected clients that the server is reloading
         broadcast({ type: 'server:reloading' as WSMessageType, payload: {} });
