@@ -718,6 +718,19 @@
     background: rgba(255, 171, 64, 0.22);
 }
 
+/* Inline worktree badge on a single-task worktree (icon only, branch in tooltip) */
+.workspace-panel .task-item .task-worktree-badge {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    margin-left: 4px;
+    padding: 1px 4px;
+    border-radius: 8px;
+    background: rgba(0, 212, 255, 0.1);
+    color: var(--accent-secondary);
+    opacity: 0.8;
+}
+
 /* ===== PR badge (worktree group header + workspace header) ===== */
 .pr-badge {
     position: relative;

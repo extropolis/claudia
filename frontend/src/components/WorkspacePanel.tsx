@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
-import { Task, Workspace } from '@claudia/shared';
+import { Task, Workspace, WorkspacePrInfo } from '@claudia/shared';
 import {
     Loader2, Circle, ChevronRight, ChevronDown, ChevronLeft,
     Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp
@@ -109,6 +109,9 @@ interface TaskItemProps {
     onDragStart: (index: number) => void;
     onDragEnter: (index: number) => void;
     onDragEnd: () => void;
+    // When this task is the sole task in a worktree, show an inline worktree
+    // badge (branch in tooltip) + PR badge instead of a separate group section.
+    worktreeInfo?: { branch: string; prInfo?: WorkspacePrInfo | null };
 }
 
 /** Format a time-ago string from a Date/string, e.g. "5s", "2m", "1h", "3d" */
@@ -127,7 +130,7 @@ function formatTimeAgo(date: Date | string): string {
     return `${days}d`;
 }
 
-function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, onOpenScheduledTasks, isSelected, isLastSelected, hasActiveQuestion, hasUnreadActivity, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd }: TaskItemProps) {
+function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, onOpenScheduledTasks, isSelected, isLastSelected, hasActiveQuestion, hasUnreadActivity, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd, worktreeInfo }: TaskItemProps) {
     const [stopClicked, setStopClicked] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
     const [editValue, setEditValue] = useState('');
@@ -258,6 +261,12 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                     <span className="task-cron-count">{scheduledTaskCount}</span>
                 </button>
             )}
+            {worktreeInfo && (
+                <span className="task-worktree-badge" title={`Worktree: ${worktreeInfo.branch}`}>
+                    <GitBranch size={10} />
+                </span>
+            )}
+            {worktreeInfo?.prInfo && <PrBadge prInfo={worktreeInfo.prInfo} />}
             <div className="task-actions">
                 {task.lastActivity && (
                     <span
@@ -1793,22 +1802,54 @@ function WorkspaceSection({
                                     />
                                 ))}
                                 {worktreeGroups.map((group) => (
-                                    <WorktreeGroupSection
-                                        key={group.workspace.id}
-                                        group={group}
-                                        selectedTaskId={selectedTaskId}
-                                        lastSelectedTaskId={lastSelectedTaskId}
-                                        waitingInputTaskIds={waitingInputTaskIds}
-                                        unreadTaskIds={unreadTaskIds}
-                                        onDeleteTask={onDeleteTask}
-                                        onInterruptTask={onInterruptTask}
-                                        onArchiveTask={onArchiveTask}
-                                        onRevertTask={onRevertTask}
-                                        onSelectTask={onSelectTask}
-                                        onRenameTask={onRenameTask}
-                                        onOpenScheduledTasks={onOpenScheduledTasks}
-                                        onRemoveWorktree={onRemoveWorktree}
-                                    />
+                                    // Single-task worktree: render the task inline with a
+                                    // worktree badge + PR badge instead of a group section.
+                                    // Multi-task worktree: keep the collapsible group.
+                                    group.tasks.length === 1 ? (
+                                        <TaskItem
+                                            key={group.workspace.id}
+                                            task={group.tasks[0]}
+                                            index={0}
+                                            isSelected={selectedTaskId === group.tasks[0].id}
+                                            isLastSelected={lastSelectedTaskId === group.tasks[0].id}
+                                            hasActiveQuestion={waitingInputTaskIds.has(group.tasks[0].id)}
+                                            hasUnreadActivity={unreadTaskIds.has(group.tasks[0].id)}
+                                            onDeleteTask={onDeleteTask}
+                                            onInterruptTask={onInterruptTask}
+                                            onArchiveTask={onArchiveTask}
+                                            onRevertTask={onRevertTask}
+                                            onSelectTask={onSelectTask}
+                                            onRenameTask={onRenameTask}
+                                            onOpenScheduledTasks={onOpenScheduledTasks}
+                                            isDragging={false}
+                                            dragIndex={null}
+                                            dragOverIndex={null}
+                                            onDragStart={() => {}}
+                                            onDragEnter={() => {}}
+                                            onDragEnd={() => {}}
+                                            worktreeInfo={{
+                                                branch: group.workspace.worktreeBranch || group.branch,
+                                                prInfo: group.workspace.prInfo,
+                                            }}
+                                        />
+                                    ) : (
+                                        <WorktreeGroupSection
+                                            key={group.workspace.id}
+                                            group={group}
+                                            selectedTaskId={selectedTaskId}
+                                            lastSelectedTaskId={lastSelectedTaskId}
+                                            waitingInputTaskIds={waitingInputTaskIds}
+                                            unreadTaskIds={unreadTaskIds}
+                                            onDeleteTask={onDeleteTask}
+                                            onInterruptTask={onInterruptTask}
+                                            onArchiveTask={onArchiveTask}
+                                            onRevertTask={onRevertTask}
+                                            onSelectTask={onSelectTask}
+                                            onRenameTask={onRenameTask}
+                                            onOpenScheduledTasks={onOpenScheduledTasks}
+                                            onRemoveWorktree={onRemoveWorktree}
+                                        />
+                                    )
                                 ))}
                             </div>
                             <div
