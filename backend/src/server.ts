@@ -19,7 +19,7 @@ import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
-import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch } from './git-utils.js';
+import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
 import { WorktreeManager } from './worktree-manager.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
@@ -672,6 +672,95 @@ export async function createApp(basePath?: string) {
         scheduleBatchedBroadcast();
     }
 
+    // ===== GitHub PR info refresh =====
+    // Resolve the GitHub PR for each relevant workspace's branch via `gh`, cache it
+    // on the workspace store, and broadcast when anything changed. Respects the same
+    // anti-storm discipline the frontend uses (WorkspacePanel.tsx git-status polling):
+    // only the workspaces with active tasks are refreshed on the interval; others are
+    // refreshed lazily via refreshPrInfoFor() on task/worktree events.
+    let ghAvailable: boolean | null = null;
+    async function isGhAvailable(): Promise<boolean> {
+        if (ghAvailable !== null) return ghAvailable;
+        try {
+            const { execFile } = await import('child_process');
+            const { promisify } = await import('util');
+            await promisify(execFile)('gh', ['--version'], { timeout: 5000 });
+            ghAvailable = true;
+        } catch {
+            ghAvailable = false;
+        }
+        return ghAvailable;
+    }
+
+    // Track which workspaces we've looked up at least once (lazy first-fetch),
+    // and which currently have an in-flight `gh` call (so rapid task creates /
+    // overlapping ticks don't fire concurrent calls for the same workspace).
+    const prInfoSeen = new Set<string>();
+    const prInfoInFlight = new Set<string>();
+
+    // Resolve (repoPath, branch) for a workspace, then look up its PR.
+    async function refreshPrInfoFor(workspaceId: string): Promise<void> {
+        if (prInfoInFlight.has(workspaceId)) return;
+        if (!(await isGhAvailable())) return;
+        const ws = workspaceStore.getWorkspace(workspaceId);
+        if (!ws) return;
+        prInfoInFlight.add(workspaceId);
+        prInfoSeen.add(workspaceId);
+        try {
+            let repoPath: string;
+            let branch: string | null;
+            if (ws.worktreeParentId && ws.worktreeBranch) {
+                repoPath = ws.worktreeParentId;   // parent repo path
+                branch = ws.worktreeBranch;
+            } else {
+                repoPath = ws.id;
+                branch = await getCurrentBranch(ws.id);
+            }
+            const prInfo = branch ? await getPrForBranch(repoPath, branch) : null;
+            if (workspaceStore.setPrInfo(workspaceId, prInfo)) {
+                broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces: workspaceStore.getWorkspaces() } });
+            }
+        } catch (err) {
+            logger.debug('refreshPrInfoFor failed', { workspaceId, error: err instanceof Error ? err.message : String(err) });
+        } finally {
+            prInfoInFlight.delete(workspaceId);
+        }
+    }
+
+    // Reentrancy guard: if a refresh pass runs long (slow gh/auth), don't let the
+    // next interval tick start a second concurrent pass.
+    let prRefreshPassInFlight = false;
+
+    async function refreshActiveWorkspacePrInfo(): Promise<void> {
+        if (prRefreshPassInFlight) return;
+        if (!(await isGhAvailable())) return;
+        prRefreshPassInFlight = true;
+        try {
+        const tasks = taskSpawner.getAllTasks();
+        // Workspaces with at least one active task → refresh every interval.
+        const activeWorkspaceIds = new Set(
+            tasks.filter(t => t.state === 'busy' || t.state === 'starting' || t.state === 'waiting_input')
+                 .map(t => t.workspaceId)
+        );
+        // Workspaces with any task we haven't looked up yet → one-time lazy fetch.
+        const lazyWorkspaceIds = new Set(
+            tasks.map(t => t.workspaceId).filter(id => !prInfoSeen.has(id))
+        );
+        const toRefresh = new Set<string>([...activeWorkspaceIds, ...lazyWorkspaceIds]);
+        for (const id of toRefresh) {
+            await refreshPrInfoFor(id);  // marks prInfoSeen + guards in-flight
+        }
+        } finally {
+            prRefreshPassInFlight = false;
+        }
+    }
+
+    // Poll on an interval (90s) — only touches active/unseen workspaces, not all.
+    const PR_INFO_INTERVAL_MS = 90_000;
+    const prInfoInterval = setInterval(() => { void refreshActiveWorkspacePrInfo(); }, PR_INFO_INTERVAL_MS);
+    // Kick off an initial pass shortly after startup.
+    setTimeout(() => { void refreshActiveWorkspacePrInfo(); }, 5_000);
+
     // ===== Embedded Shell Terminal Management =====
     const isWindows = process.platform === 'win32';
     const shellProcesses: Map<string, IPty> = new Map(); // workspaceId → PTY
@@ -1168,6 +1257,8 @@ export async function createApp(basePath?: string) {
                             // Done here (not in the taskCreated event handler) so the source
                             // field is always correct even with concurrent creates.
                             broadcast({ type: 'task:created', payload: { task: newTask, source } });
+                            // Resolve PR info for this task's workspace (lazy first-fetch).
+                            void refreshPrInfoFor(newTask.workspaceId);
                             // Track which references were injected so we can detect changes on follow-ups
                             const internalTask = taskSpawner.getTask(newTask.id);
                             if (internalTask) {
@@ -1895,6 +1986,10 @@ export async function createApp(basePath?: string) {
 
                         // Broadcast updated tasks to all clients
                         broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+
+                        // Branch changed (e.g. back to main) — re-resolve PR info so the
+                        // badge updates/clears for the newly checked-out branch.
+                        void refreshPrInfoFor(workspaceId);
 
                         // Send result back to requesting client
                         ws.send(JSON.stringify({
@@ -5946,20 +6041,24 @@ Guidelines:
         console.log('[Server] Restart requested via API');
         res.json({ status: 'restarting' });
 
-        // Give time for response to be sent
+        // Two restart mechanisms depending on how the backend was launched:
+        // - tsx watch mode (CLAUDIA_WATCH_MODE=1): process.exit does NOT make tsx
+        //   relaunch — only a file change does. Touch index.ts to trigger reload.
+        // - no-watch mode: exit with code 75; the start-script relaunch loop restarts us.
+        const watchMode = process.env['CLAUDIA_WATCH_MODE'] === '1';
         setTimeout(async () => {
-            // Touch a watched file to trigger tsx watch restart
-            // This is more reliable than process.exit(0) which tsx may not restart
-            try {
-                const { utimes } = await import('fs/promises');
-                const restartTriggerFile = join(__dirname, 'index.ts');
-                const now = new Date();
-                await utimes(restartTriggerFile, now, now);
-                console.log('[Server] Touched index.ts to trigger tsx watch restart');
-            } catch (error) {
-                console.error('[Server] Failed to touch restart trigger file, falling back to graceful shutdown:', error);
-                gracefulShutdown('RESTART');
+            if (watchMode) {
+                try {
+                    const { utimes } = await import('fs/promises');
+                    const now = new Date();
+                    await utimes(join(__dirname, 'index.ts'), now, now);
+                    console.log('[Server] Touched index.ts to trigger tsx watch restart');
+                    return;
+                } catch (error) {
+                    console.error('[Server] Touch failed, falling back to exit-code restart:', error);
+                }
             }
+            gracefulShutdown('RESTART', 75);
         }, 100);
     });
 
@@ -5977,8 +6076,18 @@ Guidelines:
         });
     }
 
-    // Graceful shutdown handler
-    function gracefulShutdown(signal: string): void {
+    // Graceful shutdown handler. exitCode 75 signals the start-script relaunch
+    // loop to restart the backend (used by POST /api/server/restart in no-watch mode).
+    let isShuttingDown = false;
+    function gracefulShutdown(signal: string, exitCode: number = 0): void {
+        // Guard against double-shutdown (e.g. restart clicked twice, or Ctrl+C
+        // during the restart window) — two overlapping sequences would race
+        // process.exit with different codes.
+        if (isShuttingDown) {
+            console.log(`[Server] Shutdown already in progress, ignoring ${signal}`);
+            return;
+        }
+        isShuttingDown = true;
         console.log(`[Server] Shutting down (${signal}), saving state immediately...`);
 
         // CRITICAL: Save all state IMMEDIATELY before anything else.
@@ -5993,6 +6102,7 @@ Guidelines:
 
         // Clear heartbeat interval
         clearInterval(heartbeatInterval);
+        clearInterval(prInfoInterval);
 
         // Notify all connected clients that the server is reloading
         broadcast({ type: 'server:reloading' as WSMessageType, payload: {} });
@@ -6009,8 +6119,8 @@ Guidelines:
                 client.close(1001, 'Server reloading');
             }
 
-            console.log('[Server] Shutdown complete');
-            process.exit(0);
+            console.log(`[Server] Shutdown complete (exit ${exitCode})`);
+            process.exit(exitCode);
         }, 500);
     }
 

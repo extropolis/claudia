@@ -38,6 +38,9 @@ const MAX_RECENT_WORKSPACES = 10;  // Keep only the last 10 recent workspaces
 export class WorkspaceStore {
     private config: WorkspaceConfig;
     private workspaceFile: string;
+    // In-memory PR info cache keyed by workspace id. Not persisted to disk —
+    // it's transient state resolved from `gh` and pushed to the frontend.
+    private prInfoCache = new Map<string, Workspace['prInfo']>();
 
     constructor(basePath?: string) {
         // Use basePath if provided (Electron userData), otherwise use default location
@@ -88,11 +91,29 @@ export class WorkspaceStore {
     }
 
     getWorkspaces(): Workspace[] {
-        return [...this.config.workspaces];
+        return this.config.workspaces.map(w => this.withPrInfo(w));
+    }
+
+    /** Merge the in-memory PR info cache onto a workspace for serialization. */
+    private withPrInfo(w: Workspace): Workspace {
+        const prInfo = this.prInfoCache.get(w.id);
+        return prInfo !== undefined ? { ...w, prInfo } : w;
+    }
+
+    /**
+     * Set (or clear) the cached PR info for a workspace.
+     * Returns true if the value changed (so callers can decide whether to broadcast).
+     */
+    setPrInfo(id: string, prInfo: Workspace['prInfo']): boolean {
+        const prev = this.prInfoCache.get(id);
+        const changed = JSON.stringify(prev) !== JSON.stringify(prInfo);
+        this.prInfoCache.set(id, prInfo);
+        return changed;
     }
 
     getWorkspace(id: string): Workspace | undefined {
-        return this.config.workspaces.find(w => w.id === id);
+        const w = this.config.workspaces.find(w => w.id === id);
+        return w ? this.withPrInfo(w) : w;
     }
 
     // Add workspace by path - the id IS the path, name comes from folder

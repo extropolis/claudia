@@ -79,62 +79,67 @@ $env:CLAUDIA_BACKEND_PORT = $BACKEND_PORT
 # Increase Node.js memory limit for backend
 $env:NODE_OPTIONS = "--max-old-space-size=8192"
 
-# Start backend and frontend concurrently
-# Using npm.cmd to avoid the PowerShell strict mode bug with npm.ps1
+# Start backend and frontend as tracked child processes.
 # -Watch selects 'dev' (tsx watch, auto-reload) over the default 'dev:no-watch'.
 # no-watch is the default because spurious restarts can occur when Claude Code
 # tasks edit source files, antivirus scans, or the Windows indexer touch backend/src.
+#
+# The backend runs in a RELAUNCH LOOP: when it exits with code 75 (RESTART_EXIT_CODE,
+# triggered by POST /api/server/restart), we relaunch it. Any other exit code stops
+# the loop. This gives a working "restart backend" button without tsx watch.
 $backendScript = if ($Watch) { "dev" } else { "dev:no-watch" }
+$RESTART_EXIT_CODE = 75
 Write-Host "Backend mode: $backendScript$(if ($Watch) { ' (auto-reload enabled)' } else { '' })"
-$backendJob = Start-Job -ScriptBlock {
-    param($dir, $port, $nodeOpts, $script)
-    Set-Location $dir
-    $env:CLAUDIA_BACKEND_PORT = $port
-    $env:NODE_OPTIONS = $nodeOpts
-    & npm.cmd run $script -w backend 2>&1
-} -ArgumentList $PSScriptRoot, $BACKEND_PORT, $env:NODE_OPTIONS, $backendScript
 
-$frontendJob = Start-Job -ScriptBlock {
-    param($dir)
-    Set-Location $dir
-    & npm.cmd run dev -w frontend 2>&1
-} -ArgumentList $PSScriptRoot
+$env:CLAUDIA_BACKEND_PORT = $BACKEND_PORT
 
-Write-Host "Backend job: $($backendJob.Id) | Frontend job: $($frontendJob.Id)"
+# Helper: kill a process and its entire child tree (npm -> node -> tsx -> node).
+function Stop-Tree($procId) {
+    if (-not $procId) { return }
+    try { & taskkill /PID $procId /T /F 2>$null | Out-Null } catch {}
+}
+
+# Frontend: single long-lived child process (no relaunch loop needed).
+$frontendProc = Start-Process -FilePath "npm.cmd" -ArgumentList @("run", "dev", "-w", "frontend") `
+    -WorkingDirectory $PSScriptRoot -NoNewWindow -PassThru
+
+Write-Host "Frontend PID: $($frontendProc.Id)"
 Write-Host "Press Ctrl+C to stop..."
 Write-Host ""
 
+$backendProc = $null
 try {
-    # Stream output from both jobs
     while ($true) {
-        $backendOutput = Receive-Job $backendJob -ErrorAction SilentlyContinue
-        $frontendOutput = Receive-Job $frontendJob -ErrorAction SilentlyContinue
+        # Launch backend and wait for it to exit.
+        $backendProc = Start-Process -FilePath "npm.cmd" -ArgumentList @("run", $backendScript, "-w", "backend") `
+            -WorkingDirectory $PSScriptRoot -NoNewWindow -PassThru
+        # CRITICAL: cache .Handle BEFORE the process exits, otherwise .ExitCode
+        # reads $null after WaitForExit() (.NET only retains the code if the handle
+        # was accessed). Without this the relaunch loop never sees exit code 75.
+        $null = $backendProc.Handle
+        Write-Host "Backend PID: $($backendProc.Id) ($backendScript)"
+        $backendProc.WaitForExit()
+        $code = $backendProc.ExitCode
 
-        if ($backendOutput) {
-            $backendOutput | ForEach-Object { Write-Host "[backend] $_" }
-        }
-        if ($frontendOutput) {
-            $frontendOutput | ForEach-Object { Write-Host "[frontend] $_" }
-        }
-
-        # Check if either job has stopped
-        if ($backendJob.State -eq "Completed" -or $backendJob.State -eq "Failed") {
-            Write-Host "Backend process exited ($($backendJob.State))"
-            break
-        }
-        if ($frontendJob.State -eq "Completed" -or $frontendJob.State -eq "Failed") {
-            Write-Host "Frontend process exited ($($frontendJob.State))"
-            break
+        if ($code -eq $RESTART_EXIT_CODE) {
+            Write-Host "Backend requested restart (exit $code) -- relaunching..."
+            Start-Sleep -Milliseconds 500
+            continue
         }
 
-        Start-Sleep -Milliseconds 500
+        # Frontend died, or backend exited for another reason -- stop.
+        if ($frontendProc.HasExited) {
+            Write-Host "Frontend exited -- shutting down."
+        } else {
+            Write-Host "Backend exited (code $code) -- shutting down."
+        }
+        break
     }
 } finally {
-    # Cleanup on exit
+    # Cleanup on exit -- kill full process trees so ports 4001/5173 are freed.
     Write-Host "Shutting down..."
-    Stop-Job $backendJob -ErrorAction SilentlyContinue
-    Stop-Job $frontendJob -ErrorAction SilentlyContinue
-    Remove-Job $backendJob -Force -ErrorAction SilentlyContinue
-    Remove-Job $frontendJob -Force -ErrorAction SilentlyContinue
+    if ($backendProc)  { Stop-Tree $backendProc.Id }
+    if ($frontendProc) { Stop-Tree $frontendProc.Id }
     Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
+    Write-Host "Stopped."
 }

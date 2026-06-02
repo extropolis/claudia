@@ -6,6 +6,7 @@ import {
     Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
+import { PrBadge } from './PrBadge';
 import { SystemPromptModal } from './SystemPromptModal';
 import { ConfirmModal } from './ConfirmModal';
 import { ScheduledTasksModal } from './ScheduledTasksModal';
@@ -610,6 +611,7 @@ function WorktreeGroupSection({ group, selectedTaskId, lastSelectedTaskId, waiti
                 {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
                 <GitBranch size={12} />
                 <span className="worktree-group-branch" title={group.workspace.worktreeBranch || group.branch}>{group.branch}</span>
+                {group.workspace.prInfo && <PrBadge prInfo={group.workspace.prInfo} />}
                 {hasActive && <span className="worktree-group-active-dot" title="Has active tasks" />}
                 {!collapsed && onRemoveWorktree && (
                     <button
@@ -1239,6 +1241,7 @@ function WorkspaceSection({
                             <span className="branch-name">{branchName}</span>
                         </span>
                     )}
+                    {workspace.prInfo && <PrBadge prInfo={workspace.prInfo} />}
                     {tasks.length > 0 && (
                         <>
                             <span className="workspace-task-count">{tasks.length}</span>

@@ -66,6 +66,18 @@ export interface Workspace {
     worktreeParentId?: string;   // If this workspace IS a worktree, the parent workspace's id (absolute path)
     worktreeBranch?: string;     // Branch checked out in this worktree
     autoWorktree?: boolean;      // If true, new tasks auto-create an isolated worktree
+
+    // GitHub PR associated with this workspace's branch (resolved via `gh`, cached server-side).
+    // null = looked up, no PR found; undefined = not yet looked up.
+    prInfo?: WorkspacePrInfo | null;
+}
+
+export interface WorkspacePrInfo {
+    number: number;
+    title: string;
+    state: 'draft' | 'open' | 'merged' | 'closed';
+    url: string;
+    ci?: 'passed' | 'failed' | 'running' | 'none';  // statusCheckRollup summary
 }
 
 // Metadata about a single git worktree (from `git worktree list --porcelain`)

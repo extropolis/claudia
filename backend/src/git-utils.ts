@@ -1,6 +1,6 @@
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
-import { TaskGitState, FileDiff } from '@claudia/shared';
+import { TaskGitState, FileDiff, WorkspacePrInfo } from '@claudia/shared';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -383,5 +383,74 @@ export async function revertTaskChanges(
             error: message,
             filesReverted: []
         };
+    }
+}
+
+/** Summarize a gh statusCheckRollup array into a single CI state. */
+function summarizeCi(rollup: unknown): WorkspacePrInfo['ci'] {
+    if (!Array.isArray(rollup) || rollup.length === 0) return 'none';
+    let anyRunning = false;
+    let anyFailed = false;
+    let anyTerminal = false;
+    for (const check of rollup) {
+        if (!check || typeof check !== 'object') continue;
+        // CheckRun: { status: QUEUED|IN_PROGRESS|COMPLETED, conclusion: SUCCESS|FAILURE|... }
+        // StatusContext: { state: SUCCESS|PENDING|FAILURE|ERROR }
+        const status = String((check as any).status || '').toUpperCase();
+        const conclusion = String((check as any).conclusion || '').toUpperCase();
+        const state = String((check as any).state || '').toUpperCase();
+
+        if (status === 'IN_PROGRESS' || status === 'QUEUED' || status === 'PENDING' ||
+            status === 'WAITING' || status === 'REQUESTED' || state === 'PENDING' || state === 'EXPECTED') {
+            anyRunning = true;
+            continue;
+        }
+        const outcome = conclusion || state; // COMPLETED uses conclusion; StatusContext uses state
+        anyTerminal = true;
+        if (['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'].includes(outcome)) {
+            anyFailed = true;
+        }
+    }
+    if (anyFailed) return 'failed';
+    if (anyRunning) return 'running';
+    if (anyTerminal) return 'passed';
+    return 'none';
+}
+
+/**
+ * Look up the GitHub PR for a branch via the `gh` CLI. Returns null when there's
+ * no PR, `gh` is missing/unauthenticated, or the dir isn't a GitHub repo.
+ * Never throws — callers can treat null as "no badge".
+ */
+export async function getPrForBranch(repoPath: string, branch: string): Promise<WorkspacePrInfo | null> {
+    if (!branch || !isValidBranchName(branch)) return null;
+    try {
+        const { stdout } = await execFileAsync(
+            'gh',
+            ['pr', 'list', '--head', branch, '--state', 'all', '--limit', '1',
+             '--json', 'number,title,state,isDraft,url,statusCheckRollup'],
+            { cwd: repoPath, timeout: 15000 }
+        );
+        const arr = JSON.parse(stdout) as Array<{
+            number: number; title: string; state: string; isDraft: boolean; url: string; statusCheckRollup?: unknown;
+        }>;
+        if (!Array.isArray(arr) || arr.length === 0) return null;
+        const pr = arr[0];
+        const rawState = String(pr.state || '').toUpperCase();
+        const state: WorkspacePrInfo['state'] = pr.isDraft
+            ? 'draft'
+            : rawState === 'MERGED' ? 'merged'
+            : rawState === 'CLOSED' ? 'closed'
+            : 'open';
+        return {
+            number: pr.number,
+            title: pr.title || '',
+            state,
+            url: pr.url,
+            ci: summarizeCi(pr.statusCheckRollup),
+        };
+    } catch {
+        // gh missing/unauth, not a repo, no network — no badge.
+        return null;
     }
 }

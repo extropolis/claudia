@@ -718,6 +718,49 @@
     background: rgba(255, 171, 64, 0.22);
 }
 
+/* ===== PR badge (worktree group header + workspace header) ===== */
+.pr-badge {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 0.625rem;
+    font-weight: 600;
+    line-height: 1.4;
+    text-decoration: none;
+    background: rgba(139, 148, 158, 0.15);
+    color: #8b949e;
+    transition: filter 0.15s ease;
+}
+.pr-badge:hover { filter: brightness(1.25); }
+
+.pr-badge.draft  { background: rgba(139, 148, 158, 0.15); color: #8b949e; }
+.pr-badge.open   { background: rgba(63, 185, 80, 0.15);   color: #3fb950; }
+.pr-badge.merged { background: rgba(163, 113, 247, 0.15); color: #a371f7; }
+.pr-badge.closed { background: rgba(248, 81, 73, 0.15);   color: #f85149; }
+
+/* Subtle CI status mark in the badge's top-right corner */
+.pr-badge-ci {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    padding: 1px;
+    background: var(--bg-primary, #0d1117);
+    line-height: 0;
+}
+.pr-badge-ci.passed  { color: #3fb950; }
+.pr-badge-ci.failed  { color: #f85149; }
+.pr-badge-ci.running { color: #d29922; }
+.pr-badge-ci-spin { animation: pr-badge-spin 1s linear infinite; }
+@keyframes pr-badge-spin { to { transform: rotate(360deg); } }
+
 .workspace-panel .task-item .task-cron-badge .task-cron-count {
     font-variant-numeric: tabular-nums;
     line-height: 1;
