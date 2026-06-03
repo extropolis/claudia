@@ -693,32 +693,45 @@ export async function createApp(basePath?: string) {
     }
 
     // Track which workspaces we've looked up at least once (lazy first-fetch),
-    // and which currently have an in-flight `gh` call (so rapid task creates /
-    // overlapping ticks don't fire concurrent calls for the same workspace).
+    // which currently have an in-flight `gh` call, and the last-seen branch per
+    // workspace (so we only call `gh` when the branch actually changes — the
+    // local `git branch` check is fast, the `gh pr list` call is slow/networked).
     const prInfoSeen = new Set<string>();
     const prInfoInFlight = new Set<string>();
+    const lastSeenBranch = new Map<string, string | null>();
 
     // Resolve (repoPath, branch) for a workspace, then look up its PR.
-    async function refreshPrInfoFor(workspaceId: string): Promise<void> {
+    // If `force` is false (default), skips the expensive `gh` call when the
+    // branch hasn't changed since the last check.
+    async function refreshPrInfoFor(workspaceId: string, force = false): Promise<void> {
         if (prInfoInFlight.has(workspaceId)) return;
-        if (!(await isGhAvailable())) return;
         const ws = workspaceStore.getWorkspace(workspaceId);
         if (!ws) return;
+
+        // Resolve current branch (fast local git call).
+        let branch: string | null;
+        try {
+            if (ws.worktreeParentId) {
+                branch = await getCurrentBranch(ws.id) || ws.worktreeBranch || null;
+            } else {
+                branch = await getCurrentBranch(ws.id);
+            }
+        } catch {
+            return;
+        }
+
+        // Skip the expensive `gh` call if branch hasn't changed and we already
+        // have a result (unless forced — e.g. initial fetch or CI may have changed).
+        const prev = lastSeenBranch.get(workspaceId);
+        const branchChanged = prev !== branch;
+        if (!branchChanged && !force && prInfoSeen.has(workspaceId)) return;
+        lastSeenBranch.set(workspaceId, branch);
+
+        if (!(await isGhAvailable())) return;
         prInfoInFlight.add(workspaceId);
         prInfoSeen.add(workspaceId);
         try {
-            let repoPath: string;
-            let branch: string | null;
-            if (ws.worktreeParentId) {
-                // Worktree: query its CURRENT branch, not the one stored at creation.
-                // Claude often switches/creates a branch inside the worktree (and
-                // opens the PR on that branch), so the stored worktreeBranch goes stale.
-                repoPath = ws.id;  // run gh inside the worktree (same git repo)
-                branch = await getCurrentBranch(ws.id) || ws.worktreeBranch || null;
-            } else {
-                repoPath = ws.id;
-                branch = await getCurrentBranch(ws.id);
-            }
+            const repoPath = ws.id;
             const prInfo = branch ? await getPrForBranch(repoPath, branch) : null;
             if (workspaceStore.setPrInfo(workspaceId, prInfo)) {
                 broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces: workspaceStore.getWorkspaces() } });
@@ -751,7 +764,7 @@ export async function createApp(basePath?: string) {
         );
         const toRefresh = new Set<string>([...activeWorkspaceIds, ...lazyWorkspaceIds]);
         for (const id of toRefresh) {
-            await refreshPrInfoFor(id);  // marks prInfoSeen + guards in-flight
+            await refreshPrInfoFor(id, true);  // force=true: periodic re-checks CI even if branch same
         }
         } finally {
             prRefreshPassInFlight = false;
@@ -922,11 +935,14 @@ export async function createApp(basePath?: string) {
         console.log(`[Server] taskStateChanged event: task=${task.id} state=${task.state}`);
         queueTaskStateChange(task); // Batched - deduplicates rapid state changes
 
-        // When a task goes idle it may have just created a worktree or switched
-        // branches — refresh both worktree discovery and PR info for its workspace.
+        // Refresh PR info when a task goes idle (may have switched branches / pushed
+        // a PR) or becomes busy (new step starting on a potentially different branch).
+        // Also discover worktrees on idle (Claude may have run `git worktree add`).
+        if (task.state === 'idle' || task.state === 'busy') {
+            void refreshPrInfoFor(task.workspaceId);
+        }
         if (task.state === 'idle') {
             void discoverWorktrees();
-            void refreshPrInfoFor(task.workspaceId);
         }
 
         // Deliver pending reference notifications when a task becomes idle
