@@ -2119,7 +2119,15 @@ export class TaskSpawner extends EventEmitter {
             // lines. Re-pasting appends a second (third, ...) copy of the prompt on
             // top of the partially-cleared first copy, causing the duplicate-paste bug.
             // Once written to the PTY, the text is there — only Enter delivery needs retrying.
-            task.process.write(prompt);
+            //
+            // Wrap in bracketed paste (ESC[200~ ... ESC[201~) so the TUI treats the
+            // whole block as a single atomic paste. Without this, the input box can
+            // repaint mid-write and drop the leading characters of long prompts
+            // (symptom: prompt arrives "beginning mid-sentence"). Claude Code enables
+            // bracketed-paste mode (ESC[?2004h), so the markers are consumed, not shown.
+            // Strip any stray end-marker in the prompt so it can't close the paste early.
+            const safePrompt = prompt.replace(/\x1b\[201~/g, '');
+            task.process.write(`\x1b[200~${safePrompt}\x1b[201~`);
             task.promptSubmitAttempts = 0;
             // Give more time for longer prompts to be written before sending Enter.
             // Scale: base 500ms + 50ms per 100 chars, capped at 2500ms (aligned with writeToTask).
