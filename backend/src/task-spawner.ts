@@ -3401,7 +3401,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             // Base: 500ms, +50ms per 100 chars, capped at 2500ms.
             const enterDelayMs = Math.min(500 + Math.floor(messageContent.length / 100) * 50, 2500);
             console.log(`[TaskSpawner] Writing message to task ${taskId} (${messageContent.length} chars), sending Enter in ${enterDelayMs}ms`);
-            task.process.write(messageContent);
+            // Wrap in bracketed paste so the TUI handles it as one atomic paste,
+            // preventing front-truncation on large/multi-line messages.
+            const safeMsg = messageContent.replace(/\x1b\[201~/g, '');
+            task.process.write(`\x1b[200~${safeMsg}\x1b[201~`);
             task.promptSubmitAttempts = 0;
 
             // Use consolidated retry mechanism with follow-up input options (5 retries for reliability)
