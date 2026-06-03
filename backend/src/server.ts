@@ -761,51 +761,65 @@ export async function createApp(basePath?: string) {
     // Kick off an initial pass shortly after startup.
     setTimeout(() => { void refreshActiveWorkspacePrInfo(); }, 5_000);
 
-    // ===== Worktree discovery =====
-    // A task may create a git worktree itself (raw `git worktree add`) instead of
-    // going through Claudia's auto-worktree path. Those aren't registered as
-    // workspaces, so they never appear in the sidebar. Detect worktrees in repos
-    // that have Claudia tasks and register any we don't know about yet.
+    // ===== Worktree discovery (session attribution) =====
+    // A task's Claude session may create a git worktree (raw `git worktree add`)
+    // and start operating on that branch. The task's PTY cwd stays at the parent
+    // repo, so we detect this by diffing the repo's worktree list: a branch that
+    // appears while a task is running in that repo is attributed to that task and
+    // the task row is annotated with a worktree badge. We do NOT mass-register
+    // every worktree — repos can have dozens unrelated to Claudia tasks.
     let worktreeScanInFlight = false;
+    // Per-repo baseline of worktree branches observed at first scan. Branches that
+    // appear after the baseline (while a task runs there) are "new" → attributable.
+    const repoWorktreeBaseline = new Map<string, Set<string>>();
+
     async function discoverWorktrees(): Promise<void> {
         if (worktreeScanInFlight) return;
         worktreeScanInFlight = true;
         try {
-            const known = new Set(workspaceStore.getWorkspaces().map(w => resolve(w.id)));
-            // Only scan repos that are registered, non-worktree workspaces with tasks.
             const tasks = taskSpawner.getAllTasks();
-            const workspacesWithTasks = new Set(tasks.map(t => t.workspaceId));
-            const reposToScan = workspaceStore.getWorkspaces().filter(
-                w => !w.worktreeParentId && workspacesWithTasks.has(w.id)
-            );
+            // Group tasks by their (non-worktree) repo workspace.
+            const tasksByRepo = new Map<string, typeof tasks>();
+            for (const t of tasks) {
+                const ws = workspaceStore.getWorkspace(t.workspaceId);
+                if (!ws || ws.worktreeParentId) continue; // skip tasks already in a worktree ws
+                if (!tasksByRepo.has(t.workspaceId)) tasksByRepo.set(t.workspaceId, []);
+                tasksByRepo.get(t.workspaceId)!.push(t);
+            }
+
             const manager = new WorktreeManager();
-            let added = false;
-            for (const repo of reposToScan) {
+            for (const [repoId, repoTasks] of tasksByRepo) {
                 let worktrees: Awaited<ReturnType<WorktreeManager['listWorktrees']>>;
                 try {
-                    worktrees = await manager.listWorktrees(repo.id);
+                    worktrees = await manager.listWorktrees(repoId);
                 } catch {
-                    continue; // not a git repo or git error — skip
+                    continue;
                 }
-                for (const wt of worktrees) {
-                    if (wt.isMain) continue;
-                    const wtPath = resolve(wt.path);
-                    if (known.has(wtPath)) continue;
-                    if (!existsSync(wtPath)) continue;
-                    const branch = wt.branch.replace(/^refs\/heads\//, '');
-                    try {
-                        const wtWorkspace = await workspaceStore.addWorktreeWorkspace(wtPath, repo.id, branch);
-                        known.add(wtPath);
-                        broadcast({ type: 'workspace:created' as WSMessageType, payload: { workspace: wtWorkspace } });
-                        logger.info('Discovered externally-created worktree', { path: wtPath, branch, parent: repo.id });
-                        added = true;
-                    } catch (err) {
-                        logger.debug('Failed to register discovered worktree', { path: wtPath, error: err instanceof Error ? err.message : String(err) });
-                    }
+                const branches = worktrees
+                    .filter(wt => !wt.isMain)
+                    .map(wt => wt.branch.replace(/^refs\/heads\//, ''))
+                    .filter(b => b && !b.startsWith('('));
+
+                const baseline = repoWorktreeBaseline.get(repoId);
+                if (!baseline) {
+                    // First scan: record what already exists; don't attribute these.
+                    repoWorktreeBaseline.set(repoId, new Set(branches));
+                    continue;
                 }
-            }
-            if (added) {
-                broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces: workspaceStore.getWorkspaces() } });
+                const newBranches = branches.filter(b => !baseline.has(b));
+                if (newBranches.length === 0) continue;
+                newBranches.forEach(b => baseline.add(b));
+
+                // Attribute new branch(es) to the most-recently-active task in this repo.
+                const sorted = [...repoTasks].sort((a, b) =>
+                    new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime());
+                const target = sorted[0];
+                if (!target) continue;
+                const branch = newBranches[newBranches.length - 1]; // latest
+                const prInfo = await getPrForBranch(repoId, branch);
+                if (taskSpawner.setSessionWorktree(target.id, branch, prInfo)) {
+                    logger.info('Attributed worktree to task session', { taskId: target.id, branch, repo: repoId });
+                }
             }
         } finally {
             worktreeScanInFlight = false;
@@ -813,7 +827,7 @@ export async function createApp(basePath?: string) {
     }
 
     // Periodic sweep + initial pass shortly after startup.
-    const WORKTREE_SCAN_INTERVAL_MS = 60_000;
+    const WORKTREE_SCAN_INTERVAL_MS = 30_000;
     const worktreeScanInterval = setInterval(() => { void discoverWorktrees(); }, WORKTREE_SCAN_INTERVAL_MS);
     setTimeout(() => { void discoverWorktrees(); }, 6_000);
 

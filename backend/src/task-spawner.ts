@@ -2739,7 +2739,23 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             displayNameEditedByUser: task.displayNameEditedByUser,
             order: task.order,
             tokenUsage: task.tokenUsage,
+            sessionWorktreeBranch: task.sessionWorktreeBranch,
+            sessionWorktreePrInfo: task.sessionWorktreePrInfo,
         };
+    }
+
+    /** Annotate a task with the worktree branch its session moved onto. */
+    setSessionWorktree(taskId: string, branch: string | undefined, prInfo?: import('@claudia/shared').WorkspacePrInfo | null): boolean {
+        const task = this.tasks.get(taskId);
+        if (!task) return false;
+        if (task.sessionWorktreeBranch === branch &&
+            JSON.stringify(task.sessionWorktreePrInfo) === JSON.stringify(prInfo)) {
+            return false;
+        }
+        task.sessionWorktreeBranch = branch;
+        task.sessionWorktreePrInfo = prInfo;
+        this.emit('taskStateChanged', this.toPublicTask(task));
+        return true;
     }
 
     async captureGitStateAfterTask(taskId: string): Promise<void> {

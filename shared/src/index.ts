@@ -45,6 +45,11 @@ export interface Task {
     displayName?: string;    // User-editable display name (shown instead of prompt when set)
     displayNameEditedByUser?: boolean; // True if the user manually edited the display name (prevents agent auto-title)
     tokenUsage?: TaskTokenUsage; // Token usage data for this task
+    // Branch of a git worktree this task's Claude session created/moved onto
+    // (detected by diffing the repo's worktree list while the task runs). Used to
+    // annotate the task row with a worktree badge. Undefined = no worktree detected.
+    sessionWorktreeBranch?: string;
+    sessionWorktreePrInfo?: WorkspacePrInfo | null; // PR for that branch (if any)
 }
 
 export interface WorkspaceReference {

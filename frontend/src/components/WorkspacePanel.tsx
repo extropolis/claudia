@@ -1799,6 +1799,9 @@ function WorkspaceSection({
                                         onDragStart={handleTaskDragStart}
                                         onDragEnter={handleTaskDragEnter}
                                         onDragEnd={handleTaskDragEnd}
+                                        worktreeInfo={task.sessionWorktreeBranch
+                                            ? { branch: task.sessionWorktreeBranch, prInfo: task.sessionWorktreePrInfo }
+                                            : undefined}
                                     />
                                 ))}
                                 {worktreeGroups.map((group) => (
