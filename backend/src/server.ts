@@ -922,10 +922,11 @@ export async function createApp(basePath?: string) {
         console.log(`[Server] taskStateChanged event: task=${task.id} state=${task.state}`);
         queueTaskStateChange(task); // Batched - deduplicates rapid state changes
 
-        // When a task goes idle it may have just created a worktree (raw git) —
-        // scan so it shows up in the sidebar. Guarded against concurrent scans.
+        // When a task goes idle it may have just created a worktree or switched
+        // branches — refresh both worktree discovery and PR info for its workspace.
         if (task.state === 'idle') {
             void discoverWorktrees();
+            void refreshPrInfoFor(task.workspaceId);
         }
 
         // Deliver pending reference notifications when a task becomes idle
