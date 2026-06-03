@@ -1304,12 +1304,21 @@ function WorkspaceSection({
                     {isMenuOpen && (
                         <div className="workspace-dropdown-menu" ref={(el) => {
                             if (el) {
-                                const rect = el.getBoundingClientRect();
-                                if (rect.bottom > window.innerHeight - 8) {
-                                    el.style.top = 'auto';
-                                    el.style.bottom = '100%';
-                                    el.style.marginTop = '0';
-                                    el.style.marginBottom = '4px';
+                                // Position using the trigger button's viewport coords
+                                // (the menu is position:fixed to escape overflow clipping).
+                                const btn = el.parentElement?.querySelector('.workspace-action-button.menu');
+                                const btnRect = btn?.getBoundingClientRect();
+                                if (btnRect) {
+                                    const menuH = el.offsetHeight;
+                                    const spaceBelow = window.innerHeight - btnRect.bottom - 8;
+                                    if (spaceBelow >= menuH) {
+                                        el.style.top = `${btnRect.bottom + 4}px`;
+                                        el.style.bottom = 'auto';
+                                    } else {
+                                        el.style.top = 'auto';
+                                        el.style.bottom = `${window.innerHeight - btnRect.top + 4}px`;
+                                    }
+                                    el.style.right = `${window.innerWidth - btnRect.right}px`;
                                 }
                             }
                         }}
@@ -2093,6 +2102,7 @@ export function WorkspacePanel({
     const [showWorkspaceManager, setShowWorkspaceManager] = useState(false);
 
     // Close menu when clicking outside (capture phase so stopPropagation on child elements doesn't block it)
+    // or when the panel scrolls (menu is position:fixed and would detach from its trigger).
     useEffect(() => {
         if (!openMenuId) return;
 
@@ -2102,9 +2112,15 @@ export function WorkspacePanel({
                 setOpenMenuId(null);
             }
         };
+        const handleScroll = () => setOpenMenuId(null);
 
         document.addEventListener('mousedown', handleClickOutside, true);
-        return () => document.removeEventListener('mousedown', handleClickOutside, true);
+        const scrollContainer = document.querySelector('.workspace-panel-content');
+        scrollContainer?.addEventListener('scroll', handleScroll);
+        return () => {
+            document.removeEventListener('mousedown', handleClickOutside, true);
+            scrollContainer?.removeEventListener('scroll', handleScroll);
+        };
     }, [openMenuId]);
 
     // Get last modified time for a workspace (most recent task activity).
