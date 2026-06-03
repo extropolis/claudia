@@ -709,9 +709,12 @@ export async function createApp(basePath?: string) {
         try {
             let repoPath: string;
             let branch: string | null;
-            if (ws.worktreeParentId && ws.worktreeBranch) {
-                repoPath = ws.worktreeParentId;   // parent repo path
-                branch = ws.worktreeBranch;
+            if (ws.worktreeParentId) {
+                // Worktree: query its CURRENT branch, not the one stored at creation.
+                // Claude often switches/creates a branch inside the worktree (and
+                // opens the PR on that branch), so the stored worktreeBranch goes stale.
+                repoPath = ws.id;  // run gh inside the worktree (same git repo)
+                branch = await getCurrentBranch(ws.id) || ws.worktreeBranch || null;
             } else {
                 repoPath = ws.id;
                 branch = await getCurrentBranch(ws.id);
