@@ -720,6 +720,20 @@ export async function createApp(basePath?: string) {
             return;
         }
 
+        // No badge for the default branch (main/master) — `gh pr list --head main`
+        // returns unrelated PRs (e.g. from forks) that aren't "this workspace's PR".
+        if (branch) {
+            const defaultBranch = await getDefaultBranch(ws.worktreeParentId || ws.id);
+            if (branch === defaultBranch) {
+                if (workspaceStore.setPrInfo(workspaceId, null)) {
+                    broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces: workspaceStore.getWorkspaces() } });
+                }
+                lastSeenBranch.set(workspaceId, branch);
+                prInfoSeen.add(workspaceId);
+                return;
+            }
+        }
+
         // Skip the expensive `gh` call if branch hasn't changed and we already
         // have a result (unless forced — e.g. initial fetch or CI may have changed).
         const prev = lastSeenBranch.get(workspaceId);
