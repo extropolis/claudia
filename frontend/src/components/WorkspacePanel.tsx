@@ -1955,9 +1955,9 @@ interface ArchivedTaskItemProps {
 }
 
 function ArchivedTaskItem({ task, workspaceName, onContinue, onRestore, onDelete }: ArchivedTaskItemProps) {
-    // Split prompt by ⏺ dots and get the last segment for display
+    // Use displayName if set, otherwise fall back to prompt parsing
     const segments = task.prompt.split('⏺').map(s => s.trim()).filter(Boolean);
-    const lastSegment = segments.length > 0 ? segments[segments.length - 1] : task.prompt;
+    const lastSegment = task.displayName || (segments.length > 0 ? segments[segments.length - 1] : task.prompt);
 
     // Format date
     const archivedDate = new Date(task.lastActivity).toLocaleDateString();
@@ -2429,7 +2429,7 @@ export function WorkspacePanel({
                         <div className="empty-archived">No archived tasks</div>
                     ) : (
                         <div className="archived-task-list">
-                            {archivedTasks.map(task => {
+                            {[...archivedTasks].sort((a, b) => new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime()).map(task => {
                                 const ws = workspaces.find(w => w.id === task.workspaceId);
                                 // Use display name, workspace name, or fall back to last path segment
                                 const wsName = ws?.displayName || ws?.name || (task.workspaceId ? task.workspaceId.replace(/[\\/]+$/, '').split(/[\\/]/).pop() : undefined);
