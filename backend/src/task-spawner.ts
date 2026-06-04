@@ -2482,7 +2482,17 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - Each spawned task prompt should be fully self-contained — include file paths, context, and constraints so it can work independently
 - While waiting for spawned tasks, do NOT start implementing features that overlap with what they're doing
 - **NEVER delete or archive completed tasks** — the user wants to review their outputs. After a task completes, just report its status and read its output. The MCP server intentionally does NOT expose archive/delete tools — only the user can archive tasks via the UI.
+
+**Scheduling prompts (self-scheduling):**
+- You can schedule prompts to be sent to any task (including your own) on a cron schedule using \`claudia_cron_create\`.
+- Use this to set up recurring checks, periodic polling, or delayed follow-ups — e.g. "check CI status every 10 minutes" or "remind me to review in 2 hours".
+- Your own task ID is \`${id}\` — pass it as \`taskId\` to schedule prompts on yourself.
+- Use standard 5-field cron expressions: \`*/5 * * * *\` (every 5 min), \`0 9 * * 1-5\` (weekdays 9am), \`30 14 * * *\` (daily 2:30pm).
+- Set \`isRecurring: false\` for one-shot schedules that fire once and auto-delete.
+- Use \`claudia_cron_list\` to see active schedules, \`claudia_cron_delete\` to remove them when the work is done, and \`claudia_cron_pause\` to temporarily suspend/resume.
+- Recurring schedules auto-expire after 3 days. Max 50 per task.
 `;
+
             systemPrompt = systemPrompt
                 ? `${systemPrompt}\n\n${orchestrationGuidance}`
                 : orchestrationGuidance;
