@@ -3440,8 +3440,16 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 }
             }
         } else {
-            // Single keypress or task is busy - write directly
-            task.process.write(data);
+            // Single keypress or task is busy — write directly.
+            // For multi-char messages, wrap in bracketed paste so they aren't
+            // truncated by the TUI (same fix as the idle/initial paths).
+            if (hasMessageContent) {
+                const msg = data.slice(0, -1);
+                const safeMsg = msg.replace(/\x1b\[201~/g, '');
+                task.process.write(`\x1b[200~${safeMsg}\x1b[201~${data.slice(-1)}`);
+            } else {
+                task.process.write(data);
+            }
         }
     }
 
