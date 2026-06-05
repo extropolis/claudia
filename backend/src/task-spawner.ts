@@ -541,9 +541,11 @@ export class TaskSpawner extends EventEmitter {
             }
         }
 
-        // Inject the Claudia MCP server if enabled
-        // Scoped to the task's workspace via CLAUDIA_WORKSPACE_ID env var
-        if (claudiaMcpEnabled) {
+        // Inject the Claudia MCP server if enabled AND we have a task context.
+        // The claudia server needs per-task env vars (CLAUDIA_WORKSPACE_ID,
+        // CLAUDIA_TASK_ID) — including it without them (e.g. in workspace .mcp.json)
+        // causes Claude Code to load the env-less copy and break MCP tools.
+        if (claudiaMcpEnabled && workspaceId) {
             const mcpServerPath = join(__dirname, 'claudia-mcp-server.ts');
             // Use tsx cli directly instead of npx tsx (saves ~25 seconds on Windows).
             // Full paths ensure it works regardless of Claude Code's cwd.
@@ -617,6 +619,11 @@ export class TaskSpawner extends EventEmitter {
      * @param workspaceIds - List of workspace directory paths to sync. All must exist on disk.
      */
     syncWorkspaceMcpConfigs(workspaceIds: string[]): void {
+        // Build config WITHOUT workspaceId/taskId — the claudia MCP server entry
+        // is excluded from the workspace .mcp.json because it needs per-task env
+        // vars (CLAUDIA_WORKSPACE_ID, CLAUDIA_TASK_ID). Including it without those
+        // vars causes Claude Code to load the env-less workspace copy instead of
+        // the per-task --mcp-config copy, breaking the MCP tools.
         const result = this.buildMcpConfig();
         if (!result) {
             logger.info('No enabled MCP servers, skipping workspace sync');
