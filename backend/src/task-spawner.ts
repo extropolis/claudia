@@ -214,6 +214,7 @@ interface InternalTask extends Task {
     processStartedAt?: Date; // When the current busy/starting state began (for elapsed timer)
     readyFallbackTimer?: ReturnType<typeof setTimeout>; // Fallback timer to send prompt if ready signal is never detected
     titleInstructionInjected?: boolean; // True if auto-title instruction has been injected into this session
+    titleInstructionCount?: number; // Number of follow-up messages sent (for periodic title-update reminders)
 }
 
 /**
@@ -2473,7 +2474,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - The parameter is literally named \`displayName\` (string). Do NOT pass it as \`title\` — that will fail validation.
 - **Do NOT call \`claudia_rename_task\` before producing output** — write your first response first, then title yourself
 - If the rename is rejected (user manually edited the title), do NOT retry
-- If your work evolves significantly, call \`claudia_rename_task\` again with \`taskId="${id}"\` and an updated \`displayName\` (unless user-edited)
+- **Keep the title current**: whenever the focus of your work shifts (new topic, different file, switched from investigation to implementation, moved to testing, etc.), call \`claudia_rename_task\` again with an updated \`displayName\` that reflects what you are doing NOW — not what you started with. The user relies on the title to understand what each task is working on at a glance. Stale titles are confusing.
 
 **Handling file edit conflicts:**
 - If you get an "Error editing file" (e.g., content mismatch, file changed on disk), another Claudia task may be editing the same file concurrently

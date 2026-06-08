@@ -1457,9 +1457,12 @@ export async function createApp(basePath?: string) {
                                     // One-time auto-title instruction injection for existing sessions
                                     // (new sessions get this in the orchestration guidance system prompt)
                                     const claudiaMcpEnabled = configStore.getClaudioMcpServerEnabled();
-                                    if (claudiaMcpEnabled && !inputTask.titleInstructionInjected) {
-                                        inputTask.titleInstructionInjected = true;
-                                        const titleInstruction = `[CONTEXT UPDATE: You can update your task title using claudia_rename_task. Call it with your own task ID and a \`displayName\` parameter (string, 3-6 words) describing what you're working on. The parameter is named \`displayName\`, NOT \`title\`. Do NOT rename if the user has manually edited the title (the tool will reject it).] `;
+                                    // Inject a title-update reminder on the first follow-up and
+                                    // every 5th message after that so Claude keeps the title fresh.
+                                    const msgCount = (inputTask.titleInstructionCount || 0) + 1;
+                                    inputTask.titleInstructionCount = msgCount;
+                                    if (claudiaMcpEnabled && (msgCount === 1 || msgCount % 5 === 0)) {
+                                        const titleInstruction = `[CONTEXT UPDATE: You can update your task title using claudia_rename_task. Call it with your own task ID and a \`displayName\` parameter (string, 3-6 words) describing what you're doing NOW. The parameter is named \`displayName\`, NOT \`title\`. Keep the title current — whenever your focus shifts (new topic, new phase, different file), rename yourself so the sidebar reflects your current work. Do NOT rename if the user has manually edited the title (the tool will reject it).] `;
                                         const msgContent = filteredInput.endsWith('\r') || filteredInput.endsWith('\n')
                                             ? filteredInput.slice(0, -1)
                                             : filteredInput;
