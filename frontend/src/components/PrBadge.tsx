@@ -22,6 +22,7 @@ export function PrBadge({ prInfo }: PrBadgeProps) {
             target="_blank"
             rel="noopener noreferrer"
             title={tooltip}
+            draggable={false}
             onClick={(e) => e.stopPropagation()}
         >
             #{number}
