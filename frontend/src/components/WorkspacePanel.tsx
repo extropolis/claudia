@@ -215,7 +215,7 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
         <div
             ref={taskItemRef}
             className={`task-item ${isSelected ? 'selected' : ''} ${isLastSelected && !isSelected ? 'last-selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${hasUnreadActivity && !isSelected ? 'unread' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
-            draggable={!isEditing}
+            draggable={!isEditing && !worktreeInfo}
             onClick={() => !isEditing && onSelectTask(task.id)}
             onDragStart={(e) => {
                 if (isEditing) { e.preventDefault(); return; }
