@@ -542,11 +542,13 @@ export class TaskSpawner extends EventEmitter {
             }
         }
 
-        // Inject the Claudia MCP server if enabled AND we have a task context.
-        // The claudia server needs per-task env vars (CLAUDIA_WORKSPACE_ID,
-        // CLAUDIA_TASK_ID) — including it without them (e.g. in workspace .mcp.json)
-        // causes Claude Code to load the env-less copy and break MCP tools.
-        if (claudiaMcpEnabled && workspaceId) {
+        // Inject the Claudia MCP server if enabled.
+        // For per-task configs (workspaceId + taskId), include both env vars.
+        // For workspace .mcp.json sync (workspaceId only, no taskId), include
+        // CLAUDIA_WORKSPACE_ID so tools work on resumed sessions where --mcp-config
+        // doesn't load. CLAUDIA_TASK_ID is omitted but the core tools (list, create,
+        // status, output) work without it — only self-rename needs the task ID.
+        if (claudiaMcpEnabled) {
             const mcpServerPath = join(__dirname, 'claudia-mcp-server.ts');
             // Use tsx cli directly instead of npx tsx (saves ~25 seconds on Windows).
             // Full paths ensure it works regardless of Claude Code's cwd.
@@ -620,34 +622,11 @@ export class TaskSpawner extends EventEmitter {
      * @param workspaceIds - List of workspace directory paths to sync. All must exist on disk.
      */
     syncWorkspaceMcpConfigs(workspaceIds: string[]): void {
-        // Build config WITHOUT workspaceId/taskId — the claudia MCP server entry
-        // is excluded from the workspace .mcp.json because it needs per-task env
-        // vars (CLAUDIA_WORKSPACE_ID, CLAUDIA_TASK_ID). Including it without those
-        // vars causes Claude Code to load the env-less workspace copy instead of
-        // the per-task --mcp-config copy, breaking the MCP tools.
-        const result = this.buildMcpConfig();
-        if (!result) {
-            logger.info('No enabled MCP servers, skipping workspace sync');
-            return;
-        }
-
-        const { mcpConfig, enabledMcpServers } = result;
-        const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
-        const serverNames = enabledMcpServers.map(s => s.name);
-
-        const settingsContent = {
-            permissions: {
-                allow: ['mcp__*'],
-                deny: []
-            },
-            enableAllProjectMcpServers: true,
-            enabledMcpjsonServers: serverNames
-        };
-
         // The Claudia project root — skip syncing to our own directory to avoid
         // triggering tsx watch restarts from file writes in the project tree.
         const selfRoot = resolve(join(__dirname, '..', '..'));
 
+        let syncCount = 0;
         for (const workspaceId of workspaceIds) {
             if (!existsSync(workspaceId)) {
                 logger.warn('Workspace does not exist, skipping MCP sync', { workspaceId });
@@ -658,11 +637,29 @@ export class TaskSpawner extends EventEmitter {
                 continue;
             }
 
+            // Build per-workspace config with CLAUDIA_WORKSPACE_ID so the claudia
+            // MCP server works on resumed sessions (where --mcp-config doesn't load).
+            // No taskId — per-task --mcp-config supplies that for new sessions.
+            const result = this.buildMcpConfig(workspaceId);
+            if (!result) continue;
+
+            const { mcpConfig, enabledMcpServers } = result;
+            const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
+            const serverNames = enabledMcpServers.map(s => s.name);
+
+            const settingsContent = {
+                permissions: {
+                    allow: ['mcp__*'],
+                    deny: []
+                },
+                enableAllProjectMcpServers: true,
+                enabledMcpjsonServers: serverNames
+            };
+
             // Write .mcp.json
             const workspaceMcpFile = `${workspaceId}/.mcp.json`;
             try {
                 atomicWriteFileSync(workspaceMcpFile, mcpConfigJson);
-                logger.info('Synced .mcp.json', { workspaceId });
             } catch (err) {
                 logger.error('Failed to write .mcp.json', { workspaceId, error: err });
             }
@@ -675,13 +672,13 @@ export class TaskSpawner extends EventEmitter {
                     mkdirSync(claudeSettingsDir, { recursive: true });
                 }
                 atomicWriteFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
-                logger.info('Synced settings.local.json', { workspaceId });
             } catch (err) {
                 logger.error('Failed to write settings.local.json', { workspaceId, error: err });
             }
+            syncCount++;
         }
 
-        logger.info(`Synced MCP config to ${workspaceIds.length} workspace(s)`, { servers: serverNames });
+        logger.info(`Synced MCP config to ${syncCount} workspace(s)`, { servers: ['playwright', ...(this.configStore?.getClaudioMcpServerEnabled() ? ['claudia'] : [])] });
     }
 
     /**

@@ -806,6 +806,8 @@ export async function createApp(basePath?: string) {
     // Per-repo baseline of worktree branches observed at first scan. Branches that
     // appear after the baseline (while a task runs there) are "new" → attributable.
     const repoWorktreeBaseline = new Map<string, Set<string>>();
+    // Repos confirmed to NOT be git repos — skip future scans to avoid error log spam.
+    const nonGitRepos = new Set<string>();
 
     async function discoverWorktrees(): Promise<void> {
         if (worktreeScanInFlight) return;
@@ -816,7 +818,8 @@ export async function createApp(basePath?: string) {
             const tasksByRepo = new Map<string, typeof tasks>();
             for (const t of tasks) {
                 const ws = workspaceStore.getWorkspace(t.workspaceId);
-                if (!ws || ws.worktreeParentId) continue; // skip tasks already in a worktree ws
+                if (!ws || ws.worktreeParentId) continue;
+                if (nonGitRepos.has(t.workspaceId)) continue; // skip known non-repos
                 if (!tasksByRepo.has(t.workspaceId)) tasksByRepo.set(t.workspaceId, []);
                 tasksByRepo.get(t.workspaceId)!.push(t);
             }
@@ -827,6 +830,7 @@ export async function createApp(basePath?: string) {
                 try {
                     worktrees = await manager.listWorktrees(repoId);
                 } catch {
+                    nonGitRepos.add(repoId); // remember and stop retrying
                     continue;
                 }
                 const branches = worktrees
@@ -861,9 +865,20 @@ export async function createApp(basePath?: string) {
     }
 
     // Periodic sweep + initial pass shortly after startup.
-    const WORKTREE_SCAN_INTERVAL_MS = 30_000;
+    const WORKTREE_SCAN_INTERVAL_MS = 60_000;
     const worktreeScanInterval = setInterval(() => { void discoverWorktrees(); }, WORKTREE_SCAN_INTERVAL_MS);
     setTimeout(() => { void discoverWorktrees(); }, 6_000);
+
+    // Debounced discovery trigger — multiple tasks going idle in quick succession
+    // only fire one scan instead of one per task.
+    let discoverDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+    function debouncedDiscoverWorktrees(): void {
+        if (discoverDebounceTimer) return; // already scheduled
+        discoverDebounceTimer = setTimeout(() => {
+            discoverDebounceTimer = null;
+            void discoverWorktrees();
+        }, 3_000);
+    }
 
     // ===== Embedded Shell Terminal Management =====
     const isWindows = process.platform === 'win32';
@@ -960,7 +975,7 @@ export async function createApp(basePath?: string) {
             void refreshPrInfoFor(task.workspaceId);
         }
         if (task.state === 'idle') {
-            void discoverWorktrees();
+            debouncedDiscoverWorktrees();
         }
 
         // Deliver pending reference notifications when a task becomes idle
