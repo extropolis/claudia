@@ -726,7 +726,10 @@ export async function createApp(basePath?: string) {
             const defaultBranch = await getDefaultBranch(ws.worktreeParentId || ws.id);
             if (branch === defaultBranch) {
                 if (workspaceStore.setPrInfo(workspaceId, null)) {
-                    broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces: workspaceStore.getWorkspaces() } });
+                    // Broadcast singular update (not full array) to avoid re-rendering
+                    // the entire workspace list, which kills an in-progress drag.
+                    const updated = workspaceStore.getWorkspace(workspaceId);
+                    if (updated) broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updated } });
                 }
                 lastSeenBranch.set(workspaceId, branch);
                 prInfoSeen.add(workspaceId);
@@ -748,7 +751,8 @@ export async function createApp(basePath?: string) {
             const repoPath = ws.id;
             const prInfo = branch ? await getPrForBranch(repoPath, branch) : null;
             if (workspaceStore.setPrInfo(workspaceId, prInfo)) {
-                broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces: workspaceStore.getWorkspaces() } });
+                const updated = workspaceStore.getWorkspace(workspaceId);
+                if (updated) broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updated } });
             }
         } catch (err) {
             logger.debug('refreshPrInfoFor failed', { workspaceId, error: err instanceof Error ? err.message : String(err) });
