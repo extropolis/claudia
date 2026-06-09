@@ -1608,7 +1608,8 @@ export async function createApp(basePath?: string) {
                                     const taskWs = workspaceStore.getWorkspaces().find(w => w.id === task.workspaceId);
                                     if (taskWs?.worktreeParentId) {
                                         if (workspaceStore.renameWorkspace(taskWs.id, displayName.substring(0, 60))) {
-                                            broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspaces: workspaceStore.getWorkspaces() } });
+                                            const updated = workspaceStore.getWorkspace(taskWs.id);
+                                            if (updated) broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updated } });
                                         }
                                     }
                                 }

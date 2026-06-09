@@ -240,6 +240,7 @@ export class WorkspaceStore {
 
         const workspace = this.config.workspaces[index];
         this.config.workspaces.splice(index, 1);
+        this.prInfoCache.delete(id);
 
         // Add to recent workspaces (only if it still exists on disk)
         if (existsSync(id)) {

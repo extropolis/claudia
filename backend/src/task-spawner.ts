@@ -2756,9 +2756,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             systemPrompt: task.systemPrompt,
             sessionId: task.sessionId || undefined,
             backendType,
-            // Decode entities so legacy names stored with HTML entities (e.g.
-            // "release notes &amp; agent CI") render as plain text.
-            displayName: task.displayName ? decodeHtmlEntities(task.displayName) : task.displayName,
+            displayName: task.displayName,
             displayNameEditedByUser: task.displayNameEditedByUser,
             order: task.order,
             tokenUsage: task.tokenUsage,

@@ -44,7 +44,6 @@ function parseWorktreeListOutput(stdout: string): WorktreeInfo[] {
         };
 
         let lockedReason: string | undefined;
-        let isFirst = true;
 
         for (const line of lines) {
             if (line.startsWith('worktree ')) {
@@ -69,18 +68,12 @@ function parseWorktreeListOutput(stdout: string): WorktreeInfo[] {
             }
         }
 
-        // The first worktree block is always the main working tree
-        if (isFirst) {
-            info.isMain = true;
-            isFirst = false;
-        }
-
         if (info.path) {
             results.push({
                 path: info.path,
                 commitHash: info.commitHash,
                 branch: info.branch || '(unknown)',
-                isMain: info.isMain,
+                isMain: false,
                 isLocked: info.isLocked,
                 lockedReason,
                 prunable: info.prunable,
@@ -88,7 +81,7 @@ function parseWorktreeListOutput(stdout: string): WorktreeInfo[] {
         }
     }
 
-    // Mark first as main (re-apply since isFirst logic above has a bug in loop)
+    // The first worktree block in `git worktree list` is always the main working tree.
     if (results.length > 0) {
         results[0].isMain = true;
     }
