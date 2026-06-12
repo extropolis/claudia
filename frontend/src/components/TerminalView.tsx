@@ -18,6 +18,17 @@ function ensureGhosttyInit(): Promise<void> {
   return ghosttyInitPromise;
 }
 
+// Global write-lock: ghostty-web 0.4.x shares WASM linear memory across all
+// Terminal instances. Concurrent writes to two instances (e.g. old terminal
+// still flushing history while new one starts) corrupt the shared heap.
+// This promise chain serializes all active chunked writes so only one runs
+// at a time, regardless of which Terminal instance it targets.
+let ghosttyWriteQueue: Promise<void> = Promise.resolve();
+function enqueueGhosttyWrite(fn: () => Promise<void>): Promise<void> {
+  ghosttyWriteQueue = ghosttyWriteQueue.then(() => fn()).catch(() => {});
+  return ghosttyWriteQueue;
+}
+
 /**
  * Sanitize scrollback before writing to a fresh ghostty-web terminal instance.
  *
@@ -204,9 +215,6 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
     try {
       fitAddonRef.current.fit();
-      // Force a full refresh to fix any rendering artifacts
-      const rows = xtermRef.current.rows;
-      xtermRef.current.refresh(0, rows - 1);
     } catch (err) {
       console.warn('Failed to fit terminal:', err);
     }
@@ -250,9 +258,25 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     let cleanup: (() => void) | null = null;
     let termDisposed = false;
 
+    // Wait for the container to have real pixel dimensions before creating
+    // the terminal. If we open() at 0x0 or at the wrong size, ghostty-web
+    // creates its canvas too small and history written immediately after
+    // renders garbled. Mirrors Nimbalyst's waitForVisibleTerminalDimensions().
+    const waitForDimensions = async (): Promise<void> => {
+      const start = Date.now();
+      while (Date.now() - start < 1500) {
+        if (!terminalRef.current) return;
+        const rect = terminalRef.current.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) return;
+        await new Promise(resolve => requestAnimationFrame(() => resolve(undefined)));
+      }
+    };
+
     // ghostty-web requires WASM to be initialized before Terminal construction.
     // We await it before creating the instance; subsequent calls are instant no-ops.
-    void ensureGhosttyInit().then(() => {
+    void ensureGhosttyInit()
+      .then(() => waitForDimensions())
+      .then(async () => {
     if (destroyed || !terminalRef.current) return;
 
     // Create terminal
@@ -407,15 +431,51 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
       }
     });
 
-    // Open terminal
+    // Open terminal — container already has real dimensions (waitForDimensions above)
     term.open(terminalRef.current);
+    // Yield one microtask so the browser can finish layout after open()
+    await new Promise(resolve => setTimeout(resolve, 0));
+    if (destroyed || !terminalRef.current) return;
+
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // Register OSC8 hyperlinks and URL detection — ghostty-web handles these
-    // natively via link providers (replaces xterm's WebLinksAddon).
+    // Fit to container and get confirmed dimensions
+    let initialCols = term.cols;
+    let initialRows = term.rows;
+    try {
+      fitAddon.fit();
+      const dims = fitAddon.proposeDimensions();
+      if (dims && dims.cols > 0 && dims.rows > 0) {
+        initialCols = dims.cols;
+        initialRows = dims.rows;
+      }
+    } catch (e) {
+      console.warn('[TerminalView] Initial fit failed:', e);
+    }
+
+    // Register OSC8 hyperlinks and URL detection
     term.registerLinkProvider(new OSC8LinkProvider(term));
     term.registerLinkProvider(new UrlRegexProvider(term));
+
+    // End init phase and send definitive resize to backend
+    initPhase = false;
+    lastSentCols = initialCols;
+    lastSentRows = initialRows;
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'task:resize',
+        payload: { taskId: task.id, cols: initialCols, rows: initialRows },
+      }));
+    }
+
+    // Request history now that terminal is correctly sized
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'task:select',
+        payload: { taskId: task.id },
+      }));
+    }
 
     // Track user scroll position to prevent auto-scroll when user has scrolled up
     // We need to distinguish between programmatic scrolls and user scrolls
@@ -522,7 +582,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             setTimeout(() => { programmaticScrollRef.current = false; }, 50);
           }
         };
-        void writeAllChunks();
+        void enqueueGhosttyWrite(writeAllChunks);
       } catch (err) {
         console.warn('[TerminalView] history chunk fetch error', err);
       } finally {
@@ -573,68 +633,39 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
       }
     });
 
-    // CRITICAL: Fit the terminal BEFORE requesting history.
-    // History is raw PTY output captured at the original terminal size. If we
-    // write it at default 80x24 and then fit to the actual size, xterm reflows
-    // the content which garbles Claude Code's cursor-positioned TUI output.
-    //
-    // Double-rAF: the first rAF fires before the browser paints; the second
-    // fires after layout + paint have completed, so container dimensions are
-    // final. A single rAF is NOT enough — flexbox/grid sizing may still be
-    // in-progress during the first frame.
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        try {
-          fitAddon.fit();
-        } catch (e) {
-          console.error('[TerminalView] Initial fit failed:', e);
-        }
-
-        // End init phase — subsequent resizes (window resize, etc.) will
-        // be forwarded to the backend normally.
-        initPhase = false;
-
-        // Send ONE definitive resize to the backend with the correct dimensions
-        const { cols, rows } = term;
-        lastSentCols = cols;
-        lastSentRows = rows;
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(
-            JSON.stringify({
-              type: 'task:resize',
-              payload: { taskId: task.id, cols, rows },
-            }),
-          );
-        }
-
-        // NOW request history — terminal is properly sized, so history
-        // will render correctly without reflow.
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(
-            JSON.stringify({
-              type: 'task:select',
-              payload: { taskId: task.id },
-            }),
-          );
-        }
-      });
-    });
-
-    // ResizeObserver for container changes — use fitTerminal() which does
-    // fit() + refresh() to clear rendering artifacts from the previous width.
-    // 150ms debounce prevents rapid-fire resizes during layout transitions.
+    // ResizeObserver: 120ms debounce matches Nimbalyst — collapses resize bursts
+    // (sidebar animate, window drag) into a single PTY SIGWINCH.
     let resizeTimeout: number;
+    const applyResize = () => {
+      if (!fitAddonRef.current || !xtermRef.current || !terminalRef.current) return;
+      if (terminalRef.current.clientWidth === 0 || terminalRef.current.clientHeight === 0) return;
+      try {
+        fitAddonRef.current.fit();
+        const dims = fitAddonRef.current.proposeDimensions();
+        if (dims && dims.cols > 0 && dims.rows > 0) {
+          const cols = dims.cols;
+          const rows = dims.rows;
+          if (Math.abs(cols - lastSentCols) > 2 || rows !== lastSentRows) {
+            lastSentCols = cols;
+            lastSentRows = rows;
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({
+                type: 'task:resize',
+                payload: { taskId: task.id, cols, rows },
+              }));
+            }
+          }
+        }
+      } catch { /* ignore during cleanup */ }
+    };
     const resizeObserver = new ResizeObserver(() => {
       if (resizeTimeout) window.clearTimeout(resizeTimeout);
-      resizeTimeout = window.setTimeout(fitTerminal, 150);
+      resizeTimeout = window.setTimeout(applyResize, 120);
     });
-
     resizeObserver.observe(terminalRef.current);
-
-    // Window resize fallback
     const handleWindowResize = () => {
       if (resizeTimeout) window.clearTimeout(resizeTimeout);
-      resizeTimeout = window.setTimeout(fitTerminal, 150);
+      resizeTimeout = window.setTimeout(applyResize, 120);
     };
     window.addEventListener('resize', handleWindowResize);
 
@@ -728,9 +759,13 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
           console.log(
             `[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}, alreadyLoaded: ${historyLoadedRef.current}`,
           );
+          // Guard: only process the first restore per terminal mount
+          if (historyLoadedRef.current) return;
           if (history && history.length > 0) {
             restoreInProgress = true;
             restoreOutputBuffer = [];
+            // Clear any content written before history arrives (e.g. stale output)
+            if (!termDisposed) term.clear();
 
             // Sanitize before writing — strips NUL bytes, invalid Unicode,
             // cursor save/restore, scroll regions, and other sequences that
@@ -760,10 +795,11 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     break;
                   }
                   try {
+                    if (termDisposed) return; // re-check after async yield
                     term.write(cleaned.slice(i, i + CHUNK_SIZE));
                   } catch (err) {
-                    console.warn('[TerminalView] Scrollback write error:', err);
-                    break;
+                    if (!termDisposed) console.warn('[TerminalView] Scrollback write error:', err);
+                    return;
                   }
                   // Yield every 4 chunks to keep UI responsive
                   if ((i / CHUNK_SIZE) % 4 === 3) {
@@ -779,7 +815,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 }
               };
 
-              void writeChunks().then(() => {
+              void enqueueGhosttyWrite(writeChunks).then(() => {
                 loadedHistoryRef.current = cleaned;
                 fetch(`${getApiBaseUrl()}/api/task/${task.id}/history?endBefore=0&maxBytes=0`)
                   .then((r) => r.json())
@@ -837,7 +873,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
       xtermRef.current = null;
       fitAddonRef.current = null;
     };
-    }); // end ensureGhosttyInit().then()
+    }); // end ensureGhosttyInit().then(...).then()
 
     return () => {
       destroyed = true;

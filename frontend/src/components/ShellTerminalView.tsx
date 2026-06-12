@@ -204,7 +204,6 @@ export function ShellTerminalView({
       if (terminalRef.current.clientWidth === 0 || terminalRef.current.clientHeight === 0) return;
       try {
         fitAddonRef.current.fit();
-        xtermRef.current.refresh(0, xtermRef.current.rows - 1);
       } catch {}
     };
     const resizeObserver = new ResizeObserver(() => {
@@ -277,7 +276,6 @@ export function ShellTerminalView({
         try {
           fitAddonRef.current?.fit();
           if (xtermRef.current) {
-            xtermRef.current.refresh(0, xtermRef.current.rows - 1);
           }
           xtermRef.current?.scrollToBottom();
         } catch {}
