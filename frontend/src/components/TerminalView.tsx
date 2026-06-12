@@ -366,16 +366,29 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
     // WebGL renderer — GPU-accelerated, significantly faster for high-throughput
     // TUI output. Falls back to the DOM renderer on context loss or if WebGL2
-    // is unavailable (headless, older hardware, certain VMs).
-    try {
-      const webglAddon = new WebglAddon();
-      webglAddon.onContextLoss(() => {
-        console.warn('[TerminalView] WebGL context lost — falling back to DOM renderer');
-        webglAddon.dispose();
-      });
-      term.loadAddon(webglAddon);
-    } catch (e) {
-      console.warn('[TerminalView] WebGL unavailable, using DOM renderer:', e);
+    // is unavailable (headless Chromium, older hardware, certain VMs). We probe
+    // for WebGL2 before instantiating because WebglAddon's constructor succeeds
+    // even when WebGL2 is unsupported, then crashes during dispose with
+    // "Cannot read properties of undefined (reading '_isDisposed')".
+    const probeCanvas = document.createElement('canvas');
+    const hasWebgl2 = !!probeCanvas.getContext('webgl2');
+    if (hasWebgl2) {
+      try {
+        const webglAddon = new WebglAddon();
+        webglAddon.onContextLoss(() => {
+          console.warn('[TerminalView] WebGL context lost — falling back to DOM renderer');
+          try {
+            webglAddon.dispose();
+          } catch {
+            /* addon may already be disposed */
+          }
+        });
+        term.loadAddon(webglAddon);
+      } catch (e) {
+        console.warn('[TerminalView] WebGL addon failed to load, using DOM renderer:', e);
+      }
+    } else {
+      console.info('[TerminalView] WebGL2 unavailable, using DOM renderer');
     }
 
     // Track user scroll position to prevent auto-scroll when user has scrolled up
@@ -657,10 +670,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 programmaticScrollRef.current = false;
               }, 100);
             });
-          } else if (Number.isInteger(viewport)) {
-            // User was scrolled up - maintain their position.
-            // Guard against a non-finite viewportY (xterm's scrollToLine
-            // throws "This API only accepts integers" on NaN).
+          } else {
+            // User was scrolled up - maintain their position
             programmaticScrollRef.current = true;
             term.scrollToLine(viewport);
             setTimeout(() => {

@@ -484,12 +484,17 @@ export class TaskSpawner extends EventEmitter {
 
     this.backend.on('task:sessionCaptured', (taskId: string, sessionId: string) => {
       const task = this.tasks.get(taskId);
-      if (task && !task.sessionId) {
+      if (task) {
+        const isNew = !task.sessionId;
         task.sessionId = sessionId;
         this.sessionToTaskId.set(sessionId, taskId);
-        // Save immediately - session IDs are critical state that must survive
-        // tsx watch restarts on Windows (TerminateProcess skips all handlers)
-        this.saveTasks();
+        if (isNew) {
+          // Save immediately - session IDs are critical state that must survive
+          // tsx watch restarts on Windows (TerminateProcess skips all handlers)
+          this.saveTasks();
+        }
+        // Always emit — narrator needs to attach even when session was already
+        // loaded from disk (the idempotency guard in TaskNarrator handles retries).
         this.emit('taskSessionCaptured', taskId, sessionId);
       }
     });
@@ -1919,6 +1924,8 @@ export class TaskSpawner extends EventEmitter {
               // that must survive tsx watch restarts on Windows where TerminateProcess
               // skips all signal/exit handlers
               this.saveTasks();
+              // Notify listeners (e.g. narrator) that a session file is now available.
+              this.emit('taskSessionCaptured', taskId, sessionId);
             }
 
             this.clearSessionCapture(taskId);
