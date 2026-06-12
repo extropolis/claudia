@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { WebglAddon } from '@xterm/addon-webgl';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { Task, Workspace } from '@claudia/shared';
 import { Copy, Check, Play, BookOpen, ArrowDown, MessageSquare } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
@@ -211,9 +213,12 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
     const fitAddon = new FitAddon();
     const webLinksAddon = new WebLinksAddon();
+    const unicode11Addon = new Unicode11Addon();
 
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
+    term.loadAddon(unicode11Addon);
+    term.unicode.activeVersion = '11';
 
     // Clipboard integration: Ctrl+V / Cmd+V paste and Ctrl+C / Cmd+C copy
     // Works in both Electron and browser environments
@@ -358,6 +363,20 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     term.open(terminalRef.current);
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
+
+    // WebGL renderer — GPU-accelerated, significantly faster for high-throughput
+    // TUI output. Falls back to the DOM renderer on context loss or if WebGL2
+    // is unavailable (headless, older hardware, certain VMs).
+    try {
+      const webglAddon = new WebglAddon();
+      webglAddon.onContextLoss(() => {
+        console.warn('[TerminalView] WebGL context lost — falling back to DOM renderer');
+        webglAddon.dispose();
+      });
+      term.loadAddon(webglAddon);
+    } catch (e) {
+      console.warn('[TerminalView] WebGL unavailable, using DOM renderer:', e);
+    }
 
     // Track user scroll position to prevent auto-scroll when user has scrolled up
     // We need to distinguish between programmatic scrolls and user scrolls
