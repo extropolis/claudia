@@ -128,6 +128,7 @@ interface TaskStore {
     // Workspace actions
     setWorkspaces: (workspaces: Workspace[]) => void;
     addWorkspace: (workspace: Workspace) => void;
+    updateWorkspace: (workspace: Workspace) => void;
     removeWorkspace: (workspaceId: string) => void;
     reorderWorkspaces: (fromIndex: number, toIndex: number) => void;
     toggleWorkspaceExpanded: (workspaceId: string) => void;
@@ -535,6 +536,11 @@ export const useTaskStore = create<TaskStore>()(
                     workspaces: [...workspaces, workspace],
                     expandedWorkspaces: newExpanded
                 });
+            },
+
+            updateWorkspace: (workspace) => {
+                const { workspaces } = get();
+                set({ workspaces: workspaces.map(w => w.id === workspace.id ? workspace : w) });
             },
 
             removeWorkspace: (workspaceId) => {

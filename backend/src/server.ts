@@ -19,7 +19,8 @@ import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
-import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch } from './git-utils.js';
+import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
+import { WorktreeManager } from './worktree-manager.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
@@ -94,6 +95,11 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'cron:update',
     'cron:list',
     'cron:run',
+    'worktree:list',
+    'worktree:create',
+    'worktree:remove',
+    'worktree:prune',
+    'workspace:autoWorktree',
 ]);
 
 // WebSocket message validation
@@ -666,6 +672,214 @@ export async function createApp(basePath?: string) {
         scheduleBatchedBroadcast();
     }
 
+    // ===== GitHub PR info refresh =====
+    // Resolve the GitHub PR for each relevant workspace's branch via `gh`, cache it
+    // on the workspace store, and broadcast when anything changed. Respects the same
+    // anti-storm discipline the frontend uses (WorkspacePanel.tsx git-status polling):
+    // only the workspaces with active tasks are refreshed on the interval; others are
+    // refreshed lazily via refreshPrInfoFor() on task/worktree events.
+    let ghAvailable: boolean | null = null;
+    async function isGhAvailable(): Promise<boolean> {
+        if (ghAvailable !== null) return ghAvailable;
+        try {
+            const { execFile } = await import('child_process');
+            const { promisify } = await import('util');
+            await promisify(execFile)('gh', ['--version'], { timeout: 5000 });
+            ghAvailable = true;
+        } catch {
+            ghAvailable = false;
+        }
+        return ghAvailable;
+    }
+
+    // Track which workspaces we've looked up at least once (lazy first-fetch),
+    // which currently have an in-flight `gh` call, and the last-seen branch per
+    // workspace (so we only call `gh` when the branch actually changes — the
+    // local `git branch` check is fast, the `gh pr list` call is slow/networked).
+    const prInfoSeen = new Set<string>();
+    const prInfoInFlight = new Set<string>();
+    const lastSeenBranch = new Map<string, string | null>();
+
+    // Resolve (repoPath, branch) for a workspace, then look up its PR.
+    // If `force` is false (default), skips the expensive `gh` call when the
+    // branch hasn't changed since the last check.
+    async function refreshPrInfoFor(workspaceId: string, force = false): Promise<void> {
+        if (prInfoInFlight.has(workspaceId)) return;
+        const ws = workspaceStore.getWorkspace(workspaceId);
+        if (!ws) return;
+
+        // Resolve current branch (fast local git call).
+        let branch: string | null;
+        try {
+            if (ws.worktreeParentId) {
+                branch = await getCurrentBranch(ws.id) || ws.worktreeBranch || null;
+            } else {
+                branch = await getCurrentBranch(ws.id);
+            }
+        } catch {
+            return;
+        }
+
+        // No badge for the default branch (main/master) — `gh pr list --head main`
+        // returns unrelated PRs (e.g. from forks) that aren't "this workspace's PR".
+        if (branch) {
+            const defaultBranch = await getDefaultBranch(ws.worktreeParentId || ws.id);
+            if (branch === defaultBranch) {
+                if (workspaceStore.setPrInfo(workspaceId, null)) {
+                    // Broadcast singular update (not full array) to avoid re-rendering
+                    // the entire workspace list, which kills an in-progress drag.
+                    const updated = workspaceStore.getWorkspace(workspaceId);
+                    if (updated) broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updated } });
+                }
+                lastSeenBranch.set(workspaceId, branch);
+                prInfoSeen.add(workspaceId);
+                return;
+            }
+        }
+
+        // Skip the expensive `gh` call if branch hasn't changed and we already
+        // have a result (unless forced — e.g. initial fetch or CI may have changed).
+        const prev = lastSeenBranch.get(workspaceId);
+        const branchChanged = prev !== branch;
+        if (!branchChanged && !force && prInfoSeen.has(workspaceId)) return;
+        lastSeenBranch.set(workspaceId, branch);
+
+        if (!(await isGhAvailable())) return;
+        prInfoInFlight.add(workspaceId);
+        prInfoSeen.add(workspaceId);
+        try {
+            const repoPath = ws.id;
+            const prInfo = branch ? await getPrForBranch(repoPath, branch) : null;
+            if (workspaceStore.setPrInfo(workspaceId, prInfo)) {
+                const updated = workspaceStore.getWorkspace(workspaceId);
+                if (updated) broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updated } });
+            }
+        } catch (err) {
+            logger.debug('refreshPrInfoFor failed', { workspaceId, error: err instanceof Error ? err.message : String(err) });
+        } finally {
+            prInfoInFlight.delete(workspaceId);
+        }
+    }
+
+    // Reentrancy guard: if a refresh pass runs long (slow gh/auth), don't let the
+    // next interval tick start a second concurrent pass.
+    let prRefreshPassInFlight = false;
+
+    async function refreshActiveWorkspacePrInfo(): Promise<void> {
+        if (prRefreshPassInFlight) return;
+        if (!(await isGhAvailable())) return;
+        prRefreshPassInFlight = true;
+        try {
+        const tasks = taskSpawner.getAllTasks();
+        // Workspaces with at least one active task → refresh every interval.
+        const activeWorkspaceIds = new Set(
+            tasks.filter(t => t.state === 'busy' || t.state === 'starting' || t.state === 'waiting_input')
+                 .map(t => t.workspaceId)
+        );
+        // Workspaces with any task we haven't looked up yet → one-time lazy fetch.
+        const lazyWorkspaceIds = new Set(
+            tasks.map(t => t.workspaceId).filter(id => !prInfoSeen.has(id))
+        );
+        const toRefresh = new Set<string>([...activeWorkspaceIds, ...lazyWorkspaceIds]);
+        for (const id of toRefresh) {
+            await refreshPrInfoFor(id, true);  // force=true: periodic re-checks CI even if branch same
+        }
+        } finally {
+            prRefreshPassInFlight = false;
+        }
+    }
+
+    // Poll on an interval (90s) — only touches active/unseen workspaces, not all.
+    const PR_INFO_INTERVAL_MS = 90_000;
+    const prInfoInterval = setInterval(() => { void refreshActiveWorkspacePrInfo(); }, PR_INFO_INTERVAL_MS);
+    // Kick off an initial pass shortly after startup.
+    setTimeout(() => { void refreshActiveWorkspacePrInfo(); }, 5_000);
+
+    // ===== Worktree discovery (session attribution) =====
+    // A task's Claude session may create a git worktree (raw `git worktree add`)
+    // and start operating on that branch. The task's PTY cwd stays at the parent
+    // repo, so we detect this by diffing the repo's worktree list: a branch that
+    // appears while a task is running in that repo is attributed to that task and
+    // the task row is annotated with a worktree badge. We do NOT mass-register
+    // every worktree — repos can have dozens unrelated to Claudia tasks.
+    let worktreeScanInFlight = false;
+    // Per-repo baseline of worktree branches observed at first scan. Branches that
+    // appear after the baseline (while a task runs there) are "new" → attributable.
+    const repoWorktreeBaseline = new Map<string, Set<string>>();
+    // Repos confirmed to NOT be git repos — skip future scans to avoid error log spam.
+    const nonGitRepos = new Set<string>();
+
+    async function discoverWorktrees(): Promise<void> {
+        if (worktreeScanInFlight) return;
+        worktreeScanInFlight = true;
+        try {
+            const tasks = taskSpawner.getAllTasks();
+            // Group tasks by their (non-worktree) repo workspace.
+            const tasksByRepo = new Map<string, typeof tasks>();
+            for (const t of tasks) {
+                const ws = workspaceStore.getWorkspace(t.workspaceId);
+                if (!ws || ws.worktreeParentId) continue;
+                if (nonGitRepos.has(t.workspaceId)) continue; // skip known non-repos
+                if (!tasksByRepo.has(t.workspaceId)) tasksByRepo.set(t.workspaceId, []);
+                tasksByRepo.get(t.workspaceId)!.push(t);
+            }
+
+            const manager = new WorktreeManager();
+            for (const [repoId, repoTasks] of tasksByRepo) {
+                let worktrees: Awaited<ReturnType<WorktreeManager['listWorktrees']>>;
+                try {
+                    worktrees = await manager.listWorktrees(repoId);
+                } catch {
+                    nonGitRepos.add(repoId); // remember and stop retrying
+                    continue;
+                }
+                const branches = worktrees
+                    .filter(wt => !wt.isMain)
+                    .map(wt => wt.branch.replace(/^refs\/heads\//, ''))
+                    .filter(b => b && !b.startsWith('('));
+
+                const baseline = repoWorktreeBaseline.get(repoId);
+                if (!baseline) {
+                    // First scan: record what already exists; don't attribute these.
+                    repoWorktreeBaseline.set(repoId, new Set(branches));
+                    continue;
+                }
+                const newBranches = branches.filter(b => !baseline.has(b));
+                if (newBranches.length === 0) continue;
+                newBranches.forEach(b => baseline.add(b));
+
+                // Attribute new branch(es) to the most-recently-active task in this repo.
+                const sorted = [...repoTasks].sort((a, b) =>
+                    new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime());
+                const target = sorted[0];
+                if (!target) continue;
+                const branch = newBranches[newBranches.length - 1]; // latest
+                const prInfo = await getPrForBranch(repoId, branch);
+                if (taskSpawner.setSessionWorktree(target.id, branch, prInfo)) {
+                    logger.info('Attributed worktree to task session', { taskId: target.id, branch, repo: repoId });
+                }
+            }
+        } finally {
+            worktreeScanInFlight = false;
+        }
+    }
+
+    // Periodic sweep + initial pass shortly after startup.
+    const WORKTREE_SCAN_INTERVAL_MS = 60_000;
+    const worktreeScanInterval = setInterval(() => { void discoverWorktrees(); }, WORKTREE_SCAN_INTERVAL_MS);
+    setTimeout(() => { void discoverWorktrees(); }, 6_000);
+
+    // Debounced discovery trigger — multiple tasks going idle in quick succession
+    // only fire one scan instead of one per task.
+    let discoverDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+    function debouncedDiscoverWorktrees(): void {
+        if (discoverDebounceTimer) return; // already scheduled
+        discoverDebounceTimer = setTimeout(() => {
+            discoverDebounceTimer = null;
+            void discoverWorktrees();
+        }, 3_000);
+    }
+
     // ===== Embedded Shell Terminal Management =====
     const isWindows = process.platform === 'win32';
     const shellProcesses: Map<string, IPty> = new Map(); // workspaceId → PTY
@@ -753,6 +967,16 @@ export async function createApp(basePath?: string) {
     taskSpawner.on('taskStateChanged', (task: Task) => {
         console.log(`[Server] taskStateChanged event: task=${task.id} state=${task.state}`);
         queueTaskStateChange(task); // Batched - deduplicates rapid state changes
+
+        // Refresh PR info when a task goes idle (may have switched branches / pushed
+        // a PR) or becomes busy (new step starting on a potentially different branch).
+        // Also discover worktrees on idle (Claude may have run `git worktree add`).
+        if (task.state === 'idle' || task.state === 'busy') {
+            void refreshPrInfoFor(task.workspaceId);
+        }
+        if (task.state === 'idle') {
+            debouncedDiscoverWorktrees();
+        }
 
         // Deliver pending reference notifications when a task becomes idle
         if (task.state === 'idle') {
@@ -1068,7 +1292,7 @@ export async function createApp(basePath?: string) {
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId, initialCols, initialRows, source, complexity } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string; complexity?: string };
+                        const { prompt, workspaceId, initialCols, initialRows, source, complexity, isolate } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string; complexity?: string; isolate?: boolean };
                         if (!prompt || !workspaceId) {
                             logger.error('task:create requires prompt and workspaceId');
                             sendWSError(ws, 'task:create requires prompt and workspaceId', message.type, 'MISSING_PARAMS');
@@ -1089,7 +1313,7 @@ export async function createApp(basePath?: string) {
                         }
 
                         // Auto-add workspace if it doesn't exist yet
-                        const validatedPath = workspaceValidation.data!;
+                        let validatedPath = workspaceValidation.data!;
                         if (!workspaceStore.getWorkspace(validatedPath)) {
                             try {
                                 const workspace = workspaceStore.addWorkspace(validatedPath);
@@ -1098,6 +1322,31 @@ export async function createApp(basePath?: string) {
                             } catch (error) {
                                 logger.error('Failed to auto-add workspace', { error });
                                 // Continue anyway - task creation shouldn't fail if workspace can't be added
+                            }
+                        }
+
+                        // AUTO-WORKTREE: if workspace has autoWorktree enabled OR isolate flag set, create an isolated worktree
+                        const wsConfig = workspaceStore.getWorkspace(validatedPath);
+                        if ((wsConfig?.autoWorktree || isolate) && !wsConfig?.worktreeParentId) {
+                            // Only auto-worktree on parent workspaces (not on existing worktrees)
+                            try {
+                                const { randomBytes } = await import('crypto');
+                                const shortId = randomBytes(4).toString('hex');
+                                const autoBranch = `claudia/task-${shortId}`;
+                                const manager = new WorktreeManager();
+                                const wt = await manager.createWorktree({
+                                    repoPath: validatedPath,
+                                    branch: autoBranch,
+                                    createBranch: true,
+                                });
+                                const wtWorkspace = await workspaceStore.addWorktreeWorkspace(wt.path, validatedPath, autoBranch);
+                                broadcast({ type: 'workspace:created' as WSMessageType, payload: { workspace: wtWorkspace } });
+                                validatedPath = wt.path; // task runs in the new worktree
+                                logger.info('Auto-created worktree for task', { worktreePath: wt.path, branch: autoBranch });
+                            } catch (wtErr) {
+                                const wtErrMsg = wtErr instanceof Error ? wtErr.message : String(wtErr);
+                                logger.warn('Auto-worktree creation failed, falling back to parent workspace', { error: wtErrMsg });
+                                ws.send(JSON.stringify({ type: 'error', payload: { message: `Worktree creation failed, task running in parent workspace: ${wtErrMsg}` } }));
                             }
                         }
 
@@ -1137,6 +1386,8 @@ export async function createApp(basePath?: string) {
                             // Done here (not in the taskCreated event handler) so the source
                             // field is always correct even with concurrent creates.
                             broadcast({ type: 'task:created', payload: { task: newTask, source } });
+                            // Resolve PR info for this task's workspace (lazy first-fetch).
+                            void refreshPrInfoFor(newTask.workspaceId);
                             // Track which references were injected so we can detect changes on follow-ups
                             const internalTask = taskSpawner.getTask(newTask.id);
                             if (internalTask) {
@@ -1221,9 +1472,12 @@ export async function createApp(basePath?: string) {
                                     // One-time auto-title instruction injection for existing sessions
                                     // (new sessions get this in the orchestration guidance system prompt)
                                     const claudiaMcpEnabled = configStore.getClaudioMcpServerEnabled();
-                                    if (claudiaMcpEnabled && !inputTask.titleInstructionInjected) {
-                                        inputTask.titleInstructionInjected = true;
-                                        const titleInstruction = `[CONTEXT UPDATE: You can update your task title using claudia_rename_task. Call it with your own task ID and a \`displayName\` parameter (string, 3-6 words) describing what you're working on. The parameter is named \`displayName\`, NOT \`title\`. Do NOT rename if the user has manually edited the title (the tool will reject it).] `;
+                                    // Inject a title-update reminder on the first follow-up and
+                                    // every 5th message after that so Claude keeps the title fresh.
+                                    const msgCount = (inputTask.titleInstructionCount || 0) + 1;
+                                    inputTask.titleInstructionCount = msgCount;
+                                    if (claudiaMcpEnabled && (msgCount === 1 || msgCount % 5 === 0)) {
+                                        const titleInstruction = `[CONTEXT UPDATE: You can update your task title using claudia_rename_task. Call it with your own task ID and a \`displayName\` parameter (string, 3-6 words) describing what you're doing NOW. The parameter is named \`displayName\`, NOT \`title\`. Keep the title current — whenever your focus shifts (new topic, new phase, different file), rename yourself so the sidebar reflects your current work. Do NOT rename if the user has manually edited the title (the tool will reject it).] `;
                                         const msgContent = filteredInput.endsWith('\r') || filteredInput.endsWith('\n')
                                             ? filteredInput.slice(0, -1)
                                             : filteredInput;
@@ -1345,6 +1599,21 @@ export async function createApp(basePath?: string) {
                         const renamed = taskSpawner.renameTask(taskId, displayName, source || 'user');
                         if (renamed) {
                             broadcast({ type: 'tasks:updated' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
+                            // If this task lives in a worktree workspace, update the workspace displayName
+                            // so the inline group header shows a human-readable label instead of the branch slug.
+                            // worktreeBranch (the git branch) remains unchanged.
+                            if (displayName) {
+                                const task = taskSpawner.getTask(taskId);
+                                if (task) {
+                                    const taskWs = workspaceStore.getWorkspaces().find(w => w.id === task.workspaceId);
+                                    if (taskWs?.worktreeParentId) {
+                                        if (workspaceStore.renameWorkspace(taskWs.id, displayName.substring(0, 60))) {
+                                            const updated = workspaceStore.getWorkspace(taskWs.id);
+                                            if (updated) broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updated } });
+                                        }
+                                    }
+                                }
+                            }
                         }
                         break;
                     }
@@ -1851,6 +2120,10 @@ export async function createApp(basePath?: string) {
                         // Broadcast updated tasks to all clients
                         broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
 
+                        // Branch changed (e.g. back to main) — re-resolve PR info so the
+                        // badge updates/clears for the newly checked-out branch.
+                        void refreshPrInfoFor(workspaceId);
+
                         // Send result back to requesting client
                         ws.send(JSON.stringify({
                             type: 'workspace:resetResult',
@@ -2139,6 +2412,127 @@ export async function createApp(basePath?: string) {
                         }
                         break;
                     }
+
+                    // ── Worktree WS handlers ──────────────────────────────
+
+                    case 'worktree:list': {
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) {
+                            sendWSError(ws, 'worktree:list requires workspaceId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        try {
+                            const manager = new WorktreeManager();
+                            const worktrees = await manager.listWorktrees(workspaceId);
+                            for (const wt of worktrees) {
+                                const tasks = taskSpawner.getAllTasks().filter(t => t.workspaceId === wt.path);
+                                wt.taskCount = tasks.length;
+                            }
+                            ws.send(JSON.stringify({ type: 'worktree:listed', payload: { workspaceId, worktrees } }));
+                        } catch (err) {
+                            sendWSError(ws, err instanceof Error ? err.message : String(err), message.type, 'WORKTREE_LIST_FAILED');
+                        }
+                        break;
+                    }
+
+                    case 'worktree:create': {
+                        const { workspaceId, branch, baseBranch, createBranch = true } = payload as {
+                            workspaceId?: string;
+                            branch?: string;
+                            baseBranch?: string;
+                            createBranch?: boolean;
+                        };
+                        if (!workspaceId || !branch) {
+                            sendWSError(ws, 'worktree:create requires workspaceId and branch', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        try {
+                            const manager = new WorktreeManager();
+                            const result = await manager.createWorktree({ repoPath: workspaceId, branch, baseBranch, createBranch });
+                            const workspace = await workspaceStore.addWorktreeWorkspace(result.path, workspaceId, branch);
+                            broadcast({ type: 'workspace:created' as WSMessageType, payload: { workspace } });
+                            ws.send(JSON.stringify({ type: 'worktree:created', payload: { workspace, worktreePath: result.path, branch: result.branch } }));
+                            logger.info('Worktree created via WS', { path: result.path, branch });
+                        } catch (err) {
+                            sendWSError(ws, err instanceof Error ? err.message : String(err), message.type, 'WORKTREE_CREATE_FAILED');
+                        }
+                        break;
+                    }
+
+                    case 'worktree:remove': {
+                        const { workspaceId, worktreePath, force = false } = payload as {
+                            workspaceId?: string;
+                            worktreePath?: string;
+                            force?: boolean;
+                        };
+                        if (!workspaceId || !worktreePath) {
+                            sendWSError(ws, 'worktree:remove requires workspaceId and worktreePath', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        // Safety: check for active tasks
+                        const activeTasks = taskSpawner.getAllTasks().filter(
+                            t => t.workspaceId === worktreePath && ['busy', 'starting', 'waiting_input'].includes(t.state)
+                        );
+                        if (activeTasks.length > 0 && !force) {
+                            ws.send(JSON.stringify({
+                                type: 'worktree:error',
+                                payload: {
+                                    error: `Cannot remove: ${activeTasks.length} active task(s) still running`,
+                                    activeTasks: activeTasks.map(t => t.id),
+                                }
+                            }));
+                            break;
+                        }
+                        try {
+                            const manager = new WorktreeManager();
+                            await manager.removeWorktree({ repoPath: workspaceId, worktreePath, force });
+                            workspaceStore.deleteWorkspace(worktreePath);
+                            broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: worktreePath } });
+                            ws.send(JSON.stringify({ type: 'worktree:removed', payload: { worktreePath } }));
+                            logger.info('Worktree removed via WS', { worktreePath });
+                        } catch (err) {
+                            sendWSError(ws, err instanceof Error ? err.message : String(err), message.type, 'WORKTREE_REMOVE_FAILED');
+                        }
+                        break;
+                    }
+
+                    case 'worktree:prune': {
+                        const { workspaceId } = payload as { workspaceId?: string };
+                        if (!workspaceId) {
+                            sendWSError(ws, 'worktree:prune requires workspaceId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        try {
+                            const manager = new WorktreeManager();
+                            const pruned = await manager.pruneWorktrees(workspaceId);
+                            for (const p of pruned) {
+                                if (workspaceStore.getWorkspace(p)) {
+                                    workspaceStore.deleteWorkspace(p);
+                                    broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: p } });
+                                }
+                            }
+                            ws.send(JSON.stringify({ type: 'worktree:pruned', payload: { workspaceId, pruned } }));
+                        } catch (err) {
+                            sendWSError(ws, err instanceof Error ? err.message : String(err), message.type, 'WORKTREE_PRUNE_FAILED');
+                        }
+                        break;
+                    }
+
+                    case 'workspace:autoWorktree': {
+                        const { workspaceId, enabled } = payload as { workspaceId?: string; enabled?: boolean };
+                        if (!workspaceId || typeof enabled !== 'boolean') {
+                            sendWSError(ws, 'workspace:autoWorktree requires workspaceId and enabled', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const ok = workspaceStore.setAutoWorktree(workspaceId, enabled);
+                        if (!ok) {
+                            sendWSError(ws, 'Workspace not found', message.type, 'NOT_FOUND');
+                            break;
+                        }
+                        const updatedWs = workspaceStore.getWorkspace(workspaceId);
+                        broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updatedWs } });
+                        break;
+                    }
                 }
             } catch (err) {
                 logger.error('Error handling message', {
@@ -2200,17 +2594,34 @@ export async function createApp(basePath?: string) {
             const platform = process.platform;
             let cmd: string;
             let args: string[];
+            const lastBrowsed = workspaceStore.getLastBrowsedPath();
 
             if (platform === 'darwin') {
+                const scriptParts = ['POSIX path of (choose folder with prompt "Select a workspace folder"'];
+                if (lastBrowsed) {
+                    const safe = lastBrowsed.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                    scriptParts.push(` default location POSIX file "${safe}"`);
+                }
+                scriptParts.push(')');
                 cmd = 'osascript';
-                args = ['-e', 'POSIX path of (choose folder with prompt "Select reference folder")'];
+                args = ['-e', scriptParts.join('')];
             } else if (platform === 'win32') {
+                const initialDir = lastBrowsed
+                    ? `$f.SelectedPath = [System.IO.Path]::GetFullPath("${lastBrowsed.replace(/"/g, '')}"); `
+                    : '';
                 cmd = 'powershell';
-                args = ['-Command', `Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Select reference folder'; if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }`];
+                args = ['-STA', '-NoProfile', '-Command', `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Application]::EnableVisualStyles(); $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Select a workspace folder'; $f.ShowNewFolderButton = $true; ${initialDir}if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }`];
             } else {
-                // Linux - try zenity, then kdialog
-                cmd = 'zenity';
-                args = ['--file-selection', '--directory', '--title=Select reference folder'];
+                // Linux - try zenity first, fall back to kdialog
+                try {
+                    require('child_process').execFileSync('which', ['zenity'], { stdio: 'ignore' });
+                    cmd = 'zenity';
+                    args = ['--file-selection', '--directory', '--title=Select a workspace folder'];
+                    if (lastBrowsed) args.push(`--filename=${lastBrowsed}/`);
+                } catch {
+                    cmd = 'kdialog';
+                    args = ['--getexistingdirectory', lastBrowsed || process.env['HOME'] || '/', '--title', 'Select a workspace folder'];
+                }
             }
 
             const child = spawn(cmd, args);
@@ -2221,6 +2632,7 @@ export async function createApp(basePath?: string) {
             child.on('close', (code: number | null) => {
                 const path = stdout.trim();
                 if (code === 0 && path) {
+                    workspaceStore.setLastBrowsedPath(path);
                     res.json({ success: true, path });
                 } else {
                     // User cancelled or error
@@ -3741,6 +4153,165 @@ export async function createApp(basePath?: string) {
             logger.error('Failed to get git status', { error: err instanceof Error ? err.message : String(err) });
             res.status(500).json({ error: 'Failed to get git status' });
         }
+    });
+
+    // ── Worktree REST endpoints (query-param routing for Windows path compat) ──
+
+    // GET /api/worktrees?workspace=<path>  — list worktrees for a repo
+    app.get('/api/worktrees', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+        try {
+            const manager = new WorktreeManager();
+            const worktrees = await manager.listWorktrees(workspacePath);
+            // Enrich with Claudia task counts
+            for (const wt of worktrees) {
+                const tasks = taskSpawner.getAllTasks().filter(t => t.workspaceId === wt.path);
+                wt.taskCount = tasks.length;
+            }
+            return res.json({ worktrees });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error('GET /api/worktrees failed', { error: msg });
+            return res.status(500).json({ error: msg });
+        }
+    });
+
+    // POST /api/worktrees?workspace=<path>  — create a worktree
+    app.post('/api/worktrees', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+        const { branch, baseBranch, createBranch = true } = req.body as {
+            branch?: string;
+            baseBranch?: string;
+            createBranch?: boolean;
+        };
+        if (!branch) {
+            return res.status(400).json({ error: 'branch is required' });
+        }
+        try {
+            const manager = new WorktreeManager();
+            const result = await manager.createWorktree({ repoPath: workspacePath, branch, baseBranch, createBranch });
+            // Register as workspace and insert after parent
+            const workspace = await workspaceStore.addWorktreeWorkspace(result.path, workspacePath, branch);
+            broadcast({ type: 'workspace:created' as WSMessageType, payload: { workspace } });
+            logger.info('Worktree created', { path: result.path, branch });
+            return res.json({ workspace, worktreePath: result.path, branch: result.branch });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error('POST /api/worktrees failed', { error: msg });
+            return res.status(400).json({ error: msg });
+        }
+    });
+
+    // DELETE /api/worktrees?workspace=<path>&worktreePath=<path>&force=true
+    app.delete('/api/worktrees', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        const worktreePath = req.query.worktreePath as string;
+        const force = req.query.force === 'true';
+        if (!workspacePath || !worktreePath) {
+            return res.status(400).json({ error: 'workspace and worktreePath query parameters are required' });
+        }
+        // Safety: don't allow removing the workspace that is the parent
+        if (worktreePath === workspacePath) {
+            return res.status(400).json({ error: 'Cannot remove the primary workspace' });
+        }
+        // Safety: check for active tasks
+        const activeTasks = taskSpawner.getAllTasks().filter(
+            t => t.workspaceId === worktreePath && ['busy', 'starting', 'waiting_input'].includes(t.state)
+        );
+        if (activeTasks.length > 0 && !force) {
+            return res.status(409).json({
+                error: `Cannot remove: ${activeTasks.length} active task(s) still running in this worktree`,
+                activeTasks: activeTasks.map(t => t.id),
+            });
+        }
+        try {
+            const manager = new WorktreeManager();
+            await manager.removeWorktree({ repoPath: workspacePath, worktreePath, force });
+            // Remove from workspace store
+            workspaceStore.deleteWorkspace(worktreePath);
+            broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: worktreePath } });
+            logger.info('Worktree removed', { worktreePath });
+            return res.json({ success: true });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error('DELETE /api/worktrees failed', { error: msg });
+            return res.status(400).json({ error: msg });
+        }
+    });
+
+    // POST /api/worktrees/prune?workspace=<path>  — prune stale worktrees
+    app.post('/api/worktrees/prune', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+        try {
+            const manager = new WorktreeManager();
+            const pruned = await manager.pruneWorktrees(workspacePath);
+            // Remove any pruned paths from workspace store
+            for (const p of pruned) {
+                if (workspaceStore.getWorkspace(p)) {
+                    workspaceStore.deleteWorkspace(p);
+                    broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: p } });
+                }
+            }
+            logger.info('Worktrees pruned', { count: pruned.length, pruned });
+            return res.json({ pruned });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.error('POST /api/worktrees/prune failed', { error: msg });
+            return res.status(500).json({ error: msg });
+        }
+    });
+
+    // GET /api/worktrees/branches?workspace=<path>  — list local + remote branches for autocomplete
+    app.get('/api/worktrees/branches', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        try {
+            const manager = new WorktreeManager();
+            const [local, remote] = await Promise.all([
+                manager.getLocalBranches(workspacePath),
+                manager.getRemoteBranches(workspacePath),
+            ]);
+            return res.json({ local, remote });
+        } catch (err) {
+            return res.json({ local: [], remote: [] });
+        }
+    });
+
+    // PATCH /api/worktrees/auto?workspace=<path>  — toggle autoWorktree on a workspace
+    app.patch('/api/worktrees/auto', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        const { enabled } = req.body as { enabled?: boolean };
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (typeof enabled !== 'boolean') {
+            return res.status(400).json({ error: 'enabled (boolean) is required in body' });
+        }
+        const ok = workspaceStore.setAutoWorktree(workspacePath, enabled);
+        if (!ok) return res.status(404).json({ error: 'Workspace not found' });
+        const workspace = workspaceStore.getWorkspace(workspacePath);
+        broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace } });
+        return res.json({ success: true, autoWorktree: enabled });
     });
 
     // Git log endpoint - get commit history
@@ -5603,20 +6174,24 @@ Guidelines:
         console.log('[Server] Restart requested via API');
         res.json({ status: 'restarting' });
 
-        // Give time for response to be sent
+        // Two restart mechanisms depending on how the backend was launched:
+        // - tsx watch mode (CLAUDIA_WATCH_MODE=1): process.exit does NOT make tsx
+        //   relaunch — only a file change does. Touch index.ts to trigger reload.
+        // - no-watch mode: exit with code 75; the start-script relaunch loop restarts us.
+        const watchMode = process.env['CLAUDIA_WATCH_MODE'] === '1';
         setTimeout(async () => {
-            // Touch a watched file to trigger tsx watch restart
-            // This is more reliable than process.exit(0) which tsx may not restart
-            try {
-                const { utimes } = await import('fs/promises');
-                const restartTriggerFile = join(__dirname, 'index.ts');
-                const now = new Date();
-                await utimes(restartTriggerFile, now, now);
-                console.log('[Server] Touched index.ts to trigger tsx watch restart');
-            } catch (error) {
-                console.error('[Server] Failed to touch restart trigger file, falling back to graceful shutdown:', error);
-                gracefulShutdown('RESTART');
+            if (watchMode) {
+                try {
+                    const { utimes } = await import('fs/promises');
+                    const now = new Date();
+                    await utimes(join(__dirname, 'index.ts'), now, now);
+                    console.log('[Server] Touched index.ts to trigger tsx watch restart');
+                    return;
+                } catch (error) {
+                    console.error('[Server] Touch failed, falling back to exit-code restart:', error);
+                }
             }
+            gracefulShutdown('RESTART', 75);
         }, 100);
     });
 
@@ -5634,8 +6209,18 @@ Guidelines:
         });
     }
 
-    // Graceful shutdown handler
-    function gracefulShutdown(signal: string): void {
+    // Graceful shutdown handler. exitCode 75 signals the start-script relaunch
+    // loop to restart the backend (used by POST /api/server/restart in no-watch mode).
+    let isShuttingDown = false;
+    function gracefulShutdown(signal: string, exitCode: number = 0): void {
+        // Guard against double-shutdown (e.g. restart clicked twice, or Ctrl+C
+        // during the restart window) — two overlapping sequences would race
+        // process.exit with different codes.
+        if (isShuttingDown) {
+            console.log(`[Server] Shutdown already in progress, ignoring ${signal}`);
+            return;
+        }
+        isShuttingDown = true;
         console.log(`[Server] Shutting down (${signal}), saving state immediately...`);
 
         // CRITICAL: Save all state IMMEDIATELY before anything else.
@@ -5650,6 +6235,8 @@ Guidelines:
 
         // Clear heartbeat interval
         clearInterval(heartbeatInterval);
+        clearInterval(prInfoInterval);
+        clearInterval(worktreeScanInterval);
 
         // Notify all connected clients that the server is reloading
         broadcast({ type: 'server:reloading' as WSMessageType, payload: {} });
@@ -5666,8 +6253,8 @@ Guidelines:
                 client.close(1001, 'Server reloading');
             }
 
-            console.log('[Server] Shutdown complete');
-            process.exit(0);
+            console.log(`[Server] Shutdown complete (exit ${exitCode})`);
+            process.exit(exitCode);
         }, 500);
     }
 

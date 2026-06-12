@@ -45,6 +45,11 @@ export interface Task {
     displayName?: string;    // User-editable display name (shown instead of prompt when set)
     displayNameEditedByUser?: boolean; // True if the user manually edited the display name (prevents agent auto-title)
     tokenUsage?: TaskTokenUsage; // Token usage data for this task
+    // Branch of a git worktree this task's Claude session created/moved onto
+    // (detected by diffing the repo's worktree list while the task runs). Used to
+    // annotate the task row with a worktree badge. Undefined = no worktree detected.
+    sessionWorktreeBranch?: string;
+    sessionWorktreePrInfo?: WorkspacePrInfo | null; // PR for that branch (if any)
 }
 
 export interface WorkspaceReference {
@@ -61,6 +66,35 @@ export interface Workspace {
     systemPrompt?: string;   // Custom system prompt for this workspace
     displayName?: string;    // User-editable display name (shown instead of folder name when set)
     references?: WorkspaceReference[];  // Referenced workspaces/folders for cross-workspace context
+
+    // Worktree fields (optional — only set for worktree workspaces)
+    worktreeParentId?: string;   // If this workspace IS a worktree, the parent workspace's id (absolute path)
+    worktreeBranch?: string;     // Branch checked out in this worktree
+    autoWorktree?: boolean;      // If true, new tasks auto-create an isolated worktree
+
+    // GitHub PR associated with this workspace's branch (resolved via `gh`, cached server-side).
+    // null = looked up, no PR found; undefined = not yet looked up.
+    prInfo?: WorkspacePrInfo | null;
+}
+
+export interface WorkspacePrInfo {
+    number: number;
+    title: string;
+    state: 'draft' | 'open' | 'merged' | 'closed';
+    url: string;
+    ci?: 'passed' | 'failed' | 'running' | 'none';  // statusCheckRollup summary
+}
+
+// Metadata about a single git worktree (from `git worktree list --porcelain`)
+export interface WorktreeInfo {
+    path: string;            // Absolute path to the worktree directory
+    branch: string;          // Branch checked out (e.g. "refs/heads/feature/foo" or detached hash)
+    commitHash: string;      // Current HEAD commit hash
+    isMain: boolean;         // True for the primary working tree
+    isLocked: boolean;       // True if the worktree is locked
+    lockedReason?: string;   // Why it's locked (if locked)
+    prunable: boolean;       // True if the directory no longer exists (stale)
+    taskCount?: number;      // Number of active Claudia tasks in this worktree (enriched by server)
 }
 
 export interface RecentWorkspace {
@@ -152,6 +186,16 @@ export type WSMessageType =
     | 'workspace:renamed'
     | 'workspace:recent:list'
     | 'workspace:resetResult'
+    // Worktree management
+    | 'worktree:list'
+    | 'worktree:listed'
+    | 'worktree:create'
+    | 'worktree:created'
+    | 'worktree:remove'
+    | 'worktree:removed'
+    | 'worktree:prune'
+    | 'worktree:pruned'
+    | 'worktree:error'
     // Task reordering
     | 'tasks:reordered'
     // Embedded shell terminals

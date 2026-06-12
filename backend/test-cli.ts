@@ -1357,6 +1357,15 @@ function parseArgs(): TestConfig {
     let cronRecurring = true;
     let cronPause: boolean | null = null;
     let complexity: string | null = null;
+    // Worktree operations
+    let listWorktrees = false;
+    let createWorktree = false;
+    let removeWorktree = false;
+    let toggleAutoWorktree = false;
+    let worktreeBranch: string | null = null;
+    let worktreePath: string | null = null;
+    let worktreeForce = false;
+    let autoWorktreeEnabled: boolean | null = null;
 
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
@@ -1563,6 +1572,32 @@ function parseArgs(): TestConfig {
             case '--cron-resume':
                 cronPause = false;
                 break;
+            case '--list-worktrees':
+                listWorktrees = true;
+                break;
+            case '--create-worktree':
+                createWorktree = true;
+                break;
+            case '--remove-worktree':
+                removeWorktree = true;
+                break;
+            case '--toggle-auto-worktree':
+                toggleAutoWorktree = true;
+                break;
+            case '--worktree-branch':
+                worktreeBranch = args[++i];
+                break;
+            case '--worktree-path':
+                worktreePath = args[++i];
+                break;
+            case '--worktree-force':
+                worktreeForce = true;
+                break;
+            case '--auto-worktree': {
+                const av = args[++i];
+                autoWorktreeEnabled = av !== 'false';
+                break;
+            }
             case '--complexity': {
                 const value = args[++i];
                 if (!['low', 'medium', 'high'].includes(value)) {
@@ -1659,6 +1694,16 @@ SCHEDULED TASK (CRON) OPERATIONS:
   --cron-expression <expr> Cron expression for scheduling (e.g., "*/5 * * * *")
   --cron-id <id>           Scheduled task ID for operations
   --cron-recurring <bool>  Whether the task recurs (default: true, set to false for one-shot)
+
+GIT WORKTREE OPERATIONS:
+  --list-worktrees         List all worktrees for a workspace (requires --workspace)
+  --create-worktree        Create a new worktree (requires --workspace and --worktree-branch)
+  --remove-worktree        Remove a worktree (requires --workspace and --worktree-path)
+  --toggle-auto-worktree   Toggle auto-isolate mode (requires --workspace and --auto-worktree)
+  --worktree-branch <name> Branch name for --create-worktree
+  --worktree-path <path>   Worktree path for --remove-worktree
+  --worktree-force         Force remove even if tasks are running
+  --auto-worktree <bool>   Enable/disable auto-worktree mode (true/false)
 
 Examples:
   # Basic chat message
@@ -1842,6 +1887,25 @@ Examples:
         cronRecurring,
         cronPause,
         complexity,
+        // Worktree fields aren't in the TestConfig interface — handled directly in main()
+        // We'll pass them as extra properties via type assertion in main()
+        listWorktrees: listWorktrees as any,
+        createWorktree: createWorktree as any,
+        removeWorktree: removeWorktree as any,
+        toggleAutoWorktree: toggleAutoWorktree as any,
+        worktreeBranch: worktreeBranch as any,
+        worktreePath: worktreePath as any,
+        worktreeForce: worktreeForce as any,
+        autoWorktreeEnabled: autoWorktreeEnabled as any,
+    } as TestConfig & {
+        listWorktrees: boolean;
+        createWorktree: boolean;
+        removeWorktree: boolean;
+        toggleAutoWorktree: boolean;
+        worktreeBranch: string | null;
+        worktreePath: string | null;
+        worktreeForce: boolean;
+        autoWorktreeEnabled: boolean | null;
     };
 }
 
@@ -2278,9 +2342,88 @@ async function checkApiConfig(baseHttpUrl: string): Promise<void> {
     }
 }
 
+// ============================================================================
+// Worktree operations (HTTP-based, no WebSocket needed)
+// ============================================================================
+
+async function listWorktreesCmd(baseHttpUrl: string, workspaceId: string): Promise<void> {
+    console.log(`🌳 Listing worktrees for workspace: ${workspaceId}`);
+    const url = `${baseHttpUrl}/api/worktrees?workspace=${encodeURIComponent(workspaceId)}`;
+    const resp = await fetch(url);
+    if (!resp.ok) {
+        const body = await resp.text();
+        console.error(`❌ Failed to list worktrees: ${resp.status} ${body}`);
+        return;
+    }
+    const data = await resp.json() as { worktrees: any[] };
+    const wts = data.worktrees;
+    if (wts.length === 0) {
+        console.log('  (no worktrees)');
+        return;
+    }
+    for (const wt of wts) {
+        const flags = [
+            wt.isMain ? 'main' : 'linked',
+            wt.isLocked ? '🔒 locked' : '',
+            wt.prunable ? '🗑 prunable' : '',
+        ].filter(Boolean).join(', ');
+        const tasks = wt.taskCount !== undefined ? ` [${wt.taskCount} tasks]` : '';
+        console.log(`  📁 ${wt.path}`);
+        console.log(`     branch: ${wt.branch}  commit: ${wt.commitHash.slice(0, 8)}  (${flags})${tasks}`);
+    }
+}
+
+async function createWorktreeCmd(baseHttpUrl: string, workspaceId: string, branch: string, baseBranch?: string): Promise<void> {
+    console.log(`🌳 Creating worktree for workspace: ${workspaceId}, branch: ${branch}`);
+    const url = `${baseHttpUrl}/api/worktrees?workspace=${encodeURIComponent(workspaceId)}`;
+    const body: any = { branch };
+    if (baseBranch) body.baseBranch = baseBranch;
+    const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const data = await resp.json() as any;
+    if (!resp.ok) {
+        console.error(`❌ Failed to create worktree: ${resp.status} ${data.error ?? JSON.stringify(data)}`);
+        return;
+    }
+    console.log(`✅ Worktree created: ${data.worktreePath}`);
+    console.log(`   Workspace ID: ${data.workspaceId}`);
+    console.log(`   Branch: ${data.branch}`);
+}
+
+async function removeWorktreeCmd(baseHttpUrl: string, workspaceId: string, worktreePath: string, force: boolean): Promise<void> {
+    console.log(`🗑  Removing worktree: ${worktreePath}`);
+    const url = `${baseHttpUrl}/api/worktrees?workspace=${encodeURIComponent(workspaceId)}&worktreePath=${encodeURIComponent(worktreePath)}&force=${force}`;
+    const resp = await fetch(url, { method: 'DELETE' });
+    const data = await resp.json() as any;
+    if (!resp.ok) {
+        console.error(`❌ Failed to remove worktree: ${resp.status} ${data.error ?? JSON.stringify(data)}`);
+        return;
+    }
+    console.log(`✅ Worktree removed: ${worktreePath}`);
+}
+
+async function toggleAutoWorktreeCmd(baseHttpUrl: string, workspaceId: string, enabled: boolean): Promise<void> {
+    console.log(`🔄 Setting auto-worktree=${enabled} for workspace: ${workspaceId}`);
+    const url = `${baseHttpUrl}/api/worktrees/auto?workspace=${encodeURIComponent(workspaceId)}`;
+    const resp = await fetch(url, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+    });
+    const data = await resp.json() as any;
+    if (!resp.ok) {
+        console.error(`❌ Failed to toggle auto-worktree: ${resp.status} ${data.error ?? JSON.stringify(data)}`);
+        return;
+    }
+    console.log(`✅ Auto-worktree ${enabled ? 'enabled' : 'disabled'}`);
+}
+
 // Main execution
 async function main() {
-    const config = parseArgs();
+    const config = parseArgs() as any;
 
     // Derive HTTP URL from WebSocket URL for API calls
     const baseHttpUrl = config.backendUrl
@@ -2348,6 +2491,55 @@ async function main() {
             process.exit(1);
         }
         await cronPauseTask(baseHttpUrl, config.cronId, config.cronPause);
+        process.exit(0);
+    }
+
+    // Worktree operations (HTTP-based)
+    if (config.listWorktrees) {
+        if (!config.workspaceId) {
+            console.error('❌ --list-worktrees requires --workspace');
+            process.exit(1);
+        }
+        await listWorktreesCmd(baseHttpUrl, config.workspaceId);
+        process.exit(0);
+    }
+
+    if (config.createWorktree) {
+        if (!config.workspaceId) {
+            console.error('❌ --create-worktree requires --workspace');
+            process.exit(1);
+        }
+        if (!config.worktreeBranch) {
+            console.error('❌ --create-worktree requires --worktree-branch');
+            process.exit(1);
+        }
+        await createWorktreeCmd(baseHttpUrl, config.workspaceId, config.worktreeBranch);
+        process.exit(0);
+    }
+
+    if (config.removeWorktree) {
+        if (!config.workspaceId) {
+            console.error('❌ --remove-worktree requires --workspace');
+            process.exit(1);
+        }
+        if (!config.worktreePath) {
+            console.error('❌ --remove-worktree requires --worktree-path');
+            process.exit(1);
+        }
+        await removeWorktreeCmd(baseHttpUrl, config.workspaceId, config.worktreePath, config.worktreeForce);
+        process.exit(0);
+    }
+
+    if (config.toggleAutoWorktree) {
+        if (!config.workspaceId) {
+            console.error('❌ --toggle-auto-worktree requires --workspace');
+            process.exit(1);
+        }
+        if (config.autoWorktreeEnabled === null) {
+            console.error('❌ --toggle-auto-worktree requires --auto-worktree <true|false>');
+            process.exit(1);
+        }
+        await toggleAutoWorktreeCmd(baseHttpUrl, config.workspaceId, config.autoWorktreeEnabled);
         process.exit(0);
     }
 

@@ -369,7 +369,7 @@ server.tool(
 // ============================================================================
 // Tool: claudia_create_task
 // ============================================================================
-const createTaskBaseDescription = `Create a new task in Claudia. The task will be assigned to a Claude Code agent in the current workspace (${WORKSPACE_ID || 'unknown'}). Use this to delegate work to other agents running in parallel.`;
+const createTaskBaseDescription = `Create a new task in Claudia. The task will be assigned to a Claude Code agent in the current workspace (${WORKSPACE_ID || 'unknown'}). Use this to delegate work to other agents running in parallel. PREFER this over launching your own internal subagent (the built-in Agent/Task tool) for any delegatable work — Claudia tasks are user-visible, monitorable, resumable, and isolated. Only use your own subagent for a quick throwaway lookup you need inline, or when a Claudia task would clearly give a worse result.`;
 
 const createTaskTieringSuffix = `
 
@@ -380,8 +380,8 @@ You can pass an optional \`complexity\` hint to control the cost of the spawned 
 
 Be conservative — pick \`low\` when the work is genuinely simple. Omit the parameter to use the workspace's default model.`;
 
-async function handleCreateTask(args: { prompt: string; displayName?: string; complexity?: 'low' | 'medium' | 'high' }) {
-    const { prompt, displayName, complexity } = args;
+async function handleCreateTask(args: { prompt: string; displayName?: string; complexity?: 'low' | 'medium' | 'high'; isolate?: boolean }) {
+    const { prompt, displayName, complexity, isolate } = args;
     if (!WORKSPACE_ID) {
         return {
             content: [{
@@ -391,13 +391,44 @@ async function handleCreateTask(args: { prompt: string; displayName?: string; co
         };
     }
 
+    // If isolate=true, create an isolated worktree via the REST API before spawning the task
+    let effectiveWorkspaceId = WORKSPACE_ID;
+    if (isolate) {
+        try {
+            log.info('isolate=true: creating worktree before task spawn');
+            const { randomBytes } = await import('crypto');
+            const shortId = randomBytes(4).toString('hex');
+            const branch = `claudia/task-${shortId}`;
+            const res = await backendFetch(
+                `/api/worktrees?workspace=${encodeURIComponent(WORKSPACE_ID)}`,
+                {
+                    method: 'POST',
+                    body: JSON.stringify({ branch, createBranch: true }),
+                }
+            );
+            if (res.ok) {
+                const data = await res.json() as { worktreePath?: string; workspace?: { id?: string } };
+                const worktreePath = data.workspace?.id ?? data.worktreePath;
+                if (worktreePath) {
+                    effectiveWorkspaceId = worktreePath;
+                    log.info(`Worktree created: ${worktreePath} (branch=${branch})`);
+                }
+            } else {
+                const err = await res.text();
+                log.error(`Failed to create worktree (isolate): ${err}. Falling back to parent workspace.`);
+            }
+        } catch (isolateErr) {
+            log.error('Worktree creation for isolate failed (non-fatal)', isolateErr);
+        }
+    }
+
     try {
-        log.info(`Creating task in workspace: ${WORKSPACE_ID}${complexity ? ` (complexity=${complexity})` : ''}`);
+        log.info(`Creating task in workspace: ${effectiveWorkspaceId}${complexity ? ` (complexity=${complexity})` : ''}${isolate ? ' (isolated)' : ''}`);
         log.info(`Prompt: ${prompt.substring(0, 100)}...`);
 
         const payload: Record<string, unknown> = {
             prompt,
-            workspaceId: WORKSPACE_ID,
+            workspaceId: effectiveWorkspaceId,
             source: 'mcp',
         };
         if (MODEL_TIERING_ENABLED && complexity) {
@@ -427,10 +458,11 @@ async function handleCreateTask(args: { prompt: string; displayName?: string; co
                         taskId: task.id,
                         displayName: displayName || null,
                         state: task.state,
-                        workspace: task.workspaceId,
+                        workspace: effectiveWorkspaceId,
+                        isolated: isolate && effectiveWorkspaceId !== WORKSPACE_ID,
                         prompt: task.prompt?.substring(0, 200),
                         complexity: complexity || null,
-                        message: `Task '${task.id}'${displayName ? ` (${displayName})` : ''} created successfully. It is now running in workspace '${WORKSPACE_ID}'.`
+                        message: `Task '${task.id}'${displayName ? ` (${displayName})` : ''} created successfully${isolate && effectiveWorkspaceId !== WORKSPACE_ID ? ` in isolated worktree '${effectiveWorkspaceId}'` : ` in workspace '${WORKSPACE_ID}'`}.`
                     }, null, 2)
                 }]
             };
@@ -457,6 +489,14 @@ async function handleCreateTask(args: { prompt: string; displayName?: string; co
     }
 }
 
+const isolateParam = {
+    isolate: z.boolean().optional().describe(
+        'When true, creates a new isolated git worktree for this task (branch: claudia/task-<id>). ' +
+        'Use this when the task will make file changes that should not conflict with other tasks running in the same workspace. ' +
+        'Recommended for parallel feature development or any task that will commit changes.'
+    ),
+};
+
 if (MODEL_TIERING_ENABLED) {
     server.tool(
         'claudia_create_task',
@@ -467,6 +507,7 @@ if (MODEL_TIERING_ENABLED) {
             complexity: z.enum(['low', 'medium', 'high']).optional().describe(
                 'Cost/capability tier for the spawned task. Use "low" for trivial work, "medium" for normal coding, "high" for hard reasoning. Omit to use the workspace default model.'
             ),
+            ...isolateParam,
         },
         async (args) => handleCreateTask(args)
     );
@@ -477,6 +518,7 @@ if (MODEL_TIERING_ENABLED) {
         {
             prompt: z.string().describe('The prompt/instructions for the new task'),
             displayName: z.string().optional().describe('Optional short display name for the task in the Claudia sidebar (e.g., "Build API endpoint", "Write tests")'),
+            ...isolateParam,
         },
         async (args) => handleCreateTask(args)
     );
