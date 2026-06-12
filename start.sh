@@ -1,8 +1,19 @@
 #!/bin/bash
 
 # Claudia - Start Script
+#
+# Usage:
+#   ./start.sh           # backend runs no-watch (default; stable, no spurious restarts)
+#   ./start.sh --watch   # backend runs tsx watch (auto-reload on backend/src edits)
 
 set -e
+
+WATCH=0
+for arg in "$@"; do
+    case "$arg" in
+        --watch|-w) WATCH=1 ;;
+    esac
+done
 
 # ============================================
 # PORT CONFIGURATION - Single source of truth
@@ -112,8 +123,43 @@ export CLAUDIA_BACKEND_PORT=$BACKEND_PORT
 # Increase Node.js memory limit for backend (handles many persisted tasks + archived tasks)
 export NODE_OPTIONS="--max-old-space-size=8192"
 
-# Start backend and frontend
-# Backend: tsx watch - auto-reloads on file changes (or use restart button in UI)
-# Frontend: Vite HMR auto-reloads on file changes
-npm run dev -w backend & npm run dev -w frontend
+# Start backend and frontend.
+# Backend defaults to no-watch to prevent spurious restarts from file changes
+# (e.g., Claude Code tasks editing source files, antivirus). Pass --watch for auto-reload.
+# Frontend: Vite HMR auto-reloads on file changes.
+#
+# The backend runs in a RELAUNCH LOOP: exit code 75 (triggered by POST
+# /api/server/restart) relaunches it; any other exit code stops everything.
+if [ "$WATCH" -eq 1 ]; then BACKEND_SCRIPT="dev"; else BACKEND_SCRIPT="dev:no-watch"; fi
+echo "Backend mode: $BACKEND_SCRIPT"
+
+# Recursively kill a process and all its descendants (vite spawns esbuild
+# grandchildren that `pkill -P` alone would miss).
+kill_tree() {
+    local pid=$1
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill_tree "$child"
+    done
+    kill "$pid" 2>/dev/null
+}
+
+# Frontend as a background child; kill its whole tree on exit.
+npm run dev -w frontend &
+FRONTEND_PID=$!
+trap "rm -f '$LOCK_FILE'; kill_tree $FRONTEND_PID" EXIT INT TERM
+
+RESTART_EXIT_CODE=75
+while true; do
+    set +e
+    npm run "$BACKEND_SCRIPT" -w backend
+    code=$?
+    set -e
+    if [ "$code" -eq "$RESTART_EXIT_CODE" ]; then
+        echo "Backend requested restart (exit $code) -- relaunching..."
+        sleep 0.5
+        continue
+    fi
+    echo "Backend exited (code $code) -- shutting down."
+    break
+done
 

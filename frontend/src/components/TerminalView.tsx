@@ -276,6 +276,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         let lastSentCols = 0;
         let lastSentRows = 0;
 
+
         // Resize output buffer: after sending a resize to the backend, buffer all
         // incoming PTY output for RESIZE_BUFFER_MS. This gives the PTY time to
         // process SIGWINCH and start rendering at the new width. Without this,
@@ -311,6 +312,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 term.write(combined);
             }
         };
+
 
         // Handle resize - sync to backend
         term.onResize(({ cols, rows }) => {
@@ -601,8 +603,10 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                                 programmaticScrollRef.current = false;
                             }, 100);
                         });
-                    } else {
-                        // User was scrolled up - maintain their position
+                    } else if (Number.isInteger(viewport)) {
+                        // User was scrolled up - maintain their position.
+                        // Guard against a non-finite viewportY (xterm's scrollToLine
+                        // throws "This API only accepts integers" on NaN).
                         programmaticScrollRef.current = true;
                         term.scrollToLine(viewport);
                         setTimeout(() => {
