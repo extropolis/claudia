@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import { WebLinksAddon } from '@xterm/addon-web-links';
+import { init as initGhostty, Terminal, FitAddon, OSC8LinkProvider, UrlRegexProvider } from 'ghostty-web';
 import { X, Copy, Check } from 'lucide-react';
 import { useEffectiveTheme } from '../hooks/useTheme';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
-import '@xterm/xterm/css/xterm.css';
 import './ShellTerminalView.css';
+
+let ghosttyInitPromise: Promise<void> | null = null;
+function ensureGhosttyInit(): Promise<void> {
+  if (!ghosttyInitPromise) ghosttyInitPromise = initGhostty();
+  return ghosttyInitPromise;
+}
 
 interface ShellTerminalViewProps {
   workspaceId: string;
@@ -57,19 +60,22 @@ export function ShellTerminalView({
       terminalRef.current.removeChild(terminalRef.current.firstChild);
     }
 
+    let destroyed = false;
+    let cleanup: (() => void) | null = null;
+
+    void ensureGhosttyInit().then(() => {
+    if (destroyed || !terminalRef.current) return;
+
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 14,
       fontFamily: '"SF Mono", "Monaco", "Inconsolata", "Fira Code", monospace',
       scrollback: 10000,
-      allowProposedApi: true,
       theme: effectiveTheme === 'light' ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME,
     });
 
     const fitAddon = new FitAddon();
-    const webLinksAddon = new WebLinksAddon();
     term.loadAddon(fitAddon);
-    term.loadAddon(webLinksAddon);
 
     // Clipboard integration: Ctrl+V / Cmd+V paste and Ctrl+C / Cmd+C copy
     // Works in both Electron and browser environments
@@ -153,6 +159,8 @@ export function ShellTerminalView({
     term.open(terminalRef.current);
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
+    term.registerLinkProvider(new OSC8LinkProvider(term));
+    term.registerLinkProvider(new UrlRegexProvider(term));
 
     // Right-click: copy selection or paste (works in both Electron and browser)
     term.element?.addEventListener('contextmenu', (e) => {
@@ -246,7 +254,7 @@ export function ShellTerminalView({
       );
     }
 
-    return () => {
+    cleanup = () => {
       if (resizeTimeout) window.clearTimeout(resizeTimeout);
       resizeObserver.disconnect();
       window.removeEventListener('resize', handleWindowResize);
@@ -256,6 +264,12 @@ export function ShellTerminalView({
       term.dispose();
       xtermRef.current = null;
       fitAddonRef.current = null;
+    };
+    }); // end ensureGhosttyInit().then()
+
+    return () => {
+      destroyed = true;
+      if (cleanup) cleanup();
     };
   }, [workspaceId, wsRef]);
 
