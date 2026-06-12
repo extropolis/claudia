@@ -242,6 +242,11 @@ function DirectoryNode({
   selectedPaths,
   onContextMenu,
   onSelect,
+  expandedDirs,
+  setDirExpanded,
+  childrenCache,
+  loadingDirs,
+  fetchDirChildren,
 }: {
   item: FileItem;
   workspacePath: string;
@@ -250,11 +255,16 @@ function DirectoryNode({
   selectedPaths: Set<string>;
   onContextMenu: (e: React.MouseEvent, path: string, type: 'file' | 'directory') => void;
   onSelect: (path: string, type: 'file' | 'directory', multi: boolean) => void;
+  expandedDirs: Set<string>;
+  setDirExpanded: (path: string, expanded: boolean) => void;
+  childrenCache: Map<string, FileItem[]>;
+  loadingDirs: Set<string>;
+  fetchDirChildren: (path: string) => Promise<void>;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const [children, setChildren] = useState<FileItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+  const expanded = expandedDirs.has(item.path);
+  const loaded = childrenCache.has(item.path);
+  const loading = loadingDirs.has(item.path);
+  const children = childrenCache.get(item.path) || [];
   const isSelected = selectedPaths.has(item.path);
 
   const toggleExpand = useCallback(
@@ -265,24 +275,11 @@ function DirectoryNode({
       }
 
       if (!expanded && !loaded) {
-        setLoading(true);
-        try {
-          const params = new URLSearchParams({ workspace: workspacePath, path: item.path });
-          const res = await fetch(`${getApiBaseUrl()}/api/workspaces/files?${params}`);
-          if (res.ok) {
-            const data = await res.json();
-            setChildren(data.items || []);
-            setLoaded(true);
-          }
-        } catch (err) {
-          console.error('[FileExplorer] Failed to load directory:', err);
-        } finally {
-          setLoading(false);
-        }
+        await fetchDirChildren(item.path);
       }
-      setExpanded(!expanded);
+      setDirExpanded(item.path, !expanded);
     },
-    [expanded, loaded, workspacePath, item.path],
+    [expanded, loaded, item.path, fetchDirChildren, setDirExpanded],
   );
 
   const handleClick = useCallback(
@@ -350,6 +347,11 @@ function DirectoryNode({
                 selectedPaths={selectedPaths}
                 onContextMenu={onContextMenu}
                 onSelect={onSelect}
+                expandedDirs={expandedDirs}
+                setDirExpanded={setDirExpanded}
+                childrenCache={childrenCache}
+                loadingDirs={loadingDirs}
+                fetchDirChildren={fetchDirChildren}
               />
             ) : (
               <FileNode
@@ -468,46 +470,152 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const [childrenCache, setChildrenCache] = useState<Map<string, FileItem[]>>(new Map());
+  const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
   const prevWorkspaceRef = useRef<string | undefined>(undefined);
+  // Use refs so the polling loop's closure always sees the latest set
+  // without retriggering the effect each time a dir is expanded.
+  const expandedDirsRef = useRef<Set<string>>(expandedDirs);
+  const isPollingRef = useRef(false);
+  useEffect(() => {
+    expandedDirsRef.current = expandedDirs;
+  }, [expandedDirs]);
 
-  const loadRootFiles = useCallback(async () => {
-    if (!workspacePath) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams({ workspace: workspacePath });
-      const res = await fetch(`${getApiBaseUrl()}/api/workspaces/files?${params}`);
-      if (res.ok) {
-        const data = await res.json();
-        setRootItems(data.items || []);
-      } else {
-        const errData = await res.json().catch(() => ({ error: 'Unknown error' }));
-        setError(errData.error || 'Failed to load files');
+  const fetchPath = useCallback(
+    async (path: string): Promise<FileItem[] | null> => {
+      if (!workspacePath) return null;
+      try {
+        const params = new URLSearchParams({ workspace: workspacePath });
+        if (path) params.set('path', path);
+        const res = await fetch(`${getApiBaseUrl()}/api/workspaces/files?${params}`);
+        if (res.ok) {
+          const data = await res.json();
+          return data.items || [];
+        }
+        return null;
+      } catch (err) {
+        console.error('[FileExplorer] fetchPath failed for', path, err);
+        return null;
       }
-    } catch (err) {
-      console.error('[FileExplorer] Failed to load root files:', err);
-      setError('Failed to connect to server');
-    } finally {
-      setLoading(false);
-      setHasLoaded(true);
-    }
-  }, [workspacePath]);
+    },
+    [workspacePath],
+  );
 
+  const fetchDirChildren = useCallback(
+    async (path: string) => {
+      setLoadingDirs((prev) => {
+        const next = new Set(prev);
+        next.add(path);
+        return next;
+      });
+      try {
+        const items = await fetchPath(path);
+        if (items !== null) {
+          setChildrenCache((prev) => {
+            const next = new Map(prev);
+            next.set(path, items);
+            return next;
+          });
+        }
+      } finally {
+        setLoadingDirs((prev) => {
+          const next = new Set(prev);
+          next.delete(path);
+          return next;
+        });
+      }
+    },
+    [fetchPath],
+  );
+
+  const setDirExpanded = useCallback((path: string, expanded: boolean) => {
+    setExpandedDirs((prev) => {
+      const next = new Set(prev);
+      if (expanded) next.add(path);
+      else next.delete(path);
+      return next;
+    });
+  }, []);
+
+  // Refresh root + every currently-expanded directory in parallel.
+  // Used by both the auto-poller and the explicit refresh button.
+  const refreshAll = useCallback(
+    async (showSpinner = false) => {
+      if (!workspacePath) return;
+      if (showSpinner) {
+        setLoading(true);
+        setError(null);
+      }
+      try {
+        const expanded = Array.from(expandedDirsRef.current);
+        const [rootItems, ...dirResults] = await Promise.all([
+          fetchPath(''),
+          ...expanded.map((p) => fetchPath(p)),
+        ]);
+
+        if (rootItems !== null) {
+          setRootItems(rootItems);
+        } else if (showSpinner) {
+          setError('Failed to load files');
+        }
+
+        // Merge into cache, dropping entries whose parent no longer exists
+        setChildrenCache((prev) => {
+          const next = new Map(prev);
+          expanded.forEach((p, i) => {
+            const items = dirResults[i];
+            if (items !== null) next.set(p, items);
+          });
+          return next;
+        });
+      } catch (err) {
+        console.error('[FileExplorer] refreshAll failed:', err);
+        if (showSpinner) setError('Failed to connect to server');
+      } finally {
+        if (showSpinner) setLoading(false);
+        setHasLoaded(true);
+      }
+    },
+    [workspacePath, fetchPath],
+  );
+
+  // Reset state on workspace change
   useEffect(() => {
     if (workspacePath && workspacePath !== prevWorkspaceRef.current) {
       prevWorkspaceRef.current = workspacePath;
       setRootItems([]);
       setHasLoaded(false);
       setSelectedPaths(new Set());
-      if (isActive && isConnected) loadRootFiles();
+      setExpandedDirs(new Set());
+      setChildrenCache(new Map());
+      setLoadingDirs(new Set());
+      if (isActive && isConnected) refreshAll(true);
     }
-  }, [workspacePath, isActive, isConnected, loadRootFiles]);
+  }, [workspacePath, isActive, isConnected, refreshAll]);
 
+  // Initial load when tab becomes active
   useEffect(() => {
     if (isActive && isConnected && !hasLoaded && workspacePath && !loading) {
-      loadRootFiles();
+      refreshAll(true);
     }
-  }, [isActive, isConnected, hasLoaded, workspacePath, loading, loadRootFiles]);
+  }, [isActive, isConnected, hasLoaded, workspacePath, loading, refreshAll]);
+
+  // Auto-refresh every 4s while the tab is visible — no manual refresh needed.
+  // Skip ticks while a refresh is already inflight to avoid stacking requests.
+  useEffect(() => {
+    if (!isActive || !isConnected || !workspacePath) return;
+    const interval = setInterval(async () => {
+      if (isPollingRef.current) return;
+      isPollingRef.current = true;
+      try {
+        await refreshAll(false);
+      } finally {
+        isPollingRef.current = false;
+      }
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [isActive, isConnected, workspacePath, refreshAll]);
 
   const handleFileClick = useCallback((path: string) => {
     setSelectedFile(path);
@@ -582,7 +690,7 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
               });
 
               if (res.ok) {
-                loadRootFiles();
+                refreshAll(true);
               } else {
                 const error = await res.json();
                 alert(`Failed to copy: ${error.error}`);
@@ -615,7 +723,7 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
               });
 
               if (res.ok) {
-                loadRootFiles();
+                refreshAll(true);
                 setSelectedPaths(new Set());
               } else {
                 const error = await res.json();
@@ -644,7 +752,7 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
               });
 
               if (res.ok) {
-                loadRootFiles();
+                refreshAll(true);
                 setSelectedPaths(new Set());
               } else {
                 const error = await res.json();
@@ -660,7 +768,7 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
 
       setContextMenu({ x: e.clientX, y: e.clientY, items });
     },
-    [workspacePath, selectedPaths, loadRootFiles],
+    [workspacePath, selectedPaths, refreshAll],
   );
 
   const dirCount = rootItems.filter((i) => i.type === 'directory').length;
@@ -677,7 +785,7 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
           )}
           <button
             className="fe-toolbar-btn"
-            onClick={() => loadRootFiles()}
+            onClick={() => refreshAll(true)}
             disabled={loading}
             title="Refresh"
           >
@@ -706,6 +814,11 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
                 selectedPaths={selectedPaths}
                 onContextMenu={handleContextMenu}
                 onSelect={handleSelect}
+                expandedDirs={expandedDirs}
+                setDirExpanded={setDirExpanded}
+                childrenCache={childrenCache}
+                loadingDirs={loadingDirs}
+                fetchDirChildren={fetchDirChildren}
               />
             ) : (
               <FileNode

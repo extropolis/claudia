@@ -63,6 +63,9 @@ backend/chat-history.json
 backend/archived-histories/
 backend/task-histories/
 backend/data/conversations.json
+backend/checkpoints.json
+backend/usage-data.json
+backend/mobile-chat-history.json
 
 # Vite cache
 vite

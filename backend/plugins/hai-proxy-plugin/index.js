@@ -379,11 +379,14 @@ export default class HaiProxyPlugin {
             }
         }
 
-        // Kill any stale process
+        // Kill any stale process (managed by us)
         if (this.haiProxyProcess) {
             try { this.haiProxyProcess.kill(); } catch { }
             this.haiProxyProcess = null;
         }
+
+        // Kill any externally-started hai proxy on this port (e.g. started manually by user)
+        await this.killProcessOnPort(HAI_PROXY_PORT);
 
         // Generate a new API key
         const apiKey = randomUUID();
@@ -458,6 +461,27 @@ export default class HaiProxyPlugin {
         this.context.logger.info('HAI proxy started and config saved');
 
         return { success: true, apiKey, proxyUrl: HAI_PROXY_URL, pid: proc.pid };
+    }
+
+    async killProcessOnPort(port) {
+        try {
+            await new Promise((resolve) => {
+                const proc = spawn('lsof', ['-ti', `:${port}`], { stdio: ['ignore', 'pipe', 'ignore'] });
+                let pids = '';
+                proc.stdout.on('data', d => { pids += d.toString(); });
+                proc.on('close', () => {
+                    const pidList = pids.trim().split('\n').filter(Boolean);
+                    if (pidList.length === 0) return resolve();
+                    this.context.logger.info('Killing existing processes on port', { port, pids: pidList });
+                    const kill = spawn('kill', pidList, { stdio: 'ignore' });
+                    kill.on('close', () => setTimeout(resolve, 500));
+                    kill.on('error', () => resolve());
+                });
+                proc.on('error', () => resolve());
+            });
+        } catch {
+            // Non-fatal
+        }
     }
 
     async isHaiProxyRunning(apiKey, proxyUrl = HAI_PROXY_URL) {

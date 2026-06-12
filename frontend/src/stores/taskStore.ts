@@ -7,6 +7,7 @@ import {
   WaitingInputType,
   ScheduledTask,
   TaskTokenUsage,
+  NarrationMessage,
 } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
 import { ThemePreference } from '../types/theme';
@@ -80,6 +81,11 @@ interface TaskStore {
 
   // Task summaries
   taskSummaries: Map<string, TaskSummary>;
+
+  // Minimal chat view — narrations per task + per-task view mode toggle
+  // (per-task: each task remembers if the user prefers terminal or chat)
+  narrations: Map<string, NarrationMessage[]>;
+  taskViewMode: Map<string, 'terminal' | 'chat'>;
 
   // Waiting input notifications
   waitingInputNotifications: Map<string, WaitingInputInfo>;
@@ -157,6 +163,13 @@ interface TaskStore {
   // Task summary actions
   setTaskSummary: (summary: TaskSummary) => void;
   clearTaskSummary: (taskId: string) => void;
+
+  // Narration actions (minimal chat view)
+  appendNarration: (msg: NarrationMessage) => void;
+  setNarrationsForTask: (taskId: string, msgs: NarrationMessage[]) => void;
+  clearNarrationsForTask: (taskId: string) => void;
+  setTaskViewMode: (taskId: string, mode: 'terminal' | 'chat') => void;
+  getTaskViewMode: (taskId: string) => 'terminal' | 'chat';
 
   // Waiting input actions
   setWaitingInput: (info: WaitingInputInfo) => void;
@@ -238,6 +251,7 @@ interface PersistedState {
   themePreference: ThemePreference;
   tokenCostEnabled: boolean;
   taskSummaries: [string, TaskSummary][]; // Stored as entries array
+  taskViewMode: [string, 'terminal' | 'chat'][]; // per-task minimal chat preference
 }
 
 export const useTaskStore = create<TaskStore>()(
@@ -284,6 +298,10 @@ export const useTaskStore = create<TaskStore>()(
 
       // Task summary initial state
       taskSummaries: new Map(),
+
+      // Narration initial state
+      narrations: new Map(),
+      taskViewMode: new Map(),
 
       // Waiting input initial state
       waitingInputNotifications: new Map(),
@@ -741,6 +759,41 @@ export const useTaskStore = create<TaskStore>()(
         set({ taskSummaries: newSummaries });
       },
 
+      // Narration actions
+      appendNarration: (msg) => {
+        const { narrations } = get();
+        const list = narrations.get(msg.taskId) ?? [];
+        // Deduplicate by id to prevent doubles from restore+live overlap.
+        if (list.some((m) => m.id === msg.id)) return;
+        const next = [...list, msg].slice(-100);
+        const newMap = new Map(narrations);
+        newMap.set(msg.taskId, next);
+        set({ narrations: newMap });
+      },
+      setNarrationsForTask: (taskId, msgs) => {
+        const { narrations } = get();
+        const newMap = new Map(narrations);
+        newMap.set(taskId, msgs.slice(-100));
+        set({ narrations: newMap });
+      },
+      clearNarrationsForTask: (taskId) => {
+        const { narrations } = get();
+        if (!narrations.has(taskId)) return;
+        const newMap = new Map(narrations);
+        newMap.delete(taskId);
+        set({ narrations: newMap });
+      },
+      setTaskViewMode: (taskId, mode) => {
+        const { taskViewMode } = get();
+        const newMap = new Map(taskViewMode);
+        newMap.set(taskId, mode);
+        set({ taskViewMode: newMap });
+      },
+      getTaskViewMode: (taskId) => {
+        const { taskViewMode } = get();
+        return taskViewMode.get(taskId) ?? 'terminal';
+      },
+
       // Waiting input actions
       setWaitingInput: (info) => {
         const { waitingInputNotifications } = get();
@@ -829,6 +882,7 @@ export const useTaskStore = create<TaskStore>()(
         themePreference: state.themePreference,
         tokenCostEnabled: state.tokenCostEnabled,
         taskSummaries: Array.from(state.taskSummaries.entries()),
+        taskViewMode: Array.from(state.taskViewMode.entries()),
       }),
       // Merge persisted state with initial state, converting arrays back to Set/Map
       merge: (persistedState, currentState) => {
@@ -888,6 +942,9 @@ export const useTaskStore = create<TaskStore>()(
           taskSummaries: persisted.taskSummaries
             ? new Map(persisted.taskSummaries)
             : currentState.taskSummaries,
+          taskViewMode: persisted.taskViewMode
+            ? new Map(persisted.taskViewMode)
+            : currentState.taskViewMode,
         };
       },
     },

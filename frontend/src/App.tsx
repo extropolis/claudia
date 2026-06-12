@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { WorkspacePanel } from './components/WorkspacePanel';
 import { TerminalView } from './components/TerminalView';
+import { MinimalChatView } from './components/MinimalChatView';
 import { ProjectPicker } from './components/ProjectPicker';
 import { SettingsMenu } from './components/SettingsMenu';
 import { GlobalVoiceManager } from './components/GlobalVoiceManager';
@@ -99,6 +100,9 @@ function App() {
     clearErrorNotification,
     unreadTaskIds,
   } = useTaskStore();
+  const selectedTaskViewMode = useTaskStore(
+    (s) => (selectedTaskId ? s.taskViewMode.get(selectedTaskId) ?? 'terminal' : 'terminal'),
+  );
   const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
   const selectedWorkspace = selectedTask
     ? workspaces.find((w) => w.id === selectedTask.workspaceId)
@@ -555,15 +559,24 @@ function App() {
         {/* ===== MOBILE LAYOUT ===== */}
         {isMobile ? (
           mobileShowingTerminal ? (
-            // Screen 2: Full-screen terminal
+            // Screen 2: Full-screen terminal (or minimal chat if user toggled)
             <section className="main-panel mobile-full">
-              <TerminalView
-                key={`${selectedTask!.id}-${terminalRefreshCounter}`}
-                task={selectedTask!}
-                wsRef={wsRef}
-                workspace={selectedWorkspace}
-                isMobile={true}
-              />
+              {selectedTaskViewMode === 'chat' ? (
+                <MinimalChatView
+                  key={`${selectedTask!.id}-chat`}
+                  task={selectedTask!}
+                  wsRef={wsRef}
+                  workspace={selectedWorkspace}
+                />
+              ) : (
+                <TerminalView
+                  key={`${selectedTask!.id}-${terminalRefreshCounter}`}
+                  task={selectedTask!}
+                  wsRef={wsRef}
+                  workspace={selectedWorkspace}
+                  isMobile={true}
+                />
+              )}
             </section>
           ) : (
             // Screen 1: Full-screen workspace list
@@ -691,12 +704,21 @@ function App() {
                         </span>
                       </button>
                     )}
-                    <TerminalView
-                      key={`${selectedTask.id}-${terminalRefreshCounter}`}
-                      task={selectedTask}
-                      wsRef={wsRef}
-                      workspace={selectedWorkspace}
-                    />
+                    {selectedTaskViewMode === 'chat' ? (
+                      <MinimalChatView
+                        key={`${selectedTask.id}-chat`}
+                        task={selectedTask}
+                        wsRef={wsRef}
+                        workspace={selectedWorkspace}
+                      />
+                    ) : (
+                      <TerminalView
+                        key={`${selectedTask.id}-${terminalRefreshCounter}`}
+                        task={selectedTask}
+                        wsRef={wsRef}
+                        workspace={selectedWorkspace}
+                      />
+                    )}
                   </>
                 ) : (
                   <div className="empty-state-main">

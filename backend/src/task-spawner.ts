@@ -224,6 +224,7 @@ interface InternalTask extends Task {
   shouldContinue?: boolean; // True if this is a reconnected task that should auto-continue
   continuationSent?: boolean; // True if continuation prompt has been sent
   consecutiveOutputChanges?: number; // Count of consecutive polls with output changes (for idle→busy debouncing)
+  consecutiveStablePolls?: number; // Count of consecutive polls with stable output while busy (for busy→idle debouncing)
   inactiveOutputLogged?: boolean; // True if we've already logged the "dropping output" message for this inactive state
   lastRefKey?: string; // Tracks which workspace references were last injected (sorted ref IDs)
   pendingRefNotification?: boolean; // True if workspace references changed while task was busy
@@ -489,6 +490,7 @@ export class TaskSpawner extends EventEmitter {
         // Save immediately - session IDs are critical state that must survive
         // tsx watch restarts on Windows (TerminateProcess skips all handlers)
         this.saveTasks();
+        this.emit('taskSessionCaptured', taskId, sessionId);
       }
     });
 
@@ -500,6 +502,7 @@ export class TaskSpawner extends EventEmitter {
         task.sessionId = sessionId;
         this.sessionToTaskId.set(sessionId, taskId);
         this.saveTasks();
+        this.emit('taskSessionCaptured', taskId, sessionId);
       }
     });
 
@@ -680,9 +683,13 @@ export class TaskSpawner extends EventEmitter {
     const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
     const serverNames = enabledMcpServers.map((s) => s.name);
 
+    // Per-server allow patterns. The new Claude Code rejects bare 'mcp__*' wildcards;
+    // allow rules require a literal `mcp__<server>__` prefix before any glob.
+    const mcpAllowRules = serverNames.map((name) => `mcp__${name}__*`);
+
     const settingsContent = {
       permissions: {
-        allow: ['mcp__*'],
+        allow: mcpAllowRules,
         deny: [],
       },
       enableAllProjectMcpServers: true,
@@ -1216,6 +1223,17 @@ export class TaskSpawner extends EventEmitter {
     // This prevents spurious transitions from one-time terminal redraws (resize, focus, etc.)
     const CONSECUTIVE_CHANGES_FOR_BUSY = 2;
 
+    // Number of consecutive polls with stable output required to transition busy → idle.
+    // A single stable poll is not enough because long-running silent operations (Bash
+    // commands, network calls, MCP roundtrips, model thinking before next chunk) can
+    // produce >1 polling interval of silence even though Claude is still working. With
+    // the default 3s poll, requiring 3 consecutive stable polls means ~9s of true
+    // silence before declaring idle — which prevents the false "task complete" sound.
+    // Note: we can't gate on the spinner being absent from output, because spinner
+    // bytes accumulate in outputHistory and never get erased (they're overwritten on
+    // the live terminal via \r, but the buffer keeps every byte ever printed).
+    const CONSECUTIVE_STABLE_FOR_IDLE = 3;
+
     if (process.env.DEBUG_POLLING) {
       console.log(`[TaskSpawner] checking state for ${this.tasks.size} tasks`);
     }
@@ -1235,6 +1253,8 @@ export class TaskSpawner extends EventEmitter {
       if (outputChanged) {
         // Track consecutive output changes for idle → busy debouncing
         task.consecutiveOutputChanges = (task.consecutiveOutputChanges || 0) + 1;
+        // Reset the busy → idle stable counter — output is moving again
+        task.consecutiveStablePolls = 0;
 
         // Output is changing → busy (or starting → busy if task actually started)
         if (task.state === 'starting') {
@@ -1264,6 +1284,7 @@ export class TaskSpawner extends EventEmitter {
       } else {
         // Reset consecutive output counter when output is stable
         task.consecutiveOutputChanges = 0;
+        task.consecutiveStablePolls = (task.consecutiveStablePolls || 0) + 1;
 
         // Output stable → check if idle or waiting_input (but only for tasks that have started)
         if (task.state === 'busy') {
@@ -1278,7 +1299,7 @@ export class TaskSpawner extends EventEmitter {
               `polling: detected ${inputType}`,
             );
             this.emit('taskWaitingInput', task.id, inputType, recentOutput);
-          } else {
+          } else if (task.consecutiveStablePolls >= CONSECUTIVE_STABLE_FOR_IDLE) {
             // Capture token usage before transitioning to idle so the save
             // triggered by transitionTaskState includes the latest costs.
             // Guard: only transition to idle if the task is still in 'busy' state when
@@ -1292,7 +1313,12 @@ export class TaskSpawner extends EventEmitter {
               })
               .finally(() => {
                 if (task.state === 'busy') {
-                  this.transitionTaskState(task, 'idle', undefined, 'polling: output stable');
+                  this.transitionTaskState(
+                    task,
+                    'idle',
+                    undefined,
+                    `polling: output stable (${task.consecutiveStablePolls} consecutive)`,
+                  );
                 }
               });
             this.captureGitStateAfterTask(task.id).catch((err) => {
@@ -1302,6 +1328,8 @@ export class TaskSpawner extends EventEmitter {
               });
             });
           }
+          // else: still busy — either we haven't seen enough stable polls yet,
+          // or a spinner/processing indicator is visible. Wait for the next poll.
         }
         // Don't transition 'starting' → 'idle' - leave it in starting until Enter is accepted
       }
@@ -1344,6 +1372,10 @@ export class TaskSpawner extends EventEmitter {
         oldState !== 'starting'
       ) {
         task.processStartedAt = new Date();
+        // Reset stable-poll counter so the next busy→idle transition requires
+        // a fresh window of consecutive silent polls (prevents leftover counts
+        // from carrying over across user turns).
+        task.consecutiveStablePolls = 0;
         console.log(
           `[TaskSpawner] Reset processStartedAt for task ${task.id} to ${task.processStartedAt.toISOString()} (transition: ${oldState} → ${newState})`,
         );
@@ -2719,8 +2751,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     // IMPORTANT: Claude doesn't automatically load MCP servers from ~/.claude.json in non-interactive mode
     // We must explicitly pass --mcp-config to load MCP servers
     const mcpResult = this.buildMcpConfig(workspaceId, id);
+    let enabledMcpServerNames: string[] = [];
     if (mcpResult) {
       const { mcpConfig, enabledMcpServers } = mcpResult;
+      enabledMcpServerNames = enabledMcpServers.map((s) => s.name);
       const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
 
       // Write to temp file for --mcp-config
@@ -2736,14 +2770,19 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
       this.syncWorkspaceMcpConfigs([workspaceId]);
 
       logger.info(`Added ${enabledMcpServers.length} MCP server(s)`, {
-        servers: enabledMcpServers.map((s) => s.name),
+        servers: enabledMcpServerNames,
       });
     } else {
       logger.warn('No enabled MCP servers found!');
     }
 
-    // Explicitly allow all MCP tools to avoid deferred loading issues
-    claudeArgs.push('--allowedTools', 'mcp__*');
+    // Explicitly allow all MCP tools to avoid deferred loading issues.
+    // Newer Claude Code rejects bare `mcp__*` allow rules — use a per-server
+    // `mcp__<server>__*` pattern instead (see syncWorkspaceMcpConfigs).
+    if (enabledMcpServerNames.length > 0) {
+      const mcpAllowRules = enabledMcpServerNames.map((name) => `mcp__${name}__*`).join(',');
+      claudeArgs.push('--allowedTools', mcpAllowRules);
+    }
 
     // Add Claude Code CLI switches from settings
     if (this.configStore) {
@@ -4363,9 +4402,6 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         claudeArgs.push('--dangerously-skip-permissions');
       }
 
-      // Explicitly allow all MCP tools to avoid deferred loading issues
-      claudeArgs.push('--allowedTools', 'mcp__*');
-
       // Add Claude Code CLI switches from settings
       if (this.configStore) {
         const switches = this.configStore.getClaudeCodeSwitches();
@@ -4386,6 +4422,16 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         console.log(
           `[TaskSpawner] Added ${mcpResult.enabledMcpServers.length} MCP server(s) for reconnection via ${mcpConfigFile}`,
         );
+
+        // Explicitly allow all MCP tools to avoid deferred loading issues.
+        // Newer Claude Code rejects bare `mcp__*` allow rules — must use a
+        // per-server `mcp__<server>__*` pattern.
+        const mcpAllowRules = mcpResult.enabledMcpServers
+          .map((s) => `mcp__${s.name}__*`)
+          .join(',');
+        if (mcpAllowRules) {
+          claudeArgs.push('--allowedTools', mcpAllowRules);
+        }
       }
 
       if (sessionIdToUse) {

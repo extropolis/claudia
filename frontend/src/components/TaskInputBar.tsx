@@ -30,22 +30,42 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
     (state) => Array.from(state.scheduledTasks.values()).filter((s) => s.taskId === task.id).length,
   );
 
-  const {
-    globalVoiceEnabled,
-    focusedInputId,
-    voiceTranscript,
-    voiceInterimTranscript,
-    setFocusedInputId,
-    consumeVoiceTranscript,
-    clearVoiceTranscript,
-    setTaskDraftInput,
-    getTaskDraftInput,
-    clearTaskDraftInput,
-  } = useTaskStore();
+  const globalVoiceEnabled = useTaskStore((s) => s.globalVoiceEnabled);
+  const focusedInputId = useTaskStore((s) => s.focusedInputId);
+  const voiceTranscript = useTaskStore((s) => s.voiceTranscript);
+  const voiceInterimTranscript = useTaskStore((s) => s.voiceInterimTranscript);
+  const setFocusedInputId = useTaskStore((s) => s.setFocusedInputId);
+  const consumeVoiceTranscript = useTaskStore((s) => s.consumeVoiceTranscript);
+  const clearVoiceTranscript = useTaskStore((s) => s.clearVoiceTranscript);
+  const setTaskDraftInput = useTaskStore((s) => s.setTaskDraftInput);
+  const getTaskDraftInput = useTaskStore((s) => s.getTaskDraftInput);
+  const clearTaskDraftInput = useTaskStore((s) => s.clearTaskDraftInput);
 
-  // Get the draft message from the store (preserved when switching tasks)
-  const message = getTaskDraftInput(task.id);
-  const setMessage = (value: string) => setTaskDraftInput(task.id, value);
+  // Local state drives the textarea so typing doesn't update the global store
+  // on every keystroke (which causes app-wide re-renders and visible input lag).
+  // The store is used only as backing storage so drafts survive task switches.
+  const [message, setMessageState] = useState<string>(() => getTaskDraftInput(task.id));
+
+  // When the active task changes, swap to that task's persisted draft.
+  useEffect(() => {
+    setMessageState(getTaskDraftInput(task.id));
+  }, [task.id, getTaskDraftInput]);
+
+  const messageRef = useRef(message);
+  messageRef.current = message;
+
+  // Persist the draft to the store when leaving the field or unmounting.
+  const persistDraft = useCallback(() => {
+    setTaskDraftInput(task.id, messageRef.current);
+  }, [setTaskDraftInput, task.id]);
+
+  useEffect(() => {
+    return () => {
+      setTaskDraftInput(task.id, messageRef.current);
+    };
+  }, [task.id, setTaskDraftInput]);
+
+  const setMessage = setMessageState;
 
   const inputId = `task-${task.id}`;
   const isFocused = focusedInputId === inputId;
@@ -96,13 +116,10 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
   useEffect(() => {
     if (isFocused && voiceTranscript && voiceTranscript !== lastProcessedTranscriptRef.current) {
       lastProcessedTranscriptRef.current = voiceTranscript;
-      // Get current message from store to avoid stale closure
-      const currentMessage = getTaskDraftInput(task.id);
-      setMessage(currentMessage ? currentMessage + ' ' + voiceTranscript : voiceTranscript);
-      // Clear the transcript after consuming
+      setMessage((prev) => (prev ? prev + ' ' + voiceTranscript : voiceTranscript));
       consumeVoiceTranscript();
     }
-  }, [isFocused, voiceTranscript, consumeVoiceTranscript, setMessage, getTaskDraftInput, task.id]);
+  }, [isFocused, voiceTranscript, consumeVoiceTranscript, setMessage]);
 
   // Upload image to server
   const uploadImage = async (file: File): Promise<UploadedImage | null> => {
@@ -278,6 +295,7 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
     );
 
     clearTaskDraftInput(task.id);
+    setMessageState('');
     // Clear images after sending (don't delete from server - Claude may need them)
     images.forEach((img) => URL.revokeObjectURL(img.previewUrl));
     setImages([]);
@@ -318,6 +336,7 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
   };
 
   const handleBlur = () => {
+    persistDraft();
     // Only clear if this input is still the focused one
     // Use setTimeout to allow click events to fire first
     setTimeout(() => {

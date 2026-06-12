@@ -7,6 +7,7 @@ import {
   Workspace,
   TaskSummary,
   WaitingInputType,
+  NarrationMessage,
 } from '@claudia/shared';
 import { getWebSocketUrl, getApiBaseUrl, isTunnelAccess } from '../config/api-config';
 import {
@@ -110,6 +111,8 @@ export function useWebSocket() {
     clearWaitingInput,
     setArchivedTasks,
     removeArchivedTask,
+    appendNarration,
+    setNarrationsForTask,
   } = useTaskStore();
 
   const connect = useCallback(async () => {
@@ -314,6 +317,23 @@ export function useWebSocket() {
             const payload = message.payload as { summary: TaskSummary };
             console.log('[WebSocket] Task summary received:', payload.summary);
             setTaskSummary(payload.summary);
+            break;
+          }
+          case 'task:narration': {
+            const payload = message.payload as { message: NarrationMessage };
+            if (payload?.message) {
+              appendNarration(payload.message);
+            }
+            break;
+          }
+          case 'task:narration:restore': {
+            const payload = message.payload as {
+              taskId: string;
+              messages: NarrationMessage[];
+            };
+            if (payload?.taskId && Array.isArray(payload.messages)) {
+              setNarrationsForTask(payload.taskId, payload.messages);
+            }
             break;
           }
           case 'task:waitingInput': {
@@ -661,6 +681,8 @@ export function useWebSocket() {
     clearWaitingInput,
     setArchivedTasks,
     removeArchivedTask,
+    appendNarration,
+    setNarrationsForTask,
   ]);
 
   const sendMessage = useCallback((type: string, payload: unknown) => {

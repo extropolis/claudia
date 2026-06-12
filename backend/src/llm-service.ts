@@ -1,14 +1,19 @@
 /**
- * LLM Service - Uses the built-in Anthropic proxy for generating dynamic responses
- * This service calls the local /v1/messages endpoint which proxies to the configured API
+ * LLM Service - resolves the active Anthropic-style endpoint from the
+ * proxy plugin / config and exposes a tiny wrapper for plain text completions.
+ *
+ * The active endpoint depends on `apiMode` from the config store:
+ *   • hyperspace-proxy → `${proxyUrl}/anthropic/v1/messages` + Bearer key
+ *   • custom-anthropic → api.anthropic.com + x-api-key
+ *   • default          → api.anthropic.com + x-api-key (env)
+ *
+ * `mobile-agent.ts` reuses `resolveLlmEndpoint()` to make tool-use calls
+ * against the same upstream so we don't have to keep this URL logic in
+ * two places.
  */
-
-// The local server's Anthropic proxy endpoint (same server, no port needed)
-import { PORTS } from '@claudia/shared';
 
 import type { ConfigStore } from './config-store.js';
 
-const LLM_API_URL = `http://localhost:${PORTS.BACKEND}/v1/messages`;
 const DEFAULT_LLM_MODEL = 'claude-sonnet-4-5-20250929';
 
 let configStoreRef: ConfigStore | null = null;
@@ -31,6 +36,56 @@ function getLLMModel(): string {
   }
 
   return DEFAULT_LLM_MODEL;
+}
+
+export interface LlmEndpoint {
+  url: string;
+  headers: Record<string, string>;
+  apiMode: string;
+}
+
+/**
+ * Resolve the upstream Anthropic-style endpoint based on the current
+ * `apiMode`. Mirrors the dispatch in autonomous-controller.ts so all
+ * server-side LLM callers use one source of truth.
+ */
+export function resolveLlmEndpoint(): LlmEndpoint {
+  const apiMode = configStoreRef?.getApiMode?.() ?? 'default';
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'anthropic-version': '2023-06-01',
+  };
+
+  if (apiMode === 'hyperspace-proxy') {
+    const proxy = configStoreRef!.getHyperspaceProxy();
+    if (!proxy?.proxyUrl) {
+      throw new Error('hyperspace-proxy mode but no proxyUrl configured');
+    }
+    headers['Authorization'] = `Bearer ${proxy.apiKey ?? ''}`;
+    return {
+      url: `${proxy.proxyUrl}/anthropic/v1/messages`,
+      headers,
+      apiMode,
+    };
+  }
+
+  if (apiMode === 'custom-anthropic') {
+    const apiKey = configStoreRef?.getCustomAnthropicApiKey?.() ?? '';
+    headers['x-api-key'] = apiKey;
+    return {
+      url: 'https://api.anthropic.com/v1/messages',
+      headers,
+      apiMode,
+    };
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? '';
+  headers['x-api-key'] = apiKey;
+  return {
+    url: 'https://api.anthropic.com/v1/messages',
+    headers,
+    apiMode: 'default',
+  };
 }
 
 interface AnthropicMessage {
@@ -59,19 +114,19 @@ export async function generateLLMResponse(
   const messages: AnthropicMessage[] = [{ role: 'user', content: userMessage }];
 
   const modelToUse = getLLMModel();
+  const endpoint = resolveLlmEndpoint();
 
   try {
-    console.log(`[LLM] Calling ${modelToUse} via built-in Anthropic proxy...`);
+    console.log(
+      `[LLM] Calling ${modelToUse} via ${endpoint.apiMode} → ${endpoint.url}`,
+    );
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-    const response = await fetch(LLM_API_URL, {
+    const response = await fetch(endpoint.url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'anthropic-version': '2023-06-01',
-      },
+      headers: endpoint.headers,
       body: JSON.stringify({
         model: modelToUse,
         system: systemPrompt,

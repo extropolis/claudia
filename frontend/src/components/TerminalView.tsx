@@ -3,11 +3,12 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Task, Workspace } from '@claudia/shared';
-import { Copy, Check, Play, BookOpen, ArrowDown } from 'lucide-react';
+import { Copy, Check, Play, BookOpen, ArrowDown, MessageSquare } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
 import { TaskTokenStats } from './TaskTokenStats';
 import { CheckpointTimeline } from './CheckpointTimeline';
 import { useEffectiveTheme } from '../hooks/useTheme';
+import { useTaskStore } from '../stores/taskStore';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
 import { getApiBaseUrl } from '../config/api-config';
 import '@xterm/xterm/css/xterm.css';
@@ -53,6 +54,7 @@ interface TerminalViewProps {
 
 export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewProps) {
   const effectiveTheme = useEffectiveTheme();
+  const setTaskViewMode = useTaskStore((s) => s.setTaskViewMode);
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -780,6 +782,14 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
           title="Copy prompt to clipboard"
         >
           {copied ? <Check size={16} /> : <Copy size={16} />}
+        </button>
+        <button
+          className="view-toggle-button"
+          onClick={() => setTaskViewMode(task.id, 'chat')}
+          title="Switch to minimal chat view"
+        >
+          <MessageSquare size={14} />
+          <span>Chat</span>
         </button>
         {workspace && (
           <button

@@ -118,6 +118,7 @@ export interface AppConfig {
   tokenCostEnabled?: boolean; // Enable cost calculation display (default: false)
   defaultBaseDirectory?: string; // Default base directory for new workspaces (optional)
   modelTiering?: ModelTieringConfig; // Complexity-based model selection for MCP-spawned tasks
+  autoReloadEnabled?: boolean; // Auto-restart backend when src/ files change (read by dev-watcher.mjs)
 }
 
 
@@ -238,6 +239,7 @@ export class ConfigStore {
         enabled: loaded.modelTiering?.enabled ?? DEFAULT_MODEL_TIERING.enabled,
         tiers: { ...DEFAULT_MODEL_TIERING.tiers, ...(loaded.modelTiering?.tiers || {}) },
       },
+      autoReloadEnabled: loaded.autoReloadEnabled ?? true,
     };
   }
 
@@ -343,6 +345,9 @@ export class ConfigStore {
         enabled: updates.modelTiering.enabled ?? existing.enabled,
         tiers: { ...existing.tiers, ...(updates.modelTiering.tiers || {}) },
       };
+    }
+    if (updates.autoReloadEnabled !== undefined) {
+      this.config.autoReloadEnabled = updates.autoReloadEnabled;
     }
     this.saveConfig();
     return this.getConfig();

@@ -26,6 +26,7 @@ import { getConversationHistory, getWorkspaceSessions } from './conversation-par
 import { setUserId } from './usage-reporter.js';
 import {
   Task,
+  TaskState,
   Workspace,
   WorkspaceReference,
   WSMessage,
@@ -36,6 +37,7 @@ import {
   PORTS,
   TaskTokenUsage,
   UsageDashboardData,
+  NarrationMessage,
 } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { UsageStore } from './usage-store.js';
@@ -45,6 +47,11 @@ import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch } from '.
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
+import { registerDevice, unregisterDevice, listDevices, sendPush } from './mobile-push.js';
+import { generateMobileSummary, buildSimulatedSummary } from './task-summary.js';
+import { MobileChatStore } from './mobile-chat-store.js';
+import { MobileAgent } from './mobile-agent.js';
+import { TaskNarrator } from './task-narrator.js';
 // import { ElevenLabsTTS } from './elevenlabs-tts.js'; // TODO: Implement ElevenLabs TTS
 import { createLogger } from './logger.js';
 import { PluginManager, PluginContext } from './plugin-system/index.js';
@@ -536,6 +543,14 @@ export async function createApp(basePath?: string) {
   // LearningsStore for RAG-based learnings
   const learningsStore = new LearningsStore(basePath, configStore);
 
+  // Mobile companion: per-workspace chat transcript + agent
+  const mobileChatStore = new MobileChatStore(basePath);
+  const mobileAgent = new MobileAgent({
+    taskSpawner,
+    workspaceStore,
+    chatStore: mobileChatStore,
+  });
+
   // CronScheduler for scheduled/recurring prompts
   const cronScheduler = new CronScheduler(
     // Fire callback: send prompt to task PTY
@@ -749,10 +764,77 @@ export async function createApp(basePath?: string) {
     }
   }
 
+  // Track last-seen task state so we can detect transitions across batched
+  // broadcast windows. Used by the mobile companion to fire `task:summary`
+  // exactly once when a task settles from busy/starting/waiting_input → idle.
+  const lastTaskState = new Map<string, TaskState>();
+
   // Queue a task state change for batched broadcast
   function queueTaskStateChange(task: Task): void {
+    const prevState = lastTaskState.get(task.id);
     pendingTaskStateChanges.set(task.id, task);
     scheduleBatchedBroadcast();
+
+    const wasActive =
+      prevState === 'busy' ||
+      prevState === 'starting' ||
+      prevState === 'waiting_input';
+    if (task.state === 'idle' && wasActive) {
+      void emitMobileTaskSummary(task).catch((err) =>
+        console.error('[mobile-push] summary emit failed:', err),
+      );
+    }
+    lastTaskState.set(task.id, task.state);
+  }
+
+  async function emitMobileTaskSummary(task: Task): Promise<void> {
+    // New mobile chat path: have the per-workspace agent generate a chat-style
+    // summary message + dynamic quick actions. The store appends durably; we
+    // broadcast over WS so any paired devices update immediately.
+    let chatMessage: Awaited<ReturnType<typeof mobileAgent.summarizeIdleTask>> | undefined;
+    try {
+      chatMessage = await mobileAgent.summarizeIdleTask(task);
+      broadcast({
+        type: 'chat:message' as WSMessageType,
+        payload: { workspaceId: task.workspaceId, message: chatMessage },
+      });
+    } catch (err) {
+      console.error('[mobile-chat] summarizeIdleTask failed:', err);
+    }
+
+    // Legacy `task:summary` (used by the old card-based mobile UI and by any
+    // other consumers) — keep emitting for back-compat. Built from the same
+    // chat message when available; otherwise fall back to the old generator.
+    let legacy;
+    if (chatMessage) {
+      legacy = {
+        taskId: task.id,
+        workspaceId: task.workspaceId,
+        workspaceName: workspaceStore
+          .getWorkspaces()
+          .find((w) => w.id === task.workspaceId)?.displayName,
+        taskName: task.displayName ?? task.prompt,
+        state: task.state,
+        summary: chatMessage.text,
+        spendUsd: task.tokenUsage?.totalCostUsd,
+        nextActions: chatMessage.quickActions ?? [],
+        timestamp: chatMessage.createdAt,
+      };
+    } else {
+      const ws = workspaceStore.getWorkspaces().find((w) => w.id === task.workspaceId);
+      legacy = await generateMobileSummary({
+        task,
+        workspaceName: ws?.displayName ?? ws?.name,
+        spendUsd: task.tokenUsage?.totalCostUsd,
+      });
+    }
+    broadcast({ type: 'task:summary' as WSMessageType, payload: legacy });
+
+    await sendPush({
+      title: legacy.taskName ?? 'Task complete',
+      body: legacy.summary,
+      data: { kind: 'task:summary', taskId: legacy.taskId },
+    });
   }
 
   // Queue a tasks:updated broadcast (will be deduplicated)
@@ -916,6 +998,68 @@ export async function createApp(basePath?: string) {
     { data: string; timer: ReturnType<typeof setTimeout> }
   >();
 
+  // ─── Minimal chat view: per-task narrators + ring buffer ──────────────────
+  // Tails Claude Code's session JSONL and emits each new assistant text block
+  // as a task:narration WS event. One narrator per active task; a ring buffer
+  // of recent narrations lets reconnecting clients paint the chat view instantly.
+  const narrators = new Map<string, TaskNarrator>();
+  const narrationHistory = new Map<string, NarrationMessage[]>();
+  const NARRATION_HISTORY_CAP = 50;
+  let narrationCounter = 0;
+
+  function appendNarration(msg: NarrationMessage): void {
+    const list = narrationHistory.get(msg.taskId) ?? [];
+    list.push(msg);
+    if (list.length > NARRATION_HISTORY_CAP) {
+      list.splice(0, list.length - NARRATION_HISTORY_CAP);
+    }
+    narrationHistory.set(msg.taskId, list);
+  }
+
+  function broadcastNarration(taskId: string, text: string, timestamp?: string): NarrationMessage {
+    const msg: NarrationMessage = {
+      id: `narr-${Date.now()}-${++narrationCounter}`,
+      taskId,
+      text,
+      timestamp: timestamp ?? new Date().toISOString(),
+    };
+    appendNarration(msg);
+    broadcast({ type: 'task:narration' as WSMessageType, payload: { message: msg } });
+    return msg;
+  }
+
+  function ensureNarrator(taskId: string): TaskNarrator {
+    let n = narrators.get(taskId);
+    if (!n) {
+      n = new TaskNarrator({
+        taskId,
+        onNarration: ({ text, timestamp }) => {
+          broadcastNarration(taskId, text, timestamp);
+        },
+      });
+      narrators.set(taskId, n);
+    }
+    return n;
+  }
+
+  /**
+   * Attach the narrator to the task's JSONL session file. Called whenever a
+   * sessionId is captured or updated for a task. Idempotent.
+   */
+  function attachNarratorToSession(taskId: string, sessionId: string): void {
+    const task = taskSpawner.getTask(taskId);
+    if (!task) return;
+    ensureNarrator(taskId).attach(task.workspaceId, sessionId);
+  }
+
+  function disposeNarrator(taskId: string): void {
+    const n = narrators.get(taskId);
+    if (n) {
+      n.dispose();
+      narrators.delete(taskId);
+    }
+  }
+
   const stripAnsiForDetection = (s: string) =>
     s
       .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
@@ -1034,6 +1178,8 @@ export async function createApp(basePath?: string) {
 
   taskSpawner.on('taskDestroyed', (taskId: string) => {
     broadcast({ type: 'task:destroyed', payload: { taskId } });
+    disposeNarrator(taskId);
+    narrationHistory.delete(taskId);
     // Clean up any scheduled tasks for this task
     const removed = cronScheduler.removeAllForTask(taskId);
     if (removed > 0) {
@@ -1080,6 +1226,22 @@ export async function createApp(basePath?: string) {
   taskSpawner.on('taskTokenUsage', (taskId: string, tokenUsage: TaskTokenUsage) => {
     broadcast({ type: 'task:tokenUsage' as WSMessageType, payload: { taskId, tokenUsage } });
   });
+
+  // When a session id is captured (or updated on reconnect), attach the
+  // narrator to its JSONL file so we can stream assistant text turns into the
+  // minimal chat view.
+  taskSpawner.on('taskSessionCaptured', (taskId: string, sessionId: string) => {
+    attachNarratorToSession(taskId, sessionId);
+  });
+
+  // For tasks that already have a sessionId on startup (e.g. survived a tsx
+  // watch reload), attach narrators eagerly so the chat view is populated for
+  // anyone who reconnects.
+  for (const t of taskSpawner.getAllTasks()) {
+    if (t.sessionId) {
+      attachNarratorToSession(t.id, t.sessionId);
+    }
+  }
 
   // ===== WebSocket Upgrade Routing =====
   // Using noServer mode so we can selectively handle upgrades.
@@ -1748,6 +1910,17 @@ export async function createApp(basePath?: string) {
                 JSON.stringify({
                   type: 'task:restore',
                   payload: { taskId, history },
+                }),
+              );
+            }
+            // Also replay any narration history we have for this task so the
+            // minimal chat view paints immediately on reconnect.
+            const narrations = narrationHistory.get(taskId);
+            if (narrations && narrations.length > 0) {
+              ws.send(
+                JSON.stringify({
+                  type: 'task:narration:restore',
+                  payload: { taskId, messages: narrations },
                 }),
               );
             }
@@ -2886,6 +3059,200 @@ export async function createApp(basePath?: string) {
     res.json({ status: 'ok' });
   });
 
+  // ─── Mobile companion app routes ───────────────────────────────────────
+  // Token-gated when accessed via tunnel (the global tunnel auth middleware
+  // handles that). Locally these are open so the RN web build on
+  // http://localhost can hit them without ceremony.
+
+  // Bridge metadata for the mobile app to display after connecting.
+  app.get('/api/mobile/bridge-info', (_req, res) => {
+    const tunnelStatus = tunnelManager.getStatus();
+    const dgKey =
+      configStore.getConfig().deepgramApiKey ?? process.env.DEEPGRAM_API_KEY;
+    res.json({
+      success: true,
+      version: '0.1.0',
+      tunnel: { active: tunnelStatus.active, url: tunnelStatus.url },
+      voiceConfigured: Boolean(dgKey),
+      pushSupported: true,
+    });
+  });
+
+  // Register an Expo push token (called by the RN app on first launch).
+  app.post('/api/mobile/register-push', (req, res) => {
+    const { deviceId, pushToken, platform, label } = req.body ?? {};
+    if (typeof deviceId !== 'string' || typeof pushToken !== 'string') {
+      return res
+        .status(400)
+        .json({ success: false, error: 'deviceId and pushToken are required strings' });
+    }
+    const plat: 'ios' | 'android' | 'web' =
+      platform === 'ios' || platform === 'android' || platform === 'web' ? platform : 'web';
+    const device = registerDevice({ deviceId, pushToken, platform: plat, label });
+    res.json({ success: true, device });
+  });
+
+  app.delete('/api/mobile/register-push/:deviceId', (req, res) => {
+    const ok = unregisterDevice(req.params.deviceId);
+    res.json({ success: ok });
+  });
+
+  app.get('/api/mobile/devices', (_req, res) => {
+    res.json({ success: true, devices: listDevices() });
+  });
+
+  // Send a test push (used by the mobile app's "Send test" button and by
+  // the test-cli's --simulate-mobile-event flag).
+  app.post('/api/mobile/test-push', async (req, res) => {
+    const title = (req.body?.title as string) ?? 'Claudia';
+    const body = (req.body?.body as string) ?? 'Test notification from your bridge.';
+    const result = await sendPush({ title, body, data: { kind: 'test' } });
+    res.json({ success: true, result });
+  });
+
+  // Simulate a `task:summary` event end-to-end. Used by --simulate-mobile-event
+  // to verify the mobile feed without spawning a real task.
+  app.post('/api/mobile/simulate-summary', async (req, res) => {
+    const taskId = (req.body?.taskId as string) ?? 'sim-task';
+    const summary = buildSimulatedSummary(taskId);
+    broadcast({ type: 'task:summary' as WSMessageType, payload: summary });
+    // Also push so phones registered to this bridge see it on lock screen.
+    await sendPush({
+      title: summary.taskName ?? 'Task complete',
+      body: summary.summary,
+      data: { kind: 'task:summary', taskId: summary.taskId },
+    });
+    res.json({ success: true, summary });
+  });
+
+  // ─── Mobile single-agent chat ───────────────────────────────────────────
+  // Per-workspace chat transcript between the user and the mobile agent.
+  // The agent decides what to do (spawn task, send input, just reply) via
+  // tool calls — see backend/src/mobile-agent.ts. Transcripts are persisted
+  // server-side so multiple paired devices stay in sync.
+  //
+  // Workspace IDs are filesystem paths (containing slashes), so we pass them
+  // as `?workspaceId=...` query/body args rather than as URL path params —
+  // Express path matching strips embedded slashes even when URL-encoded.
+
+  // Fetch the transcript for a workspace.
+  app.get('/api/mobile/chat', (req, res) => {
+    const workspaceId = (req.query.workspaceId as string) ?? '';
+    if (!workspaceId) {
+      res.status(400).json({ error: 'workspaceId query param is required' });
+      return;
+    }
+    const messages = mobileChatStore.getTranscript(workspaceId);
+    res.json({ workspaceId, messages });
+  });
+
+  // Send a user message into the workspace chat. Runs the agent loop,
+  // appends both the user message and any agent/system messages it
+  // produces, broadcasts each new message over WS, and returns them so the
+  // device can update its UI immediately even before the WS event lands.
+  app.post('/api/mobile/chat', async (req, res) => {
+    const workspaceId =
+      (typeof req.body?.workspaceId === 'string' ? req.body.workspaceId : '') ||
+      (req.query.workspaceId as string | undefined) ||
+      '';
+    const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+    if (!workspaceId) {
+      res.status(400).json({ error: 'workspaceId is required' });
+      return;
+    }
+    if (!text) {
+      res.status(400).json({ error: 'text is required and must be non-empty' });
+      return;
+    }
+    const ws = workspaceStore.getWorkspaces().find((w) => w.id === workspaceId);
+    if (!ws) {
+      res.status(404).json({ error: `Workspace '${workspaceId}' not found` });
+      return;
+    }
+
+    try {
+      const beforeCount = mobileChatStore.getTranscript(workspaceId).length;
+      const newMessages = await mobileAgent.runAgentTurn(workspaceId, text);
+      const afterAll = mobileChatStore.getTranscript(workspaceId);
+      const fresh = afterAll.slice(beforeCount);
+      for (const m of fresh) {
+        broadcast({
+          type: 'chat:message' as WSMessageType,
+          payload: { workspaceId, message: m },
+        });
+      }
+      res.json({ success: true, messages: fresh, agentMessages: newMessages });
+    } catch (err) {
+      console.error('[mobile-chat] runAgentTurn failed:', err);
+      res
+        .status(500)
+        .json({ error: err instanceof Error ? err.message : 'agent turn failed' });
+    }
+  });
+
+  // Wipe a workspace's transcript.
+  app.delete('/api/mobile/chat', (req, res) => {
+    const workspaceId =
+      (typeof req.body?.workspaceId === 'string' ? req.body.workspaceId : '') ||
+      (req.query.workspaceId as string | undefined) ||
+      '';
+    if (!workspaceId) {
+      res.status(400).json({ error: 'workspaceId is required' });
+      return;
+    }
+    const removed = mobileChatStore.clear(workspaceId);
+    res.json({ success: true, removed });
+  });
+
+  // Run the idle-task summary path on demand (test/debug). Bypasses the
+  // need to wait for a real busy→idle transition — handy for `test-cli
+  // --mobile-summary --task-id <id>` when iterating on the LLM prompt.
+  app.post('/api/mobile/chat/summarize-task', async (req, res) => {
+    const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId : '';
+    if (!taskId) {
+      res.status(400).json({ error: 'body.taskId is required' });
+      return;
+    }
+    const task = taskSpawner.getTask(taskId);
+    if (!task) {
+      res.status(404).json({ error: `Task '${taskId}' not found` });
+      return;
+    }
+    try {
+      const message = await mobileAgent.summarizeIdleTask(task);
+      broadcast({
+        type: 'chat:message' as WSMessageType,
+        payload: { workspaceId: task.workspaceId, message },
+      });
+      res.json({ success: true, message });
+    } catch (err) {
+      console.error('[mobile-chat] summarizeIdleTask (manual) failed:', err);
+      res
+        .status(500)
+        .json({ error: err instanceof Error ? err.message : 'summary failed' });
+    }
+  });
+
+  // ─── Voice (Deepgram) ────────────────────────────────────────────────
+  // The RN app uses Deepgram's streaming WebSocket directly. We serve the
+  // user's saved Deepgram key (stored via the desktop Settings → Voice
+  // panel, persisted to config.json by `setDeepgramApiKey`) so the device
+  // never has to hold it long-term — it just opens a WS, streams a clip,
+  // and discards. If no key is configured we return configured:false and
+  // the mobile app falls back to text-only input.
+  //
+  // For production tunnel deployments we should mint a short-lived member
+  // key via Deepgram's Management API instead of forwarding the long-lived
+  // one. That's a v2 hardening pass.
+  app.get('/api/voice/deepgram-token', async (_req, res) => {
+    const apiKey =
+      configStore.getConfig().deepgramApiKey || process.env.DEEPGRAM_API_KEY;
+    if (!apiKey) {
+      return res.json({ success: true, configured: false });
+    }
+    res.json({ success: true, configured: true, key: apiKey, expiresIn: 30 });
+  });
+
   // Byte-range read of a task's history file. Used by the terminal's
   // scroll-up handler to lazy-load earlier output beyond the initial
   // 512KB sent with `task:restore`. Returns { data, startOffset, totalSize,
@@ -2918,75 +3285,149 @@ export async function createApp(basePath?: string) {
   app.post('/api/browse-folder', async (_req, res) => {
     try {
       const platform = process.platform;
-      let cmd: string;
-      let args: string[];
-      const lastBrowsed = workspaceStore.getLastBrowsedPath();
-
-      if (platform === 'darwin') {
-        const scriptParts = [
-          'POSIX path of (choose folder with prompt "Select a workspace folder"',
-        ];
-        if (lastBrowsed) {
-          const safe = lastBrowsed.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-          scriptParts.push(` default location POSIX file "${safe}"`);
-        }
-        scriptParts.push(')');
-        cmd = 'osascript';
-        args = ['-e', scriptParts.join('')];
-      } else if (platform === 'win32') {
-        const initialDir = lastBrowsed
-          ? `$f.SelectedPath = [System.IO.Path]::GetFullPath("${lastBrowsed.replace(/"/g, '')}"); `
-          : '';
-        cmd = 'powershell';
-        args = [
-          '-STA',
-          '-NoProfile',
-          '-Command',
-          `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Application]::EnableVisualStyles(); $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Select a workspace folder'; $f.ShowNewFolderButton = $true; ${initialDir}if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }`,
-        ];
-      } else {
-        // Linux - try zenity first, fall back to kdialog
+      const storedLastBrowsed = workspaceStore.getLastBrowsedPath();
+      // Validate the stored path still exists — a stale path can break the
+      // native dialog (on macOS, AppleScript's `default location POSIX file
+      // "..."` errors with "-1700 Can't make file ... into type alias" if the
+      // path is gone, which manifested as the Browse button doing nothing).
+      let lastBrowsed: string | undefined;
+      if (storedLastBrowsed) {
         try {
-          require('child_process').execFileSync('which', ['zenity'], { stdio: 'ignore' });
-          cmd = 'zenity';
-          args = ['--file-selection', '--directory', '--title=Select a workspace folder'];
-          if (lastBrowsed) args.push(`--filename=${lastBrowsed}/`);
+          const stat = fs.statSync(storedLastBrowsed);
+          if (stat.isDirectory()) lastBrowsed = storedLastBrowsed;
         } catch {
-          cmd = 'kdialog';
-          args = [
-            '--getexistingdirectory',
-            lastBrowsed || process.env['HOME'] || '/',
-            '--title',
-            'Select a workspace folder',
-          ];
+          // path is gone — drop it from the store so we don't keep tripping
+          console.log(
+            '[browse-folder] Clearing stale lastBrowsedPath:',
+            storedLastBrowsed,
+          );
+          workspaceStore.setLastBrowsedPath('');
         }
       }
+      console.log(
+        '[browse-folder] Request received, platform:',
+        platform,
+        'lastBrowsed:',
+        lastBrowsed,
+      );
 
-      const child = spawn(cmd, args);
-      let stdout = '';
-      let stderr = '';
-      child.stdout.on('data', (data: Buffer) => {
-        stdout += data.toString();
-      });
-      child.stderr.on('data', (data: Buffer) => {
-        stderr += data.toString();
-      });
-      child.on('close', (code: number | null) => {
-        const path = stdout.trim();
-        if (code === 0 && path) {
-          workspaceStore.setLastBrowsedPath(path);
-          res.json({ success: true, path });
+      const buildArgs = (useLastBrowsed: boolean): { cmd: string; args: string[] } => {
+        const seed = useLastBrowsed ? lastBrowsed : undefined;
+        if (platform === 'darwin') {
+          const scriptParts = [
+            'POSIX path of (choose folder with prompt "Select a workspace folder"',
+          ];
+          if (seed) {
+            const safe = seed.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            scriptParts.push(` default location POSIX file "${safe}"`);
+          }
+          scriptParts.push(')');
+          return { cmd: 'osascript', args: ['-e', scriptParts.join('')] };
+        } else if (platform === 'win32') {
+          const initialDir = seed
+            ? `$f.SelectedPath = [System.IO.Path]::GetFullPath("${seed.replace(/"/g, '')}"); `
+            : '';
+          return {
+            cmd: 'powershell',
+            args: [
+              '-STA',
+              '-NoProfile',
+              '-Command',
+              `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Application]::EnableVisualStyles(); $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Select a workspace folder'; $f.ShowNewFolderButton = $true; ${initialDir}if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }`,
+            ],
+          };
         } else {
-          // User cancelled or error
-          res.json({ success: false, cancelled: true });
+          // Linux - try zenity first, fall back to kdialog
+          try {
+            require('child_process').execFileSync('which', ['zenity'], { stdio: 'ignore' });
+            const args = ['--file-selection', '--directory', '--title=Select a workspace folder'];
+            if (seed) args.push(`--filename=${seed}/`);
+            return { cmd: 'zenity', args };
+          } catch {
+            return {
+              cmd: 'kdialog',
+              args: [
+                '--getexistingdirectory',
+                seed || process.env['HOME'] || '/',
+                '--title',
+                'Select a workspace folder',
+              ],
+            };
+          }
         }
-      });
-      child.on('error', (err: Error) => {
-        console.error('[browse-folder] Failed to open folder dialog:', err.message);
-        res.status(500).json({ success: false, error: err.message });
-      });
+      };
+
+      const runDialog = (
+        useLastBrowsed: boolean,
+      ): Promise<{ code: number | null; stdout: string; stderr: string }> => {
+        return new Promise((resolve, reject) => {
+          const { cmd, args } = buildArgs(useLastBrowsed);
+          console.log('[browse-folder] Spawning:', cmd, JSON.stringify(args));
+          const child = spawn(cmd, args);
+          let stdout = '';
+          let stderr = '';
+          child.stdout.on('data', (data: Buffer) => {
+            stdout += data.toString();
+          });
+          child.stderr.on('data', (data: Buffer) => {
+            stderr += data.toString();
+          });
+          child.on('close', (code: number | null) => {
+            resolve({ code, stdout, stderr });
+          });
+          child.on('error', (err: Error) => {
+            reject(err);
+          });
+        });
+      };
+
+      let result = await runDialog(true);
+      console.log(
+        '[browse-folder] Child closed. code=',
+        result.code,
+        'stdout=',
+        JSON.stringify(result.stdout),
+        'stderr=',
+        JSON.stringify(result.stderr),
+      );
+
+      // If the dialog failed (non-zero exit with no path) AND we used a seed
+      // path, retry once without the seed — protects against broken
+      // `default location` references we couldn't detect with statSync.
+      if (
+        (result.code !== 0 || !result.stdout.trim()) &&
+        result.stderr &&
+        lastBrowsed &&
+        !result.stdout.trim()
+      ) {
+        console.log('[browse-folder] Retrying without lastBrowsed seed');
+        workspaceStore.setLastBrowsedPath('');
+        result = await runDialog(false);
+        console.log(
+          '[browse-folder] Retry closed. code=',
+          result.code,
+          'stdout=',
+          JSON.stringify(result.stdout),
+          'stderr=',
+          JSON.stringify(result.stderr),
+        );
+      }
+
+      const path = result.stdout.trim();
+      if (result.code === 0 && path) {
+        workspaceStore.setLastBrowsedPath(path);
+        res.json({ success: true, path });
+      } else {
+        res.json({
+          success: false,
+          cancelled: true,
+          code: result.code,
+          stderr: result.stderr.trim(),
+        });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      console.error('[browse-folder] Failed to open folder dialog:', message);
       res.status(500).json({ success: false, error: message });
     }
   });

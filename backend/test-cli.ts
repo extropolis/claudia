@@ -56,6 +56,7 @@ interface TestConfig {
     listMcpServers: boolean;      // List available MCP servers (no WebSocket needed)
     testMcpServer: string | null; // Test a specific MCP server by name
     checkApiConfig: boolean;      // Check API configuration (mode, credentials, plugin status)
+    simulateMobileEvent: boolean; // Emit a fake task:summary for mobile feed testing
     disconnectTask: boolean;      // Disconnect a task
     reconnectTask: boolean;       // Reconnect a task
     renameTask: boolean;          // Rename a task
@@ -77,6 +78,12 @@ interface TestConfig {
     cronRecurring: boolean;           // Whether the cron is recurring (default true)
     cronPause: boolean | null;        // true to pause, false to resume, null = not set
     complexity: string | null;        // Optional complexity tier for task:create (low/medium/high)
+    // Mobile single-agent chat
+    mobileChatSend: boolean;          // POST /api/mobile/chat — send a user message
+    mobileChatShow: boolean;          // GET /api/mobile/chat — print transcript
+    mobileChatClear: boolean;         // DELETE /api/mobile/chat — wipe transcript
+    mobileSummary: boolean;           // POST /api/mobile/chat/summarize-task — force summary
+    watchNarrations: boolean;         // Subscribe to task:narration events and print them
 }
 
 class TestCLI {
@@ -234,6 +241,23 @@ class TestCLI {
                     // Watch task state changes - don't auto-close
                     console.log('👁️  Watching task state changes... (Ctrl+C to exit)');
                     console.log('');
+                } else if (this.config.watchNarrations) {
+                    // Watch live narration messages — don't auto-close.
+                    // If a --task-id is provided, request its narration history
+                    // so prior narrations replay before the live stream begins.
+                    const filter = this.config.taskId
+                        ? ` for task ${this.config.taskId.substring(0, 12)}…`
+                        : ' (all tasks)';
+                    console.log(`🗣  Watching narrations${filter}... (Ctrl+C to exit)`);
+                    console.log('');
+                    if (this.config.taskId && this.ws && this.ws.readyState === WebSocket.OPEN) {
+                        this.ws.send(
+                            JSON.stringify({
+                                type: 'task:restore',
+                                payload: { taskId: this.config.taskId },
+                            }),
+                        );
+                    }
                 } else if (this.config.archiveTask && this.config.taskId) {
                     this.sendArchiveTask(this.config.taskId);
                     setTimeout(() => this.cleanup(), 2000);
@@ -921,6 +945,21 @@ class TestCLI {
                 this.handleTaskOutput(message.payload as { taskId: string; data: string });
                 break;
 
+            case 'task:narration':
+                this.handleTaskNarration(
+                    message.payload as { message: { taskId: string; text: string; timestamp: string } },
+                );
+                break;
+
+            case 'task:narration:restore':
+                this.handleTaskNarrationRestore(
+                    message.payload as {
+                        taskId: string;
+                        messages: Array<{ taskId: string; text: string; timestamp: string }>;
+                    },
+                );
+                break;
+
             case 'supervisor:chat:response':
                 this.handleSupervisorChatResponse(message.payload as { message: ChatMessage });
                 break;
@@ -992,6 +1031,35 @@ class TestCLI {
             const preview = payload.data.substring(0, 80).replace(/\n/g, ' ');
             console.log(`[${elapsed}s] OUTPUT    │ [${payload.taskId.substring(0, 8)}...] ${preview}...`);
         }
+    }
+
+    private handleTaskNarration(payload: {
+        message: { taskId: string; text: string; timestamp: string };
+    }): void {
+        if (!this.config.watchNarrations) return;
+        const m = payload.message;
+        // Optional --task-id filter
+        if (this.config.taskId && m.taskId !== this.config.taskId) return;
+        this.lastActivityTime = Date.now();
+        const ts = new Date(m.timestamp).toLocaleTimeString();
+        const short = m.taskId.substring(0, 8);
+        console.log(`[${ts}] 🗣  ${short} │ ${m.text}`);
+    }
+
+    private handleTaskNarrationRestore(payload: {
+        taskId: string;
+        messages: Array<{ taskId: string; text: string; timestamp: string }>;
+    }): void {
+        if (!this.config.watchNarrations) return;
+        if (this.config.taskId && payload.taskId !== this.config.taskId) return;
+        if (!payload.messages?.length) return;
+        const short = payload.taskId.substring(0, 8);
+        console.log(`── ${payload.messages.length} prior narration(s) for ${short} ──`);
+        for (const m of payload.messages) {
+            const ts = new Date(m.timestamp).toLocaleTimeString();
+            console.log(`[${ts}] 🗣  ${short} │ ${m.text}`);
+        }
+        console.log('── live ──');
     }
 
     private handleChatCleared(): void {
@@ -1337,6 +1405,7 @@ function parseArgs(): TestConfig {
     let listMcpServers = false;
     let testMcpServer: string | null = null;
     let checkApiConfig = false;
+    let simulateMobileEvent = false;
     let disconnectTask = false;
     let reconnectTask = false;
     let renameTask = false;
@@ -1357,6 +1426,11 @@ function parseArgs(): TestConfig {
     let cronRecurring = true;
     let cronPause: boolean | null = null;
     let complexity: string | null = null;
+    let mobileChatSend = false;
+    let mobileChatShow = false;
+    let mobileChatClear = false;
+    let mobileSummary = false;
+    let watchNarrations = false;
 
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
@@ -1499,6 +1573,24 @@ function parseArgs(): TestConfig {
                 break;
             case '--check-api-config':
                 checkApiConfig = true;
+                break;
+            case '--simulate-mobile-event':
+                simulateMobileEvent = true;
+                break;
+            case '--mobile-chat-send':
+                mobileChatSend = true;
+                break;
+            case '--mobile-chat-show':
+                mobileChatShow = true;
+                break;
+            case '--mobile-chat-clear':
+                mobileChatClear = true;
+                break;
+            case '--mobile-summary':
+                mobileSummary = true;
+                break;
+            case '--watch-narrations':
+                watchNarrations = true;
                 break;
             case '--test-mcp-server':
                 testMcpServer = args[++i];
@@ -1649,6 +1741,12 @@ MCP SERVER OPERATIONS:
   --list-mcp-servers       List all available MCP servers (global and project-specific)
   --test-mcp-server <name> Test a specific MCP server by calling its tools
   --check-api-config       Check API configuration (mode, credentials, enabled plugins)
+  --simulate-mobile-event  Emit a fake task:summary over WS + push (mobile feed test)
+  --mobile-chat-send -w <wsId> -m "..."   Send a user message to the mobile agent
+  --mobile-chat-show -w <wsId>            Print the mobile chat transcript
+  --mobile-chat-clear -w <wsId>           Wipe the mobile chat transcript
+  --mobile-summary --task-id <id>         Force a chat-style summary for a task
+  --watch-narrations [--task-id <id>]     Stream live first-person task narrations (Ctrl+C to exit)
 
 SCHEDULED TASK (CRON) OPERATIONS:
   --cron-create            Create a scheduled task (requires --task-id, --cron-expression, and --message)
@@ -1822,6 +1920,7 @@ Examples:
         listMcpServers,
         testMcpServer,
         checkApiConfig,
+        simulateMobileEvent,
         disconnectTask,
         reconnectTask,
         renameTask,
@@ -1842,6 +1941,11 @@ Examples:
         cronRecurring,
         cronPause,
         complexity,
+        mobileChatSend,
+        mobileChatShow,
+        mobileChatClear,
+        mobileSummary,
+        watchNarrations,
     };
 }
 
@@ -2152,6 +2256,193 @@ async function testMcpServer(serverName: string): Promise<void> {
     console.log('');
 }
 
+async function simulateMobileEvent(baseHttpUrl: string): Promise<void> {
+    console.log('📱 Simulating task:summary mobile event...');
+    try {
+        const res = await fetch(`${baseHttpUrl}/api/mobile/simulate-summary`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        const data = await res.json() as { success?: boolean; summary?: unknown; result?: unknown; error?: string };
+        if (!res.ok || !data.success) {
+            console.error(`❌ Failed: HTTP ${res.status}`, data.error ?? '');
+            process.exit(1);
+        }
+        console.log('✅ Emitted task:summary over WS');
+        console.log('   summary:', JSON.stringify(data.summary, null, 2));
+        if ((data as { result?: unknown }).result) {
+            console.log('   push:', JSON.stringify(data.result, null, 2));
+        }
+        console.log('');
+        console.log('Tip: open the mobile app (web build) and watch for the card.');
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('❌ Error:', msg);
+        process.exit(1);
+    }
+}
+
+// ─── Mobile single-agent chat helpers ───────────────────────────────────
+
+async function mobileChatSend(
+    baseHttpUrl: string,
+    workspaceId: string,
+    text: string,
+): Promise<void> {
+    if (!workspaceId) {
+        console.error('❌ --mobile-chat-send requires -w <workspaceId>');
+        process.exit(1);
+    }
+    if (!text) {
+        console.error('❌ --mobile-chat-send requires -m "message"');
+        process.exit(1);
+    }
+    console.log(`💬 Sending message to mobile agent (ws=${workspaceId})...`);
+    console.log(`   user: ${text}`);
+    try {
+        const res = await fetch(`${baseHttpUrl}/api/mobile/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workspaceId, text }),
+        });
+        const data = (await res.json()) as {
+            success?: boolean;
+            messages?: Array<{ role: string; text: string; quickActions?: Array<{ label: string }> }>;
+            error?: string;
+        };
+        if (!res.ok || !data.success) {
+            console.error(`❌ Failed: HTTP ${res.status}`, data.error ?? '');
+            process.exit(1);
+        }
+        console.log(`✅ Agent turn produced ${data.messages?.length ?? 0} new message(s):`);
+        for (const m of data.messages ?? []) {
+            console.log('');
+            console.log(`   [${m.role}] ${m.text}`);
+            if (m.quickActions?.length) {
+                console.log(`   actions: ${m.quickActions.map((a) => a.label).join(' | ')}`);
+            }
+        }
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('❌ Error:', msg);
+        process.exit(1);
+    }
+}
+
+async function mobileChatShow(baseHttpUrl: string, workspaceId: string): Promise<void> {
+    if (!workspaceId) {
+        console.error('❌ --mobile-chat-show requires -w <workspaceId>');
+        process.exit(1);
+    }
+    try {
+        const res = await fetch(
+            `${baseHttpUrl}/api/mobile/chat?workspaceId=${encodeURIComponent(workspaceId)}`,
+        );
+        const data = (await res.json()) as {
+            workspaceId?: string;
+            messages?: Array<{
+                id: string;
+                role: string;
+                text: string;
+                taskId?: string;
+                quickActions?: Array<{ label: string; prompt: string }>;
+                createdAt: string;
+            }>;
+            error?: string;
+        };
+        if (!res.ok) {
+            console.error(`❌ Failed: HTTP ${res.status}`, data.error ?? '');
+            process.exit(1);
+        }
+        console.log(`📜 Transcript for ws=${data.workspaceId} (${data.messages?.length ?? 0} messages):`);
+        console.log('');
+        for (const m of data.messages ?? []) {
+            console.log(`[${m.createdAt}] (${m.role})${m.taskId ? ` task=${m.taskId}` : ''}`);
+            console.log(`  ${m.text.replace(/\n/g, '\n  ')}`);
+            if (m.quickActions?.length) {
+                console.log(`  actions: ${m.quickActions.map((a) => `[${a.label}]`).join(' ')}`);
+            }
+            console.log('');
+        }
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('❌ Error:', msg);
+        process.exit(1);
+    }
+}
+
+async function mobileChatClear(baseHttpUrl: string, workspaceId: string): Promise<void> {
+    if (!workspaceId) {
+        console.error('❌ --mobile-chat-clear requires -w <workspaceId>');
+        process.exit(1);
+    }
+    try {
+        const res = await fetch(
+            `${baseHttpUrl}/api/mobile/chat?workspaceId=${encodeURIComponent(workspaceId)}`,
+            { method: 'DELETE' },
+        );
+        const data = (await res.json()) as { success?: boolean; removed?: boolean; error?: string };
+        if (!res.ok || !data.success) {
+            console.error(`❌ Failed: HTTP ${res.status}`, data.error ?? '');
+            process.exit(1);
+        }
+        console.log(data.removed ? '✅ Cleared transcript.' : 'ℹ️  No transcript existed.');
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('❌ Error:', msg);
+        process.exit(1);
+    }
+}
+
+async function mobileSummary(baseHttpUrl: string, taskId: string): Promise<void> {
+    if (!taskId) {
+        console.error('❌ --mobile-summary requires --task-id <id>');
+        process.exit(1);
+    }
+    console.log(`🧠 Forcing chat-style summary for task ${taskId}...`);
+    try {
+        const res = await fetch(`${baseHttpUrl}/api/mobile/chat/summarize-task`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ taskId }),
+        });
+        const data = (await res.json()) as {
+            success?: boolean;
+            message?: {
+                role: string;
+                text: string;
+                taskId?: string;
+                quickActions?: Array<{ label: string; prompt: string }>;
+            };
+            error?: string;
+        };
+        if (!res.ok || !data.success) {
+            console.error(`❌ Failed: HTTP ${res.status}`, data.error ?? '');
+            process.exit(1);
+        }
+        const m = data.message;
+        if (!m) {
+            console.error('❌ Server returned no message');
+            process.exit(1);
+        }
+        console.log(`✅ Generated agent message (task=${m.taskId ?? '-'}):`);
+        console.log('');
+        console.log(`   ${m.text.replace(/\n/g, '\n   ')}`);
+        if (m.quickActions?.length) {
+            console.log('');
+            console.log('   Quick actions:');
+            for (const a of m.quickActions) {
+                console.log(`     [${a.label}] → ${a.prompt}`);
+            }
+        }
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('❌ Error:', msg);
+        process.exit(1);
+    }
+}
+
 async function checkApiConfig(baseHttpUrl: string): Promise<void> {
     console.log('🔍 Checking API Configuration...');
     console.log('');
@@ -2311,6 +2602,32 @@ async function main() {
 
     if (config.checkApiConfig) {
         await checkApiConfig(baseHttpUrl);
+        process.exit(0);
+    }
+
+    if (config.simulateMobileEvent) {
+        await simulateMobileEvent(baseHttpUrl);
+        process.exit(0);
+    }
+
+    if (config.mobileChatSend) {
+        await mobileChatSend(
+            baseHttpUrl,
+            config.workspaceId ?? '',
+            config.testMessage ?? '',
+        );
+        process.exit(0);
+    }
+    if (config.mobileChatShow) {
+        await mobileChatShow(baseHttpUrl, config.workspaceId ?? '');
+        process.exit(0);
+    }
+    if (config.mobileChatClear) {
+        await mobileChatClear(baseHttpUrl, config.workspaceId ?? '');
+        process.exit(0);
+    }
+    if (config.mobileSummary) {
+        await mobileSummary(baseHttpUrl, config.taskId ?? '');
         process.exit(0);
     }
 
