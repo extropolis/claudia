@@ -201,6 +201,7 @@
     padding: 8px;
     min-height: 0; /* Allow shrinking in flex context */
     overflow: hidden;
+    position: relative; /* Required for ghostty-web's absolute-positioned input textarea */
 }
 
 /* Loading spinner overlay while reconnecting / restoring history */
