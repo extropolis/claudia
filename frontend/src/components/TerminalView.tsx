@@ -19,34 +19,78 @@ function ensureGhosttyInit(): Promise<void> {
 }
 
 /**
- * Strip screen-clearing escape sequences from restored history.
- * When Claude Code goes idle, it sends cleanup sequences (clear screen, cursor home, etc.)
- * that wipe all visible content. When replaying history, we strip these so the actual
- * task output remains visible instead of showing a blank screen.
+ * Sanitize scrollback before writing to a fresh ghostty-web terminal instance.
+ *
+ * Ported from Nimbalyst's scrollbackSanitization.ts — three-stage pipeline:
+ * 1. sanitizeScrollback: strip NUL bytes, validate Unicode code points, discard if corrupted
+ * 2. stripProblematicEscapeSequences: remove cursor save/restore, scroll regions, alt screen
+ * 3. cleanScrollback: strip trailing whitespace before CRs (zsh PROMPT_SP artifacts)
+ *
+ * Also preserves Claudia's original session-separator stripping.
  */
-function stripScreenClears(history: string): string {
-  return (
-    history
-      // \x1bc - RIS (Reset to Initial State) — causes a full terminal reset
-      // that blacks out the screen if no content follows immediately
-      .replace(/\x1bc/g, '')
-      // \x1b[2J\x1b[H - Clear screen + cursor home (common cleanup pattern)
-      // Strip as a pair so standalone \x1b[H used for TUI drawing is preserved
-      .replace(/\x1b\[2J\x1b\[H/g, '')
-      // \x1b[2J - Clear entire screen (standalone)
-      .replace(/\x1b\[2J/g, '')
-      // \x1b[3J - Clear entire screen + scrollback
-      .replace(/\x1b\[3J/g, '')
-      // \x1b[?1049h / \x1b[?1049l - Alt screen buffer enter/exit
-      .replace(/\x1b\[\?1049[hl]/g, '')
-      // Strip accumulated "Resuming session" / "Session reconnected" separator lines.
-      // These accumulate across server restarts and fill the terminal with noise,
-      // hiding the actual conversation content.
-      .replace(
-        /\r?\n?\x1b\[90m─── (Resuming session [a-f0-9-]+|Session reconnected) ───\x1b\[0m\r?\n?\r?\n?/g,
-        '',
-      )
+function sanitizeHistoryForRestore(raw: string): string | null {
+  // Stage 1: NUL bytes and Unicode validation
+  let s = raw;
+  if (s.includes('\x00')) {
+    const nullCount = (s.match(/\x00/g) || []).length;
+    s = s.replace(/\x00/g, '');
+    console.warn(`[TerminalView] Stripped ${nullCount} NUL byte(s) from scrollback`);
+  }
+
+  // Check for excessive suspicious control characters (binary corruption indicator)
+  let suspicious = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if ((c >= 0x01 && c <= 0x06) || (c >= 0x0E && c <= 0x1A)) suspicious++;
+  }
+  if (s.length > 0 && suspicious / s.length > 0.005) {
+    console.warn(`[TerminalView] Scrollback likely corrupted (${suspicious} suspicious control chars), discarding`);
+    return null;
+  }
+
+  // Replace invalid Unicode code points
+  let validated = '';
+  let invalidCount = 0;
+  for (let i = 0; i < s.length; i++) {
+    const cp = s.codePointAt(i);
+    if (cp === undefined || cp < 0 || cp > 0x10FFFF) {
+      invalidCount++;
+      validated += '?';
+    } else if (cp > 0xFFFF) {
+      validated += String.fromCodePoint(cp);
+      i++;
+    } else {
+      validated += s[i];
+    }
+  }
+  if (s.length > 0 && invalidCount / s.length > 0.01) {
+    console.warn(`[TerminalView] Scrollback severely corrupted (${invalidCount} invalid code points), discarding`);
+    return null;
+  }
+
+  // Stage 2: Strip escape sequences that corrupt state when replayed into a fresh terminal
+  let r = validated;
+  r = r.replace(/\x1b[78]/g, '');           // ESC 7/8 cursor save/restore (DEC)
+  r = r.replace(/\x1b\[s/g, '');            // CSI s cursor save
+  r = r.replace(/\x1b\[u/g, '');            // CSI u cursor restore
+  r = r.replace(/\x1b\[\d*;?\d*r/g, '');   // CSI r scroll region
+  r = r.replace(/\x1b\[\d*;?\d*[Hf]/g, ''); // CSI H/f absolute cursor position
+  r = r.replace(/\x1b\[\?(1049|47|1047)[hl]/g, ''); // alt screen buffer
+  r = r.replace(/\x1b\[\?7[hl]/g, '');     // autowrap mode
+  r = r.replace(/\x1bc/g, '');             // RIS (full terminal reset)
+  r = r.replace(/\x1b\[2J/g, '');          // clear screen
+  r = r.replace(/\x1b\[3J/g, '');          // clear screen + scrollback
+
+  // Stage 3: Clean zsh PROMPT_SP artifacts (spaces before CR, not before \r\n)
+  r = r.replace(/[ \t]+\r(?!\n)/g, '\r');
+
+  // Strip accumulated session-reconnect separator lines
+  r = r.replace(
+    /\r?\n?\x1b\[90m─── (Resuming session [a-f0-9-]+|Session reconnected) ───\x1b\[0m\r?\n?\r?\n?/g,
+    '',
   );
+
+  return r;
 }
 
 interface TerminalViewProps {
@@ -443,9 +487,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
           topOffsetRef.current = 0;
           return;
         }
-        // Prepend the new chunk to the loaded buffer, then reset + rewrite.
-        // We must reset because xterm.write only appends — there's no insert API.
-        const cleanedChunk = stripScreenClears(data);
+        // Prepend the new chunk to the loaded buffer, then rewrite.
+        const cleanedChunk = sanitizeHistoryForRestore(data) ?? data;
         loadedHistoryRef.current = cleanedChunk + loadedHistoryRef.current;
         topOffsetRef.current = startOffset;
         totalSizeRef.current = totalSize;
@@ -456,20 +499,30 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         const oldViewportY = term.buffer.active.viewportY;
         const linesFromBottom = oldTotalLines - oldViewportY;
 
-        // Block live output during the reset+rewrite to prevent interleaving
+        // Block live output during rewrite to prevent interleaving.
+        // Do NOT call term.reset() — it corrupts ghostty-web's state.
         restoreInProgress = true;
         restoreOutputBuffer = [];
         programmaticScrollRef.current = true;
-        term.reset();
-        term.write(loadedHistoryRef.current, () => {
-          flushRestoreBuffer();
-          const newTotal = term.buffer.active.length;
-          const targetViewportY = Math.max(0, newTotal - linesFromBottom);
-          term.scrollToLine(targetViewportY);
-          setTimeout(() => {
-            programmaticScrollRef.current = false;
-          }, 50);
-        });
+        const fullHistory = loadedHistoryRef.current;
+        const CHUNK_SIZE = 8192;
+        // Write in chunks, then restore scroll position
+        const writeAllChunks = async () => {
+          for (let i = 0; i < fullHistory.length; i += CHUNK_SIZE) {
+            if (termDisposed) return;
+            term.write(fullHistory.slice(i, i + CHUNK_SIZE));
+            if ((i / CHUNK_SIZE) % 4 === 3) await new Promise(r => setTimeout(r, 0));
+          }
+          if (!termDisposed) {
+            term.write('\x1b[r'); // reset scroll region
+            flushRestoreBuffer();
+            const newTotal = term.buffer.active.length;
+            const targetViewportY = Math.max(0, newTotal - linesFromBottom);
+            if (Number.isInteger(targetViewportY)) term.scrollToLine(targetViewportY);
+            setTimeout(() => { programmaticScrollRef.current = false; }, 50);
+          }
+        };
+        void writeAllChunks();
       } catch (err) {
         console.warn('[TerminalView] history chunk fetch error', err);
       } finally {
@@ -676,53 +729,85 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             `[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}, alreadyLoaded: ${historyLoadedRef.current}`,
           );
           if (history && history.length > 0) {
-            // Block task:output writes until the history replay completes.
-            // Without this, live output arriving between reset() and write()
-            // completion gets interleaved with history, causing garbled text.
             restoreInProgress = true;
             restoreOutputBuffer = [];
-            term.reset();
-            const cleaned = stripScreenClears(history);
-            programmaticScrollRef.current = true;
-            term.write(cleaned, () => {
-              // History fully written — flush any output that arrived during restore
+
+            // Sanitize before writing — strips NUL bytes, invalid Unicode,
+            // cursor save/restore, scroll regions, and other sequences that
+            // corrupt ghostty-web's state when replayed into a fresh terminal.
+            // Do NOT call term.reset() — it corrupts ghostty-web's internal
+            // state machine when history is written immediately after.
+            const cleaned = sanitizeHistoryForRestore(history);
+
+            if (!cleaned) {
+              // Corrupted — skip restore, let live output continue
+              console.warn(`[TerminalView] History corrupted for ${task.id}, skipping restore`);
               flushRestoreBuffer();
-              term.scrollToBottom();
-              setTimeout(() => {
-                programmaticScrollRef.current = false;
-              }, 50);
-            });
-            // Seed the chunked-scrollback buffer with the cleaned tail we
-            // just wrote. We can't fully reconstruct the original byte
-            // offset (cleaned !== raw history due to stripScreenClears),
-            // so we ask the backend for metadata and assume the
-            // restored tail starts at `totalSize - rawHistory.length`.
-            loadedHistoryRef.current = cleaned;
-            fetch(`${getApiBaseUrl()}/api/task/${task.id}/history?endBefore=0&maxBytes=0`)
-              .then((r) => r.json())
-              .then((meta: { totalSize: number; isBase64Legacy: boolean }) => {
-                totalSizeRef.current = meta.totalSize;
-                topOffsetRef.current = Math.max(0, meta.totalSize - history.length);
-                historyChunkUnavailableRef.current = !!meta.isBase64Legacy;
+              historyLoadedRef.current = true;
+              setIsLoadingHistory(false);
+            } else {
+              // Write in 8KB chunks to avoid WASM memory issues with large histories
+              const CHUNK_SIZE = 8192;
+              const MAX_RESTORE_MS = 2000;
+              const startTime = Date.now();
+              programmaticScrollRef.current = true;
+
+              const writeChunks = async () => {
+                for (let i = 0; i < cleaned.length; i += CHUNK_SIZE) {
+                  if (termDisposed) return;
+                  if (Date.now() - startTime > MAX_RESTORE_MS) {
+                    console.warn('[TerminalView] Scrollback restore timed out, skipping remainder');
+                    break;
+                  }
+                  try {
+                    term.write(cleaned.slice(i, i + CHUNK_SIZE));
+                  } catch (err) {
+                    console.warn('[TerminalView] Scrollback write error:', err);
+                    break;
+                  }
+                  // Yield every 4 chunks to keep UI responsive
+                  if ((i / CHUNK_SIZE) % 4 === 3) {
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                  }
+                }
+                if (!termDisposed) {
+                  // Reset scroll region to full screen, then scroll to bottom
+                  term.write('\x1b[r');
+                  term.scrollToBottom();
+                  setTimeout(() => { programmaticScrollRef.current = false; }, 50);
+                  flushRestoreBuffer();
+                }
+              };
+
+              void writeChunks().then(() => {
+                loadedHistoryRef.current = cleaned;
+                fetch(`${getApiBaseUrl()}/api/task/${task.id}/history?endBefore=0&maxBytes=0`)
+                  .then((r) => r.json())
+                  .then((meta: { totalSize: number; isBase64Legacy: boolean }) => {
+                    totalSizeRef.current = meta.totalSize;
+                    topOffsetRef.current = Math.max(0, meta.totalSize - history.length);
+                    historyChunkUnavailableRef.current = !!meta.isBase64Legacy;
+                    console.log(
+                      `[TerminalView] history metadata: total=${meta.totalSize} topOffset=${topOffsetRef.current} legacy=${meta.isBase64Legacy}`,
+                    );
+                  })
+                  .catch((err) => {
+                    console.warn('[TerminalView] failed to fetch history metadata', err);
+                    historyChunkUnavailableRef.current = true;
+                  });
                 console.log(
-                  `[TerminalView] history metadata: total=${meta.totalSize} topOffset=${topOffsetRef.current} legacy=${meta.isBase64Legacy}`,
+                  `[TerminalView] History written for ${task.id} (original: ${history.length}, cleaned: ${cleaned.length})`,
                 );
-              })
-              .catch((err) => {
-                console.warn('[TerminalView] failed to fetch history metadata', err);
-                historyChunkUnavailableRef.current = true;
+                historyLoadedRef.current = true;
+                setIsLoadingHistory(false);
               });
-            console.log(
-              `[TerminalView] History written for ${task.id} (original: ${history.length}, cleaned: ${cleaned.length})`,
-            );
+            }
           } else {
-            term.reset();
             term.write('\x1b[90m── Session history not available ──\x1b[0m\r\n');
             console.log(`[TerminalView] Empty history for ${task.id}`);
+            historyLoadedRef.current = true;
+            setIsLoadingHistory(false);
           }
-          // Clear loading state - history has been restored
-          historyLoadedRef.current = true;
-          setIsLoadingHistory(false);
         }
       } catch (e) {
         console.error('[TerminalView] Message error:', e);
