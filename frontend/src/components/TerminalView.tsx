@@ -95,6 +95,10 @@ function sanitizeHistoryForRestore(raw: string): string | null {
   // Stage 3: Clean zsh PROMPT_SP artifacts (spaces before CR, not before \r\n)
   r = r.replace(/[ \t]+\r(?!\n)/g, '\r');
 
+  // Strip full-width horizontal separator lines (─ U+2500, - repeated, ═ U+2550)
+  // These are drawn at a specific terminal width and overflow/garble at different widths.
+  r = r.replace(/\r?\n?[ \t]*[-─═━──━═╌╍]{10,}[ \t]*\r?\n?/g, '\n');
+
   // Strip accumulated session-reconnect separator lines
   r = r.replace(
     /\r?\n?\x1b\[90m─── (Resuming session [a-f0-9-]+|Session reconnected) ───\x1b\[0m\r?\n?\r?\n?/g,
@@ -433,6 +437,10 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
     // Open terminal — container already has real dimensions (waitForDimensions above)
     term.open(terminalRef.current);
+    // Wait for fonts to load so ghostty-web's getMetrics() returns accurate
+    // character dimensions. Without this, fit() may run before the monospace
+    // font is ready and compute far too few cols (e.g. 60 instead of 120).
+    try { await document.fonts.ready; } catch { /* ignore */ }
     // Yield one microtask so the browser can finish layout after open()
     await new Promise(resolve => setTimeout(resolve, 0));
     if (destroyed || !terminalRef.current) return;
@@ -440,19 +448,27 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // Fit to container and get confirmed dimensions
-    let initialCols = term.cols;
-    let initialRows = term.rows;
-    try {
-      fitAddon.fit();
-      const dims = fitAddon.proposeDimensions();
-      if (dims && dims.cols > 0 && dims.rows > 0) {
-        initialCols = dims.cols;
-        initialRows = dims.rows;
-      }
-    } catch (e) {
-      console.warn('[TerminalView] Initial fit failed:', e);
+    // Fit to container. Retry once after a short delay in case font metrics
+    // weren't ready yet (ghostty-web measures "M" at open() time; if the
+    // monospace font loads slightly late, fit() computes too few cols).
+    const doFit = () => {
+      try {
+        fitAddon.fit();
+        return fitAddon.proposeDimensions();
+      } catch { return undefined; }
+    };
+
+    let dims = doFit();
+    // If cols look unreasonably low (< 60 for a full-width terminal), the
+    // font metrics were stale — wait for fonts and retry once.
+    if (!dims || dims.cols < 60) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      if (destroyed || !terminalRef.current) return;
+      dims = doFit();
     }
+
+    let initialCols = dims?.cols ?? term.cols;
+    let initialRows = dims?.rows ?? term.rows;
 
     // Register OSC8 hyperlinks and URL detection
     term.registerLinkProvider(new OSC8LinkProvider(term));
