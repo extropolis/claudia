@@ -5176,16 +5176,19 @@ export async function createApp(basePath?: string) {
                 }
             }
 
-            // If MCP servers were updated, sync .mcp.json and settings.local.json to all workspaces
-            // and notify running tasks of the change
-            if (validation.data!.mcpServers !== undefined) {
+            // If MCP servers or skipPermissions were updated, sync .mcp.json and
+            // settings.local.json to all workspaces. skipPermissions affects the
+            // allow list written to settings.local.json (allow: ['*'] vs ['mcp__*']).
+            if (validation.data!.mcpServers !== undefined || validation.data!.skipPermissions !== undefined) {
                 const workspaces = workspaceStore.getWorkspaces();
                 if (workspaces.length > 0) {
                     const workspaceIds = workspaces.map(w => w.id);
                     taskSpawner.syncWorkspaceMcpConfigs(workspaceIds);
                     logger.info('Synced MCP config to all workspaces after config update', { count: workspaceIds.length });
                 }
-                notifyTasksOfMcpChange(taskSpawner, configStore);
+                if (validation.data!.mcpServers !== undefined) {
+                    notifyTasksOfMcpChange(taskSpawner, configStore);
+                }
             }
 
             res.json(updatedConfig);
