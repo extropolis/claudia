@@ -60,6 +60,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const webglAddonRef = useRef<WebglAddon | null>(null);
   const userHasScrolledRef = useRef(false); // Track if user manually scrolled up
   const programmaticScrollRef = useRef(false); // Track programmatic scrolls to ignore in scroll handler
   const [copied, setCopied] = useState(false);
@@ -377,13 +378,11 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         const webglAddon = new WebglAddon();
         webglAddon.onContextLoss(() => {
           console.warn('[TerminalView] WebGL context lost — falling back to DOM renderer');
-          try {
-            webglAddon.dispose();
-          } catch {
-            /* addon may already be disposed */
-          }
+          try { webglAddon.dispose(); } catch { /* already disposed */ }
+          webglAddonRef.current = null;
         });
         term.loadAddon(webglAddon);
+        webglAddonRef.current = webglAddon;
       } catch (e) {
         console.warn('[TerminalView] WebGL addon failed to load, using DOM renderer:', e);
       }
@@ -763,6 +762,14 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
       }
       if (wsRef.current) {
         wsRef.current.removeEventListener('message', handleMessage);
+      }
+      // Dispose WebGL addon explicitly before term.dispose() to avoid
+      // "Cannot read properties of undefined (reading '_isDisposed')" crash
+      // that occurs when the AddonManager tries to dispose a partially-initialized
+      // WebGL renderer during component unmount (e.g. switching tasks).
+      if (webglAddonRef.current) {
+        try { webglAddonRef.current.dispose(); } catch { /* ignore */ }
+        webglAddonRef.current = null;
       }
       term.dispose();
       xtermRef.current = null;
