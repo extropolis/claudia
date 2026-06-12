@@ -95,9 +95,19 @@ function sanitizeHistoryForRestore(raw: string): string | null {
   // Stage 3: Clean zsh PROMPT_SP artifacts (spaces before CR, not before \r\n)
   r = r.replace(/[ \t]+\r(?!\n)/g, '\r');
 
+  // Strip Claude Code's startup TUI banner — it's drawn with box characters at
+  // a specific terminal width and garbles badly when replayed at a different width.
+  // The banner starts with the Claude Code logo/header (contains ╭ or │ box chars)
+  // and ends at the first prompt line (▶▶ bypass permissions).
+  // We strip runs of lines that are predominantly box-drawing or pipe characters.
+  r = r.replace(
+    /(\r?\n[ \t]*[│╭╰╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬├┤┬┴┼─═║╔╗╚╝╠╣╦╩╬]+[^\r\n]*)+/g,
+    '',
+  );
+
   // Strip full-width horizontal separator lines (─ U+2500, - repeated, ═ U+2550)
   // These are drawn at a specific terminal width and overflow/garble at different widths.
-  r = r.replace(/\r?\n?[ \t]*[-─═━──━═╌╍]{10,}[ \t]*\r?\n?/g, '\n');
+  r = r.replace(/\r?\n?[ \t]*[-─═━]{10,}[ \t]*\r?\n?/g, '\n');
 
   // Strip accumulated session-reconnect separator lines
   r = r.replace(
@@ -269,7 +279,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     const waitForDimensions = async (): Promise<void> => {
       const start = Date.now();
       while (Date.now() - start < 1500) {
-        if (!terminalRef.current) return;
+        if (destroyed || !terminalRef.current) return;
         const rect = terminalRef.current.getBoundingClientRect();
         if (rect.width > 0 && rect.height > 0) return;
         await new Promise(resolve => requestAnimationFrame(() => resolve(undefined)));
@@ -436,6 +446,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     });
 
     // Open terminal — container already has real dimensions (waitForDimensions above)
+    if (destroyed || !terminalRef.current) return;
     term.open(terminalRef.current);
     // Wait for fonts to load so ghostty-web's getMetrics() returns accurate
     // character dimensions. Without this, fit() may run before the monospace
