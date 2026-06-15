@@ -69,6 +69,34 @@ const log = {
 };
 
 /**
+ * Get all workspace IDs that belong to the current workspace scope.
+ * Includes the workspace itself plus any child worktree workspaces.
+ * This ensures tasks in worktrees are visible to their parent workspace's MCP tools.
+ */
+async function getScopedWorkspaceIds(): Promise<Set<string>> {
+    const ids = new Set<string>();
+    if (!WORKSPACE_ID) return ids;
+    ids.add(WORKSPACE_ID);
+
+    try {
+        const response = await backendFetch('/api/workspaces');
+        if (response.ok) {
+            const data = await response.json();
+            const workspaces = data.workspaces || data;
+            for (const ws of workspaces) {
+                if (ws.worktreeParentId === WORKSPACE_ID) {
+                    ids.add(ws.id);
+                }
+            }
+        }
+    } catch {
+        // If workspace fetch fails, just use the direct workspace ID
+    }
+
+    return ids;
+}
+
+/**
  * Make an HTTP request to the Claudia backend
  */
 async function backendFetch(path: string, options: RequestInit = {}): Promise<Response> {
@@ -218,9 +246,10 @@ server.tool(
             }
             let tasks = await response.json();
 
-            // Filter to current workspace
+            // Filter to current workspace and its child worktrees
             if (WORKSPACE_ID) {
-                tasks = tasks.filter((t: any) => t.workspaceId === WORKSPACE_ID);
+                const scopedIds = await getScopedWorkspaceIds();
+                tasks = tasks.filter((t: any) => scopedIds.has(t.workspaceId));
             }
 
             if (!tasks || tasks.length === 0) {
@@ -715,26 +744,33 @@ server.tool(
         try {
             log.info(`Stopping all tasks in workspace: ${WORKSPACE_ID}${SELF_TASK_ID ? ` (excluding self: ${SELF_TASK_ID})` : ''}`);
 
-            const result = await sendWSMessage('task:stopAll', {
-                workspaceId: WORKSPACE_ID,
-                // Exclude the calling task itself to prevent race condition
-                // where the orchestrator stops its own Claude Code session
-                ...(SELF_TASK_ID ? { excludeTaskId: SELF_TASK_ID } : {}),
-            }) as {
-                workspaceId: string;
-                stoppedCount: number;
-                stoppedIds: string[];
-            };
+            // Stop tasks in the parent workspace and all child worktrees
+            const scopedIds = await getScopedWorkspaceIds();
+            let totalStopped = 0;
+            const allStoppedIds: string[] = [];
+
+            for (const wsId of scopedIds) {
+                const result = await sendWSMessage('task:stopAll', {
+                    workspaceId: wsId,
+                    ...(SELF_TASK_ID ? { excludeTaskId: SELF_TASK_ID } : {}),
+                }) as {
+                    workspaceId: string;
+                    stoppedCount: number;
+                    stoppedIds: string[];
+                };
+                totalStopped += result.stoppedCount;
+                allStoppedIds.push(...result.stoppedIds);
+            }
 
             return {
                 content: [{
                     type: 'text',
                     text: JSON.stringify({
                         success: true,
-                        stoppedCount: result.stoppedCount,
-                        stoppedIds: result.stoppedIds,
-                        message: result.stoppedCount > 0
-                            ? `Stopped ${result.stoppedCount} task(s): ${result.stoppedIds.join(', ')}`
+                        stoppedCount: totalStopped,
+                        stoppedIds: allStoppedIds,
+                        message: totalStopped > 0
+                            ? `Stopped ${totalStopped} task(s): ${allStoppedIds.join(', ')}`
                             : 'No running tasks found in this workspace.',
                     }, null, 2)
                 }]
