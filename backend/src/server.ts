@@ -131,6 +131,19 @@ function sendWSError(ws: WebSocket, message: string, originalType?: string, code
 }
 
 /**
+ * Convert a GitHub API URL to a browser-facing HTML URL.
+ * e.g. https://api.github.com/repos/owner/repo/pulls/123 → https://github.com/owner/repo/pull/123
+ */
+function apiUrlToHtmlUrl(apiUrl: string | null, repoHtmlUrl: string): string {
+    if (!apiUrl) return repoHtmlUrl || '';
+    const match = apiUrl.match(/repos\/([^/]+\/[^/]+)\/(pulls|issues|commits)\/(.+)/);
+    if (!match) return repoHtmlUrl || '';
+    const [, ownerRepo, type, id] = match;
+    const htmlType = type === 'pulls' ? 'pull' : type;
+    return `https://github.com/${ownerRepo}/${htmlType}/${id}`;
+}
+
+/**
  * Build system prompt context for workspace references.
  * Tells Claude about referenced directories so it can read files from them.
  */
@@ -4975,6 +4988,95 @@ export async function createApp(basePath?: string) {
         } catch (err) {
             logger.error('Failed to update GitHub issue', { error: err instanceof Error ? err.message : String(err) });
             res.status(500).json({ error: 'Failed to update GitHub issue' });
+        }
+    });
+
+    // GitHub Notifications endpoint
+    app.get('/api/github/notifications', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        const showAll = req.query.all === 'true';
+        const perPage = Math.min(parseInt(req.query.per_page as string) || 50, 100);
+
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+
+        try {
+            const { execFile } = await import('child_process');
+            const execFileAsync = (await import('util')).promisify(execFile);
+
+            try {
+                await execFileAsync('gh', ['--version'], { timeout: 5000 });
+            } catch {
+                return res.json({ notifications: [], error: 'gh CLI not installed. Install from https://cli.github.com' });
+            }
+
+            const ghArgs = ['api', 'notifications', '--method', 'GET',
+                '-f', `per_page=${perPage}`];
+            if (showAll) ghArgs.push('-f', 'all=true');
+
+            const { stdout } = await execFileAsync('gh', ghArgs, {
+                cwd: workspacePath,
+                timeout: 15000
+            });
+
+            const raw = JSON.parse(stdout);
+
+            const notifications = raw.map((n: any) => ({
+                id: n.id,
+                reason: n.reason,
+                unread: n.unread,
+                updatedAt: n.updated_at,
+                lastReadAt: n.last_read_at,
+                subject: {
+                    title: n.subject.title,
+                    type: n.subject.type,
+                    url: n.subject.url,
+                    htmlUrl: apiUrlToHtmlUrl(n.subject.url, n.repository?.html_url),
+                },
+                repository: {
+                    fullName: n.repository?.full_name || '',
+                    htmlUrl: n.repository?.html_url || '',
+                },
+            }));
+
+            res.json({ notifications });
+        } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            if (errorMsg.includes('authentication') || errorMsg.includes('HTTP 401')) {
+                return res.json({ notifications: [], error: 'GitHub authentication required. Run: gh auth login' });
+            }
+            logger.error('Failed to get GitHub notifications', { error: errorMsg });
+            res.json({ notifications: [], error: 'Failed to fetch notifications' });
+        }
+    });
+
+    // Mark a single GitHub notification as read
+    app.patch('/api/github/notifications/:threadId', async (req, res) => {
+        const { threadId } = req.params;
+        const workspacePath = req.body.workspace as string;
+
+        if (!workspacePath || !existsSync(workspacePath)) {
+            return res.status(400).json({ error: 'Valid workspace is required' });
+        }
+
+        try {
+            const { execFile } = await import('child_process');
+            const execFileAsync = (await import('util')).promisify(execFile);
+
+            await execFileAsync('gh', ['api', `notifications/threads/${threadId}`, '--method', 'PATCH'], {
+                cwd: workspacePath,
+                timeout: 10000
+            });
+
+            res.json({ success: true });
+        } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            logger.error('Failed to mark notification as read', { threadId, error: errorMsg });
+            res.status(500).json({ error: 'Failed to mark notification as read' });
         }
     });
 
