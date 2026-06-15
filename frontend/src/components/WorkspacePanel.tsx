@@ -2078,6 +2078,7 @@ interface WorkspacePanelProps {
     onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
     onResetWorkspace?: (workspaceId: string) => void;
+    onRejectDeleteRequest?: (taskId: string, requestId: string) => void;
     onCollapse?: () => void;
 }
 
@@ -2108,6 +2109,7 @@ export function WorkspacePanel({
     onAddCustomReference,
     onRemoveReference,
     onResetWorkspace,
+    onRejectDeleteRequest,
     onCollapse
 }: WorkspacePanelProps) {
     const {
@@ -2128,7 +2130,9 @@ export function WorkspacePanel({
         workspaceSortBy,
         setWorkspaceSortBy,
         taskSortBy,
-        lastSelectedTaskByWorkspace
+        lastSelectedTaskByWorkspace,
+        pendingDeleteRequest,
+        setPendingDeleteRequest
     } = useTaskStore();
 
     // Drag and drop state
@@ -2598,6 +2602,29 @@ export function WorkspacePanel({
                     onDeleteWorkspace={onDeleteWorkspace}
                     onReorderWorkspaces={onReorderWorkspaces}
                 />
+            )}
+
+            {pendingDeleteRequest && (
+                <ConfirmModal
+                    title="Delete Task"
+                    variant="danger"
+                    confirmLabel="Delete"
+                    cancelLabel="Keep"
+                    onConfirm={() => {
+                        onArchiveTask(pendingDeleteRequest.taskId);
+                        setPendingDeleteRequest(null);
+                    }}
+                    onCancel={() => {
+                        onRejectDeleteRequest?.(pendingDeleteRequest.taskId, pendingDeleteRequest.requestId);
+                        setPendingDeleteRequest(null);
+                    }}
+                >
+                    <p>An agent is requesting to delete this task:</p>
+                    <p><strong>{pendingDeleteRequest.taskName}</strong></p>
+                    <div className="confirm-note">
+                        The task will be archived and can be restored later.
+                    </div>
+                </ConfirmModal>
             )}
         </div>
     );

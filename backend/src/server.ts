@@ -52,6 +52,8 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'task:stopAll',
     'task:interrupt',
     'task:archive',
+    'task:deleteRequest',
+    'task:deleteRejected',
     'task:reconnect',
     'task:revert',
     'task:restore',
@@ -1588,6 +1590,34 @@ export async function createApp(basePath?: string) {
                         // Archive a completed task (removes from view)
                         const { taskId } = payload as { taskId?: string };
                         if (taskId) taskSpawner.archiveTask(taskId);
+                        break;
+                    }
+
+                    case 'task:deleteRequest': {
+                        // MCP agent is requesting to delete a task — broadcast to
+                        // frontend so it can show a confirmation dialog to the user.
+                        const { taskId, requestId, taskName } = payload as { taskId?: string; requestId?: string; taskName?: string };
+                        if (taskId && requestId) {
+                            logger.info('task:deleteRequest from MCP agent', { taskId, requestId });
+                            broadcast({
+                                type: 'task:deleteRequest' as WSMessageType,
+                                payload: { taskId, requestId, taskName }
+                            });
+                        }
+                        break;
+                    }
+
+                    case 'task:deleteRejected': {
+                        // User rejected the delete confirmation — broadcast so the
+                        // MCP agent's waiting WebSocket receives the rejection.
+                        const { taskId, requestId } = payload as { taskId?: string; requestId?: string };
+                        if (taskId && requestId) {
+                            logger.info('task:deleteRejected by user', { taskId, requestId });
+                            broadcast({
+                                type: 'task:deleteRejected' as WSMessageType,
+                                payload: { taskId, requestId }
+                            });
+                        }
                         break;
                     }
 

@@ -18,11 +18,9 @@
  *   - claudia_stop_task: Gracefully stop a running task
  *   - claudia_stop_all_tasks: Stop all running tasks in the workspace
  *   - claudia_rename_task: Set a display name for a task
+ *   - claudia_delete_task: Archive/remove a task from the sidebar
  *   - claudia_cron_create / claudia_cron_list / claudia_cron_delete / claudia_cron_pause:
  *     Manage scheduled (cron) prompts attached to tasks
- *
- * Note: Archive/delete tools intentionally NOT exposed to MCP. Only the user
- * can archive or delete tasks via the UI — agents must never archive tasks.
  *
 
  */
@@ -213,6 +211,62 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
         ws.on('error', (err: Error) => {
             clearTimeout(timeout);
             reject(new Error(`WebSocket error: ${err.message}. Is the Claudia server running?`));
+        });
+
+        ws.on('close', () => {
+            clearTimeout(timeout);
+        });
+    });
+}
+
+/**
+ * Send a WS message and wait for one of multiple possible responses.
+ * The matcher function is called for each incoming message and should return
+ * a result object if the message is the expected response, or null to keep waiting.
+ */
+async function sendWSMessageWithMultiResponse<T>(
+    type: string,
+    payload: Record<string, unknown>,
+    matcher: (msg: { type: string; payload?: any }) => T | null,
+    timeoutMs: number = 30000
+): Promise<T> {
+    const WebSocket = (await import('ws')).default;
+
+    return new Promise((resolve, reject) => {
+        const wsUrl = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss://');
+        const ws = new WebSocket(wsUrl);
+        const timeout = setTimeout(() => {
+            ws.close();
+            reject(new Error(`WebSocket operation timed out after ${timeoutMs / 1000}s for ${type}`));
+        }, timeoutMs);
+
+        ws.on('open', () => {
+            log.debug(`WS connected, sending: ${type}`);
+            ws.send(JSON.stringify({ type, payload }));
+        });
+
+        ws.on('message', (data: Buffer) => {
+            try {
+                const msg = JSON.parse(data.toString());
+                const result = matcher(msg);
+                if (result !== null) {
+                    clearTimeout(timeout);
+                    ws.close();
+                    resolve(result);
+                }
+                if (msg.type === 'error') {
+                    clearTimeout(timeout);
+                    ws.close();
+                    reject(new Error(msg.payload?.message || 'Unknown WebSocket error'));
+                }
+            } catch {
+                // Ignore parse errors
+            }
+        });
+
+        ws.on('error', (err: Error) => {
+            clearTimeout(timeout);
+            reject(new Error(`WebSocket error: ${err.message}`));
         });
 
         ws.on('close', () => {
@@ -849,6 +903,96 @@ server.tool(
                     text: `Error renaming task: ${error instanceof Error ? error.message : String(error)}`
                 }]
             };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_delete_task
+// ============================================================================
+server.tool(
+    'claudia_delete_task',
+    'Request deletion (archival) of a task. This sends a confirmation popup to the user — the task is only deleted if the user approves. IMPORTANT: Only call this when the user explicitly asks to delete/remove a task. Never delete tasks automatically after completion — users want to review outputs.',
+    {
+        taskId: z.string().describe('The task ID to delete'),
+    },
+    async ({ taskId }) => {
+        if (SELF_TASK_ID && taskId === SELF_TASK_ID) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: false,
+                        message: `Cannot delete task '${taskId}' because it is the currently running session.`,
+                    }, null, 2)
+                }]
+            };
+        }
+
+        try {
+            // Look up task name for the confirmation dialog
+            let taskName = taskId;
+            try {
+                const tasksResponse = await backendFetch('/api/tasks');
+                if (tasksResponse.ok) {
+                    const tasks = await tasksResponse.json();
+                    const task = tasks.find((t: any) => t.id === taskId);
+                    if (!task) {
+                        return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
+                    }
+                    taskName = task.displayName || task.prompt?.substring(0, 60) || taskId;
+                }
+            } catch { /* use taskId as fallback name */ }
+
+            const requestId = `del-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            log.info(`Requesting user confirmation to delete task: ${taskId}`, { requestId });
+
+            // Send deleteRequest — backend broadcasts to frontend which shows
+            // a confirmation modal. We wait for either task:destroyed (approved)
+            // or task:deleteRejected (denied).
+            const result = await sendWSMessageWithMultiResponse(
+                'task:deleteRequest',
+                { taskId, requestId, taskName },
+                (msg) => {
+                    if (msg.type === 'task:destroyed' && msg.payload?.taskId === taskId) {
+                        return { outcome: 'approved' };
+                    }
+                    if (msg.type === 'task:deleteRejected' && msg.payload?.requestId === requestId) {
+                        return { outcome: 'rejected' };
+                    }
+                    return null;
+                },
+                60000
+            );
+
+            if (result.outcome === 'approved') {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({
+                            success: true,
+                            message: `Task '${taskName}' deleted (archived) by user.`,
+                        }, null, 2)
+                    }]
+                };
+            } else {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({
+                            success: false,
+                            message: `User rejected deletion of task '${taskName}'.`,
+                        }, null, 2)
+                    }]
+                };
+            }
+        } catch (error) {
+            log.error('Failed to delete task:', error);
+            const msg = error instanceof Error ? error.message : String(error);
+            if (msg.includes('timed out')) {
+                return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: 'User did not respond to the deletion confirmation within 60 seconds.' }, null, 2) }] };
+            }
+            return { content: [{ type: 'text', text: `Error deleting task: ${msg}` }] };
         }
     }
 );
