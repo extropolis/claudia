@@ -236,7 +236,7 @@ const server = new McpServer({
 // ============================================================================
 server.tool(
     'claudia_list_tasks',
-    `List all active tasks in the current workspace. Shows task ID, state, prompt, and whether it is waiting for input.${WORKSPACE_ID ? ` Scoped to workspace: ${WORKSPACE_ID}` : ''}`,
+    `List all tasks in the current workspace (including disconnected/interrupted ones). Shows task ID, state, prompt, and whether it is waiting for input. Disconnected tasks can be resumed via claudia_continue_task.${WORKSPACE_ID ? ` Scoped to workspace: ${WORKSPACE_ID}` : ''}`,
     {},
     async () => {
         try {
@@ -253,7 +253,7 @@ server.tool(
             }
 
             if (!tasks || tasks.length === 0) {
-                return { content: [{ type: 'text', text: `No active tasks in this workspace.` }] };
+                return { content: [{ type: 'text', text: `No tasks in this workspace.` }] };
             }
 
             const now = Date.now();
@@ -271,6 +271,7 @@ server.tool(
                     processStartedAt: t.processStartedAt || null,
                     runningFor: runningForMs ? formatDuration(runningForMs) : null,
                     waitingInputType: t.waitingInputType || null,
+                    canResume: t.state === 'disconnected' || t.state === 'interrupted' || t.state === 'idle' || t.state === 'exited',
                 };
             });
 
@@ -291,7 +292,7 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_get_task_status',
-    'Get detailed status of a specific task including state, runtime duration, and a snippet of recent output. Use this to check progress of spawned tasks without fetching full output.',
+    'Get detailed status of a specific task including state, runtime duration, and a snippet of recent output. Works for all task states including disconnected and interrupted tasks. Use this to check progress of spawned tasks without fetching full output.',
     {
         taskId: z.string().describe('The task ID to get status for'),
     },
@@ -339,6 +340,7 @@ server.tool(
                 processStartedAt: task.processStartedAt || null,
                 runningFor: runningForMs ? formatDuration(runningForMs) : null,
                 waitingInputType: task.waitingInputType || null,
+                canResume: task.state === 'disconnected' || task.state === 'interrupted' || task.state === 'idle' || task.state === 'exited',
                 recentOutput: outputSnippet,
             };
 
@@ -599,7 +601,7 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_continue_task',
-    'Send a follow-up prompt to an idle or exited Claude Code task, resuming its session with a new instruction. Works on tasks in idle, exited, or disconnected states. The task will reconnect if needed and start processing the new prompt.',
+    'Send a follow-up prompt to an idle, exited, disconnected, or interrupted Claude Code task, resuming its session with a new instruction. Disconnected/interrupted tasks will be automatically reconnected before the prompt is delivered. The task will start processing the new prompt.',
     {
         taskId: z.string().describe('The task ID to continue'),
         prompt: z.string().describe('The follow-up prompt/instructions to send to the task'),
@@ -632,6 +634,9 @@ server.tool(
                             }, null, 2)
                         }]
                     };
+                }
+                if (task.state === 'disconnected' || task.state === 'interrupted') {
+                    log.info(`Task ${taskId} is ${task.state}, will auto-reconnect on input`);
                 }
             }
 
