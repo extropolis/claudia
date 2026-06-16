@@ -86,6 +86,7 @@ export function useWebSocket() {
         selectTask,
         setWorkspaces,
         addWorkspace,
+        updateWorkspace,
         removeWorkspace,
         setTaskSummary,
         addChatMessage,
@@ -269,9 +270,13 @@ export function useWebSocket() {
                         break;
                     }
                     case 'workspace:updated': {
-                        const payload = message.payload as { workspaces: Workspace[] };
-                        console.log('[WebSocket] Workspaces updated');
-                        setWorkspaces(payload.workspaces);
+                        const payload = message.payload as { workspaces?: Workspace[]; workspace?: Workspace };
+                        if (payload.workspace) {
+                            // Singular update (e.g. autoWorktree toggle)
+                            updateWorkspace(payload.workspace);
+                        } else if (payload.workspaces) {
+                            setWorkspaces(payload.workspaces);
+                        }
                         break;
                     }
                     case 'task:summary': {
@@ -573,7 +578,7 @@ export function useWebSocket() {
         };
 
         wsRef.current = ws;
-    }, [setConnected, setTasks, addTask, updateTask, deleteTask, selectTask, setWorkspaces, addWorkspace, removeWorkspace, setTaskSummary, addChatMessage, setChatMessages, setChatTyping, setWaitingInput, clearWaitingInput, setArchivedTasks, removeArchivedTask]);
+    }, [setConnected, setTasks, addTask, updateTask, deleteTask, selectTask, setWorkspaces, addWorkspace, updateWorkspace, removeWorkspace, setTaskSummary, addChatMessage, setChatMessages, setChatTyping, setWaitingInput, clearWaitingInput, setArchivedTasks, removeArchivedTask]);
 
     const sendMessage = useCallback((type: string, payload: unknown) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -636,8 +641,8 @@ export function useWebSocket() {
     }, []);
 
     // Task actions
-    const createTask = useCallback((prompt: string, workspaceId: string, initialCols?: number, initialRows?: number) => {
-        sendMessage('task:create', { prompt, workspaceId, initialCols, initialRows });
+    const createTask = useCallback((prompt: string, workspaceId: string, initialCols?: number, initialRows?: number, isolate?: boolean) => {
+        sendMessage('task:create', { prompt, workspaceId, initialCols, initialRows, ...(isolate ? { isolate: true } : {}) });
     }, [sendMessage]);
 
     const selectTaskOnServer = useCallback((taskId: string) => {

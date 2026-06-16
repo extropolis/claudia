@@ -1,6 +1,6 @@
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
-import { TaskGitState, FileDiff } from '@claudia/shared';
+import { TaskGitState, FileDiff, WorkspacePrInfo } from '@claudia/shared';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -245,6 +245,45 @@ export async function captureGitStateAfter(
 const MAX_REVERT_COMMITS = 5;
 
 /**
+ * Detect if a directory is a git-linked worktree (not the main working tree).
+ * In a linked worktree, `.git` is a FILE; in the main working tree it is a DIRECTORY.
+ */
+export async function isLinkedWorktree(cwd: string): Promise<boolean> {
+    try {
+        const { lstatSync, existsSync } = await import('fs');
+        const { join } = await import('path');
+        const gitPath = join(cwd, '.git');
+        if (!existsSync(gitPath)) return false;
+        return lstatSync(gitPath).isFile();
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Get the absolute path to the main working tree from any worktree.
+ * Uses `git rev-parse --path-format=absolute --git-common-dir` which works in both
+ * the main working tree and in linked worktrees.
+ */
+export async function getMainWorktreePath(cwd: string): Promise<string | null> {
+    try {
+        const { execFile } = await import('child_process');
+        const { promisify } = await import('util');
+        const { resolve } = await import('path');
+        const execFileA = promisify(execFile);
+        const { stdout } = await execFileA(
+            'git',
+            ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+            { cwd }
+        );
+        // Strip trailing /.git[/] to get the main worktree directory
+        return resolve(stdout.trim().replace(/[\/\\]\.git[\/\\]?$/, ''));
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Revert changes made by a task
  * This will:
  * 1. Reset to the commit before the task started
@@ -344,5 +383,74 @@ export async function revertTaskChanges(
             error: message,
             filesReverted: []
         };
+    }
+}
+
+/** Summarize a gh statusCheckRollup array into a single CI state. */
+function summarizeCi(rollup: unknown): WorkspacePrInfo['ci'] {
+    if (!Array.isArray(rollup) || rollup.length === 0) return 'none';
+    let anyRunning = false;
+    let anyFailed = false;
+    let anyTerminal = false;
+    for (const check of rollup) {
+        if (!check || typeof check !== 'object') continue;
+        // CheckRun: { status: QUEUED|IN_PROGRESS|COMPLETED, conclusion: SUCCESS|FAILURE|... }
+        // StatusContext: { state: SUCCESS|PENDING|FAILURE|ERROR }
+        const status = String((check as any).status || '').toUpperCase();
+        const conclusion = String((check as any).conclusion || '').toUpperCase();
+        const state = String((check as any).state || '').toUpperCase();
+
+        if (status === 'IN_PROGRESS' || status === 'QUEUED' || status === 'PENDING' ||
+            status === 'WAITING' || status === 'REQUESTED' || state === 'PENDING' || state === 'EXPECTED') {
+            anyRunning = true;
+            continue;
+        }
+        const outcome = conclusion || state; // COMPLETED uses conclusion; StatusContext uses state
+        anyTerminal = true;
+        if (['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'].includes(outcome)) {
+            anyFailed = true;
+        }
+    }
+    if (anyFailed) return 'failed';
+    if (anyRunning) return 'running';
+    if (anyTerminal) return 'passed';
+    return 'none';
+}
+
+/**
+ * Look up the GitHub PR for a branch via the `gh` CLI. Returns null when there's
+ * no PR, `gh` is missing/unauthenticated, or the dir isn't a GitHub repo.
+ * Never throws — callers can treat null as "no badge".
+ */
+export async function getPrForBranch(repoPath: string, branch: string): Promise<WorkspacePrInfo | null> {
+    if (!branch || !isValidBranchName(branch)) return null;
+    try {
+        const { stdout } = await execFileAsync(
+            'gh',
+            ['pr', 'list', '--head', branch, '--state', 'all', '--limit', '1',
+             '--json', 'number,title,state,isDraft,url,statusCheckRollup'],
+            { cwd: repoPath, timeout: 15000 }
+        );
+        const arr = JSON.parse(stdout) as Array<{
+            number: number; title: string; state: string; isDraft: boolean; url: string; statusCheckRollup?: unknown;
+        }>;
+        if (!Array.isArray(arr) || arr.length === 0) return null;
+        const pr = arr[0];
+        const rawState = String(pr.state || '').toUpperCase();
+        const state: WorkspacePrInfo['state'] = pr.isDraft
+            ? 'draft'
+            : rawState === 'MERGED' ? 'merged'
+            : rawState === 'CLOSED' ? 'closed'
+            : 'open';
+        return {
+            number: pr.number,
+            title: pr.title || '',
+            state,
+            url: pr.url,
+            ci: summarizeCi(pr.statusCheckRollup),
+        };
+    } catch {
+        // gh missing/unauth, not a repo, no network — no badge.
+        return null;
     }
 }

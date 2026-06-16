@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "cross-env NODE_OPTIONS=--max-old-space-size=2048 tsx watch --watch-path=src src/index.ts",
+    "dev": "cross-env CLAUDIA_WATCH_MODE=1 NODE_OPTIONS=--max-old-space-size=2048 tsx watch --watch-path=src src/index.ts",
     "dev:no-watch": "cross-env NODE_OPTIONS=--max-old-space-size=2048 tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",

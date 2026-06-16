@@ -9,7 +9,7 @@ import { execSync } from 'child_process';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
-import { sanitizePrompt } from './validation.js';
+import { sanitizePrompt, decodeHtmlEntities } from './validation.js';
 import { createLogger } from './logger.js';
 import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
@@ -96,7 +96,18 @@ function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } {
     if (!isWindows) return { command: 'claude', prefixArgs: [] };
     const appData = process.env['APPDATA'];
     if (appData) {
-        const cliPath = join(appData, 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
+        const pkgDir = join(appData, 'npm', 'node_modules', '@anthropic-ai', 'claude-code');
+        // Newer claude-code ships a native bin/claude.exe (no cli.js). Spawn it
+        // directly so multiline args like --system-prompt are passed verbatim.
+        // The cmd.exe /c claude.cmd fallback re-parses the command line and
+        // corrupts long/multiline args (e.g. dropping --model after the prompt).
+        const exePath = join(pkgDir, 'bin', 'claude.exe');
+        if (existsSync(exePath)) {
+            console.log(`[TaskSpawner] Resolved Claude CLI exe via APPDATA: ${exePath}`);
+            return { command: exePath, prefixArgs: [] };
+        }
+        // Older layout: cli.js run via node.
+        const cliPath = join(pkgDir, 'cli.js');
         if (existsSync(cliPath)) {
             console.log(`[TaskSpawner] Resolved Claude CLI via APPDATA: ${process.execPath} ${cliPath}`);
             return { command: process.execPath, prefixArgs: [cliPath] };
@@ -203,6 +214,7 @@ interface InternalTask extends Task {
     processStartedAt?: Date; // When the current busy/starting state began (for elapsed timer)
     readyFallbackTimer?: ReturnType<typeof setTimeout>; // Fallback timer to send prompt if ready signal is never detected
     titleInstructionInjected?: boolean; // True if auto-title instruction has been injected into this session
+    titleInstructionCount?: number; // Number of follow-up messages sent (for periodic title-update reminders)
 }
 
 /**
@@ -530,8 +542,12 @@ export class TaskSpawner extends EventEmitter {
             }
         }
 
-        // Inject the Claudia MCP server if enabled
-        // Scoped to the task's workspace via CLAUDIA_WORKSPACE_ID env var
+        // Inject the Claudia MCP server if enabled.
+        // For per-task configs (workspaceId + taskId), include both env vars.
+        // For workspace .mcp.json sync (workspaceId only, no taskId), include
+        // CLAUDIA_WORKSPACE_ID so tools work on resumed sessions where --mcp-config
+        // doesn't load. CLAUDIA_TASK_ID is omitted but the core tools (list, create,
+        // status, output) work without it — only self-rename needs the task ID.
         if (claudiaMcpEnabled) {
             const mcpServerPath = join(__dirname, 'claudia-mcp-server.ts');
             // Use tsx cli directly instead of npx tsx (saves ~25 seconds on Windows).
@@ -606,29 +622,11 @@ export class TaskSpawner extends EventEmitter {
      * @param workspaceIds - List of workspace directory paths to sync. All must exist on disk.
      */
     syncWorkspaceMcpConfigs(workspaceIds: string[]): void {
-        const result = this.buildMcpConfig();
-        if (!result) {
-            logger.info('No enabled MCP servers, skipping workspace sync');
-            return;
-        }
-
-        const { mcpConfig, enabledMcpServers } = result;
-        const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
-        const serverNames = enabledMcpServers.map(s => s.name);
-
-        const settingsContent = {
-            permissions: {
-                allow: ['mcp__*'],
-                deny: []
-            },
-            enableAllProjectMcpServers: true,
-            enabledMcpjsonServers: serverNames
-        };
-
         // The Claudia project root — skip syncing to our own directory to avoid
         // triggering tsx watch restarts from file writes in the project tree.
         const selfRoot = resolve(join(__dirname, '..', '..'));
 
+        let syncCount = 0;
         for (const workspaceId of workspaceIds) {
             if (!existsSync(workspaceId)) {
                 logger.warn('Workspace does not exist, skipping MCP sync', { workspaceId });
@@ -639,11 +637,29 @@ export class TaskSpawner extends EventEmitter {
                 continue;
             }
 
+            // Build per-workspace config with CLAUDIA_WORKSPACE_ID so the claudia
+            // MCP server works on resumed sessions (where --mcp-config doesn't load).
+            // No taskId — per-task --mcp-config supplies that for new sessions.
+            const result = this.buildMcpConfig(workspaceId);
+            if (!result) continue;
+
+            const { mcpConfig, enabledMcpServers } = result;
+            const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
+            const serverNames = enabledMcpServers.map(s => s.name);
+
+            const settingsContent = {
+                permissions: {
+                    allow: ['mcp__*'],
+                    deny: []
+                },
+                enableAllProjectMcpServers: true,
+                enabledMcpjsonServers: serverNames
+            };
+
             // Write .mcp.json
             const workspaceMcpFile = `${workspaceId}/.mcp.json`;
             try {
                 atomicWriteFileSync(workspaceMcpFile, mcpConfigJson);
-                logger.info('Synced .mcp.json', { workspaceId });
             } catch (err) {
                 logger.error('Failed to write .mcp.json', { workspaceId, error: err });
             }
@@ -656,13 +672,13 @@ export class TaskSpawner extends EventEmitter {
                     mkdirSync(claudeSettingsDir, { recursive: true });
                 }
                 atomicWriteFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
-                logger.info('Synced settings.local.json', { workspaceId });
             } catch (err) {
                 logger.error('Failed to write settings.local.json', { workspaceId, error: err });
             }
+            syncCount++;
         }
 
-        logger.info(`Synced MCP config to ${workspaceIds.length} workspace(s)`, { servers: serverNames });
+        logger.info(`Synced MCP config to ${syncCount} workspace(s)`, { servers: ['playwright', ...(this.configStore?.getClaudioMcpServerEnabled() ? ['claudia'] : [])] });
     }
 
     /**
@@ -2108,7 +2124,15 @@ export class TaskSpawner extends EventEmitter {
             // lines. Re-pasting appends a second (third, ...) copy of the prompt on
             // top of the partially-cleared first copy, causing the duplicate-paste bug.
             // Once written to the PTY, the text is there — only Enter delivery needs retrying.
-            task.process.write(prompt);
+            //
+            // Wrap in bracketed paste (ESC[200~ ... ESC[201~) so the TUI treats the
+            // whole block as a single atomic paste. Without this, the input box can
+            // repaint mid-write and drop the leading characters of long prompts
+            // (symptom: prompt arrives "beginning mid-sentence"). Claude Code enables
+            // bracketed-paste mode (ESC[?2004h), so the markers are consumed, not shown.
+            // Strip any stray end-marker in the prompt so it can't close the paste early.
+            const safePrompt = prompt.replace(/\x1b\[201~/g, '');
+            task.process.write(`\x1b[200~${safePrompt}\x1b[201~`);
             task.promptSubmitAttempts = 0;
             // Give more time for longer prompts to be written before sending Enter.
             // Scale: base 500ms + 50ms per 100 chars, capped at 2500ms (aligned with writeToTask).
@@ -2410,15 +2434,30 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - If another task is already handling a piece of work, do NOT implement it yourself — wait for that task to finish and read its output instead
 - After spawning tasks, your role shifts to **coordinator**: monitor, unblock, and integrate — do NOT start implementing the same work in parallel
 
+**Prefer Claudia tasks over your own subagents:**
+- When you need to delegate work, **strongly prefer spawning a Claudia task** (\`claudia_create_task\`) over launching your own internal subagent (the built-in Agent/Task tool).
+- Claudia tasks are visible to the user in the sidebar, can be monitored, titled, and resumed, run with worktree isolation, and coordinate with other agents — internal subagents are invisible and disposable.
+- **Default to \`claudia_create_task\` for any delegatable unit of work.** Only fall back to your own subagent when: (a) the work is a quick, throwaway lookup whose result you need inline within seconds, or (b) spawning a Claudia task would clearly produce a worse outcome (e.g. the subtask needs your exact in-memory context that can't be passed in a prompt).
+- When in doubt, spawn a Claudia task.
+
 **When to spawn parallel tasks:**
 - When your work can be naturally decomposed into independent pieces (e.g., backend + frontend + tests)
 - When you need to research multiple topics simultaneously
 - When building a feature that has separable components
 
+**Git worktree isolation:**
+- When spawning tasks that will **modify files or commit changes**, pass \`isolate: true\` to \`claudia_create_task\`. This creates an isolated git worktree branch so the task's changes don't conflict with other tasks or the main workspace.
+- Use \`isolate: true\` especially when:
+  - Multiple parallel tasks will edit code in the same repository
+  - A task will commit, create branches, or run destructive git operations
+  - Tasks work on independent features that should stay separated until reviewed
+- Do NOT use \`isolate: true\` for read-only tasks (research, analysis, status checks) — they don't need isolation.
+- Isolated tasks appear under the parent workspace grouped by their worktree branch.
+
 **How to orchestrate:**
 1. Check existing tasks first — call \`claudia_list_tasks\` to see what's already running
 2. Plan — break remaining work into independent, parallelizable pieces
-3. Spawn — use \`claudia_create_task\` for each piece with a clear, self-contained prompt that includes all necessary context
+3. Spawn — use \`claudia_create_task\` for each piece with a clear, self-contained prompt that includes all necessary context. Use \`isolate: true\` for tasks that modify files.
 4. Wait and monitor — poll \`claudia_get_task_status\` periodically (every 30-60s) until tasks complete. Handle any that need input via \`claudia_send_input\`
 5. Review — use \`claudia_get_task_output\` to read results from completed tasks
 6. Integrate — review the combined changes for conflicts or integration issues, then fix any problems yourself
@@ -2432,7 +2471,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - The parameter is literally named \`displayName\` (string). Do NOT pass it as \`title\` — that will fail validation.
 - **Do NOT call \`claudia_rename_task\` before producing output** — write your first response first, then title yourself
 - If the rename is rejected (user manually edited the title), do NOT retry
-- If your work evolves significantly, call \`claudia_rename_task\` again with \`taskId="${id}"\` and an updated \`displayName\` (unless user-edited)
+- **Keep the title current**: whenever the focus of your work shifts (new topic, different file, switched from investigation to implementation, moved to testing, etc.), call \`claudia_rename_task\` again with an updated \`displayName\` that reflects what you are doing NOW — not what you started with. The user relies on the title to understand what each task is working on at a glance. Stale titles are confusing.
 
 **Handling file edit conflicts:**
 - If you get an "Error editing file" (e.g., content mismatch, file changed on disk), another Claudia task may be editing the same file concurrently
@@ -2448,7 +2487,17 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - Each spawned task prompt should be fully self-contained — include file paths, context, and constraints so it can work independently
 - While waiting for spawned tasks, do NOT start implementing features that overlap with what they're doing
 - **NEVER delete or archive completed tasks** — the user wants to review their outputs. After a task completes, just report its status and read its output. The MCP server intentionally does NOT expose archive/delete tools — only the user can archive tasks via the UI.
+
+**Scheduling prompts (self-scheduling):**
+- You can schedule prompts to be sent to any task (including your own) on a cron schedule using \`claudia_cron_create\`.
+- Use this to set up recurring checks, periodic polling, or delayed follow-ups — e.g. "check CI status every 10 minutes" or "remind me to review in 2 hours".
+- Your own task ID is \`${id}\` — pass it as \`taskId\` to schedule prompts on yourself.
+- Use standard 5-field cron expressions: \`*/5 * * * *\` (every 5 min), \`0 9 * * 1-5\` (weekdays 9am), \`30 14 * * *\` (daily 2:30pm).
+- Set \`isRecurring: false\` for one-shot schedules that fire once and auto-delete.
+- Use \`claudia_cron_list\` to see active schedules, \`claudia_cron_delete\` to remove them when the work is done, and \`claudia_cron_pause\` to temporarily suspend/resume.
+- Recurring schedules auto-expire after 3 days. Max 50 per task.
 `;
+
             systemPrompt = systemPrompt
                 ? `${systemPrompt}\n\n${orchestrationGuidance}`
                 : orchestrationGuidance;
@@ -2711,7 +2760,23 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             displayNameEditedByUser: task.displayNameEditedByUser,
             order: task.order,
             tokenUsage: task.tokenUsage,
+            sessionWorktreeBranch: task.sessionWorktreeBranch,
+            sessionWorktreePrInfo: task.sessionWorktreePrInfo,
         };
+    }
+
+    /** Annotate a task with the worktree branch its session moved onto. */
+    setSessionWorktree(taskId: string, branch: string | undefined, prInfo?: import('@claudia/shared').WorkspacePrInfo | null): boolean {
+        const task = this.tasks.get(taskId);
+        if (!task) return false;
+        if (task.sessionWorktreeBranch === branch &&
+            JSON.stringify(task.sessionWorktreePrInfo) === JSON.stringify(prInfo)) {
+            return false;
+        }
+        task.sessionWorktreeBranch = branch;
+        task.sessionWorktreePrInfo = prInfo;
+        this.emit('taskStateChanged', this.toPublicTask(task));
+        return true;
     }
 
     async captureGitStateAfterTask(taskId: string): Promise<void> {
@@ -2814,7 +2879,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
      * @param source - 'user' if renamed by user in UI (locks title from agent edits), 'agent' if renamed by MCP agent
      */
     renameTask(taskId: string, displayName: string, source: 'user' | 'agent' = 'user'): boolean {
-        const trimmed = displayName.trim();
+        const trimmed = decodeHtmlEntities(displayName.trim());
 
         // Try active tasks first
         const task = this.tasks.get(taskId);
@@ -3349,7 +3414,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             // Base: 500ms, +50ms per 100 chars, capped at 2500ms.
             const enterDelayMs = Math.min(500 + Math.floor(messageContent.length / 100) * 50, 2500);
             console.log(`[TaskSpawner] Writing message to task ${taskId} (${messageContent.length} chars), sending Enter in ${enterDelayMs}ms`);
-            task.process.write(messageContent);
+            // Wrap in bracketed paste so the TUI handles it as one atomic paste,
+            // preventing front-truncation on large/multi-line messages.
+            const safeMsg = messageContent.replace(/\x1b\[201~/g, '');
+            task.process.write(`\x1b[200~${safeMsg}\x1b[201~`);
             task.promptSubmitAttempts = 0;
 
             // Use consolidated retry mechanism with follow-up input options (5 retries for reliability)
@@ -3385,8 +3453,16 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 }
             }
         } else {
-            // Single keypress or task is busy - write directly
-            task.process.write(data);
+            // Single keypress or task is busy — write directly.
+            // For multi-char messages, wrap in bracketed paste so they aren't
+            // truncated by the TUI (same fix as the idle/initial paths).
+            if (hasMessageContent) {
+                const msg = data.slice(0, -1);
+                const safeMsg = msg.replace(/\x1b\[201~/g, '');
+                task.process.write(`\x1b[200~${safeMsg}\x1b[201~${data.slice(-1)}`);
+            } else {
+                task.process.write(data);
+            }
         }
     }
 
