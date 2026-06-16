@@ -18,6 +18,9 @@ import {
     getDefaultBranch,
     getCurrentBranch,
     checkoutBranch,
+    isLinkedWorktree,
+    getMainWorktreePath,
+    getPrForBranch,
 } from '../git-utils.js';
 
 const execAsync = promisify(exec);
@@ -596,6 +599,141 @@ describe('git-utils', () => {
         it('commitExists returns false for invalid hash format', async () => {
             const result = await commitExists(testDir, 'nope!');
             expect(result).toBe(false);
+        });
+    });
+
+    describe('getDefaultBranch with a remote HEAD', () => {
+        it('should resolve the branch from refs/remotes/origin/HEAD', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+            const current = (await getCurrentBranch(testDir)) || 'main';
+
+            // Create a bare "remote", push, and set origin/HEAD so the
+            // symbolic-ref branch of getDefaultBranch is exercised.
+            const remoteDir = join(testDir, '..', 'remote-' + Date.now() + '.git');
+            await execAsync(`git init --bare "${remoteDir}"`);
+            try {
+                await execAsync(`git remote add origin "${remoteDir}"`, { cwd: testDir });
+                await execAsync(`git push -u origin ${current}`, { cwd: testDir });
+                await execAsync('git remote set-head origin -a', { cwd: testDir });
+
+                const result = await getDefaultBranch(testDir);
+                expect(result).toBe(current);
+            } finally {
+                rmSync(remoteDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+            }
+        });
+    });
+
+    describe('isLinkedWorktree', () => {
+        it('should return false for a non-existent .git path', async () => {
+            // testDir has no .git
+            const result = await isLinkedWorktree(testDir);
+            expect(result).toBe(false);
+        });
+
+        it('should return false for the main working tree (.git is a directory)', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            // Main working tree: .git is a directory.
+            const result = await isLinkedWorktree(testDir);
+            expect(result).toBe(false);
+        });
+
+        it('should return true for a linked worktree (.git is a file)', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            const wtDir = join(testDir, '..', 'wt-linked-' + Date.now());
+            await execAsync(`git worktree add "${wtDir}" -b wt-branch`, { cwd: testDir });
+            try {
+                expect(await isLinkedWorktree(wtDir)).toBe(true);
+            } finally {
+                await execAsync(`git worktree remove --force "${wtDir}"`, { cwd: testDir }).catch(() => {});
+                rmSync(wtDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+            }
+        });
+    });
+
+    describe('getMainWorktreePath', () => {
+        it('should return null for a non-git directory', async () => {
+            if (!isGitAvailable) return;
+            const result = await getMainWorktreePath(testDir);
+            expect(result).toBeNull();
+        });
+
+        it('should return the repo path from the main working tree', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            const result = await getMainWorktreePath(testDir);
+            expect(result).not.toBeNull();
+            // realpath the testDir for comparison (macOS /var -> /private/var symlinks)
+            const { realpathSync } = await import('fs');
+            expect(realpathSync(result!)).toBe(realpathSync(testDir));
+        });
+
+        it('should resolve to the main working tree from inside a linked worktree', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            const wtDir = join(testDir, '..', 'wt-main-' + Date.now());
+            await execAsync(`git worktree add "${wtDir}" -b wt-main-branch`, { cwd: testDir });
+            try {
+                const result = await getMainWorktreePath(wtDir);
+                expect(result).not.toBeNull();
+                const { realpathSync } = await import('fs');
+                expect(realpathSync(result!)).toBe(realpathSync(testDir));
+            } finally {
+                await execAsync(`git worktree remove --force "${wtDir}"`, { cwd: testDir }).catch(() => {});
+                rmSync(wtDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+            }
+        });
+    });
+
+    describe('revertTaskChanges additional safety branches', () => {
+        it('should fail with invalid commit hash in stored state', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            // canRevert true, commit "exists" check is bypassed only by hash
+            // validity; use a syntactically-invalid hash so commitExists short
+            // -circuits to false and we hit the "no longer exists" error.
+            const gitState = {
+                commitBefore: 'zzz-not-hex',
+                uncommittedBefore: false,
+                filesModified: [],
+                canRevert: true,
+            };
+            const result = await revertTaskChanges(testDir, gitState);
+            expect(result.success).toBe(false);
+            expect(result.error).toContain('no longer exists');
+        });
+    });
+
+    describe('getPrForBranch', () => {
+        it('should return null for an invalid branch name', async () => {
+            const result = await getPrForBranch(testDir, 'bad;branch');
+            expect(result).toBeNull();
+        });
+
+        it('should return null for an empty branch name', async () => {
+            const result = await getPrForBranch(testDir, '');
+            expect(result).toBeNull();
+        });
+
+        it('should return null when gh fails / there is no PR', async () => {
+            // No GitHub remote (and likely no/unauth gh in CI) -> the catch or
+            // empty-array branch returns null. Never throws.
+            const result = await getPrForBranch(testDir, 'main');
+            expect(result).toBeNull();
         });
     });
 });

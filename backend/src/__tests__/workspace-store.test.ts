@@ -620,4 +620,193 @@ describe('WorkspaceStore', () => {
             expect(refs[0].description).toBe('desc');
         });
     });
+
+    describe('setPrInfo / withPrInfo', () => {
+        it('should attach cached PR info to a workspace', () => {
+            store.addWorkspace(testWorkspace1);
+            const pr = { number: 7, title: 'My PR', state: 'open' as const, url: 'http://x', ci: 'passed' as const };
+
+            const changed = store.setPrInfo(testWorkspace1, pr);
+            expect(changed).toBe(true);
+
+            const ws = store.getWorkspace(testWorkspace1);
+            expect(ws?.prInfo).toEqual(pr);
+
+            // Also surfaced via getWorkspaces()
+            const listed = store.getWorkspaces().find(w => w.id === testWorkspace1);
+            expect(listed?.prInfo).toEqual(pr);
+        });
+
+        it('should report no change when setting identical PR info', () => {
+            store.addWorkspace(testWorkspace1);
+            const pr = { number: 1, title: 'T', state: 'open' as const, url: 'u', ci: 'none' as const };
+
+            expect(store.setPrInfo(testWorkspace1, pr)).toBe(true);
+            // Setting the same value again is not a change
+            expect(store.setPrInfo(testWorkspace1, { ...pr })).toBe(false);
+        });
+
+        it('should not include prInfo when none is cached', () => {
+            store.addWorkspace(testWorkspace1);
+            const ws = store.getWorkspace(testWorkspace1);
+            expect(ws && 'prInfo' in ws).toBe(false);
+        });
+
+        it('should clear cached PR info on delete', () => {
+            store.addWorkspace(testWorkspace1);
+            store.setPrInfo(testWorkspace1, { number: 1, title: 'T', state: 'open', url: 'u', ci: 'none' });
+            store.deleteWorkspace(testWorkspace1);
+            // Re-add: cache should have been cleared so no prInfo leaks through
+            store.addWorkspace(testWorkspace1);
+            const ws = store.getWorkspace(testWorkspace1);
+            expect(ws && 'prInfo' in ws).toBe(false);
+        });
+    });
+
+    describe('addWorktreeWorkspace', () => {
+        it('should add a worktree workspace with metadata and inheritance', async () => {
+            store.addWorkspace(testWorkspace1);
+            store.setSystemPrompt(testWorkspace1, 'parent prompt');
+            store.addReference(testWorkspace1, testWorkspace2, 'shared');
+
+            const worktreeDir = join(testBaseDir, 'wt-feature');
+            mkdirSync(worktreeDir, { recursive: true });
+
+            const ws = await store.addWorktreeWorkspace(worktreeDir, testWorkspace1, 'refs/heads/feature-x');
+
+            expect(ws.id).toBe(worktreeDir);
+            expect(ws.worktreeParentId).toBe(testWorkspace1);
+            // refs/heads/ prefix is stripped
+            expect(ws.worktreeBranch).toBe('feature-x');
+            expect(ws.displayName).toBe('workspace1 › feature-x');
+            // Inherited from parent
+            expect(ws.systemPrompt).toBe('parent prompt');
+            expect(ws.references?.length).toBe(1);
+        });
+
+        it('should position the worktree directly after its parent', async () => {
+            store.addWorkspace(testWorkspace1);
+            store.addWorkspace(testWorkspace2);
+
+            const worktreeDir = join(testBaseDir, 'wt-a');
+            mkdirSync(worktreeDir, { recursive: true });
+            await store.addWorktreeWorkspace(worktreeDir, testWorkspace1, 'branch-a');
+
+            const order = store.getWorkspaces().map(w => w.id);
+            expect(order[0]).toBe(testWorkspace1);
+            expect(order[1]).toBe(worktreeDir);
+            expect(order[2]).toBe(testWorkspace2);
+        });
+
+        it('should insert a second sibling worktree after existing siblings', async () => {
+            store.addWorkspace(testWorkspace1);
+            store.addWorkspace(testWorkspace2);
+
+            const wtA = join(testBaseDir, 'wt-sib-a');
+            const wtB = join(testBaseDir, 'wt-sib-b');
+            mkdirSync(wtA, { recursive: true });
+            mkdirSync(wtB, { recursive: true });
+
+            await store.addWorktreeWorkspace(wtA, testWorkspace1, 'a');
+            await store.addWorktreeWorkspace(wtB, testWorkspace1, 'b');
+
+            const order = store.getWorkspaces().map(w => w.id);
+            // parent, sibling-a, sibling-b, then the other workspace
+            expect(order).toEqual([testWorkspace1, wtA, wtB, testWorkspace2]);
+        });
+
+        it('should append when the parent is not registered', async () => {
+            store.addWorkspace(testWorkspace1);
+            const worktreeDir = join(testBaseDir, 'wt-orphan');
+            mkdirSync(worktreeDir, { recursive: true });
+
+            const ws = await store.addWorktreeWorkspace(worktreeDir, '/unregistered/parent', 'orphan-branch');
+            expect(ws.worktreeParentId).toBe('/unregistered/parent');
+            // Display name falls back to basename of the parent id
+            expect(ws.displayName).toBe('parent › orphan-branch');
+
+            const order = store.getWorkspaces().map(w => w.id);
+            expect(order[order.length - 1]).toBe(worktreeDir);
+        });
+
+        it('should throw when the worktree directory does not exist', async () => {
+            store.addWorkspace(testWorkspace1);
+            await expect(
+                store.addWorktreeWorkspace(join(testBaseDir, 'no-such-wt'), testWorkspace1, 'b')
+            ).rejects.toThrow('Worktree directory does not exist');
+        });
+
+        it('should throw when the worktree workspace already exists', async () => {
+            store.addWorkspace(testWorkspace1);
+            const worktreeDir = join(testBaseDir, 'wt-dup');
+            mkdirSync(worktreeDir, { recursive: true });
+            await store.addWorktreeWorkspace(worktreeDir, testWorkspace1, 'b');
+
+            await expect(
+                store.addWorktreeWorkspace(worktreeDir, testWorkspace1, 'b')
+            ).rejects.toThrow('Workspace already exists');
+        });
+
+        it('should use parent displayName when present', async () => {
+            store.addWorkspace(testWorkspace1);
+            store.renameWorkspace(testWorkspace1, 'Custom Parent');
+            const worktreeDir = join(testBaseDir, 'wt-named');
+            mkdirSync(worktreeDir, { recursive: true });
+
+            const ws = await store.addWorktreeWorkspace(worktreeDir, testWorkspace1, 'feat');
+            expect(ws.displayName).toBe('Custom Parent › feat');
+        });
+
+        it('should persist worktree metadata to file', async () => {
+            store.addWorkspace(testWorkspace1);
+            const worktreeDir = join(testBaseDir, 'wt-persist');
+            mkdirSync(worktreeDir, { recursive: true });
+            await store.addWorktreeWorkspace(worktreeDir, testWorkspace1, 'persisted');
+
+            const newStore = new WorkspaceStore(testBaseDir);
+            const ws = newStore.getWorkspace(worktreeDir);
+            expect(ws?.worktreeParentId).toBe(testWorkspace1);
+            expect(ws?.worktreeBranch).toBe('persisted');
+        });
+    });
+
+    describe('getWorktreeChildren', () => {
+        it('should return only the worktree children of a parent', async () => {
+            store.addWorkspace(testWorkspace1);
+            store.addWorkspace(testWorkspace2);
+            const wt = join(testBaseDir, 'wt-child');
+            mkdirSync(wt, { recursive: true });
+            await store.addWorktreeWorkspace(wt, testWorkspace1, 'child');
+
+            const children = store.getWorktreeChildren(testWorkspace1);
+            expect(children.map(w => w.id)).toEqual([wt]);
+            // The non-parent workspace has no children
+            expect(store.getWorktreeChildren(testWorkspace2)).toEqual([]);
+        });
+    });
+
+    describe('setAutoWorktree', () => {
+        it('should set the autoWorktree flag and persist it', () => {
+            store.addWorkspace(testWorkspace1);
+
+            expect(store.setAutoWorktree(testWorkspace1, true)).toBe(true);
+
+            const newStore = new WorkspaceStore(testBaseDir);
+            const ws = newStore.getWorkspace(testWorkspace1);
+            expect(ws?.autoWorktree).toBe(true);
+        });
+
+        it('should return false for a non-existent workspace', () => {
+            expect(store.setAutoWorktree('/non/existent', true)).toBe(false);
+        });
+    });
+
+    describe('constructor without basePath', () => {
+        it('should construct using the default config location', () => {
+            // No basePath -> uses __dirname/../workspace-config.json. Just ensure
+            // it constructs and exposes an array without throwing.
+            const defaultStore = new WorkspaceStore();
+            expect(Array.isArray(defaultStore.getWorkspaces())).toBe(true);
+        });
+    });
 });

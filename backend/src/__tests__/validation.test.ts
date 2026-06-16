@@ -6,6 +6,7 @@ import {
     validateConfigUpdate,
     validateWorkspacePath,
     sanitizePrompt,
+    decodeHtmlEntities,
 } from '../validation.js';
 
 describe('validateConfigUpdate', () => {
@@ -337,6 +338,22 @@ describe('validateConfigUpdate', () => {
             expect(validateConfigUpdate({ claudeCodeSwitches: { appendSystemPrompt: 1 } }).error).toContain('appendSystemPrompt must be a string');
             expect(validateConfigUpdate({ claudeCodeSwitches: { model: 1 } }).error).toContain('model must be a string');
         });
+
+        it('should validate defaultModel', () => {
+            const r = validateConfigUpdate({ claudeCodeSwitches: { defaultModel: 'sonnet' } });
+            expect(r.valid).toBe(true);
+            expect(r.data?.claudeCodeSwitches?.defaultModel).toBe('sonnet');
+            expect(validateConfigUpdate({ claudeCodeSwitches: { defaultModel: 1 } }).error)
+                .toBe('claudeCodeSwitches.defaultModel must be a string');
+        });
+
+        it('should validate effortLevel', () => {
+            const r = validateConfigUpdate({ claudeCodeSwitches: { effortLevel: 'high' } });
+            expect(r.valid).toBe(true);
+            expect(r.data?.claudeCodeSwitches?.effortLevel).toBe('high');
+            expect(validateConfigUpdate({ claudeCodeSwitches: { effortLevel: 5 } }).error)
+                .toBe('claudeCodeSwitches.effortLevel must be a string');
+        });
     });
 
     describe('hyperspaceProxy', () => {
@@ -585,6 +602,39 @@ describe('sanitizePrompt', () => {
     it('should handle unicode', () => {
         const unicodeText = 'Hello 世界 🌍 émoji';
         expect(sanitizePrompt(unicodeText)).toBe(unicodeText);
+    });
+});
+
+describe('decodeHtmlEntities', () => {
+    it('should decode hexadecimal numeric entities', () => {
+        expect(decodeHtmlEntities('it&#x27;s')).toBe("it's");
+        // Uppercase hex prefix and digits
+        expect(decodeHtmlEntities('&#X27;')).toBe('&#X27;'); // only lowercase x is matched
+        expect(decodeHtmlEntities('&#x3C;')).toBe('<');
+    });
+
+    it('should decode decimal numeric entities', () => {
+        expect(decodeHtmlEntities('it&#39;s')).toBe("it's");
+        expect(decodeHtmlEntities('&#60;tag&#62;')).toBe('<tag>');
+    });
+
+    it('should decode named entities', () => {
+        expect(decodeHtmlEntities('&lt;')).toBe('<');
+        expect(decodeHtmlEntities('&gt;')).toBe('>');
+        expect(decodeHtmlEntities('&quot;')).toBe('"');
+        expect(decodeHtmlEntities('&apos;')).toBe("'");
+        expect(decodeHtmlEntities('a&nbsp;b')).toBe('a b');
+    });
+
+    it('should decode &amp; last to avoid double-decoding', () => {
+        expect(decodeHtmlEntities('release notes &amp; agent CI')).toBe('release notes & agent CI');
+        // &amp;lt; must become &lt; (literal), not <
+        expect(decodeHtmlEntities('&amp;lt;')).toBe('&lt;');
+    });
+
+    it('should leave plain text untouched', () => {
+        expect(decodeHtmlEntities('no entities here')).toBe('no entities here');
+        expect(decodeHtmlEntities('')).toBe('');
     });
 });
 
