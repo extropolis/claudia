@@ -52,6 +52,8 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'task:stopAll',
     'task:interrupt',
     'task:archive',
+    'task:deleteRequest',
+    'task:deleteRejected',
     'task:reconnect',
     'task:revert',
     'task:restore',
@@ -126,6 +128,19 @@ function sendWSError(ws: WebSocket, message: string, originalType?: string, code
         type: 'error' as WSMessageType,
         payload: errorPayload
     }));
+}
+
+/**
+ * Convert a GitHub API URL to a browser-facing HTML URL.
+ * e.g. https://api.github.com/repos/owner/repo/pulls/123 → https://github.com/owner/repo/pull/123
+ */
+function apiUrlToHtmlUrl(apiUrl: string | null, repoHtmlUrl: string): string {
+    if (!apiUrl) return repoHtmlUrl || '';
+    const match = apiUrl.match(/repos\/([^/]+\/[^/]+)\/(pulls|issues|commits)\/(.+)/);
+    if (!match) return repoHtmlUrl || '';
+    const [, ownerRepo, type, id] = match;
+    const htmlType = type === 'pulls' ? 'pull' : type;
+    return `https://github.com/${ownerRepo}/${htmlType}/${id}`;
 }
 
 /**
@@ -1588,6 +1603,34 @@ export async function createApp(basePath?: string) {
                         // Archive a completed task (removes from view)
                         const { taskId } = payload as { taskId?: string };
                         if (taskId) taskSpawner.archiveTask(taskId);
+                        break;
+                    }
+
+                    case 'task:deleteRequest': {
+                        // MCP agent is requesting to delete a task — broadcast to
+                        // frontend so it can show a confirmation dialog to the user.
+                        const { taskId, requestId, taskName } = payload as { taskId?: string; requestId?: string; taskName?: string };
+                        if (taskId && requestId) {
+                            logger.info('task:deleteRequest from MCP agent', { taskId, requestId });
+                            broadcast({
+                                type: 'task:deleteRequest' as WSMessageType,
+                                payload: { taskId, requestId, taskName }
+                            });
+                        }
+                        break;
+                    }
+
+                    case 'task:deleteRejected': {
+                        // User rejected the delete confirmation — broadcast so the
+                        // MCP agent's waiting WebSocket receives the rejection.
+                        const { taskId, requestId } = payload as { taskId?: string; requestId?: string };
+                        if (taskId && requestId) {
+                            logger.info('task:deleteRejected by user', { taskId, requestId });
+                            broadcast({
+                                type: 'task:deleteRejected' as WSMessageType,
+                                payload: { taskId, requestId }
+                            });
+                        }
                         break;
                     }
 
@@ -4948,6 +4991,95 @@ export async function createApp(basePath?: string) {
         }
     });
 
+    // GitHub Notifications endpoint
+    app.get('/api/github/notifications', async (req, res) => {
+        const workspacePath = req.query.workspace as string;
+        const showAll = req.query.all === 'true';
+        const perPage = Math.min(parseInt(req.query.per_page as string) || 50, 100);
+
+        if (!workspacePath) {
+            return res.status(400).json({ error: 'workspace query parameter is required' });
+        }
+        if (!existsSync(workspacePath)) {
+            return res.status(404).json({ error: 'Workspace not found' });
+        }
+
+        try {
+            const { execFile } = await import('child_process');
+            const execFileAsync = (await import('util')).promisify(execFile);
+
+            try {
+                await execFileAsync('gh', ['--version'], { timeout: 5000 });
+            } catch {
+                return res.json({ notifications: [], error: 'gh CLI not installed. Install from https://cli.github.com' });
+            }
+
+            const ghArgs = ['api', 'notifications', '--method', 'GET',
+                '-f', `per_page=${perPage}`];
+            if (showAll) ghArgs.push('-f', 'all=true');
+
+            const { stdout } = await execFileAsync('gh', ghArgs, {
+                cwd: workspacePath,
+                timeout: 15000
+            });
+
+            const raw = JSON.parse(stdout);
+
+            const notifications = raw.map((n: any) => ({
+                id: n.id,
+                reason: n.reason,
+                unread: n.unread,
+                updatedAt: n.updated_at,
+                lastReadAt: n.last_read_at,
+                subject: {
+                    title: n.subject.title,
+                    type: n.subject.type,
+                    url: n.subject.url,
+                    htmlUrl: apiUrlToHtmlUrl(n.subject.url, n.repository?.html_url),
+                },
+                repository: {
+                    fullName: n.repository?.full_name || '',
+                    htmlUrl: n.repository?.html_url || '',
+                },
+            }));
+
+            res.json({ notifications });
+        } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            if (errorMsg.includes('authentication') || errorMsg.includes('HTTP 401')) {
+                return res.json({ notifications: [], error: 'GitHub authentication required. Run: gh auth login' });
+            }
+            logger.error('Failed to get GitHub notifications', { error: errorMsg });
+            res.json({ notifications: [], error: 'Failed to fetch notifications' });
+        }
+    });
+
+    // Mark a single GitHub notification as read
+    app.patch('/api/github/notifications/:threadId', async (req, res) => {
+        const { threadId } = req.params;
+        const workspacePath = req.body.workspace as string;
+
+        if (!workspacePath || !existsSync(workspacePath)) {
+            return res.status(400).json({ error: 'Valid workspace is required' });
+        }
+
+        try {
+            const { execFile } = await import('child_process');
+            const execFileAsync = (await import('util')).promisify(execFile);
+
+            await execFileAsync('gh', ['api', `notifications/threads/${threadId}`, '--method', 'PATCH'], {
+                cwd: workspacePath,
+                timeout: 10000
+            });
+
+            res.json({ success: true });
+        } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            logger.error('Failed to mark notification as read', { threadId, error: errorMsg });
+            res.status(500).json({ error: 'Failed to mark notification as read' });
+        }
+    });
+
     // Read file contents endpoint
     app.get('/api/workspaces/read-file', async (req, res) => {
         const workspacePath = req.query.workspace as string;
@@ -5176,16 +5308,19 @@ export async function createApp(basePath?: string) {
                 }
             }
 
-            // If MCP servers were updated, sync .mcp.json and settings.local.json to all workspaces
-            // and notify running tasks of the change
-            if (validation.data!.mcpServers !== undefined) {
+            // If MCP servers or skipPermissions were updated, sync .mcp.json and
+            // settings.local.json to all workspaces. skipPermissions affects the
+            // allow list written to settings.local.json (allow: ['*'] vs ['mcp__*']).
+            if (validation.data!.mcpServers !== undefined || validation.data!.skipPermissions !== undefined) {
                 const workspaces = workspaceStore.getWorkspaces();
                 if (workspaces.length > 0) {
                     const workspaceIds = workspaces.map(w => w.id);
                     taskSpawner.syncWorkspaceMcpConfigs(workspaceIds);
                     logger.info('Synced MCP config to all workspaces after config update', { count: workspaceIds.length });
                 }
-                notifyTasksOfMcpChange(taskSpawner, configStore);
+                if (validation.data!.mcpServers !== undefined) {
+                    notifyTasksOfMcpChange(taskSpawner, configStore);
+                }
             }
 
             res.json(updatedConfig);

@@ -15,6 +15,12 @@ import {
     captureGitStateBefore,
     captureGitStateAfter,
     revertTaskChanges,
+    getDefaultBranch,
+    getCurrentBranch,
+    checkoutBranch,
+    isLinkedWorktree,
+    getMainWorktreePath,
+    getPrForBranch,
 } from '../git-utils.js';
 
 const execAsync = promisify(exec);
@@ -375,6 +381,359 @@ describe('git-utils', () => {
             const result = await revertTaskChanges(testDir, gitState);
             expect(result.success).toBe(false);
             expect(result.error).toContain('no longer exists');
+        });
+
+        it('should discard uncommitted changes when commit unchanged', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            const commit = await createCommit('Initial commit');
+
+            // Modify a tracked file (the committed one) so checkout -- . restores it
+            const { stdout: lsFiles } = await execAsync('git ls-files', { cwd: testDir });
+            const trackedFile = lsFiles.trim().split('\n')[0];
+            writeFileSync(join(testDir, trackedFile), 'modified content that should be discarded');
+
+            expect(await hasUncommittedChanges(testDir)).toBe(true);
+
+            const gitState = {
+                commitBefore: commit,
+                uncommittedBefore: false,
+                filesModified: [trackedFile],
+                canRevert: true,
+            };
+
+            const result = await revertTaskChanges(testDir, gitState);
+            expect(result.success).toBe(true);
+            expect(result.filesReverted).toEqual([trackedFile]);
+            // HEAD unchanged, uncommitted changes discarded
+            expect(await getHeadCommit(testDir)).toBe(commit);
+            expect(await hasUncommittedChanges(testDir)).toBe(false);
+        });
+
+        it('should clean untracked files when cleanUntracked is true', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            const commit = await createCommit('Initial commit');
+
+            // Add an untracked file
+            writeFileSync(join(testDir, 'untracked-junk.txt'), 'junk');
+            expect(existsSync(join(testDir, 'untracked-junk.txt'))).toBe(true);
+
+            const gitState = {
+                commitBefore: commit,
+                uncommittedBefore: false,
+                filesModified: [],
+                canRevert: true,
+            };
+
+            const result = await revertTaskChanges(testDir, gitState, true);
+            expect(result.success).toBe(true);
+            // Untracked file should be removed
+            expect(existsSync(join(testDir, 'untracked-junk.txt'))).toBe(false);
+        });
+
+        it('should succeed as no-op for clean repo at commitBefore', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            const commit = await createCommit('Initial commit');
+
+            const gitState = {
+                commitBefore: commit,
+                uncommittedBefore: false,
+                filesModified: [],
+                canRevert: true,
+            };
+
+            const result = await revertTaskChanges(testDir, gitState);
+            expect(result.success).toBe(true);
+            expect(await getHeadCommit(testDir)).toBe(commit);
+        });
+
+        it('should fail when not a git repo (cannot determine HEAD)', async () => {
+            if (!isGitAvailable) return;
+            // testDir is not a git repo
+            const gitState = {
+                commitBefore: 'abc1234',
+                uncommittedBefore: false,
+                filesModified: [],
+                canRevert: true,
+            };
+
+            const result = await revertTaskChanges(testDir, gitState);
+            expect(result.success).toBe(false);
+            expect(result.error).toContain('Cannot determine current HEAD');
+        });
+    });
+
+    describe('getCurrentBranch', () => {
+        it('should return null for non-git directory', async () => {
+            if (!isGitAvailable) return;
+            const result = await getCurrentBranch(testDir);
+            expect(result).toBeNull();
+        });
+
+        it('should return the current branch name', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            const { stdout } = await execAsync('git branch --show-current', { cwd: testDir });
+            const expected = stdout.trim();
+
+            const result = await getCurrentBranch(testDir);
+            expect(result).toBe(expected);
+        });
+
+        it('should reflect a newly checked-out branch', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+            await execAsync('git checkout -b feature-xyz', { cwd: testDir });
+
+            const result = await getCurrentBranch(testDir);
+            expect(result).toBe('feature-xyz');
+        });
+    });
+
+    describe('getDefaultBranch', () => {
+        it('should return null for non-git directory', async () => {
+            if (!isGitAvailable) return;
+            const result = await getDefaultBranch(testDir);
+            expect(result).toBeNull();
+        });
+
+        it('should detect the local default branch (main or master)', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            const current = await getCurrentBranch(testDir);
+            const result = await getDefaultBranch(testDir);
+            // No remote configured, so it falls back to checking main/master.
+            // Result must be whichever of main/master exists.
+            if (current === 'main' || current === 'master') {
+                expect(result).toBe(current);
+            } else {
+                // Default branch named something else (e.g. via init.defaultBranch);
+                // neither main nor master exists so it returns null.
+                expect(result).toBeNull();
+            }
+        });
+
+        it('should return main when a main branch exists', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+            // Ensure a 'main' branch exists regardless of init default
+            await execAsync('git branch -f main', { cwd: testDir });
+
+            const result = await getDefaultBranch(testDir);
+            expect(result).toBe('main');
+        });
+    });
+
+    describe('checkoutBranch', () => {
+        it('should reject invalid branch names', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            const result = await checkoutBranch(testDir, 'bad;name');
+            expect(result.success).toBe(false);
+            expect(result.error).toBe('Invalid branch name');
+        });
+
+        it('should reject branch names starting with dash', async () => {
+            if (!isGitAvailable) return;
+            const result = await checkoutBranch(testDir, '-foo');
+            expect(result.success).toBe(false);
+            expect(result.error).toBe('Invalid branch name');
+        });
+
+        it('should checkout an existing branch', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+            await execAsync('git branch other-branch', { cwd: testDir });
+
+            const result = await checkoutBranch(testDir, 'other-branch');
+            expect(result.success).toBe(true);
+            expect(await getCurrentBranch(testDir)).toBe('other-branch');
+        });
+
+        it('should return error when checking out a non-existent branch', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            const result = await checkoutBranch(testDir, 'does-not-exist');
+            expect(result.success).toBe(false);
+            expect(result.error).toBeDefined();
+        });
+    });
+
+    describe('captureGitStateAfter uncommitted path', () => {
+        it('should include currently-uncommitted files in filesModified', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            const beforeCommit = await createCommit('Before commit');
+            const beforeState = { commitBefore: beforeCommit, uncommittedBefore: false };
+
+            // No new commit, just an uncommitted (untracked) file
+            writeFileSync(join(testDir, 'dirty.txt'), 'uncommitted work');
+
+            const result = await captureGitStateAfter(testDir, beforeState);
+            expect(result.commitAfter).toBe(beforeCommit);
+            expect(result.filesModified).toContain('dirty.txt');
+            // commit unchanged and no uncommittedBefore -> can revert
+            expect(result.canRevert).toBe(true);
+        });
+    });
+
+    describe('getFilesBetweenCommits / countCommitsBetween invalid input', () => {
+        it('getFilesBetweenCommits returns [] for invalid hashes', async () => {
+            const result = await getFilesBetweenCommits(testDir, 'not!valid', 'also!bad');
+            expect(result).toEqual([]);
+        });
+
+        it('commitExists returns false for invalid hash format', async () => {
+            const result = await commitExists(testDir, 'nope!');
+            expect(result).toBe(false);
+        });
+    });
+
+    describe('getDefaultBranch with a remote HEAD', () => {
+        it('should resolve the branch from refs/remotes/origin/HEAD', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+            const current = (await getCurrentBranch(testDir)) || 'main';
+
+            // Create a bare "remote", push, and set origin/HEAD so the
+            // symbolic-ref branch of getDefaultBranch is exercised.
+            const remoteDir = join(testDir, '..', 'remote-' + Date.now() + '.git');
+            await execAsync(`git init --bare "${remoteDir}"`);
+            try {
+                await execAsync(`git remote add origin "${remoteDir}"`, { cwd: testDir });
+                await execAsync(`git push -u origin ${current}`, { cwd: testDir });
+                await execAsync('git remote set-head origin -a', { cwd: testDir });
+
+                const result = await getDefaultBranch(testDir);
+                expect(result).toBe(current);
+            } finally {
+                rmSync(remoteDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+            }
+        });
+    });
+
+    describe('isLinkedWorktree', () => {
+        it('should return false for a non-existent .git path', async () => {
+            // testDir has no .git
+            const result = await isLinkedWorktree(testDir);
+            expect(result).toBe(false);
+        });
+
+        it('should return false for the main working tree (.git is a directory)', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            // Main working tree: .git is a directory.
+            const result = await isLinkedWorktree(testDir);
+            expect(result).toBe(false);
+        });
+
+        it('should return true for a linked worktree (.git is a file)', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            const wtDir = join(testDir, '..', 'wt-linked-' + Date.now());
+            await execAsync(`git worktree add "${wtDir}" -b wt-branch`, { cwd: testDir });
+            try {
+                expect(await isLinkedWorktree(wtDir)).toBe(true);
+            } finally {
+                await execAsync(`git worktree remove --force "${wtDir}"`, { cwd: testDir }).catch(() => {});
+                rmSync(wtDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+            }
+        });
+    });
+
+    describe('getMainWorktreePath', () => {
+        it('should return null for a non-git directory', async () => {
+            if (!isGitAvailable) return;
+            const result = await getMainWorktreePath(testDir);
+            expect(result).toBeNull();
+        });
+
+        it('should return the repo path from the main working tree', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            const result = await getMainWorktreePath(testDir);
+            expect(result).not.toBeNull();
+            // realpath the testDir for comparison (macOS /var -> /private/var symlinks)
+            const { realpathSync } = await import('fs');
+            expect(realpathSync(result!)).toBe(realpathSync(testDir));
+        });
+
+        it('should resolve to the main working tree from inside a linked worktree', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            const wtDir = join(testDir, '..', 'wt-main-' + Date.now());
+            await execAsync(`git worktree add "${wtDir}" -b wt-main-branch`, { cwd: testDir });
+            try {
+                const result = await getMainWorktreePath(wtDir);
+                expect(result).not.toBeNull();
+                const { realpathSync } = await import('fs');
+                expect(realpathSync(result!)).toBe(realpathSync(testDir));
+            } finally {
+                await execAsync(`git worktree remove --force "${wtDir}"`, { cwd: testDir }).catch(() => {});
+                rmSync(wtDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+            }
+        });
+    });
+
+    describe('revertTaskChanges additional safety branches', () => {
+        it('should fail with invalid commit hash in stored state', async () => {
+            if (!isGitAvailable) return;
+            await initGitRepo();
+            await createCommit('Initial commit');
+
+            // canRevert true, commit "exists" check is bypassed only by hash
+            // validity; use a syntactically-invalid hash so commitExists short
+            // -circuits to false and we hit the "no longer exists" error.
+            const gitState = {
+                commitBefore: 'zzz-not-hex',
+                uncommittedBefore: false,
+                filesModified: [],
+                canRevert: true,
+            };
+            const result = await revertTaskChanges(testDir, gitState);
+            expect(result.success).toBe(false);
+            expect(result.error).toContain('no longer exists');
+        });
+    });
+
+    describe('getPrForBranch', () => {
+        it('should return null for an invalid branch name', async () => {
+            const result = await getPrForBranch(testDir, 'bad;branch');
+            expect(result).toBeNull();
+        });
+
+        it('should return null for an empty branch name', async () => {
+            const result = await getPrForBranch(testDir, '');
+            expect(result).toBeNull();
+        });
+
+        it('should return null when gh fails / there is no PR', async () => {
+            // No GitHub remote (and likely no/unauth gh in CI) -> the catch or
+            // empty-array branch returns null. Never throws.
+            const result = await getPrForBranch(testDir, 'main');
+            expect(result).toBeNull();
         });
     });
 });

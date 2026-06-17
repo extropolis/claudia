@@ -247,6 +247,12 @@ export function useWebSocket() {
                         deleteTask(payload.taskId);
                         break;
                     }
+                    case 'task:deleteRequest': {
+                        const payload = message.payload as { taskId: string; requestId: string; taskName: string };
+                        console.log(`[WebSocket] Delete request from agent: ${payload.taskId}`);
+                        useTaskStore.getState().setPendingDeleteRequest(payload);
+                        break;
+                    }
                     case 'workspace:created': {
                         const payload = message.payload as { workspace: Workspace };
                         addWorkspace(payload.workspace);
@@ -677,6 +683,10 @@ export function useWebSocket() {
         sendMessage('task:archive', { taskId });
     }, [sendMessage]);
 
+    const rejectDeleteRequest = useCallback((taskId: string, requestId: string) => {
+        sendMessage('task:deleteRejected', { taskId, requestId });
+    }, [sendMessage]);
+
     const revertTask = useCallback((taskId: string, cleanUntracked: boolean = false) => {
         sendMessage('task:revert', { taskId, cleanUntracked });
     }, [sendMessage]);
@@ -850,6 +860,7 @@ export function useWebSocket() {
         deleteScheduledTask,
         updateScheduledTask,
         pauseScheduledTask,
+        rejectDeleteRequest,
         wsRef
     };
 }
