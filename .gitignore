@@ -8,6 +8,9 @@ build/
 release/
 *.tsbuildinfo
 
+# Coverage reports
+coverage/
+
 # IDE
 .idea/
 .vscode/
