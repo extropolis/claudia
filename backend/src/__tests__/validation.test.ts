@@ -6,6 +6,7 @@ import {
     validateConfigUpdate,
     validateWorkspacePath,
     sanitizePrompt,
+    decodeHtmlEntities,
 } from '../validation.js';
 
 describe('validateConfigUpdate', () => {
@@ -216,6 +217,234 @@ describe('validateConfigUpdate', () => {
         }).valid).toBe(false);
     });
 
+    it('should validate http url scheme', () => {
+        // https accepted
+        expect(validateConfigUpdate({
+            mcpServers: [{ name: 'test', type: 'http', url: 'https://example.com', enabled: true }]
+        }).valid).toBe(true);
+
+        // non-http scheme rejected
+        const res = validateConfigUpdate({
+            mcpServers: [{ name: 'test', type: 'http', url: 'ftp://example.com', enabled: true }]
+        });
+        expect(res.valid).toBe(false);
+        expect(res.error).toContain('http or https scheme');
+    });
+
+    it('should reject non-object mcpServers entries', () => {
+        expect(validateConfigUpdate({ mcpServers: [null] }).valid).toBe(false);
+        expect(validateConfigUpdate({ mcpServers: [null] }).error).toContain('must be an object');
+        expect(validateConfigUpdate({ mcpServers: ['string-entry'] }).valid).toBe(false);
+    });
+
+    it('should reject empty server name', () => {
+        const res = validateConfigUpdate({ mcpServers: [{ name: '', command: 'cmd', enabled: true }] });
+        expect(res.valid).toBe(false);
+        expect(res.error).toContain('name is required');
+    });
+
+    it('should reject http server with empty url', () => {
+        const res = validateConfigUpdate({ mcpServers: [{ name: 't', type: 'http', url: '', enabled: true }] });
+        expect(res.valid).toBe(false);
+        expect(res.error).toContain('url is required');
+    });
+
+    it('should validate claudiaMcpServerEnabled boolean', () => {
+        expect(validateConfigUpdate({ claudiaMcpServerEnabled: true }).valid).toBe(true);
+        expect(validateConfigUpdate({ claudiaMcpServerEnabled: 'no' }).valid).toBe(false);
+        expect(validateConfigUpdate({ claudiaMcpServerEnabled: 'no' }).error).toContain('must be a boolean');
+    });
+
+    it('should validate deepgramApiKey', () => {
+        expect(validateConfigUpdate({ deepgramApiKey: 'key123' }).valid).toBe(true);
+        const res = validateConfigUpdate({ deepgramApiKey: 123 });
+        expect(res.valid).toBe(false);
+        expect(res.error).toBe('deepgramApiKey must be a string');
+    });
+
+    it('should validate defaultBaseDirectory', () => {
+        expect(validateConfigUpdate({ defaultBaseDirectory: '/some/path' }).valid).toBe(true);
+        // null is allowed and coerced to undefined
+        const nullRes = validateConfigUpdate({ defaultBaseDirectory: null });
+        expect(nullRes.valid).toBe(true);
+        expect(nullRes.data?.defaultBaseDirectory).toBeUndefined();
+        // non-string non-null rejected
+        const res = validateConfigUpdate({ defaultBaseDirectory: 123 });
+        expect(res.valid).toBe(false);
+        expect(res.error).toBe('defaultBaseDirectory must be a string');
+    });
+
+    describe('claudeCodeSwitches', () => {
+        it('should reject non-object', () => {
+            const res = validateConfigUpdate({ claudeCodeSwitches: 'x' });
+            expect(res.valid).toBe(false);
+            expect(res.error).toBe('claudeCodeSwitches must be an object');
+            expect(validateConfigUpdate({ claudeCodeSwitches: null }).valid).toBe(false);
+        });
+
+        it('should validate verbose', () => {
+            expect(validateConfigUpdate({ claudeCodeSwitches: { verbose: true } }).valid).toBe(true);
+            const res = validateConfigUpdate({ claudeCodeSwitches: { verbose: 'yes' } });
+            expect(res.valid).toBe(false);
+            expect(res.error).toBe('claudeCodeSwitches.verbose must be a boolean');
+        });
+
+        it('should validate maxTurns', () => {
+            expect(validateConfigUpdate({ claudeCodeSwitches: { maxTurns: 5 } }).valid).toBe(true);
+            expect(validateConfigUpdate({ claudeCodeSwitches: { maxTurns: null } }).valid).toBe(true);
+            expect(validateConfigUpdate({ claudeCodeSwitches: { maxTurns: 0 } }).valid).toBe(false);
+            expect(validateConfigUpdate({ claudeCodeSwitches: { maxTurns: 1.5 } }).valid).toBe(false);
+            const res = validateConfigUpdate({ claudeCodeSwitches: { maxTurns: -3 } });
+            expect(res.valid).toBe(false);
+            expect(res.error).toContain('maxTurns must be a positive integer');
+        });
+
+        it('should validate maxBudgetUsd', () => {
+            expect(validateConfigUpdate({ claudeCodeSwitches: { maxBudgetUsd: 10 } }).valid).toBe(true);
+            expect(validateConfigUpdate({ claudeCodeSwitches: { maxBudgetUsd: 0 } }).valid).toBe(true);
+            expect(validateConfigUpdate({ claudeCodeSwitches: { maxBudgetUsd: null } }).valid).toBe(true);
+            const res = validateConfigUpdate({ claudeCodeSwitches: { maxBudgetUsd: -1 } });
+            expect(res.valid).toBe(false);
+            expect(res.error).toContain('maxBudgetUsd must be a non-negative');
+            expect(validateConfigUpdate({ claudeCodeSwitches: { maxBudgetUsd: 'x' } }).valid).toBe(false);
+        });
+
+        it('should validate permissionMode', () => {
+            for (const mode of ['plan', 'safe', 'dangerous', 'auto', 'acceptEdits', 'bypassPermissions', 'default', 'dontAsk']) {
+                expect(validateConfigUpdate({ claudeCodeSwitches: { permissionMode: mode } }).valid).toBe(true);
+            }
+            expect(validateConfigUpdate({ claudeCodeSwitches: { permissionMode: null } }).valid).toBe(true);
+            const res = validateConfigUpdate({ claudeCodeSwitches: { permissionMode: 'bogus' } });
+            expect(res.valid).toBe(false);
+            expect(res.error).toContain('permissionMode must be one of');
+            expect(validateConfigUpdate({ claudeCodeSwitches: { permissionMode: 42 } }).valid).toBe(false);
+        });
+
+        it('should validate string switches', () => {
+            const r = validateConfigUpdate({
+                claudeCodeSwitches: {
+                    allowedTools: 'Read,Write',
+                    disallowedTools: 'Bash',
+                    appendSystemPrompt: 'extra',
+                    model: 'opus',
+                }
+            });
+            expect(r.valid).toBe(true);
+            expect(r.data?.claudeCodeSwitches?.allowedTools).toBe('Read,Write');
+            expect(r.data?.claudeCodeSwitches?.model).toBe('opus');
+
+            expect(validateConfigUpdate({ claudeCodeSwitches: { allowedTools: 1 } }).error).toContain('allowedTools must be a string');
+            expect(validateConfigUpdate({ claudeCodeSwitches: { disallowedTools: 1 } }).error).toContain('disallowedTools must be a string');
+            expect(validateConfigUpdate({ claudeCodeSwitches: { appendSystemPrompt: 1 } }).error).toContain('appendSystemPrompt must be a string');
+            expect(validateConfigUpdate({ claudeCodeSwitches: { model: 1 } }).error).toContain('model must be a string');
+        });
+
+        it('should validate defaultModel', () => {
+            const r = validateConfigUpdate({ claudeCodeSwitches: { defaultModel: 'sonnet' } });
+            expect(r.valid).toBe(true);
+            expect(r.data?.claudeCodeSwitches?.defaultModel).toBe('sonnet');
+            expect(validateConfigUpdate({ claudeCodeSwitches: { defaultModel: 1 } }).error)
+                .toBe('claudeCodeSwitches.defaultModel must be a string');
+        });
+
+        it('should validate effortLevel', () => {
+            const r = validateConfigUpdate({ claudeCodeSwitches: { effortLevel: 'high' } });
+            expect(r.valid).toBe(true);
+            expect(r.data?.claudeCodeSwitches?.effortLevel).toBe('high');
+            expect(validateConfigUpdate({ claudeCodeSwitches: { effortLevel: 5 } }).error)
+                .toBe('claudeCodeSwitches.effortLevel must be a string');
+        });
+    });
+
+    describe('hyperspaceProxy', () => {
+        it('should reject non-object', () => {
+            expect(validateConfigUpdate({ hyperspaceProxy: 'x' }).error).toBe('hyperspaceProxy must be an object');
+            expect(validateConfigUpdate({ hyperspaceProxy: null }).valid).toBe(false);
+        });
+
+        it('should validate fields', () => {
+            const r = validateConfigUpdate({
+                hyperspaceProxy: { proxyUrl: 'http://p', apiKey: 'k', model: 'm', alwaysThinkingEnabled: true }
+            });
+            expect(r.valid).toBe(true);
+            expect(r.data?.hyperspaceProxy?.proxyUrl).toBe('http://p');
+            expect(r.data?.hyperspaceProxy?.alwaysThinkingEnabled).toBe(true);
+
+            expect(validateConfigUpdate({ hyperspaceProxy: { proxyUrl: 1 } }).error).toContain('proxyUrl must be a string');
+            expect(validateConfigUpdate({ hyperspaceProxy: { apiKey: 1 } }).error).toContain('apiKey must be a string');
+            expect(validateConfigUpdate({ hyperspaceProxy: { model: 1 } }).error).toContain('model must be a string');
+            expect(validateConfigUpdate({ hyperspaceProxy: { alwaysThinkingEnabled: 'x' } }).error).toContain('alwaysThinkingEnabled must be a boolean');
+        });
+    });
+
+    describe('sapAiCore', () => {
+        it('should reject non-object', () => {
+            expect(validateConfigUpdate({ sapAiCore: 'x' }).error).toBe('sapAiCore must be an object');
+            expect(validateConfigUpdate({ sapAiCore: null }).valid).toBe(false);
+        });
+
+        it('should validate all fields', () => {
+            const r = validateConfigUpdate({
+                sapAiCore: {
+                    clientId: 'id', clientSecret: 'secret', authUrl: 'http://auth',
+                    baseUrl: 'http://base', resourceGroup: 'default', model: 'm', timeoutMs: 1000,
+                }
+            });
+            expect(r.valid).toBe(true);
+            expect(r.data?.sapAiCore?.clientId).toBe('id');
+            expect(r.data?.sapAiCore?.timeoutMs).toBe(1000);
+            expect(validateConfigUpdate({ sapAiCore: { timeoutMs: 0 } }).valid).toBe(true);
+        });
+
+        it('should reject invalid field types', () => {
+            expect(validateConfigUpdate({ sapAiCore: { clientId: 1 } }).error).toContain('clientId must be a string');
+            expect(validateConfigUpdate({ sapAiCore: { clientSecret: 1 } }).error).toContain('clientSecret must be a string');
+            expect(validateConfigUpdate({ sapAiCore: { authUrl: 1 } }).error).toContain('authUrl must be a string');
+            expect(validateConfigUpdate({ sapAiCore: { baseUrl: 1 } }).error).toContain('baseUrl must be a string');
+            expect(validateConfigUpdate({ sapAiCore: { resourceGroup: 1 } }).error).toContain('resourceGroup must be a string');
+            expect(validateConfigUpdate({ sapAiCore: { model: 1 } }).error).toContain('model must be a string');
+            expect(validateConfigUpdate({ sapAiCore: { timeoutMs: -5 } }).error).toContain('timeoutMs must be a non-negative');
+            expect(validateConfigUpdate({ sapAiCore: { timeoutMs: 'x' } }).valid).toBe(false);
+        });
+    });
+
+    describe('modelTiering', () => {
+        it('should reject non-object', () => {
+            expect(validateConfigUpdate({ modelTiering: 'x' }).error).toBe('modelTiering must be an object');
+            expect(validateConfigUpdate({ modelTiering: null }).valid).toBe(false);
+        });
+
+        it('should validate enabled', () => {
+            expect(validateConfigUpdate({ modelTiering: { enabled: true } }).valid).toBe(true);
+            expect(validateConfigUpdate({ modelTiering: { enabled: 'x' } }).error).toContain('enabled must be a boolean');
+        });
+
+        it('should validate tiers object', () => {
+            const r = validateConfigUpdate({
+                modelTiering: { enabled: true, tiers: { low: '  haiku  ', medium: 'sonnet', high: 'opus' } }
+            });
+            expect(r.valid).toBe(true);
+            // values are trimmed
+            expect(r.data?.modelTiering?.tiers?.low).toBe('haiku');
+            expect(r.data?.modelTiering?.tiers?.high).toBe('opus');
+        });
+
+        it('should reject non-object tiers', () => {
+            expect(validateConfigUpdate({ modelTiering: { tiers: 'x' } }).error).toContain('tiers must be an object');
+            expect(validateConfigUpdate({ modelTiering: { tiers: null } }).valid).toBe(false);
+        });
+
+        it('should reject non-string tier value', () => {
+            expect(validateConfigUpdate({ modelTiering: { tiers: { low: 123 } } }).error).toContain('low must be a string');
+        });
+
+        it('should reject overly long tier value', () => {
+            const res = validateConfigUpdate({ modelTiering: { tiers: { medium: 'a'.repeat(201) } } });
+            expect(res.valid).toBe(false);
+            expect(res.error).toContain('medium too long');
+        });
+    });
+
     it('should validate multiple config fields at once', () => {
         const result = validateConfigUpdate({
             rules: 'test rules',
@@ -312,6 +541,24 @@ describe('validateWorkspacePath', () => {
         }
     });
 
+    it('should handle relative paths that resolve differently', () => {
+        // A relative path (no `..`) gets resolved against cwd; if it does not
+        // exist this surfaces as a non-existent path rather than passing.
+        const res = validateWorkspacePath('some-relative-nonexistent-dir');
+        expect(res.valid).toBe(false);
+    });
+
+    it('should reject /usr non-local system path', () => {
+        const res = validateWorkspacePath('/usr/bin');
+        expect(res.valid).toBe(false);
+        // On Unix /usr/bin exists and is blocked as a system path ('not
+        // allowed'). On Windows it does not exist, so it is rejected earlier
+        // with 'Path does not exist' — both are valid rejections.
+        if (existsSync('/usr/bin')) {
+            expect(res.error).toContain('not allowed');
+        }
+    });
+
     it('should allow /usr/local paths', () => {
         // This test may fail if /usr/local doesn't exist on the system
         const usrLocalPath = '/usr/local';
@@ -355,6 +602,39 @@ describe('sanitizePrompt', () => {
     it('should handle unicode', () => {
         const unicodeText = 'Hello 世界 🌍 émoji';
         expect(sanitizePrompt(unicodeText)).toBe(unicodeText);
+    });
+});
+
+describe('decodeHtmlEntities', () => {
+    it('should decode hexadecimal numeric entities', () => {
+        expect(decodeHtmlEntities('it&#x27;s')).toBe("it's");
+        // Uppercase hex prefix and digits
+        expect(decodeHtmlEntities('&#X27;')).toBe('&#X27;'); // only lowercase x is matched
+        expect(decodeHtmlEntities('&#x3C;')).toBe('<');
+    });
+
+    it('should decode decimal numeric entities', () => {
+        expect(decodeHtmlEntities('it&#39;s')).toBe("it's");
+        expect(decodeHtmlEntities('&#60;tag&#62;')).toBe('<tag>');
+    });
+
+    it('should decode named entities', () => {
+        expect(decodeHtmlEntities('&lt;')).toBe('<');
+        expect(decodeHtmlEntities('&gt;')).toBe('>');
+        expect(decodeHtmlEntities('&quot;')).toBe('"');
+        expect(decodeHtmlEntities('&apos;')).toBe("'");
+        expect(decodeHtmlEntities('a&nbsp;b')).toBe('a b');
+    });
+
+    it('should decode &amp; last to avoid double-decoding', () => {
+        expect(decodeHtmlEntities('release notes &amp; agent CI')).toBe('release notes & agent CI');
+        // &amp;lt; must become &lt; (literal), not <
+        expect(decodeHtmlEntities('&amp;lt;')).toBe('&lt;');
+    });
+
+    it('should leave plain text untouched', () => {
+        expect(decodeHtmlEntities('no entities here')).toBe('no entities here');
+        expect(decodeHtmlEntities('')).toBe('');
     });
 });
 
