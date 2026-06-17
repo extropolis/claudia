@@ -101,8 +101,8 @@ jobs:
           }
           Write-Host "All PowerShell scripts are valid"
 
-      - name: Run backend unit tests
-        run: npm test -w backend
+      - name: Run backend unit tests (with coverage gate)
+        run: npm run test:coverage -w backend
 
-      - name: Run frontend unit tests
-        run: npm test -w frontend
+      - name: Run frontend unit tests (with coverage gate)
+        run: npm run test:coverage -w frontend
