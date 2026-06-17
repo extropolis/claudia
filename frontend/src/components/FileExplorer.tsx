@@ -5,7 +5,7 @@ import {
     GitBranch, CircleDot, Plus, Trash2, Pencil, FileQuestion,
     CheckCircle2, XCircle, Clock, Loader2, SkipForward, ExternalLink,
     ArrowUp, ArrowDown, GitPullRequest, MessageSquare, Tag, User,
-    FileText, Activity, GitCommit, Copy, FolderInput, Eye, Check
+    FileText, Activity, GitCommit, Copy, FolderInput, Eye, Check, Bell
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -14,6 +14,22 @@ import { useTaskStore } from '../stores/taskStore';
 import { FileContentModal } from './FileContentModal';
 import { ContextMenu, ContextMenuItem } from './ContextMenu';
 import './FileExplorer.css';
+
+// ============== SHARED HELPERS ==============
+
+function formatRelativeDate(dateStr: string): string {
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 30) return `${diffDays}d ago`;
+    return date.toLocaleDateString();
+}
 
 // ============== SHARED TYPES ==============
 
@@ -110,7 +126,30 @@ interface GitHubIssuesStatus {
     error?: string;
 }
 
-type TabId = 'files' | 'changes' | 'ci' | 'issues';
+type TabId = 'files' | 'changes' | 'ci' | 'issues' | 'inbox';
+
+interface GitHubNotification {
+    id: string;
+    reason: string;
+    unread: boolean;
+    updatedAt: string;
+    lastReadAt: string | null;
+    subject: {
+        title: string;
+        type: string;
+        url: string;
+        htmlUrl: string;
+    };
+    repository: {
+        fullName: string;
+        htmlUrl: string;
+    };
+}
+
+interface NotificationsResponse {
+    notifications: GitHubNotification[];
+    error?: string;
+}
 
 interface FileExplorerProps {
     workspacePath: string | undefined;
@@ -1433,20 +1472,6 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
         return () => clearInterval(interval);
     }, [isActive, workspacePath, isConnected, loadIssues]);
 
-    const formatDate = (dateStr: string) => {
-        const date = new Date(dateStr);
-        const now = new Date();
-        const diffMs = now.getTime() - date.getTime();
-        const diffMins = Math.floor(diffMs / 60000);
-        const diffHours = Math.floor(diffMs / 3600000);
-        const diffDays = Math.floor(diffMs / 86400000);
-
-        if (diffMins < 60) return `${diffMins}m ago`;
-        if (diffHours < 24) return `${diffHours}h ago`;
-        if (diffDays < 30) return `${diffDays}d ago`;
-        return date.toLocaleDateString();
-    };
-
     if (!issuesStatus) {
         return (
             <div className="fe-tab-content">
@@ -1597,7 +1622,7 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
                                     {issue.assignees.length}
                                 </span>
                             )}
-                            <span className="issue-updated">{formatDate(issue.updatedAt)}</span>
+                            <span className="issue-updated">{formatRelativeDate(issue.updatedAt)}</span>
                         </div>
                         {issue.labels.length > 0 && (
                             <div className="issue-labels">
@@ -1643,6 +1668,193 @@ function IssuesTab({ workspacePath, isActive }: { workspacePath: string; isActiv
 }
 
 
+// ============== INBOX TAB ==============
+
+function InboxTab({ workspacePath, isActive, onUnreadCount }: { workspacePath: string; isActive: boolean; onUnreadCount?: (count: number) => void }) {
+    const isConnected = useTaskStore(s => s.isConnected);
+    const [data, setData] = useState<NotificationsResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [hasLoaded, setHasLoaded] = useState(false);
+    const prevWorkspaceRef = useRef<string | undefined>(undefined);
+
+    const loadNotifications = useCallback(async () => {
+        if (!workspacePath) return;
+        setLoading(true);
+        try {
+            const params = new URLSearchParams({ workspace: workspacePath });
+            const res = await fetch(`${getApiBaseUrl()}/api/github/notifications?${params}`);
+            if (res.ok) {
+                setData(await res.json());
+            }
+        } catch (err) {
+            console.error('[FileExplorer] Failed to load notifications:', err);
+        } finally {
+            setLoading(false);
+            setHasLoaded(true);
+        }
+    }, [workspacePath]);
+
+    const markAsRead = useCallback(async (threadId: string) => {
+        if (!workspacePath) return;
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/github/notifications/${threadId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ workspace: workspacePath })
+            });
+            if (res.ok) {
+                setData(prev => prev ? {
+                    ...prev,
+                    notifications: prev.notifications.map(n =>
+                        n.id === threadId ? { ...n, unread: false } : n
+                    )
+                } : prev);
+            }
+        } catch (err) {
+            console.error('[FileExplorer] Failed to mark notification as read:', err);
+        }
+    }, [workspacePath]);
+
+    // Derive unread count from data — single source of truth for the badge
+    useEffect(() => {
+        const count = data?.notifications?.filter(n => n.unread).length || 0;
+        onUnreadCount?.(count);
+    }, [data, onUnreadCount]);
+
+    useEffect(() => {
+        if (workspacePath && workspacePath !== prevWorkspaceRef.current) {
+            prevWorkspaceRef.current = workspacePath;
+            setData(null);
+            setHasLoaded(false);
+            if (isActive && isConnected) loadNotifications();
+        }
+    }, [workspacePath, isActive, isConnected, loadNotifications]);
+
+    useEffect(() => {
+        if (isActive && isConnected && !hasLoaded && workspacePath && !loading) {
+            loadNotifications();
+        }
+    }, [isActive, isConnected, hasLoaded, workspacePath, loading, loadNotifications]);
+
+    useEffect(() => {
+        if (!isActive || !workspacePath || !isConnected) return;
+        const interval = setInterval(loadNotifications, 60000);
+        return () => clearInterval(interval);
+    }, [isActive, workspacePath, isConnected, loadNotifications]);
+
+    const getReasonLabel = (reason: string) => {
+        const map: Record<string, string> = {
+            assign: 'assigned',
+            author: 'author',
+            comment: 'comment',
+            ci_activity: 'CI',
+            invitation: 'invited',
+            manual: 'subscribed',
+            mention: 'mentioned',
+            review_requested: 'review',
+            security_alert: 'security',
+            state_change: 'state change',
+            subscribed: 'subscribed',
+            team_mention: 'team mention',
+        };
+        return map[reason] || reason;
+    };
+
+    const getTypeIcon = (type: string) => {
+        switch (type) {
+            case 'PullRequest': return <GitPullRequest size={13} />;
+            case 'Issue': return <CircleDot size={13} />;
+            case 'Release': return <Tag size={13} />;
+            case 'CheckSuite': return <Activity size={13} />;
+            case 'Commit': return <GitCommit size={13} />;
+            default: return <Bell size={13} />;
+        }
+    };
+
+    if (!data) {
+        return (
+            <div className="fe-tab-content">
+                <div className="fe-tab-scroll">
+                    {loading ? (
+                        <div className="fe-loading"><RefreshCw size={16} className="spinning" /><span>Loading...</span></div>
+                    ) : (
+                        <div className="fe-empty">No data</div>
+                    )}
+                </div>
+            </div>
+        );
+    }
+
+    if (data.error) {
+        return (
+            <div className="fe-tab-content">
+                <div className="fe-tab-toolbar">
+                    <span className="fe-tab-stats">Inbox</span>
+                    <button className="fe-toolbar-btn" onClick={() => loadNotifications()} disabled={loading} title="Refresh">
+                        <RefreshCw size={13} className={loading ? 'spinning' : ''} />
+                    </button>
+                </div>
+                <div className="fe-tab-scroll">
+                    <div className="fe-error">{data.error}</div>
+                </div>
+            </div>
+        );
+    }
+
+    const unreadCount = data.notifications.filter(n => n.unread).length;
+
+    return (
+        <div className="fe-tab-content">
+            <div className="fe-tab-toolbar">
+                <span className="fe-tab-stats">
+                    <span className="fe-issue-count">{unreadCount} unread</span>
+                </span>
+                <button className="fe-toolbar-btn" onClick={() => loadNotifications()} disabled={loading} title="Refresh">
+                    <RefreshCw size={13} className={loading ? 'spinning' : ''} />
+                </button>
+            </div>
+            <div className="fe-tab-scroll">
+                {data.notifications.length === 0 && (
+                    <div className="fe-empty">No notifications</div>
+                )}
+                {data.notifications.map((notif) => (
+                    <div key={notif.id} className={`notification-item ${notif.unread ? 'unread' : ''}`}>
+                        <div className="notification-header">
+                            <span className={`notification-type-icon ${notif.subject.type.toLowerCase()}`}>
+                                {getTypeIcon(notif.subject.type)}
+                            </span>
+                            <a
+                                href={notif.subject.htmlUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="notification-title-link"
+                                title={notif.subject.title}
+                            >
+                                {notif.subject.title}
+                            </a>
+                            {notif.unread && (
+                                <button
+                                    className="notification-mark-read"
+                                    onClick={(e) => { e.stopPropagation(); markAsRead(notif.id); }}
+                                    title="Mark as read"
+                                >
+                                    <Check size={11} />
+                                </button>
+                            )}
+                        </div>
+                        <div className="notification-meta">
+                            <span className="notification-reason">{getReasonLabel(notif.reason)}</span>
+                            <span className="notification-repo">{notif.repository.fullName}</span>
+                            <span className="notification-time">{formatRelativeDate(notif.updatedAt)}</span>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+
 // ============== MAIN PANEL ==============
 
 const PANEL_WIDTH_KEY = 'claudia-file-explorer-width';
@@ -1651,6 +1863,7 @@ const DEFAULT_PANEL_WIDTH = 300;
 export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps) {
     const [isExpanded, setIsExpanded] = useState(false);
     const [activeTab, setActiveTab] = useState<TabId>('files');
+    const [inboxUnreadCount, setInboxUnreadCount] = useState(0);
     const [panelWidth, setPanelWidth] = useState(() => {
         try {
             const saved = localStorage.getItem(PANEL_WIDTH_KEY);
@@ -1740,10 +1953,11 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
                             <CircleDot size={13} />
                             <span>Issues</span>
                         </button>
-                        <button className={`fe-tab ${activeTab === 'issues' ? 'active' : ''}`}
-                            onClick={() => setActiveTab('issues')} title="GitHub Issues">
-                            <GitPullRequest size={13} />
-                            <span>Issues</span>
+                        <button className={`fe-tab ${activeTab === 'inbox' ? 'active' : ''}`}
+                            onClick={() => setActiveTab('inbox')} title="GitHub Notifications">
+                            <Bell size={13} />
+                            <span>Inbox</span>
+                            {inboxUnreadCount > 0 && <span className="fe-tab-badge">{inboxUnreadCount > 9 ? '9+' : inboxUnreadCount}</span>}
                         </button>
                     </div>
 
@@ -1752,6 +1966,7 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
                     {activeTab === 'changes' && <ChangesTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'changes'} />}
                     {activeTab === 'ci' && <CITab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'ci'} />}
                     {activeTab === 'issues' && <IssuesTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'issues'} />}
+                    {activeTab === 'inbox' && <InboxTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'inbox'} onUnreadCount={setInboxUnreadCount} />}
                 </div>
             )}
         </div>

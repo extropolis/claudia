@@ -39,7 +39,17 @@
     padding: 14px 16px;
     border-bottom: 1px solid var(--border-color);
     position: relative;
-    z-index: 2; /* Stay above scrolling content and dropdowns */
+    z-index: 2;
+}
+
+/* When any workspace has its menu open, the panel header must not paint
+   over the dropdown. The menu-open section gets z-index: 9999, which only
+   wins within workspace-panel-content (z-index: 1). We need the content
+   area to beat the header when a menu is open. The :has() selector
+   promotes the content z-index above the header so the fixed dropdown
+   is visible. */
+.workspace-panel-content:has(.workspace-section.menu-open) {
+    z-index: 3;
 }
 
 .workspace-panel-header h2 {
@@ -149,6 +159,11 @@
     border-color: var(--accent-secondary);
     box-shadow: 0 0 0 1px rgba(0, 212, 255, 0.3), 0 2px 8px rgba(0, 212, 255, 0.1);
     background: var(--bg-secondary);
+}
+
+.workspace-section.menu-open {
+    position: relative;
+    z-index: 9999;
 }
 
 .workspace-header {

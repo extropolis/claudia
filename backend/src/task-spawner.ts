@@ -622,9 +622,17 @@ export class TaskSpawner extends EventEmitter {
      * @param workspaceIds - List of workspace directory paths to sync. All must exist on disk.
      */
     syncWorkspaceMcpConfigs(workspaceIds: string[]): void {
-        // The Claudia project root — skip syncing to our own directory to avoid
-        // triggering tsx watch restarts from file writes in the project tree.
+        // The Claudia project root — skip writing .mcp.json to our own directory
+        // to avoid triggering tsx watch restarts. settings.local.json is safe
+        // (it's inside .claude/ which tsx doesn't watch).
         const selfRoot = resolve(join(__dirname, '..', '..'));
+
+        // When skip-permissions is enabled, allow ALL tools in project settings
+        // so resumed sessions don't get permission prompts from the narrow
+        // MCP-only allowlist. This is the primary mechanism for making skip-
+        // permissions work on --resume'd sessions, since CLI flags from the
+        // original spawn are baked into the session state.
+        const skipPermsSync = this.configStore?.getSkipPermissions();
 
         let syncCount = 0;
         for (const workspaceId of workspaceIds) {
@@ -632,53 +640,69 @@ export class TaskSpawner extends EventEmitter {
                 logger.warn('Workspace does not exist, skipping MCP sync', { workspaceId });
                 continue;
             }
-            if (resolve(workspaceId) === selfRoot) {
-                logger.info('Skipping MCP sync for Claudia\'s own workspace (prevents tsx watch restart)', { workspaceId });
-                continue;
-            }
+            const isSelfWorkspace = resolve(workspaceId) === selfRoot;
 
             // Build per-workspace config with CLAUDIA_WORKSPACE_ID so the claudia
             // MCP server works on resumed sessions (where --mcp-config doesn't load).
             // No taskId — per-task --mcp-config supplies that for new sessions.
             const result = this.buildMcpConfig(workspaceId);
-            if (!result) continue;
+            if (!result) {
+                // Even without MCP servers, still write settings.local.json for permissions
+                if (skipPermsSync) {
+                    this.writeSettingsLocalJson(workspaceId, skipPermsSync, []);
+                }
+                continue;
+            }
 
             const { mcpConfig, enabledMcpServers } = result;
             const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
             const serverNames = enabledMcpServers.map(s => s.name);
 
-            const settingsContent = {
-                permissions: {
-                    allow: ['mcp__*'],
-                    deny: []
-                },
-                enableAllProjectMcpServers: true,
-                enabledMcpjsonServers: serverNames
-            };
-
-            // Write .mcp.json
-            const workspaceMcpFile = `${workspaceId}/.mcp.json`;
-            try {
-                atomicWriteFileSync(workspaceMcpFile, mcpConfigJson);
-            } catch (err) {
-                logger.error('Failed to write .mcp.json', { workspaceId, error: err });
-            }
-
-            // Write .claude/settings.local.json
-            const claudeSettingsDir = `${workspaceId}/.claude`;
-            const claudeSettingsFile = `${claudeSettingsDir}/settings.local.json`;
-            try {
-                if (!existsSync(claudeSettingsDir)) {
-                    mkdirSync(claudeSettingsDir, { recursive: true });
+            // Write .mcp.json (skip for Claudia's own workspace to prevent tsx watch restart)
+            if (!isSelfWorkspace) {
+                const workspaceMcpFile = `${workspaceId}/.mcp.json`;
+                try {
+                    atomicWriteFileSync(workspaceMcpFile, mcpConfigJson);
+                } catch (err) {
+                    logger.error('Failed to write .mcp.json', { workspaceId, error: err });
                 }
-                atomicWriteFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
-            } catch (err) {
-                logger.error('Failed to write settings.local.json', { workspaceId, error: err });
+            } else {
+                logger.info('Skipping .mcp.json for Claudia\'s own workspace (prevents tsx watch restart)');
             }
+
+            // Write .claude/settings.local.json (safe for all workspaces including self)
+            this.writeSettingsLocalJson(workspaceId, skipPermsSync, serverNames);
             syncCount++;
         }
 
         logger.info(`Synced MCP config to ${syncCount} workspace(s)`, { servers: ['playwright', ...(this.configStore?.getClaudioMcpServerEnabled() ? ['claudia'] : [])] });
+    }
+
+    /**
+     * Write .claude/settings.local.json to a workspace directory.
+     * This controls project-level tool permissions that Claude Code reads on
+     * every tool call — including resumed sessions.
+     */
+    private writeSettingsLocalJson(workspaceId: string, skipPermissions: boolean | undefined, serverNames: string[]): void {
+        const settingsContent = {
+            permissions: {
+                allow: skipPermissions ? ['*'] : ['mcp__*'],
+                deny: []
+            },
+            enableAllProjectMcpServers: true,
+            enabledMcpjsonServers: serverNames
+        };
+
+        const claudeSettingsDir = `${workspaceId}/.claude`;
+        const claudeSettingsFile = `${claudeSettingsDir}/settings.local.json`;
+        try {
+            if (!existsSync(claudeSettingsDir)) {
+                mkdirSync(claudeSettingsDir, { recursive: true });
+            }
+            atomicWriteFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
+        } catch (err) {
+            logger.error('Failed to write settings.local.json', { workspaceId, error: err });
+        }
     }
 
     /**
@@ -1176,6 +1200,27 @@ export class TaskSpawner extends EventEmitter {
                     const inputType = this.detectWaitingForInput(recentOutput);
 
                     if (inputType) {
+                        // When skip-permissions is enabled, auto-accept permission
+                        // prompts by sending Enter (selects "Yes" / "Allow") instead
+                        // of pausing and waiting for user input. This handles the
+                        // Claude Code bug where --dangerously-skip-permissions doesn't
+                        // suppress all prompts (e.g. static analysis warnings).
+                        const skipPermsEnabled = this.configStore?.getSkipPermissions();
+                        const isPermission = skipPermsEnabled ? this.isPermissionPrompt(recentOutput) : false;
+                        if (skipPermsEnabled) {
+                            logger.info('Skip-permissions check', {
+                                taskId: task.id,
+                                inputType,
+                                isPermission,
+                                outputTail: recentOutput.slice(-300)
+                            });
+                        }
+                        if (skipPermsEnabled && isPermission) {
+                            logger.info('Auto-accepting permission prompt', { taskId: task.id, inputType });
+                            task.process.write('\r');
+                            continue;
+                        }
+
                         this.transitionTaskState(task, 'waiting_input', inputType, `polling: detected ${inputType}`);
                         this.emit('taskWaitingInput', task.id, inputType, recentOutput);
                     } else {
@@ -2079,6 +2124,52 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Detect if the output contains a Claude Code system prompt (permission,
+     * confirmation, plan-mode exit, etc.) that should be auto-accepted when
+     * skip-permissions is enabled.
+     *
+     * Returns true for any Claude Code TUI confirmation dialog:
+     * - Permission dialogs ("Allow" / "Deny")
+     * - Numbered Yes/No menus ("❯ 1. Yes" / "2. No")
+     * - Static analysis warnings
+     * - Edit/Bash confirmation prompts
+     *
+     * Returns false for genuine model-generated questions (AskUserQuestion
+     * tool uses "Enter to select · ↑/↓ to navigate" which is handled
+     * separately and NOT auto-accepted).
+     */
+    private isPermissionPrompt(str: string): boolean {
+        // AskUserQuestion tool uses "Enter to select · ↑/↓ to navigate" —
+        // never auto-accept these, they are genuine model-generated questions.
+        if (str.includes('Enter to select') && str.includes('to navigate')) {
+            return false;
+        }
+
+        // "Allow" / "Deny" permission dialog
+        if (str.includes('Allow') && str.includes('Deny')) {
+            return true;
+        }
+
+        // Numbered Yes/No menu — Claude Code's TUI for system confirmations:
+        // permissions, plan mode exit, edit approval, etc.
+        if (str.match(/\d+\.\s*Yes/) && str.match(/\d+\.\s*No/)) {
+            return true;
+        }
+
+        // Static analysis warning patterns
+        if (str.includes('cannot be statically analyzed') || str.includes('shell syntax')) {
+            return true;
+        }
+
+        // "Esc to cancel · Tab to amend" — Claude Code tool-use permission chrome
+        if (str.includes('Esc to cancel') && str.includes('Tab to amend')) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
      * Get the current state of a task.
      * Simply returns the stored state - polling manages state transitions.
      */
@@ -2486,7 +2577,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - Only spawn tasks when parallelization provides real value; do simple work yourself
 - Each spawned task prompt should be fully self-contained — include file paths, context, and constraints so it can work independently
 - While waiting for spawned tasks, do NOT start implementing features that overlap with what they're doing
-- **NEVER delete or archive completed tasks** — the user wants to review their outputs. After a task completes, just report its status and read its output. The MCP server intentionally does NOT expose archive/delete tools — only the user can archive tasks via the UI.
+- **Deleting tasks**: You can request task deletion via \`claudia_delete_task\`, but it requires **explicit user approval** — a confirmation popup appears in the UI and the user must click "Delete" before the task is removed. NEVER call this automatically after tasks complete. Only call it when the user explicitly asks to delete/remove/clean up tasks.
 
 **Scheduling prompts (self-scheduling):**
 - You can schedule prompts to be sent to any task (including your own) on a cron schedule using \`claudia_cron_create\`.
@@ -2535,8 +2626,15 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             logger.warn('No enabled MCP servers found!');
         }
 
-        // Explicitly allow all MCP tools to avoid deferred loading issues
-        claudeArgs.push('--allowedTools', 'mcp__*');
+        // When skip-permissions is enabled, allow ALL tools so the narrow
+        // allowlist doesn't reintroduce permission prompts. Otherwise, only
+        // auto-approve MCP tools (non-MCP tools go through normal permission flow).
+        const skipPerms = this.configStore?.getSkipPermissions();
+        if (skipPerms) {
+            claudeArgs.push('--allowedTools', '*');
+        } else {
+            claudeArgs.push('--allowedTools', 'mcp__*');
+        }
 
         // Add Claude Code CLI switches from settings
         if (this.configStore) {
@@ -4045,12 +4143,18 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
             const claudeArgs = [...customArgs];
 
-            if (this.configStore?.getSkipPermissions()) {
+            const skipPermsReconnect = this.configStore?.getSkipPermissions();
+            if (skipPermsReconnect) {
                 claudeArgs.push('--dangerously-skip-permissions');
             }
 
-            // Explicitly allow all MCP tools to avoid deferred loading issues
-            claudeArgs.push('--allowedTools', 'mcp__*');
+            // When skip-permissions is enabled, allow ALL tools to avoid
+            // the narrow MCP-only allowlist reintroducing permission prompts.
+            if (skipPermsReconnect) {
+                claudeArgs.push('--allowedTools', '*');
+            } else {
+                claudeArgs.push('--allowedTools', 'mcp__*');
+            }
 
             // Add Claude Code CLI switches from settings
             if (this.configStore) {

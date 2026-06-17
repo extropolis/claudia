@@ -1183,7 +1183,7 @@ function WorkspaceSection({
 
     return (
         <div
-            className={`workspace-section ${isExpanded ? 'expanded' : ''} ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
+            className={`workspace-section ${isExpanded ? 'expanded' : ''} ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''} ${isMenuOpen ? 'menu-open' : ''}`}
             onDragOver={(e) => e.preventDefault()}
             onDragEnter={() => onDragEnter(index)}
         >
@@ -1457,9 +1457,9 @@ function WorkspaceSection({
                                         }}
                                         onClick={(e) => e.stopPropagation()}
                                     >
-                                        {allWorkspaces.filter(w => w.id !== workspace.id).length > 0 && (
+                                        {allWorkspaces.filter(w => w.id !== workspace.id && !w.worktreeParentId).length > 0 && (
                                             <>
-                                                {allWorkspaces.filter(w => w.id !== workspace.id).map(w => {
+                                                {allWorkspaces.filter(w => w.id !== workspace.id && !w.worktreeParentId).map(w => {
                                                     const isReferenced = workspace.references?.some(r => r.path === w.id) || false;
                                                     return (
                                                         <button
@@ -1496,7 +1496,7 @@ function WorkspaceSection({
                                                 </button>
                                             </div>
                                         ))}
-                                        {(allWorkspaces.filter(w => w.id !== workspace.id).length > 0 ||
+                                        {(allWorkspaces.filter(w => w.id !== workspace.id && !w.worktreeParentId).length > 0 ||
                                           workspace.references?.filter(r => !allWorkspaces.some(w => w.id === r.path)).length) && (
                                             <div className="workspace-dropdown-divider" />
                                         )}
@@ -1518,7 +1518,7 @@ function WorkspaceSection({
                                             <FolderPlus size={14} />
                                             <span>Add Custom Folder...</span>
                                         </button>
-                                        {allWorkspaces.filter(w => w.id !== workspace.id).length === 0 &&
+                                        {allWorkspaces.filter(w => w.id !== workspace.id && !w.worktreeParentId).length === 0 &&
                                          !workspace.references?.length && (
                                             <div className="workspace-dropdown-item disabled">
                                                 <span className="reference-empty-hint">No other workspaces available</span>
@@ -1786,83 +1786,130 @@ function WorkspaceSection({
                                 className={`task-list ${isResizing ? 'resizing' : ''}`}
                                 style={taskListHeight ? { maxHeight: `${taskListHeight}px` } : undefined}
                             >
-                                {tasks.map((task, idx) => (
-                                    <TaskItem
-                                        key={task.id}
-                                        task={task}
-                                        index={idx}
-                                        isSelected={selectedTaskId === task.id}
-                                        isLastSelected={lastSelectedTaskId === task.id}
-                                        hasActiveQuestion={waitingInputTaskIds.has(task.id)}
-                                        hasUnreadActivity={unreadTaskIds.has(task.id)}
-                                        onDeleteTask={onDeleteTask}
-                                        onInterruptTask={onInterruptTask}
-                                        onArchiveTask={onArchiveTask}
-                                        onRevertTask={onRevertTask}
-                                        onSelectTask={onSelectTask}
-                                        onRenameTask={onRenameTask}
-                                        onOpenScheduledTasks={onOpenScheduledTasks}
-                                        isDragging={taskDragIndex !== null}
-                                        dragIndex={taskDragIndex}
-                                        dragOverIndex={taskDragOverIndex}
-                                        onDragStart={handleTaskDragStart}
-                                        onDragEnter={handleTaskDragEnter}
-                                        onDragEnd={handleTaskDragEnd}
-                                        worktreeInfo={task.sessionWorktreeBranch
-                                            ? { branch: task.sessionWorktreeBranch, prInfo: task.sessionWorktreePrInfo }
-                                            : undefined}
-                                    />
-                                ))}
-                                {worktreeGroups.map((group) => (
-                                    // Single-task worktree: render the task inline with a
-                                    // worktree badge + PR badge instead of a group section.
-                                    // Multi-task worktree: keep the collapsible group.
-                                    group.tasks.length === 1 ? (
-                                        <TaskItem
-                                            key={group.workspace.id}
-                                            task={group.tasks[0]}
-                                            index={0}
-                                            isSelected={selectedTaskId === group.tasks[0].id}
-                                            isLastSelected={lastSelectedTaskId === group.tasks[0].id}
-                                            hasActiveQuestion={waitingInputTaskIds.has(group.tasks[0].id)}
-                                            hasUnreadActivity={unreadTaskIds.has(group.tasks[0].id)}
-                                            onDeleteTask={onDeleteTask}
-                                            onInterruptTask={onInterruptTask}
-                                            onArchiveTask={onArchiveTask}
-                                            onRevertTask={onRevertTask}
-                                            onSelectTask={onSelectTask}
-                                            onRenameTask={onRenameTask}
-                                            onOpenScheduledTasks={onOpenScheduledTasks}
-                                            isDragging={false}
-                                            dragIndex={null}
-                                            dragOverIndex={null}
-                                            onDragStart={() => {}}
-                                            onDragEnter={() => {}}
-                                            onDragEnd={() => {}}
-                                            worktreeInfo={{
-                                                branch: group.workspace.worktreeBranch || group.branch,
-                                                prInfo: group.workspace.prInfo,
-                                            }}
-                                        />
-                                    ) : (
-                                        <WorktreeGroupSection
-                                            key={group.workspace.id}
-                                            group={group}
-                                            selectedTaskId={selectedTaskId}
-                                            lastSelectedTaskId={lastSelectedTaskId}
-                                            waitingInputTaskIds={waitingInputTaskIds}
-                                            unreadTaskIds={unreadTaskIds}
-                                            onDeleteTask={onDeleteTask}
-                                            onInterruptTask={onInterruptTask}
-                                            onArchiveTask={onArchiveTask}
-                                            onRevertTask={onRevertTask}
-                                            onSelectTask={onSelectTask}
-                                            onRenameTask={onRenameTask}
-                                            onOpenScheduledTasks={onOpenScheduledTasks}
-                                            onRemoveWorktree={onRemoveWorktree}
-                                        />
-                                    )
-                                ))}
+                                {(() => {
+                                    // Build a unified list of render items (tasks + worktree groups)
+                                    // sorted together so new worktree tasks appear at their natural
+                                    // position (e.g. top) instead of always at the bottom.
+                                    type RenderItem =
+                                        | { type: 'task'; task: Task; idx: number }
+                                        | { type: 'worktree-single'; group: WorktreeGroup }
+                                        | { type: 'worktree-multi'; group: WorktreeGroup };
+
+                                    const items: RenderItem[] = [];
+
+                                    // Add regular tasks
+                                    tasks.forEach((task, idx) => {
+                                        items.push({ type: 'task', task, idx });
+                                    });
+
+                                    // Add worktree groups
+                                    for (const group of worktreeGroups) {
+                                        if (group.tasks.length === 1) {
+                                            items.push({ type: 'worktree-single', group });
+                                        } else {
+                                            items.push({ type: 'worktree-multi', group });
+                                        }
+                                    }
+
+                                    // Sort: items with explicit order first, then by creation time (newest first).
+                                    // For worktree groups, use the newest task's creation time.
+                                    items.sort((a, b) => {
+                                        const orderA = a.type === 'task' ? a.task.order : undefined;
+                                        const orderB = b.type === 'task' ? b.task.order : undefined;
+                                        if (orderA !== undefined && orderB !== undefined) return orderA - orderB;
+                                        if (orderA !== undefined) return -1;
+                                        if (orderB !== undefined) return 1;
+
+                                        const timeA = a.type === 'task'
+                                            ? new Date(a.task.createdAt).getTime()
+                                            : Math.max(...a.group.tasks.map(t => new Date(t.createdAt).getTime()));
+                                        const timeB = b.type === 'task'
+                                            ? new Date(b.task.createdAt).getTime()
+                                            : Math.max(...b.group.tasks.map(t => new Date(t.createdAt).getTime()));
+                                        return timeB - timeA;
+                                    });
+
+                                    return items.map((item) => {
+                                        if (item.type === 'task') {
+                                            return (
+                                                <TaskItem
+                                                    key={item.task.id}
+                                                    task={item.task}
+                                                    index={item.idx}
+                                                    isSelected={selectedTaskId === item.task.id}
+                                                    isLastSelected={lastSelectedTaskId === item.task.id}
+                                                    hasActiveQuestion={waitingInputTaskIds.has(item.task.id)}
+                                                    hasUnreadActivity={unreadTaskIds.has(item.task.id)}
+                                                    onDeleteTask={onDeleteTask}
+                                                    onInterruptTask={onInterruptTask}
+                                                    onArchiveTask={onArchiveTask}
+                                                    onRevertTask={onRevertTask}
+                                                    onSelectTask={onSelectTask}
+                                                    onRenameTask={onRenameTask}
+                                                    onOpenScheduledTasks={onOpenScheduledTasks}
+                                                    isDragging={taskDragIndex !== null}
+                                                    dragIndex={taskDragIndex}
+                                                    dragOverIndex={taskDragOverIndex}
+                                                    onDragStart={handleTaskDragStart}
+                                                    onDragEnter={handleTaskDragEnter}
+                                                    onDragEnd={handleTaskDragEnd}
+                                                    worktreeInfo={item.task.sessionWorktreeBranch
+                                                        ? { branch: item.task.sessionWorktreeBranch, prInfo: item.task.sessionWorktreePrInfo }
+                                                        : undefined}
+                                                />
+                                            );
+                                        } else if (item.type === 'worktree-single') {
+                                            const t = item.group.tasks[0];
+                                            return (
+                                                <TaskItem
+                                                    key={item.group.workspace.id}
+                                                    task={t}
+                                                    index={0}
+                                                    isSelected={selectedTaskId === t.id}
+                                                    isLastSelected={lastSelectedTaskId === t.id}
+                                                    hasActiveQuestion={waitingInputTaskIds.has(t.id)}
+                                                    hasUnreadActivity={unreadTaskIds.has(t.id)}
+                                                    onDeleteTask={onDeleteTask}
+                                                    onInterruptTask={onInterruptTask}
+                                                    onArchiveTask={onArchiveTask}
+                                                    onRevertTask={onRevertTask}
+                                                    onSelectTask={onSelectTask}
+                                                    onRenameTask={onRenameTask}
+                                                    onOpenScheduledTasks={onOpenScheduledTasks}
+                                                    isDragging={false}
+                                                    dragIndex={null}
+                                                    dragOverIndex={null}
+                                                    onDragStart={() => {}}
+                                                    onDragEnter={() => {}}
+                                                    onDragEnd={() => {}}
+                                                    worktreeInfo={{
+                                                        branch: item.group.workspace.worktreeBranch || item.group.branch,
+                                                        prInfo: item.group.workspace.prInfo,
+                                                    }}
+                                                />
+                                            );
+                                        } else {
+                                            return (
+                                                <WorktreeGroupSection
+                                                    key={item.group.workspace.id}
+                                                    group={item.group}
+                                                    selectedTaskId={selectedTaskId}
+                                                    lastSelectedTaskId={lastSelectedTaskId}
+                                                    waitingInputTaskIds={waitingInputTaskIds}
+                                                    unreadTaskIds={unreadTaskIds}
+                                                    onDeleteTask={onDeleteTask}
+                                                    onInterruptTask={onInterruptTask}
+                                                    onArchiveTask={onArchiveTask}
+                                                    onRevertTask={onRevertTask}
+                                                    onSelectTask={onSelectTask}
+                                                    onRenameTask={onRenameTask}
+                                                    onOpenScheduledTasks={onOpenScheduledTasks}
+                                                    onRemoveWorktree={onRemoveWorktree}
+                                                />
+                                            );
+                                        }
+                                    });
+                                })()}
                             </div>
                             <div
                                 className="task-list-resize-handle"
@@ -2031,6 +2078,7 @@ interface WorkspacePanelProps {
     onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
     onResetWorkspace?: (workspaceId: string) => void;
+    onRejectDeleteRequest?: (taskId: string, requestId: string) => void;
     onCollapse?: () => void;
 }
 
@@ -2061,6 +2109,7 @@ export function WorkspacePanel({
     onAddCustomReference,
     onRemoveReference,
     onResetWorkspace,
+    onRejectDeleteRequest,
     onCollapse
 }: WorkspacePanelProps) {
     const {
@@ -2081,7 +2130,9 @@ export function WorkspacePanel({
         workspaceSortBy,
         setWorkspaceSortBy,
         taskSortBy,
-        lastSelectedTaskByWorkspace
+        lastSelectedTaskByWorkspace,
+        pendingDeleteRequest,
+        setPendingDeleteRequest
     } = useTaskStore();
 
     // Drag and drop state
@@ -2551,6 +2602,29 @@ export function WorkspacePanel({
                     onDeleteWorkspace={onDeleteWorkspace}
                     onReorderWorkspaces={onReorderWorkspaces}
                 />
+            )}
+
+            {pendingDeleteRequest && (
+                <ConfirmModal
+                    title="Delete Task"
+                    variant="danger"
+                    confirmLabel="Delete"
+                    cancelLabel="Keep"
+                    onConfirm={() => {
+                        onArchiveTask(pendingDeleteRequest.taskId);
+                        setPendingDeleteRequest(null);
+                    }}
+                    onCancel={() => {
+                        onRejectDeleteRequest?.(pendingDeleteRequest.taskId, pendingDeleteRequest.requestId);
+                        setPendingDeleteRequest(null);
+                    }}
+                >
+                    <p>An agent is requesting to delete this task:</p>
+                    <p><strong>{pendingDeleteRequest.taskName}</strong></p>
+                    <div className="confirm-note">
+                        The task will be archived and can be restored later.
+                    </div>
+                </ConfirmModal>
             )}
         </div>
     );

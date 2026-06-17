@@ -71,6 +71,7 @@ function App() {
         removeReference,
         requestRecentWorkspaces,
         clearRecentWorkspace,
+        rejectDeleteRequest,
         wsRef
     } = useWebSocket();
 
@@ -638,6 +639,7 @@ function App() {
                                 onAddCustomReference={addCustomReference}
                                 onRemoveReference={removeReference}
                                 onResetWorkspace={resetWorkspace}
+                                onRejectDeleteRequest={rejectDeleteRequest}
                             />
                         </aside>
                     )
@@ -688,6 +690,7 @@ function App() {
                                 onAddCustomReference={addCustomReference}
                                 onRemoveReference={removeReference}
                                 onResetWorkspace={resetWorkspace}
+                                onRejectDeleteRequest={rejectDeleteRequest}
                                 onCollapse={toggleSidebar}
                             />
                         </aside>

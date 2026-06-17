@@ -91,6 +91,10 @@ interface TaskStore {
     unreadTaskIds: Set<string>;
     activityLog: ActivityEvent[];
 
+    // Pending delete confirmation (from MCP agent)
+    pendingDeleteRequest: { taskId: string; requestId: string; taskName: string } | null;
+    setPendingDeleteRequest: (request: { taskId: string; requestId: string; taskName: string } | null) => void;
+
     // Settings
     autoFocusOnInput: boolean;
     supervisorEnabled: boolean;
@@ -307,6 +311,10 @@ export const useTaskStore = create<TaskStore>()(
             // Activity tracking initial state
             unreadTaskIds: new Set(),
             activityLog: [],
+
+            // Pending delete confirmation
+            pendingDeleteRequest: null,
+            setPendingDeleteRequest: (request) => set({ pendingDeleteRequest: request }),
 
             // Settings initial state
             autoFocusOnInput: false,

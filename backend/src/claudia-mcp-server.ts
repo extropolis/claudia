@@ -18,11 +18,9 @@
  *   - claudia_stop_task: Gracefully stop a running task
  *   - claudia_stop_all_tasks: Stop all running tasks in the workspace
  *   - claudia_rename_task: Set a display name for a task
+ *   - claudia_delete_task: Archive/remove a task from the sidebar
  *   - claudia_cron_create / claudia_cron_list / claudia_cron_delete / claudia_cron_pause:
  *     Manage scheduled (cron) prompts attached to tasks
- *
- * Note: Archive/delete tools intentionally NOT exposed to MCP. Only the user
- * can archive or delete tasks via the UI — agents must never archive tasks.
  *
 
  */
@@ -67,6 +65,34 @@ const log = {
         }
     }
 };
+
+/**
+ * Get all workspace IDs that belong to the current workspace scope.
+ * Includes the workspace itself plus any child worktree workspaces.
+ * This ensures tasks in worktrees are visible to their parent workspace's MCP tools.
+ */
+async function getScopedWorkspaceIds(): Promise<Set<string>> {
+    const ids = new Set<string>();
+    if (!WORKSPACE_ID) return ids;
+    ids.add(WORKSPACE_ID);
+
+    try {
+        const response = await backendFetch('/api/workspaces');
+        if (response.ok) {
+            const data = await response.json();
+            const workspaces = data.workspaces || data;
+            for (const ws of workspaces) {
+                if (ws.worktreeParentId === WORKSPACE_ID) {
+                    ids.add(ws.id);
+                }
+            }
+        }
+    } catch {
+        // If workspace fetch fails, just use the direct workspace ID
+    }
+
+    return ids;
+}
 
 /**
  * Make an HTTP request to the Claudia backend
@@ -193,6 +219,62 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
     });
 }
 
+/**
+ * Send a WS message and wait for one of multiple possible responses.
+ * The matcher function is called for each incoming message and should return
+ * a result object if the message is the expected response, or null to keep waiting.
+ */
+async function sendWSMessageWithMultiResponse<T>(
+    type: string,
+    payload: Record<string, unknown>,
+    matcher: (msg: { type: string; payload?: any }) => T | null,
+    timeoutMs: number = 30000
+): Promise<T> {
+    const WebSocket = (await import('ws')).default;
+
+    return new Promise((resolve, reject) => {
+        const wsUrl = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss://');
+        const ws = new WebSocket(wsUrl);
+        const timeout = setTimeout(() => {
+            ws.close();
+            reject(new Error(`WebSocket operation timed out after ${timeoutMs / 1000}s for ${type}`));
+        }, timeoutMs);
+
+        ws.on('open', () => {
+            log.debug(`WS connected, sending: ${type}`);
+            ws.send(JSON.stringify({ type, payload }));
+        });
+
+        ws.on('message', (data: Buffer) => {
+            try {
+                const msg = JSON.parse(data.toString());
+                const result = matcher(msg);
+                if (result !== null) {
+                    clearTimeout(timeout);
+                    ws.close();
+                    resolve(result);
+                }
+                if (msg.type === 'error') {
+                    clearTimeout(timeout);
+                    ws.close();
+                    reject(new Error(msg.payload?.message || 'Unknown WebSocket error'));
+                }
+            } catch {
+                // Ignore parse errors
+            }
+        });
+
+        ws.on('error', (err: Error) => {
+            clearTimeout(timeout);
+            reject(new Error(`WebSocket error: ${err.message}`));
+        });
+
+        ws.on('close', () => {
+            clearTimeout(timeout);
+        });
+    });
+}
+
 // Create the MCP server
 const server = new McpServer({
     name: 'claudia',
@@ -208,7 +290,7 @@ const server = new McpServer({
 // ============================================================================
 server.tool(
     'claudia_list_tasks',
-    `List all active tasks in the current workspace. Shows task ID, state, prompt, and whether it is waiting for input.${WORKSPACE_ID ? ` Scoped to workspace: ${WORKSPACE_ID}` : ''}`,
+    `List all tasks in the current workspace (including disconnected/interrupted ones). Shows task ID, state, prompt, and whether it is waiting for input. Disconnected tasks can be resumed via claudia_continue_task.${WORKSPACE_ID ? ` Scoped to workspace: ${WORKSPACE_ID}` : ''}`,
     {},
     async () => {
         try {
@@ -218,13 +300,14 @@ server.tool(
             }
             let tasks = await response.json();
 
-            // Filter to current workspace
+            // Filter to current workspace and its child worktrees
             if (WORKSPACE_ID) {
-                tasks = tasks.filter((t: any) => t.workspaceId === WORKSPACE_ID);
+                const scopedIds = await getScopedWorkspaceIds();
+                tasks = tasks.filter((t: any) => scopedIds.has(t.workspaceId));
             }
 
             if (!tasks || tasks.length === 0) {
-                return { content: [{ type: 'text', text: `No active tasks in this workspace.` }] };
+                return { content: [{ type: 'text', text: `No tasks in this workspace.` }] };
             }
 
             const now = Date.now();
@@ -242,6 +325,7 @@ server.tool(
                     processStartedAt: t.processStartedAt || null,
                     runningFor: runningForMs ? formatDuration(runningForMs) : null,
                     waitingInputType: t.waitingInputType || null,
+                    canResume: t.state === 'disconnected' || t.state === 'interrupted' || t.state === 'idle' || t.state === 'exited',
                 };
             });
 
@@ -262,7 +346,7 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_get_task_status',
-    'Get detailed status of a specific task including state, runtime duration, and a snippet of recent output. Use this to check progress of spawned tasks without fetching full output.',
+    'Get detailed status of a specific task including state, runtime duration, and a snippet of recent output. Works for all task states including disconnected and interrupted tasks. Use this to check progress of spawned tasks without fetching full output.',
     {
         taskId: z.string().describe('The task ID to get status for'),
     },
@@ -310,6 +394,7 @@ server.tool(
                 processStartedAt: task.processStartedAt || null,
                 runningFor: runningForMs ? formatDuration(runningForMs) : null,
                 waitingInputType: task.waitingInputType || null,
+                canResume: task.state === 'disconnected' || task.state === 'interrupted' || task.state === 'idle' || task.state === 'exited',
                 recentOutput: outputSnippet,
             };
 
@@ -570,7 +655,7 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_continue_task',
-    'Send a follow-up prompt to an idle or exited Claude Code task, resuming its session with a new instruction. Works on tasks in idle, exited, or disconnected states. The task will reconnect if needed and start processing the new prompt.',
+    'Send a follow-up prompt to an idle, exited, disconnected, or interrupted Claude Code task, resuming its session with a new instruction. Disconnected/interrupted tasks will be automatically reconnected before the prompt is delivered. The task will start processing the new prompt.',
     {
         taskId: z.string().describe('The task ID to continue'),
         prompt: z.string().describe('The follow-up prompt/instructions to send to the task'),
@@ -603,6 +688,9 @@ server.tool(
                             }, null, 2)
                         }]
                     };
+                }
+                if (task.state === 'disconnected' || task.state === 'interrupted') {
+                    log.info(`Task ${taskId} is ${task.state}, will auto-reconnect on input`);
                 }
             }
 
@@ -715,26 +803,33 @@ server.tool(
         try {
             log.info(`Stopping all tasks in workspace: ${WORKSPACE_ID}${SELF_TASK_ID ? ` (excluding self: ${SELF_TASK_ID})` : ''}`);
 
-            const result = await sendWSMessage('task:stopAll', {
-                workspaceId: WORKSPACE_ID,
-                // Exclude the calling task itself to prevent race condition
-                // where the orchestrator stops its own Claude Code session
-                ...(SELF_TASK_ID ? { excludeTaskId: SELF_TASK_ID } : {}),
-            }) as {
-                workspaceId: string;
-                stoppedCount: number;
-                stoppedIds: string[];
-            };
+            // Stop tasks in the parent workspace and all child worktrees
+            const scopedIds = await getScopedWorkspaceIds();
+            let totalStopped = 0;
+            const allStoppedIds: string[] = [];
+
+            for (const wsId of scopedIds) {
+                const result = await sendWSMessage('task:stopAll', {
+                    workspaceId: wsId,
+                    ...(SELF_TASK_ID ? { excludeTaskId: SELF_TASK_ID } : {}),
+                }) as {
+                    workspaceId: string;
+                    stoppedCount: number;
+                    stoppedIds: string[];
+                };
+                totalStopped += result.stoppedCount;
+                allStoppedIds.push(...result.stoppedIds);
+            }
 
             return {
                 content: [{
                     type: 'text',
                     text: JSON.stringify({
                         success: true,
-                        stoppedCount: result.stoppedCount,
-                        stoppedIds: result.stoppedIds,
-                        message: result.stoppedCount > 0
-                            ? `Stopped ${result.stoppedCount} task(s): ${result.stoppedIds.join(', ')}`
+                        stoppedCount: totalStopped,
+                        stoppedIds: allStoppedIds,
+                        message: totalStopped > 0
+                            ? `Stopped ${totalStopped} task(s): ${allStoppedIds.join(', ')}`
                             : 'No running tasks found in this workspace.',
                     }, null, 2)
                 }]
@@ -808,6 +903,96 @@ server.tool(
                     text: `Error renaming task: ${error instanceof Error ? error.message : String(error)}`
                 }]
             };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_delete_task
+// ============================================================================
+server.tool(
+    'claudia_delete_task',
+    'Request deletion (archival) of a task. This sends a confirmation popup to the user — the task is only deleted if the user approves. IMPORTANT: Only call this when the user explicitly asks to delete/remove a task. Never delete tasks automatically after completion — users want to review outputs.',
+    {
+        taskId: z.string().describe('The task ID to delete'),
+    },
+    async ({ taskId }) => {
+        if (SELF_TASK_ID && taskId === SELF_TASK_ID) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: false,
+                        message: `Cannot delete task '${taskId}' because it is the currently running session.`,
+                    }, null, 2)
+                }]
+            };
+        }
+
+        try {
+            // Look up task name for the confirmation dialog
+            let taskName = taskId;
+            try {
+                const tasksResponse = await backendFetch('/api/tasks');
+                if (tasksResponse.ok) {
+                    const tasks = await tasksResponse.json();
+                    const task = tasks.find((t: any) => t.id === taskId);
+                    if (!task) {
+                        return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
+                    }
+                    taskName = task.displayName || task.prompt?.substring(0, 60) || taskId;
+                }
+            } catch { /* use taskId as fallback name */ }
+
+            const requestId = `del-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            log.info(`Requesting user confirmation to delete task: ${taskId}`, { requestId });
+
+            // Send deleteRequest — backend broadcasts to frontend which shows
+            // a confirmation modal. We wait for either task:destroyed (approved)
+            // or task:deleteRejected (denied).
+            const result = await sendWSMessageWithMultiResponse(
+                'task:deleteRequest',
+                { taskId, requestId, taskName },
+                (msg) => {
+                    if (msg.type === 'task:destroyed' && msg.payload?.taskId === taskId) {
+                        return { outcome: 'approved' };
+                    }
+                    if (msg.type === 'task:deleteRejected' && msg.payload?.requestId === requestId) {
+                        return { outcome: 'rejected' };
+                    }
+                    return null;
+                },
+                60000
+            );
+
+            if (result.outcome === 'approved') {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({
+                            success: true,
+                            message: `Task '${taskName}' deleted (archived) by user.`,
+                        }, null, 2)
+                    }]
+                };
+            } else {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({
+                            success: false,
+                            message: `User rejected deletion of task '${taskName}'.`,
+                        }, null, 2)
+                    }]
+                };
+            }
+        } catch (error) {
+            log.error('Failed to delete task:', error);
+            const msg = error instanceof Error ? error.message : String(error);
+            if (msg.includes('timed out')) {
+                return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: 'User did not respond to the deletion confirmation within 60 seconds.' }, null, 2) }] };
+            }
+            return { content: [{ type: 'text', text: `Error deleting task: ${msg}` }] };
         }
     }
 );
