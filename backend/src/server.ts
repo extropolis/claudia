@@ -16,7 +16,7 @@ import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
+import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS, TaskTokenUsage, UsageDashboardData, TaskState } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
@@ -24,6 +24,10 @@ import { WorktreeManager } from './worktree-manager.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
+import { registerDevice, unregisterDevice, listDevices, sendPush } from './mobile-push.js';
+import { generateMobileSummary, buildSimulatedSummary } from './task-summary.js';
+import { MobileChatStore } from './mobile-chat-store.js';
+import { MobileAgent } from './mobile-agent.js';
 import { getVoiceAgentPageHtml } from './voice-agent-page.js';
 import { VoiceSupervisor } from './voice-supervisor.js';
 // import { ElevenLabsTTS } from './elevenlabs-tts.js'; // TODO: Implement ElevenLabs TTS
@@ -510,6 +514,14 @@ export async function createApp(basePath?: string) {
     );
     cronScheduler.start();
 
+    // Mobile companion: per-workspace chat transcript + agent
+    const mobileChatStore = new MobileChatStore(basePath);
+    const mobileAgent = new MobileAgent({
+        chatStore: mobileChatStore,
+        taskSpawner,
+        workspaceStore,
+    });
+
     // Wire up tunnel events for broadcasting
     tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
         logger.info('Tunnel ready, broadcasting status', { url: data.url });
@@ -675,10 +687,77 @@ export async function createApp(basePath?: string) {
         }
     }
 
+    // Track last-seen task state so we can detect transitions across batched
+    // broadcast windows. Used by the mobile companion to fire `task:summary`
+    // exactly once when a task settles from busy/starting/waiting_input → idle.
+    const lastTaskState = new Map<string, TaskState>();
+
     // Queue a task state change for batched broadcast
     function queueTaskStateChange(task: Task): void {
+        const prevState = lastTaskState.get(task.id);
         pendingTaskStateChanges.set(task.id, task);
         scheduleBatchedBroadcast();
+
+        const wasActive =
+            prevState === 'busy' ||
+            prevState === 'starting' ||
+            prevState === 'waiting_input';
+        if (task.state === 'idle' && wasActive) {
+            void emitMobileTaskSummary(task).catch((err) =>
+                console.error('[mobile-push] summary emit failed:', err),
+            );
+        }
+        lastTaskState.set(task.id, task.state);
+    }
+
+    async function emitMobileTaskSummary(task: Task): Promise<void> {
+        // New mobile chat path: have the per-workspace agent generate a chat-style
+        // summary message + dynamic quick actions. The store appends durably; we
+        // broadcast over WS so any paired devices update immediately.
+        let chatMessage: Awaited<ReturnType<typeof mobileAgent.summarizeIdleTask>> | undefined;
+        try {
+            chatMessage = await mobileAgent.summarizeIdleTask(task);
+            broadcast({
+                type: 'chat:message' as WSMessageType,
+                payload: { workspaceId: task.workspaceId, message: chatMessage },
+            });
+        } catch (err) {
+            console.error('[mobile-chat] summarizeIdleTask failed:', err);
+        }
+
+        // Legacy `task:summary` (used by the old card-based mobile UI and by any
+        // other consumers) — keep emitting for back-compat. Built from the same
+        // chat message when available; otherwise fall back to the old generator.
+        let legacy;
+        if (chatMessage) {
+            legacy = {
+                taskId: task.id,
+                workspaceId: task.workspaceId,
+                workspaceName: workspaceStore
+                    .getWorkspaces()
+                    .find((w) => w.id === task.workspaceId)?.displayName,
+                taskName: task.displayName ?? task.prompt,
+                state: task.state,
+                summary: chatMessage.text,
+                spendUsd: task.tokenUsage?.totalCostUsd,
+                nextActions: chatMessage.quickActions ?? [],
+                timestamp: chatMessage.createdAt,
+            };
+        } else {
+            const ws = workspaceStore.getWorkspaces().find((w) => w.id === task.workspaceId);
+            legacy = await generateMobileSummary({
+                task,
+                workspaceName: ws?.displayName ?? ws?.name,
+                spendUsd: task.tokenUsage?.totalCostUsd,
+            });
+        }
+        broadcast({ type: 'task:summary' as WSMessageType, payload: legacy });
+
+        await sendPush({
+            title: legacy.taskName ?? 'Task complete',
+            body: legacy.summary,
+            data: { kind: 'task:summary', taskId: legacy.taskId },
+        });
     }
 
     // Queue a tasks:updated broadcast (will be deduplicated)
@@ -2601,6 +2680,200 @@ export async function createApp(basePath?: string) {
     // REST API routes
     app.get('/api/health', (_req, res) => {
         res.json({ status: 'ok' });
+    });
+
+    // ─── Mobile companion app routes ───────────────────────────────────────
+    // Token-gated when accessed via tunnel (the global tunnel auth middleware
+    // handles that). Locally these are open so the RN web build on
+    // http://localhost can hit them without ceremony.
+
+    // Bridge metadata for the mobile app to display after connecting.
+    app.get('/api/mobile/bridge-info', (_req, res) => {
+        const tunnelStatus = tunnelManager.getStatus();
+        const dgKey =
+            configStore.getConfig().deepgramApiKey ?? process.env.DEEPGRAM_API_KEY;
+        res.json({
+            success: true,
+            version: '0.1.0',
+            tunnel: { active: tunnelStatus.active, url: tunnelStatus.url },
+            voiceConfigured: Boolean(dgKey),
+            pushSupported: true,
+        });
+    });
+
+    // Register an Expo push token (called by the RN app on first launch).
+    app.post('/api/mobile/register-push', (req, res) => {
+        const { deviceId, pushToken, platform, label } = req.body ?? {};
+        if (typeof deviceId !== 'string' || typeof pushToken !== 'string') {
+            return res
+                .status(400)
+                .json({ success: false, error: 'deviceId and pushToken are required strings' });
+        }
+        const plat: 'ios' | 'android' | 'web' =
+            platform === 'ios' || platform === 'android' || platform === 'web' ? platform : 'web';
+        const device = registerDevice({ deviceId, pushToken, platform: plat, label });
+        res.json({ success: true, device });
+    });
+
+    app.delete('/api/mobile/register-push/:deviceId', (req, res) => {
+        const ok = unregisterDevice(req.params.deviceId);
+        res.json({ success: ok });
+    });
+
+    app.get('/api/mobile/devices', (_req, res) => {
+        res.json({ success: true, devices: listDevices() });
+    });
+
+    // Send a test push (used by the mobile app's "Send test" button and by
+    // the test-cli's --simulate-mobile-event flag).
+    app.post('/api/mobile/test-push', async (req, res) => {
+        const title = (req.body?.title as string) ?? 'Claudia';
+        const body = (req.body?.body as string) ?? 'Test notification from your bridge.';
+        const result = await sendPush({ title, body, data: { kind: 'test' } });
+        res.json({ success: true, result });
+    });
+
+    // Simulate a `task:summary` event end-to-end. Used by --simulate-mobile-event
+    // to verify the mobile feed without spawning a real task.
+    app.post('/api/mobile/simulate-summary', async (req, res) => {
+        const taskId = (req.body?.taskId as string) ?? 'sim-task';
+        const summary = buildSimulatedSummary(taskId);
+        broadcast({ type: 'task:summary' as WSMessageType, payload: summary });
+        // Also push so phones registered to this bridge see it on lock screen.
+        await sendPush({
+            title: summary.taskName ?? 'Task complete',
+            body: summary.summary,
+            data: { kind: 'task:summary', taskId: summary.taskId },
+        });
+        res.json({ success: true, summary });
+    });
+
+    // ─── Mobile single-agent chat ───────────────────────────────────────────
+    // Per-workspace chat transcript between the user and the mobile agent.
+    // The agent decides what to do (spawn task, send input, just reply) via
+    // tool calls — see backend/src/mobile-agent.ts. Transcripts are persisted
+    // server-side so multiple paired devices stay in sync.
+    //
+    // Workspace IDs are filesystem paths (containing slashes), so we pass them
+    // as `?workspaceId=...` query/body args rather than as URL path params —
+    // Express path matching strips embedded slashes even when URL-encoded.
+
+    // Fetch the transcript for a workspace.
+    app.get('/api/mobile/chat', (req, res) => {
+        const workspaceId = (req.query.workspaceId as string) ?? '';
+        if (!workspaceId) {
+            res.status(400).json({ error: 'workspaceId query param is required' });
+            return;
+        }
+        const messages = mobileChatStore.getTranscript(workspaceId);
+        res.json({ workspaceId, messages });
+    });
+
+    // Send a user message into the workspace chat. Runs the agent loop,
+    // appends both the user message and any agent/system messages it
+    // produces, broadcasts each new message over WS, and returns them so the
+    // device can update its UI immediately even before the WS event lands.
+    app.post('/api/mobile/chat', async (req, res) => {
+        const workspaceId =
+            (typeof req.body?.workspaceId === 'string' ? req.body.workspaceId : '') ||
+            (req.query.workspaceId as string | undefined) ||
+            '';
+        const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+        if (!workspaceId) {
+            res.status(400).json({ error: 'workspaceId is required' });
+            return;
+        }
+        if (!text) {
+            res.status(400).json({ error: 'text is required and must be non-empty' });
+            return;
+        }
+        const ws = workspaceStore.getWorkspaces().find((w) => w.id === workspaceId);
+        if (!ws) {
+            res.status(404).json({ error: `Workspace '${workspaceId}' not found` });
+            return;
+        }
+
+        try {
+            const beforeCount = mobileChatStore.getTranscript(workspaceId).length;
+            const newMessages = await mobileAgent.runAgentTurn(workspaceId, text);
+            const afterAll = mobileChatStore.getTranscript(workspaceId);
+            const fresh = afterAll.slice(beforeCount);
+            for (const m of fresh) {
+                broadcast({
+                    type: 'chat:message' as WSMessageType,
+                    payload: { workspaceId, message: m },
+                });
+            }
+            res.json({ success: true, messages: fresh, agentMessages: newMessages });
+        } catch (err) {
+            console.error('[mobile-chat] runAgentTurn failed:', err);
+            res
+                .status(500)
+                .json({ error: err instanceof Error ? err.message : 'agent turn failed' });
+        }
+    });
+
+    // Wipe a workspace's transcript.
+    app.delete('/api/mobile/chat', (req, res) => {
+        const workspaceId =
+            (typeof req.body?.workspaceId === 'string' ? req.body.workspaceId : '') ||
+            (req.query.workspaceId as string | undefined) ||
+            '';
+        if (!workspaceId) {
+            res.status(400).json({ error: 'workspaceId is required' });
+            return;
+        }
+        const removed = mobileChatStore.clear(workspaceId);
+        res.json({ success: true, removed });
+    });
+
+    // Run the idle-task summary path on demand (test/debug). Bypasses the
+    // need to wait for a real busy→idle transition — handy for `test-cli
+    // --mobile-summary --task-id <id>` when iterating on the LLM prompt.
+    app.post('/api/mobile/chat/summarize-task', async (req, res) => {
+        const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId : '';
+        if (!taskId) {
+            res.status(400).json({ error: 'body.taskId is required' });
+            return;
+        }
+        const task = taskSpawner.getTask(taskId);
+        if (!task) {
+            res.status(404).json({ error: `Task '${taskId}' not found` });
+            return;
+        }
+        try {
+            const message = await mobileAgent.summarizeIdleTask(task);
+            broadcast({
+                type: 'chat:message' as WSMessageType,
+                payload: { workspaceId: task.workspaceId, message },
+            });
+            res.json({ success: true, message });
+        } catch (err) {
+            console.error('[mobile-chat] summarizeIdleTask (manual) failed:', err);
+            res
+                .status(500)
+                .json({ error: err instanceof Error ? err.message : 'summary failed' });
+        }
+    });
+
+    // ─── Voice (Deepgram) ────────────────────────────────────────────────
+    // The RN app uses Deepgram's streaming WebSocket directly. We serve the
+    // user's saved Deepgram key (stored via the desktop Settings → Voice
+    // panel, persisted to config.json by `setDeepgramApiKey`) so the device
+    // never has to hold it long-term — it just opens a WS, streams a clip,
+    // and discards. If no key is configured we return configured:false and
+    // the mobile app falls back to text-only input.
+    //
+    // For production tunnel deployments we should mint a short-lived member
+    // key via Deepgram's Management API instead of forwarding the long-lived
+    // one. That's a v2 hardening pass.
+    app.get('/api/voice/deepgram-token', async (_req, res) => {
+        const apiKey =
+            configStore.getConfig().deepgramApiKey || process.env.DEEPGRAM_API_KEY;
+        if (!apiKey) {
+            return res.json({ success: true, configured: false });
+        }
+        res.json({ success: true, configured: true, key: apiKey, expiresIn: 30 });
     });
 
     // Byte-range read of a task's history file. Used by the terminal's

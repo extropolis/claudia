@@ -139,6 +139,63 @@ export interface TaskSummary {
     timestamp: Date;
 }
 
+// Mobile companion app — compact summary card emitted to mobile clients
+// when a task transitions to idle (and has settled). Powers the feed UI.
+export interface MobileTaskSummary {
+    taskId: string;
+    workspaceId: string;
+    workspaceName?: string;
+    taskName?: string;            // task displayName or prompt
+    state: TaskState;
+    summary: string;              // ≤2 lines
+    spendUsd?: number;
+    iterations?: number;
+    nextActions: { label: string; prompt: string }[];
+    timestamp: string;            // ISO
+}
+
+// Mobile companion app — single-agent chat redesign.
+//
+// Each workspace has its own chat transcript. Messages are produced by:
+//   • the user (`role: 'user'`) — typed/voice input from the device
+//   • the mobile agent (`role: 'agent'`) — proactive task summaries, replies
+//     to user input, or tool-call confirmations (e.g. "spawned a new task to
+//     run tests"). Agent messages can carry `quickActions` for one-tap reply.
+//   • the system (`role: 'system'`) — error/info banners (rare).
+//
+// `taskId` is set when the message is *about* a particular task (e.g. a task
+// summary). `quickActions` are short button labels with the prompt to send
+// when tapped — the prompt is sent back to the same `taskId` if present, or
+// to whatever task the agent decides via tool calls if not.
+export interface MobileChatQuickAction {
+    label: string;                // ≤24 chars; chip text
+    prompt: string;               // full natural-language prompt to send
+}
+
+export interface MobileChatMessage {
+    id: string;
+    workspaceId: string;
+    role: 'user' | 'agent' | 'system';
+    text: string;
+    // When set, this message is associated with a specific task (e.g. an
+    // auto-generated task summary, or an agent reply triggered by a task
+    // event). Tapping the message in the UI opens that task's terminal.
+    taskId?: string;
+    // For agent messages: dynamically generated quick-reply chips.
+    quickActions?: MobileChatQuickAction[];
+    createdAt: string;            // ISO
+}
+
+// Minimal chat view — first-person narrations the backend periodically
+// generates while a task is busy. Streamed to the frontend so the user can
+// watch Claude narrate its own work without staring at the full PTY.
+export interface NarrationMessage {
+    id: string;
+    taskId: string;
+    text: string;                 // 1-2 conversational sentences, present-tense
+    timestamp: string;            // ISO
+}
+
 // Scheduled task (cron) for recurring/one-shot prompts
 export interface ScheduledTask {
     id: string;                    // 8-char unique ID
@@ -207,9 +264,15 @@ export type WSMessageType =
     | 'shell:closed'
     // Supervisor/Chat
     | 'task:summary'
+    | 'task:narration'
+    | 'task:narration:restore'
     | 'supervisor:chat:response'
     | 'supervisor:chat:history'
     | 'supervisor:chat:typing'
+    // Mobile companion
+    | 'mobile:registered'
+    | 'mobile:simulate'
+    | 'chat:message'
     // Scheduled tasks (cron)
     | 'cron:created'
     | 'cron:deleted'
