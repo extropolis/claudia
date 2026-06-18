@@ -191,15 +191,15 @@
 .terminal-container-wrapper {
     flex: 1;
     position: relative;
-    min-height: 0;
+    min-height: 0; /* Allow shrinking in flex context - was 100px which prevented proper layout on mobile */
     overflow: hidden;
-    padding: 8px; /* Padding here so ghostty-web measures the exact canvas target */
 }
 
 .terminal-container {
     width: 100%;
     height: 100%;
-    min-height: 0;
+    padding: 8px;
+    min-height: 0; /* Allow shrinking in flex context */
     overflow: hidden;
     position: relative; /* Required for ghostty-web's absolute-positioned input textarea */
 }
