@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { init as initGhostty, Terminal, FitAddon, OSC8LinkProvider, UrlRegexProvider } from 'ghostty-web';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import { WebglAddon } from '@xterm/addon-webgl';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { Task, Workspace } from '@claudia/shared';
 import { Copy, Check, Play, BookOpen, ArrowDown, MessageSquare } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
@@ -9,14 +13,8 @@ import { useEffectiveTheme } from '../hooks/useTheme';
 import { useTaskStore } from '../stores/taskStore';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
 import { getApiBaseUrl } from '../config/api-config';
+import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
-
-// Ghostty WASM is initialized once per page load — subsequent calls are no-ops.
-let ghosttyInitPromise: Promise<void> | null = null;
-function ensureGhosttyInit(): Promise<void> {
-  if (!ghosttyInitPromise) ghosttyInitPromise = initGhostty();
-  return ghosttyInitPromise;
-}
 
 /**
  * Strip screen-clearing escape sequences from restored history.
@@ -62,6 +60,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const webglAddonRef = useRef<WebglAddon | null>(null);
   const userHasScrolledRef = useRef(false); // Track if user manually scrolled up
   const programmaticScrollRef = useRef(false); // Track programmatic scrolls to ignore in scroll handler
   const [copied, setCopied] = useState(false);
@@ -202,27 +201,25 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
       terminalRef.current.removeChild(terminalRef.current.firstChild);
     }
 
-    let destroyed = false;
-    let cleanup: (() => void) | null = null;
-    let termDisposed = false;
-
-    // ghostty-web requires WASM to be initialized before Terminal construction.
-    // We await it before creating the instance; subsequent calls are instant no-ops.
-    void ensureGhosttyInit().then(() => {
-    if (destroyed || !terminalRef.current) return;
-
     // Create terminal
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 14,
       fontFamily: '"SF Mono", "Monaco", "Inconsolata", "Fira Code", monospace',
       scrollback: 10000,
+      allowProposedApi: true,
       scrollOnUserInput: false, // Disable automatic scroll on user input - we'll control it manually
       theme: effectiveTheme === 'light' ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME,
     });
 
     const fitAddon = new FitAddon();
+    const webLinksAddon = new WebLinksAddon();
+    const unicode11Addon = new Unicode11Addon();
+
     term.loadAddon(fitAddon);
+    term.loadAddon(webLinksAddon);
+    term.loadAddon(unicode11Addon);
+    term.unicode.activeVersion = '11';
 
     // Clipboard integration: Ctrl+V / Cmd+V paste and Ctrl+C / Cmd+C copy
     // Works in both Electron and browser environments
@@ -368,10 +365,30 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // Register OSC8 hyperlinks and URL detection — ghostty-web handles these
-    // natively via link providers (replaces xterm's WebLinksAddon).
-    term.registerLinkProvider(new OSC8LinkProvider(term));
-    term.registerLinkProvider(new UrlRegexProvider(term));
+    // WebGL renderer — GPU-accelerated, significantly faster for high-throughput
+    // TUI output. Falls back to the DOM renderer on context loss or if WebGL2
+    // is unavailable (headless Chromium, older hardware, certain VMs). We probe
+    // for WebGL2 before instantiating because WebglAddon's constructor succeeds
+    // even when WebGL2 is unsupported, then crashes during dispose with
+    // "Cannot read properties of undefined (reading '_isDisposed')".
+    const probeCanvas = document.createElement('canvas');
+    const hasWebgl2 = !!probeCanvas.getContext('webgl2');
+    if (hasWebgl2) {
+      try {
+        const webglAddon = new WebglAddon();
+        webglAddon.onContextLoss(() => {
+          console.warn('[TerminalView] WebGL context lost — falling back to DOM renderer');
+          try { webglAddon.dispose(); } catch { /* already disposed */ }
+          webglAddonRef.current = null;
+        });
+        term.loadAddon(webglAddon);
+        webglAddonRef.current = webglAddon;
+      } catch (e) {
+        console.warn('[TerminalView] WebGL addon failed to load, using DOM renderer:', e);
+      }
+    } else {
+      console.info('[TerminalView] WebGL2 unavailable, using DOM renderer');
+    }
 
     // Track user scroll position to prevent auto-scroll when user has scrolled up
     // We need to distinguish between programmatic scrolls and user scrolls
@@ -587,7 +604,6 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
     // Message handler
     const handleMessage = (event: MessageEvent) => {
-      if (termDisposed) return;
       try {
         const message = JSON.parse(event.data);
         if (message.type === 'task:output' && message.payload.taskId === task.id) {
@@ -736,7 +752,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     // NOTE: task:select is sent inside the requestAnimationFrame above
     // (after fitAddon.fit()) so that history arrives at the correct terminal size.
 
-    cleanup = () => {
+    return () => {
       if (resizeTimeout) window.clearTimeout(resizeTimeout);
       if (resizeBufferTimer) window.clearTimeout(resizeBufferTimer);
       resizeObserver.disconnect();
@@ -747,16 +763,17 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
       if (wsRef.current) {
         wsRef.current.removeEventListener('message', handleMessage);
       }
+      // Dispose WebGL addon explicitly before term.dispose() to avoid
+      // "Cannot read properties of undefined (reading '_isDisposed')" crash
+      // that occurs when the AddonManager tries to dispose a partially-initialized
+      // WebGL renderer during component unmount (e.g. switching tasks).
+      if (webglAddonRef.current) {
+        try { webglAddonRef.current.dispose(); } catch { /* ignore */ }
+        webglAddonRef.current = null;
+      }
       term.dispose();
-      termDisposed = true;
       xtermRef.current = null;
       fitAddonRef.current = null;
-    };
-    }); // end ensureGhosttyInit().then()
-
-    return () => {
-      destroyed = true;
-      if (cleanup) cleanup();
     };
   }, [task.id, wsRef]);
 
