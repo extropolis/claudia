@@ -228,9 +228,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     // Works in both Electron and browser environments
     const isMac = /Mac|iPhone|iPod|iPad/.test(navigator.userAgent);
     term.attachCustomKeyEventHandler((event) => {
-      // ghostty-web semantics: return true = "I handled it, skip default processing"
-      //                        return false = "let ghostty handle it normally"
-      if (event.type !== 'keydown') return false;
+      if (event.type !== 'keydown') return true;
 
       const modKey = isMac ? event.metaKey : event.ctrlKey;
 
@@ -239,6 +237,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         (modKey && event.key === 'v') ||
         (!isMac && event.ctrlKey && event.shiftKey && event.key === 'V');
       if (isPaste) {
+        // Prevent the browser's native paste event from also firing
+        // (which would cause xterm to paste a second time)
         event.preventDefault();
         if (window.electronAPI?.readClipboard) {
           const text = window.electronAPI.readClipboard();
@@ -253,7 +253,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
               console.warn('[TerminalView] Clipboard paste failed:', err);
             });
         }
-        return true; // handled — skip ghostty default
+        return false; // Prevent xterm from also handling the key
       }
 
       // Copy: Ctrl+C (Win/Linux), Cmd+C (Mac), or Ctrl+Shift+C (Linux terminal style)
@@ -270,13 +270,13 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
               console.warn('[TerminalView] Clipboard copy failed:', err);
             });
           }
-          return true; // handled — skip ghostty default
+          return false;
         }
         // No selection: let Ctrl+C pass through as SIGINT (but not Cmd+C on Mac)
-        if (isMac) return true;
+        if (isMac) return false;
       }
 
-      return false; // pass-through — let ghostty handle normally
+      return true;
     });
 
     // Handle input BEFORE open
