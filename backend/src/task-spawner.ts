@@ -3444,40 +3444,20 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // If task not found in active tasks, check if it's disconnected and needs reconnecting
         if (!task) {
             if (this.disconnectedTasks.has(taskId)) {
-                console.log(`[TaskSpawner] Task ${taskId} is disconnected, auto-reconnecting before write`);
+                console.log(`[TaskSpawner] Task ${taskId} is disconnected — reconnecting and queueing input for delivery once the resumed session is ready`);
                 console.log(`[TaskSpawner] Input length: ${data.length}, Data preview: ${JSON.stringify(data.substring(0, 50))}`);
-                const reconnectedTask = this.reconnectTask(taskId);
-                if (reconnectedTask) {
-                    task = this.tasks.get(taskId);
-                    if (task) {
-                        task.isActive = true;
-                        this.emit('tasksUpdated');
-                        // Wait for the task to reach idle state before delivering the write.
-                        // A fixed 500ms timeout was too short for large pastes — Claude Code
-                        // may not be ready to accept input yet when the TUI is still initializing.
-                        let delivered = false;
-                        const onStateChanged = (changedTask: Task) => {
-                            if (changedTask.id === taskId && changedTask.state === 'idle' && !delivered) {
-                                delivered = true;
-                                this.removeListener('taskStateChanged', onStateChanged);
-                                console.log(`[TaskSpawner] Task ${taskId} reached idle after reconnect, delivering pending write`);
-                                this.writeToTask(taskId, data);
-                            }
-                        };
-                        this.on('taskStateChanged', onStateChanged);
-                        // Safety fallback: if task never reaches idle within 15s, try anyway
-                        setTimeout(() => {
-                            if (!delivered) {
-                                delivered = true;
-                                this.removeListener('taskStateChanged', onStateChanged);
-                                console.log(`[TaskSpawner] Fallback: delivering pending write after 15s for task ${taskId}`);
-                                this.writeToTask(taskId, data);
-                            }
-                        }, 15000);
-                        return;
-                    }
+                // Hand the input to reconnectTask so it is delivered through the SAME
+                // TUI-ready detection + Enter-retry path that delivers a new task's
+                // initial prompt. reconnectTask creates the task with the message as a
+                // pendingPrompt and waits for the resumed Claude TUI to actually signal
+                // readiness before sending it. This is deterministic — the previous
+                // approach raced a one-shot 'idle' transition that reconnectTask had
+                // usually already emitted by the time a listener could attach, so the
+                // first message stalled behind a 15s fallback (or was lost entirely).
+                const reconnectedTask = this.reconnectTask(taskId, data);
+                if (!reconnectedTask) {
+                    console.log(`[TaskSpawner] Failed to reconnect task ${taskId} for write`);
                 }
-                console.log(`[TaskSpawner] Failed to reconnect task ${taskId} for write`);
             } else {
                 console.log(`[TaskSpawner] Cannot write to task ${taskId}: task not found`);
             }
@@ -4049,7 +4029,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         return [...liveTasks, ...disconnectedTasks];
     }
 
-    reconnectTask(taskId: string): Task | null {
+    reconnectTask(taskId: string, pendingInput?: string): Task | null {
         // Guard: if the task is already live, return it without spawning a second process
         if (this.tasks.has(taskId)) {
             const existing = this.tasks.get(taskId)!;
@@ -4084,6 +4064,16 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         const persisted = this.disconnectedTasks.get(taskId);
         if (!persisted) {
             console.log(`[TaskSpawner] Cannot reconnect: task ${taskId} not found`);
+            return null;
+        }
+
+        // Guard: the task's working directory must still exist before we spawn a PTY
+        // into it. Worktree directories can be removed after their PR merges; spawning
+        // with a non-existent cwd throws ENOENT, which was previously swallowed so the
+        // user's input vanished with no feedback. Fail the reconnect explicitly instead.
+        if (!existsSync(persisted.workspaceId)) {
+            console.error(`[TaskSpawner] Cannot reconnect task ${taskId}: workspace directory no longer exists: ${persisted.workspaceId}`);
+            logger.error('Reconnect failed: workspace directory missing', { taskId, workspaceId: persisted.workspaceId });
             return null;
         }
 
@@ -4258,13 +4248,24 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             logger.info(`Task was interrupted, will auto-continue`, { taskId });
         }
 
+        // A message the user typed into a disconnected task (pendingInput) is delivered
+        // the same way as a new task's initial prompt: queued as pendingPrompt and sent
+        // by the ready-detection in setupProcessHandlers (with the fallback timer below)
+        // once the resumed Claude TUI actually signals it can accept input. Strip a
+        // trailing newline — sendPromptWithRetry appends Enter itself via sendEnterWithRetry.
+        const queuedInput = pendingInput ? pendingInput.replace(/[\r\n]+$/, '') : '';
+        // What to deliver once Claude is ready: a continuation (interrupted mid-turn),
+        // the user's first message, or nothing (a plain background reconnect).
+        const deliverOnReady = shouldContinue ? 'continue' : (queuedInput || null);
+        const needsDelivery = deliverOnReady != null;
+
         const task: InternalTask = {
             id: persisted.id,
             prompt: persisted.prompt,
             workspaceId: persisted.workspaceId,
             process: ptyProcess,
-            state: shouldContinue ? 'starting' : 'idle',  // 'starting' if we need to send continuation
-            processStartedAt: shouldContinue
+            state: needsDelivery ? 'starting' : 'idle',  // 'starting' while we wait to deliver a prompt/message
+            processStartedAt: needsDelivery
                 ? (persisted.processStartedAt ? new Date(persisted.processStartedAt) : now)
                 : undefined,  // Preserve original start time across reconnect, or use now as fallback
             outputHistory: [], // Start empty — resume separator is emitted live but not persisted
@@ -4273,15 +4274,15 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             lastActivity: now,
             createdAt: new Date(persisted.createdAt),
             isActive: false,
-            initialPromptSent: !shouldContinue,  // False if we need to send continuation prompt
-            pendingPrompt: shouldContinue ? 'continue' : null,  // Trigger continuation
+            initialPromptSent: !needsDelivery,  // False if we have a prompt/message to deliver on ready
+            pendingPrompt: deliverOnReady,  // Continuation or the user's first message
             // Use sessionIdToUse (not persisted.sessionId) — if the session file was missing,
             // sessionIdToUse was cleared to null so the PTY handler can capture the new session ID.
             sessionId: sessionIdToUse,
             lastOutputLength: 0,  // Initialize for state polling
             totalOutputSize: 0,  // Incremental output size tracking
             savedBufferCount: 0,  // Incremental history saves
-            hasStartedProcessing: !shouldContinue,  // Will be set true when continuation starts
+            hasStartedProcessing: !needsDelivery,  // Will be set true when the queued prompt/message starts
             shouldContinue,
             continuationSent: false,
             displayName: persisted.displayName,  // Preserve user-set display name across reconnection
@@ -4317,9 +4318,18 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             this.pendingResizes.delete(taskId);
         }
 
-        // Start fallback timer for shouldContinue tasks (same race condition as new tasks)
-        if (shouldContinue && taskBackendType === 'claude-code') {
+        // Arm the ready-signal fallback timer whenever we have something to deliver
+        // (a continuation or the user's first message) — same race window as new tasks.
+        if (needsDelivery && taskBackendType === 'claude-code') {
             this.startReadyFallbackTimer(task);
+        }
+
+        // A user-initiated reconnect (they typed into the task) should stream the
+        // resumed session's output back immediately so they see their message land and
+        // the response. Background reconnects (auto-reconnect, sleep/wake, continuation)
+        // stay inactive until the user selects the task.
+        if (pendingInput) {
+            task.isActive = true;
         }
 
         this.scheduleSave();
