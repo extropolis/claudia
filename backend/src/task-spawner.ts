@@ -2628,13 +2628,14 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             logger.warn('No enabled MCP servers found!');
         }
 
-        // When skip-permissions is enabled, allow ALL tools so the narrow
-        // allowlist doesn't reintroduce permission prompts. Otherwise, only
-        // auto-approve MCP tools (non-MCP tools go through normal permission flow).
+        // When skip-permissions is enabled, --dangerously-skip-permissions (added
+        // above) already bypasses ALL permission checks, so no allowlist is needed.
+        // Do NOT pass `--allowedTools '*'` — current Claude Code rejects '*' as an
+        // invalid allow rule ("Wildcard tool name '*' is not supported"), which both
+        // prints a warning and leaves permission prompts active. Only set the narrow
+        // MCP allowlist in the non-skip case.
         const skipPerms = this.configStore?.getSkipPermissions();
-        if (skipPerms) {
-            claudeArgs.push('--allowedTools', '*');
-        } else {
+        if (!skipPerms) {
             claudeArgs.push('--allowedTools', 'mcp__*');
         }
 
@@ -4158,11 +4159,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 claudeArgs.push('--dangerously-skip-permissions');
             }
 
-            // When skip-permissions is enabled, allow ALL tools to avoid
-            // the narrow MCP-only allowlist reintroducing permission prompts.
-            if (skipPermsReconnect) {
-                claudeArgs.push('--allowedTools', '*');
-            } else {
+            // When skip-permissions is enabled, --dangerously-skip-permissions (above)
+            // bypasses all checks; do NOT pass `--allowedTools '*'` — Claude Code rejects
+            // '*' as an invalid allow rule, which spams a warning and leaves prompts active.
+            if (!skipPermsReconnect) {
                 claudeArgs.push('--allowedTools', 'mcp__*');
             }
 
