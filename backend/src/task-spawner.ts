@@ -313,6 +313,8 @@ export class TaskSpawner extends EventEmitter {
     private backendType: BackendType = 'claude-code';
     /** Track which tasks use which backend (for mixed-backend scenarios during transition) */
     private taskBackends: Map<string, BackendType> = new Map();
+    /** Per-task timestamps of recent context-destroying inputs (/clear, /compact, /reset), used to rate-limit a runaway client */
+    private recentDestructiveInputs: Map<string, number[]> = new Map();
 
     // Learnings store for RAG-based context injection
     private learningsStore: LearningsStore | null = null;
@@ -3438,7 +3440,25 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         }
     }
 
-    writeToTask(taskId: string, data: string): void {
+    writeToTask(taskId: string, data: string, source: string = 'internal'): void {
+        // Safety guard: a runaway client looping a context-destroying slash command
+        // (/clear, /compact, /reset) can wipe a Claude session. Allow a couple of
+        // legitimate manual uses, then drop the input once it repeats rapidly to the
+        // same task within a short window — and log the source so the culprit is named.
+        const destructiveCmd = data.replace(/[\r\n]+$/, '').trim();
+        if (/^\/(clear|compact|reset)\b/i.test(destructiveCmd)) {
+            const now = Date.now();
+            const recent = (this.recentDestructiveInputs.get(taskId) || []).filter(t => now - t < 10_000);
+            recent.push(now);
+            this.recentDestructiveInputs.set(taskId, recent);
+            if (recent.length > 2) {
+                console.warn(`[TaskSpawner] BLOCKED '${destructiveCmd}' to task ${taskId} — ${recent.length}x in 10s from source=${source} (runaway client?)`);
+                logger.warn('Blocked repeated context-destroying input', { taskId, command: destructiveCmd, countIn10s: recent.length, source });
+                return;
+            }
+            console.log(`[TaskSpawner] '${destructiveCmd}' -> task ${taskId} from source=${source} (${recent.length}/2 allowed in 10s window)`);
+        }
+
         let task = this.tasks.get(taskId);
 
         // If task not found in active tasks, check if it's disconnected and needs reconnecting
@@ -3474,7 +3494,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
         // Only log non-trivial writes (messages, not individual keystrokes) to avoid I/O overhead
         if (data.length > 1) {
-            console.log(`[TaskSpawner] Writing to PTY for task ${taskId} (${data.length} chars)`);
+            console.log(`[TaskSpawner] Writing to PTY for task ${taskId} (${data.length} chars) source=${source}`);
         }
 
         // Claude Code PTY-based input handling

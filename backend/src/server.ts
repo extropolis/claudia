@@ -1228,11 +1228,15 @@ export async function createApp(basePath?: string) {
     });
 
     // WebSocket connection handling
+    let wsClientSeq = 0;
     wss.on('connection', async (ws: WebSocket, req) => {
         // Check for mobile token auth on query string
         const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
         const mobileToken = url.searchParams.get('token');
         const isMobile = url.searchParams.get('mobile') === '1';
+        // Stable per-connection id so writes can be attributed to a specific client
+        // (used to attribute task:input — e.g. to catch a runaway client looping /clear).
+        const clientId = `${isMobile ? 'mobile' : 'web'}:${req.socket.remoteAddress || 'local'}#${++wsClientSeq}`;
 
         if (isMobile) {
             if (!mobileToken || !tunnelManager.validateToken(mobileToken)) {
@@ -1506,7 +1510,7 @@ export async function createApp(basePath?: string) {
                                     }
                                 }
                             }
-                            taskSpawner.writeToTask(taskId, filteredInput);
+                            taskSpawner.writeToTask(taskId, filteredInput, clientId);
                         }
                         break;
                     }
