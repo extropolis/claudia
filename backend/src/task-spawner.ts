@@ -3493,8 +3493,15 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             return;
         }
 
-        // Only log non-trivial writes (messages, not individual keystrokes) to avoid I/O overhead
-        if (data.length > 1) {
+        // Terminal protocol responses that xterm auto-sends in reply to TUI queries
+        // (cursor-position reports \x1b[r;cR, device-attributes \x1b[?...c, etc.) are
+        // pure noise — and a TUI stuck in a cursor-query loop can flood them. They're
+        // still written normally; we just don't log each one. A real message/keystroke
+        // never looks like a bare terminal-response escape.
+        const isTerminalResponse = /^\x1b\[[\d;?]*[A-Za-z~]$/.test(data);
+        // Only log non-trivial writes (messages, not individual keystrokes or protocol
+        // responses) to avoid I/O overhead and log spam.
+        if (data.length > 1 && !isTerminalResponse) {
             console.log(`[TaskSpawner] Writing to PTY for task ${taskId} (${data.length} chars) source=${source}`);
         }
 
