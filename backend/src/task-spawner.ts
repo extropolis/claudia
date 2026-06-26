@@ -3449,12 +3449,16 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         const destructiveCmd = data.replace(/[\r\n]+$/, '').trim();
         if (/^\/(clear|compact|reset)\b/i.test(destructiveCmd)) {
             const now = Date.now();
-            const recent = (this.recentDestructiveInputs.get(taskId) || []).filter(t => now - t < 10_000);
+            const WINDOW_MS = 30_000;
+            const recent = (this.recentDestructiveInputs.get(taskId) || []).filter(t => now - t < WINDOW_MS);
             recent.push(now);
             this.recentDestructiveInputs.set(taskId, recent);
-            if (recent.length > 2) {
-                console.warn(`[TaskSpawner] BLOCKED '${destructiveCmd}' to task ${taskId} — ${recent.length}x in 10s from source=${source} (runaway client?)`);
-                logger.warn('Blocked repeated context-destroying input', { taskId, command: destructiveCmd, countIn10s: recent.length, source });
+            // Allow only ONE context-destroying command per task per 30s. A real user
+            // rarely re-clears within seconds; an injected/looping source does. This caps
+            // the damage to one wipe per window while we identify/close the source.
+            if (recent.length > 1) {
+                console.warn(`[TaskSpawner] BLOCKED '${destructiveCmd}' to task ${taskId} — ${recent.length}x in 30s from source=${source} (runaway client — close that client!)`);
+                logger.warn('Blocked repeated context-destroying input', { taskId, command: destructiveCmd, countIn30s: recent.length, source });
                 return;
             }
             console.log(`[TaskSpawner] '${destructiveCmd}' -> task ${taskId} from source=${source} (${recent.length}/2 allowed in 10s window)`);
