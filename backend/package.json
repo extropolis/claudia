@@ -15,7 +15,8 @@
     "test:coverage": "npx vitest run --coverage"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.71.2",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.181",
+    "@anthropic-ai/sdk": "^0.93.0",
     "@claudia/shared": "*",
     "@modelcontextprotocol/sdk": "^1.25.2",
     "@opencode-ai/sdk": "^1.1.14",

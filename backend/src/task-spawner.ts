@@ -35,7 +35,7 @@ import { createLogger } from './logger.js';
 import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
-import { getTaskTokenUsage } from './token-parser.js';
+import { getTaskTokenUsage, getSessionFilePath } from './token-parser.js';
 import { randomBytes } from 'crypto';
 
 const logger = createLogger('[TaskSpawner]');
@@ -232,6 +232,9 @@ interface InternalTask extends Task {
   processStartedAt?: Date; // When the current busy/starting state began (for elapsed timer)
   readyFallbackTimer?: ReturnType<typeof setTimeout>; // Fallback timer to send prompt if ready signal is never detected
   titleInstructionInjected?: boolean; // True if auto-title instruction has been injected into this session
+  lastTokenUsageMtimeMs?: number; // mtime of the session JSONL last time we successfully reparsed token usage (live polling)
+  lastTokenUsagePollAt?: number; // Date.now() of last live token usage poll attempt (throttling)
+  tokenUsagePollInFlight?: boolean; // Re-entrancy guard for live token usage polling
 }
 
 /**
@@ -493,8 +496,9 @@ export class TaskSpawner extends EventEmitter {
           // tsx watch restarts on Windows (TerminateProcess skips all handlers)
           this.saveTasks();
         }
-        // Always emit — narrator needs to attach even when session was already
-        // loaded from disk (the idempotency guard in TaskNarrator handles retries).
+        // Always emit — the conversation streamer needs to attach even when
+        // the session was already loaded from disk (its UUID dedup handles
+        // retries).
         this.emit('taskSessionCaptured', taskId, sessionId);
       }
     });
@@ -1251,6 +1255,13 @@ export class TaskSpawner extends EventEmitter {
         continue;
       }
 
+      // Live token-usage refresh for active tasks. The eventual busy→idle
+      // capture would only update the chip once per turn — this keeps the
+      // conversation-view status bar ticking up while the model is mid-turn.
+      if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
+        this.maybePollLiveTokenUsage(task);
+      }
+
       const currentLength = task.totalOutputSize;
       const outputChanged = currentLength !== task.lastOutputLength;
       task.lastOutputLength = currentLength;
@@ -1924,7 +1935,8 @@ export class TaskSpawner extends EventEmitter {
               // that must survive tsx watch restarts on Windows where TerminateProcess
               // skips all signal/exit handlers
               this.saveTasks();
-              // Notify listeners (e.g. narrator) that a session file is now available.
+              // Notify listeners (the conversation streamer) that a session
+              // file is now available.
               this.emit('taskSessionCaptured', taskId, sessionId);
             }
 
@@ -3076,6 +3088,72 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * Live token-usage poll for actively running tasks. Runs from the state
+   * polling loop (every ~3s) so the conversation-view status bar can show
+   * a live-updating "in/out" chip during a turn instead of stale numbers
+   * from the previous turn (which is all the busy→idle capture would give).
+   *
+   * Throttled by JSONL mtime — if the session file hasn't been touched
+   * since the last successful parse we skip the reparse entirely. We also
+   * skip if a poll is already in flight (re-entrancy guard) and rate-limit
+   * to once every ~2s per task as a belt-and-suspenders safeguard.
+   */
+  private maybePollLiveTokenUsage(task: InternalTask): void {
+    if (!this.configStore?.getTokenTrackingEnabled()) return;
+    if (!task.sessionId) return;
+    if (task.tokenUsagePollInFlight) return;
+
+    const now = Date.now();
+    if (task.lastTokenUsagePollAt && now - task.lastTokenUsagePollAt < 2000) return;
+    task.lastTokenUsagePollAt = now;
+
+    const filePath = getSessionFilePath(task.workspaceId, task.sessionId);
+    let mtimeMs: number | undefined;
+    try {
+      mtimeMs = statSync(filePath).mtimeMs;
+    } catch {
+      // File may not exist yet (very early in the turn) — try again next poll.
+      return;
+    }
+
+    // Same mtime as last successful parse → nothing new to read.
+    if (task.lastTokenUsageMtimeMs && mtimeMs === task.lastTokenUsageMtimeMs) return;
+
+    task.tokenUsagePollInFlight = true;
+    const taskId = task.id;
+    const sessionId = task.sessionId;
+    void (async () => {
+      try {
+        const pricingMap = this.configStore?.getTokenPricing();
+        const usage = await getTaskTokenUsage(task.workspaceId, sessionId, pricingMap);
+        if (!usage) return;
+        // Only emit if numbers actually moved — keeps the WS bus quiet
+        // and avoids needless re-renders.
+        const prev = task.tokenUsage;
+        const changed =
+          !prev ||
+          prev.inputTokens !== usage.inputTokens ||
+          prev.outputTokens !== usage.outputTokens ||
+          prev.cacheCreationTokens !== usage.cacheCreationTokens ||
+          prev.cacheReadTokens !== usage.cacheReadTokens ||
+          prev.totalCostUsd !== usage.totalCostUsd;
+        task.tokenUsage = usage;
+        task.lastTokenUsageMtimeMs = mtimeMs;
+        if (changed) {
+          this.emit('taskTokenUsage', taskId, usage);
+        }
+      } catch (err) {
+        logger.error('Live token usage poll failed', {
+          taskId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        task.tokenUsagePollInFlight = false;
+      }
+    })();
   }
 
   async revertTask(

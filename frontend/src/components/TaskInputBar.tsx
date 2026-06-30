@@ -1,9 +1,22 @@
-import { useRef, useEffect, useCallback, useState } from 'react';
+import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { Send, MessageSquare, ImagePlus, X, Clipboard, Clock } from 'lucide-react';
 import { Task } from '@claudia/shared';
 import { useTaskStore } from '../stores/taskStore';
+import { useConversationStore } from '../stores/conversationStore';
 import { getApiBaseUrl } from '../config/api-config';
 import { ScheduledTasksModal } from './ScheduledTasksModal';
+import { SlashMenu } from './conversation/SlashMenu';
+import {
+  BUILTIN_SLASH_COMMANDS,
+  filterSlashCommands,
+  type SlashCommand,
+} from './conversation/slashCommands';
+import {
+  extractTriggerMatch,
+  insertAtTrigger,
+  getCursorCoordinates,
+  type TriggerMatch,
+} from '../utils/typeaheadUtils';
 import './TaskInputBar.css';
 
 interface UploadedImage {
@@ -45,6 +58,64 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
   // on every keystroke (which causes app-wide re-renders and visible input lag).
   // The store is used only as backing storage so drafts survive task switches.
   const [message, setMessageState] = useState<string>(() => getTaskDraftInput(task.id));
+
+  // ─── Slash command typeahead state ───
+  // The menu opens when the user types "/" at column 0 or after whitespace.
+  // We track the current trigger match (so we know what range to replace on
+  // select), the caret-anchor coords for the floating menu, and the selected
+  // command index for keyboard nav.
+  const [slashMatch, setSlashMatch] = useState<TriggerMatch | null>(null);
+  const [slashAnchor, setSlashAnchor] = useState<{ left: number; bottom: number } | null>(null);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const filteredSlashCommands = useMemo<SlashCommand[]>(
+    () => (slashMatch ? filterSlashCommands(slashMatch.query, BUILTIN_SLASH_COMMANDS) : []),
+    [slashMatch],
+  );
+  // Reset highlight whenever the filtered list changes shape.
+  useEffect(() => {
+    setSlashIndex(0);
+  }, [slashMatch?.query]);
+
+  const closeSlashMenu = useCallback(() => {
+    setSlashMatch(null);
+    setSlashAnchor(null);
+  }, []);
+
+  // Recompute trigger match + anchor against the current textarea state.
+  const refreshSlashMenu = useCallback(() => {
+    const ta = inputRef.current;
+    if (!ta) return;
+    const caret = ta.selectionStart ?? ta.value.length;
+    const match = extractTriggerMatch(ta.value, caret);
+    if (!match) {
+      if (slashMatch) closeSlashMenu();
+      return;
+    }
+    setSlashMatch(match);
+    const coords = getCursorCoordinates(ta, match.startIndex);
+    setSlashAnchor({ left: coords.left, bottom: coords.bottom });
+  }, [closeSlashMenu, slashMatch]);
+
+  const applySlashCommand = useCallback(
+    (cmd: SlashCommand) => {
+      const ta = inputRef.current;
+      if (!ta || !slashMatch) {
+        closeSlashMenu();
+        return;
+      }
+      const { value: nextValue, caret } = insertAtTrigger(ta.value, slashMatch, cmd.name);
+      setMessageState(nextValue);
+      closeSlashMenu();
+      // Restore caret AFTER React re-renders the textarea with the new value.
+      requestAnimationFrame(() => {
+        const el = inputRef.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(caret, caret);
+      });
+    },
+    [closeSlashMenu, slashMatch],
+  );
 
   // When the active task changes, swap to that task's persisted draft.
   useEffect(() => {
@@ -287,6 +358,14 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
       }),
     );
 
+    // Optimistic UI: show the user's message in the conversation feed
+    // immediately, before Claude flushes its JSONL (which can lag several
+    // seconds). The optimistic event will be reconciled with the real one
+    // when the JSONL streamer catches up.
+    if (fullMessage.trim()) {
+      useConversationStore.getState().appendOptimisticUserMessage(task.id, fullMessage);
+    }
+
     // Scroll terminal to bottom so user sees latest output
     window.dispatchEvent(
       new CustomEvent('terminal:scrollToBottom', {
@@ -324,10 +403,72 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
   }, [inputId, message, images, sendMessage]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Slash menu navigation takes priority over default textarea behavior.
+    if (slashMatch && filteredSlashCommands.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSlashIndex((i) => (i + 1) % filteredSlashCommands.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSlashIndex((i) => (i - 1 + filteredSlashCommands.length) % filteredSlashCommands.length);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        const cmd = filteredSlashCommands[slashIndex];
+        if (cmd) applySlashCommand(cmd);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeSlashMenu();
+        return;
+      }
+    }
+
+    // Shift+Tab → cycle Claude Code's permission mode (default → accept
+    // edits → plan → bypass permissions). The Claude Code TUI itself
+    // handles cycling when it receives the "back-tab" escape sequence
+    // (CSI Z), so we just forward it down the PTY. The footer line that
+    // Claude prints in response is parsed in useWebSocket and drives the
+    // mode chip in the conversation status bar.
+    if (e.key === 'Tab' && e.shiftKey) {
+      e.preventDefault();
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            type: 'task:input',
+            payload: { taskId: task.id, input: '\x1b[Z' },
+          }),
+        );
+      }
+      return;
+    }
+
     // Send on Enter (without Shift)
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
+      return;
+    }
+
+    // Escape cancels the currently running task (sends ESC to the PTY).
+    // The backend's interruptTask only acts when the task is 'busy', so it's
+    // a no-op for idle tasks — safe to fire unconditionally.
+    if (e.key === 'Escape') {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        e.preventDefault();
+        console.log('[TaskInputBar] Escape pressed — interrupting task', task.id);
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'task:interrupt',
+            payload: { taskId: task.id },
+          }),
+        );
+      }
     }
   };
 
@@ -337,6 +478,9 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
 
   const handleBlur = () => {
     persistDraft();
+    // Close the slash menu when the textarea loses focus — note SlashMenu
+    // suppresses mousedown so clicks on items don't trigger blur.
+    closeSlashMenu();
     // Only clear if this input is still the focused one
     // Use setTimeout to allow click events to fire first
     setTimeout(() => {
@@ -410,8 +554,27 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
           <textarea
             ref={inputRef}
             value={message}
-            onChange={(e) => setMessage(e.target.value)}
+            onChange={(e) => {
+              setMessage(e.target.value);
+              // Defer trigger detection until React commits the new value
+              // so selectionStart reflects the post-change caret.
+              requestAnimationFrame(refreshSlashMenu);
+            }}
             onKeyDown={handleKeyDown}
+            onKeyUp={(e) => {
+              // Caret moved via arrow keys / home / end — re-evaluate trigger.
+              if (
+                e.key === 'ArrowLeft' ||
+                e.key === 'ArrowRight' ||
+                e.key === 'Home' ||
+                e.key === 'End' ||
+                e.key === 'Backspace' ||
+                e.key === 'Delete'
+              ) {
+                refreshSlashMenu();
+              }
+            }}
+            onClick={refreshSlashMenu}
             onPaste={handlePaste}
             onFocus={handleFocus}
             onBlur={handleBlur}
@@ -469,7 +632,7 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
         </button>
       </div>
       <div className="task-input-hint">
-        Enter to send, Shift+Enter for new line, Ctrl+V to paste screenshots
+        Enter to send, Shift+Enter for new line, Esc to cancel task, Ctrl+V to paste screenshots
         {globalVoiceEnabled && isFocused && <span className="voice-hint"> | Voice active</span>}
       </div>
 
@@ -479,6 +642,16 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
           taskName={task.displayName || task.prompt?.substring(0, 60) || task.id}
           initialPrompt={message.trim()}
           onClose={() => setShowScheduleModal(false)}
+        />
+      )}
+
+      {slashMatch && slashAnchor && filteredSlashCommands.length > 0 && (
+        <SlashMenu
+          commands={filteredSlashCommands}
+          selectedIndex={slashIndex}
+          anchor={slashAnchor}
+          onSelect={applySlashCommand}
+          onHoverIndex={setSlashIndex}
         />
       )}
     </div>

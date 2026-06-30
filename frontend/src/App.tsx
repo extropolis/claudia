@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { WorkspacePanel } from './components/WorkspacePanel';
 import { TerminalView } from './components/TerminalView';
-import { MinimalChatView } from './components/MinimalChatView';
+import { ConversationView } from './components/conversation/ConversationView';
+import { ConversationErrorBoundary } from './components/conversation/ConversationErrorBoundary';
+import { SdkPermissionDialog } from './components/conversation/SdkPermissionDialog';
 import { ProjectPicker } from './components/ProjectPicker';
 import { SettingsMenu } from './components/SettingsMenu';
 import { GlobalVoiceManager } from './components/GlobalVoiceManager';
@@ -58,7 +60,8 @@ function App() {
   const isMobile = useIsMobile();
   useTheme();
   const {
-    createTask,
+    createTask: createTaskPty,
+    createSdkTask,
     interruptTask,
     archiveTask,
     revertTask,
@@ -83,6 +86,7 @@ function App() {
     removeReference,
     requestRecentWorkspaces,
     clearRecentWorkspace,
+    respondSdkPermission,
     wsRef,
   } = useWebSocket();
 
@@ -99,14 +103,42 @@ function App() {
     errorNotification,
     clearErrorNotification,
     unreadTaskIds,
+    skipPermissions,
   } = useTaskStore();
   const selectedTaskViewMode = useTaskStore(
-    (s) => (selectedTaskId ? s.taskViewMode.get(selectedTaskId) ?? 'terminal' : 'terminal'),
+    (s) => (selectedTaskId ? s.taskViewMode.get(selectedTaskId) ?? 'conversation' : 'conversation'),
   );
   const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
   const selectedWorkspace = selectedTask
     ? workspaces.find((w) => w.id === selectedTask.workspaceId)
     : undefined;
+
+  // ── createTask: route to SDK by default ──
+  // The SDK path renders structured events in the React conversation view
+  // and never spawns a TUI in xterm — fixes the entire class of garbling
+  // bugs. The legacy PTY path is still available per-task via the
+  // Terminal/Chat view toggle on each task pane.
+  const createTask = useCallback(
+    async (prompt: string, workspaceId: string, initialCols?: number, initialRows?: number) => {
+      // workspace.id IS the absolute path in Claudia's model.
+      const ws = workspaces.find((w) => w.id === workspaceId);
+      const cwd = ws?.id ?? workspaceId;
+      console.log('[App] createTask wrapper hit — routing to SDK', { prompt: prompt.slice(0, 60), workspaceId, cwd });
+      try {
+        await createSdkTask(prompt, workspaceId, cwd, {
+          systemPrompt: ws?.systemPrompt,
+          permissionMode: skipPermissions ? 'bypassPermissions' : undefined,
+        });
+        console.log('[App] SDK task created successfully');
+      } catch (err) {
+        // Fall back to PTY if SDK creation fails — keeps the user
+        // unblocked. They'll see the existing TerminalView for that task.
+        console.warn('[App] SDK task creation failed, falling back to PTY:', err);
+        createTaskPty(prompt, workspaceId, initialCols, initialRows);
+      }
+    },
+    [workspaces, createSdkTask, createTaskPty, skipPermissions],
+  );
 
   // Track fullscreen state (Electron only)
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -561,13 +593,15 @@ function App() {
           mobileShowingTerminal ? (
             // Screen 2: Full-screen terminal (or minimal chat if user toggled)
             <section className="main-panel mobile-full">
-              {selectedTaskViewMode === 'chat' ? (
-                <MinimalChatView
-                  key={`${selectedTask!.id}-chat`}
-                  task={selectedTask!}
-                  wsRef={wsRef}
-                  workspace={selectedWorkspace}
-                />
+              {selectedTaskViewMode === 'conversation' ? (
+                <ConversationErrorBoundary>
+                  <ConversationView
+                    key={`${selectedTask!.id}-conv`}
+                    task={selectedTask!}
+                    wsRef={wsRef}
+                    workspace={selectedWorkspace}
+                  />
+                </ConversationErrorBoundary>
               ) : (
                 <TerminalView
                   key={`${selectedTask!.id}-${terminalRefreshCounter}`}
@@ -704,13 +738,15 @@ function App() {
                         </span>
                       </button>
                     )}
-                    {selectedTaskViewMode === 'chat' ? (
-                      <MinimalChatView
-                        key={`${selectedTask.id}-chat`}
-                        task={selectedTask}
-                        wsRef={wsRef}
-                        workspace={selectedWorkspace}
-                      />
+                    {selectedTaskViewMode === 'conversation' ? (
+                      <ConversationErrorBoundary>
+                        <ConversationView
+                          key={`${selectedTask.id}-conv`}
+                          task={selectedTask}
+                          wsRef={wsRef}
+                          workspace={selectedWorkspace}
+                        />
+                      </ConversationErrorBoundary>
                     ) : (
                       <TerminalView
                         key={`${selectedTask.id}-${terminalRefreshCounter}`}
@@ -736,6 +772,17 @@ function App() {
           </>
         )}
       </main>
+
+      {/* SDK permission dialog — modal that appears when an SDK task asks the
+          user to approve a tool call. Mounted at app root so it overlays
+          whichever view is active. Renders nothing when there are no
+          pending requests for the active task. */}
+      {selectedTask && (
+        <SdkPermissionDialog
+          taskId={selectedTask.id}
+          onRespond={respondSdkPermission}
+        />
+      )}
 
       <ProjectPicker
         onSelect={handleProjectSelect}

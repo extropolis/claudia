@@ -1,16 +1,8 @@
 {
   "mcpServers": {
-    "playwright": {
-      "command": "/Users/I850333/.nvm/versions/node/v24.13.1/bin/node",
-      "args": [
-        "/Users/I850333/experiments/claudia/node_modules/@playwright/mcp/cli.js",
-        "--browser",
-        "chromium",
-        "--isolated"
-      ],
-      "env": {
-        "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": "/Users/I850333/Library/Caches/ms-playwright/chromium-1217/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
-      }
+    "voxelforge": {
+      "type": "http",
+      "url": "http://127.0.0.1:4031/mcp"
     },
     "claudia": {
       "command": "/Users/I850333/.nvm/versions/node/v24.13.1/bin/node",

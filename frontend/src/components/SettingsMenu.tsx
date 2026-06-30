@@ -112,6 +112,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     setNotifyOnWaitingInput,
     themePreference,
     setThemePreference,
+    setSkipPermissions: setSkipPermissionsStore,
   } = useTaskStore();
   const { showWarning } = useNotification();
   const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
@@ -182,6 +183,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
   const [useLearnings, setUseLearnings] = useState(false);
   const [claudiaMcpServerEnabled, setClaudiaMcpServerEnabled] = useState(false);
   const [defaultBaseDirectory, setDefaultBaseDirectory] = useState('');
+  const [mobilePushEnabled, setMobilePushEnabled] = useState(true);
+  const [mobilePairedDevices, setMobilePairedDevices] = useState(0);
 
   // CLI Switches state
   const [cliSwitches, setCliSwitches] = useState({
@@ -404,6 +407,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         setUseLearnings(config.useLearnings || false);
         setClaudiaMcpServerEnabled(config.claudiaMcpServerEnabled || false);
         setDefaultBaseDirectory(config.defaultBaseDirectory || '');
+        setMobilePushEnabled(config.mobileSummariesEnabled !== false);
 
         // Load SAP AI Core config
         if (config.sapAiCore) {
@@ -459,6 +463,17 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         if (pluginsData.success && pluginsData.plugins) {
           setPlugins(pluginsData.plugins);
         }
+      }
+
+      // Fetch paired mobile device count
+      try {
+        const devicesResponse = await fetch(`${getApiBaseUrl()}/api/mobile/devices`);
+        if (devicesResponse.ok) {
+          const devices = await devicesResponse.json();
+          setMobilePairedDevices(Array.isArray(devices) ? devices.length : 0);
+        }
+      } catch {
+        // Non-critical — ignore if mobile endpoint unavailable
       }
     } catch (error) {
       console.error('Failed to fetch config:', error);
@@ -712,6 +727,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
       });
       if (response.ok) {
         setSkipPermissions(value);
+        setSkipPermissionsStore(value);
       }
     } catch (error) {
       console.error('Failed to save skip permissions:', error);
@@ -1618,6 +1634,45 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                   </p>
                 </div>
               )}
+              <div
+                style={{
+                  marginTop: 16,
+                  paddingTop: 12,
+                  borderTop: '1px solid var(--border-color)',
+                }}
+              >
+                <div className="permission-item">
+                  <div className="permission-info">
+                    <span className="permission-label">Mobile Notifications</span>
+                    <span className="permission-description">
+                      {mobilePairedDevices === 0
+                        ? 'No devices paired. Pair a mobile device to receive push notifications.'
+                        : `Send push notifications to ${mobilePairedDevices} paired mobile device${mobilePairedDevices !== 1 ? 's' : ''} when tasks complete.`}
+                    </span>
+                  </div>
+                  <label className="toggle-switch">
+                    <input
+                      type="checkbox"
+                      checked={mobilePushEnabled}
+                      onChange={async (e) => {
+                        const enabled = e.target.checked;
+                        setMobilePushEnabled(enabled);
+                        try {
+                          await fetch(`${getApiBaseUrl()}/api/config`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ mobileSummariesEnabled: enabled }),
+                          });
+                        } catch (error) {
+                          console.error('Failed to save mobile notifications setting:', error);
+                          setMobilePushEnabled(!enabled); // revert on error
+                        }
+                      }}
+                    />
+                    <span className="toggle-slider"></span>
+                  </label>
+                </div>
+              </div>
             </div>
           </CollapsiblePanel>
 

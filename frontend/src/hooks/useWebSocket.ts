@@ -1,5 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
+import { useConversationStore } from '../stores/conversationStore';
+import { useSdkTaskStore, type SdkPermissionRequest, type SdkRunSummary } from '../stores/sdkTaskStore';
 import {
   WSMessage,
   WSErrorPayload,
@@ -7,7 +9,7 @@ import {
   Workspace,
   TaskSummary,
   WaitingInputType,
-  NarrationMessage,
+  ConversationEvent,
 } from '@claudia/shared';
 import { getWebSocketUrl, getApiBaseUrl, isTunnelAccess } from '../config/api-config';
 import {
@@ -15,6 +17,7 @@ import {
   sendTaskCompletionNotification,
   sendTaskWaitingInputNotification,
 } from '../utils/browserCapabilities';
+import { parsePermissionModeFromOutput } from '../utils/permissionModes';
 
 const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
@@ -109,10 +112,9 @@ export function useWebSocket() {
     setTaskSummary,
     setWaitingInput,
     clearWaitingInput,
+    setPermissionMode,
     setArchivedTasks,
     removeArchivedTask,
-    appendNarration,
-    setNarrationsForTask,
   } = useTaskStore();
 
   const connect = useCallback(async () => {
@@ -232,6 +234,11 @@ export function useWebSocket() {
                   useTaskStore.getState().setTokenCostEnabled(config.tokenCostEnabled);
                 }
 
+                // Sync skip permissions setting
+                if (config.skipPermissions !== undefined) {
+                  useTaskStore.getState().setSkipPermissions(!!config.skipPermissions);
+                }
+
                 // Sync Deepgram API key from backend (for mobile/tunnel clients)
                 if (config.deepgramApiKey && !useTaskStore.getState().deepgramApiKey) {
                   useTaskStore.setState({ deepgramApiKey: config.deepgramApiKey });
@@ -283,6 +290,8 @@ export function useWebSocket() {
             console.log(`[WebSocket] Task destroyed: ${payload.taskId}`);
             taskStatesRef.current.delete(payload.taskId);
             deleteTask(payload.taskId);
+            useTaskStore.getState().clearPermissionMode(payload.taskId);
+            useConversationStore.getState().clearTask(payload.taskId);
             break;
           }
           case 'workspace:created': {
@@ -319,20 +328,64 @@ export function useWebSocket() {
             setTaskSummary(payload.summary);
             break;
           }
-          case 'task:narration': {
-            const payload = message.payload as { message: NarrationMessage };
-            if (payload?.message) {
-              appendNarration(payload.message);
+          case 'task:conversation:event': {
+            const payload = message.payload as {
+              taskId: string;
+              event: ConversationEvent;
+            };
+            if (payload?.taskId && payload.event?.uuid) {
+              useConversationStore
+                .getState()
+                .appendEvent(payload.taskId, payload.event);
             }
             break;
           }
-          case 'task:narration:restore': {
+          case 'task:conversation:restore': {
             const payload = message.payload as {
               taskId: string;
-              messages: NarrationMessage[];
+              events: ConversationEvent[];
             };
-            if (payload?.taskId && Array.isArray(payload.messages)) {
-              setNarrationsForTask(payload.taskId, payload.messages);
+            if (payload?.taskId && Array.isArray(payload.events)) {
+              useConversationStore
+                .getState()
+                .setEventsForTask(payload.taskId, payload.events);
+            }
+            break;
+          }
+          case 'sdk:permission:request': {
+            // SDK runner asked the user to approve a tool call. Push it onto
+            // the pending queue — PermissionDialog (Phase 4) reads from there.
+            const payload = message.payload as SdkPermissionRequest;
+            if (payload?.requestId && payload.taskId) {
+              useSdkTaskStore.getState().addPermission(payload);
+            }
+            break;
+          }
+          case 'sdk:permission:resolved': {
+            const payload = message.payload as { taskId: string; requestId: string };
+            if (payload?.requestId && payload.taskId) {
+              useSdkTaskStore.getState().resolvePermission(payload.taskId, payload.requestId);
+            }
+            break;
+          }
+          case 'sdk:task:complete': {
+            const payload = message.payload as { taskId: string; result: SdkRunSummary };
+            if (payload?.taskId && payload.result) {
+              useSdkTaskStore.getState().setSummary(payload.taskId, payload.result);
+            }
+            break;
+          }
+          case 'task:output': {
+            // High-frequency PTY output. We don't render it here — TerminalView
+            // attaches its own listener and pumps it into xterm. The only
+            // thing we *do* care about globally is sniffing Claude Code's
+            // footer line so the conversation view's mode chip can stay in
+            // sync with whatever Shift+Tab cycle the user (or the launch
+            // arg) put us in.
+            const payload = message.payload as { taskId: string; data: string };
+            if (payload?.data) {
+              const mode = parsePermissionModeFromOutput(payload.data);
+              if (mode) setPermissionMode(payload.taskId, mode);
             }
             break;
           }
@@ -681,8 +734,6 @@ export function useWebSocket() {
     clearWaitingInput,
     setArchivedTasks,
     removeArchivedTask,
-    appendNarration,
-    setNarrationsForTask,
   ]);
 
   const sendMessage = useCallback((type: string, payload: unknown) => {
@@ -760,6 +811,85 @@ export function useWebSocket() {
       sendMessage('task:create', { prompt, workspaceId, initialCols, initialRows });
     },
     [sendMessage],
+  );
+
+  /**
+   * Create an SDK-driven task (no PTY) via the REST endpoint. Returns the
+   * created task id. Use this for chat-style tasks; the existing PTY path
+   * (createTask above) is still the right choice for shell / interactive
+   * tooling that needs the real Claude Code TUI.
+   */
+  const createSdkTask = useCallback(
+    async (prompt: string, workspaceId: string, cwd: string, opts?: {
+      systemPrompt?: string;
+      permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
+      allowedTools?: string[];
+      disallowedTools?: string[];
+      model?: string;
+      resumeSessionId?: string;
+    }): Promise<string> => {
+      const res = await fetch(`${API_URL}/api/sdk-tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceId,
+          cwd,
+          prompt,
+          ...opts,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`createSdkTask failed: ${res.status} ${text}`);
+      }
+      const body = (await res.json()) as { task: { id: string } };
+      return body.task.id;
+    },
+    [],
+  );
+
+  /** Send a follow-up turn to an existing SDK task. */
+  const continueSdkTask = useCallback(
+    async (taskId: string, prompt: string): Promise<void> => {
+      const res = await fetch(`${API_URL}/api/sdk-tasks/${encodeURIComponent(taskId)}/continue`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`continueSdkTask failed: ${res.status} ${text}`);
+      }
+    },
+    [],
+  );
+
+  /** Abort the currently running SDK turn. Task stays around for follow-ups. */
+  const abortSdkTask = useCallback(
+    async (taskId: string): Promise<void> => {
+      await fetch(`${API_URL}/api/sdk-tasks/${encodeURIComponent(taskId)}/abort`, { method: 'POST' });
+    },
+    [],
+  );
+
+  /** Resolve a pending tool-permission request. */
+  const respondSdkPermission = useCallback(
+    async (
+      taskId: string,
+      requestId: string,
+      response: { allow: boolean; rememberRule?: string; updatedInput?: Record<string, unknown>; message?: string },
+    ): Promise<void> => {
+      const res = await fetch(`${API_URL}/api/sdk-tasks/${encodeURIComponent(taskId)}/permission/${encodeURIComponent(requestId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(response),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`respondSdkPermission failed: ${res.status} ${text}`);
+      }
+    },
+    [],
   );
 
   const selectTaskOnServer = useCallback(
@@ -1017,6 +1147,10 @@ export function useWebSocket() {
 
   return {
     createTask,
+    createSdkTask,
+    continueSdkTask,
+    abortSdkTask,
+    respondSdkPermission,
     selectTaskOnServer,
     sendTaskInput,
     resizeTask,

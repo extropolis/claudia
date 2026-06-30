@@ -22,7 +22,7 @@ import multer from 'multer';
 import { TaskSpawner } from './task-spawner.js';
 import { WorkspaceStore } from './workspace-store.js';
 import { ConfigStore } from './config-store.js';
-import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
+import { getConversationHistory, getWorkspaceSessions, parseConversationEvents } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
 import {
   Task,
@@ -37,7 +37,6 @@ import {
   PORTS,
   TaskTokenUsage,
   UsageDashboardData,
-  NarrationMessage,
 } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { UsageStore } from './usage-store.js';
@@ -51,7 +50,8 @@ import { registerDevice, unregisterDevice, listDevices, sendPush } from './mobil
 import { generateMobileSummary, buildSimulatedSummary } from './task-summary.js';
 import { MobileChatStore } from './mobile-chat-store.js';
 import { MobileAgent } from './mobile-agent.js';
-import { TaskNarrator } from './task-narrator.js';
+import { ConversationStreamer } from './conversation-streamer.js';
+import { attachSdkTaskRoutes, seedReconnectingClient as seedSdkClient } from './sdk-task-server.js';
 // import { ElevenLabsTTS } from './elevenlabs-tts.js'; // TODO: Implement ElevenLabs TTS
 import { createLogger } from './logger.js';
 import { PluginManager, PluginContext } from './plugin-system/index.js';
@@ -740,6 +740,14 @@ export async function createApp(basePath?: string) {
     }
   }
 
+  // ── SDK task path (Claude Agent SDK, no PTY) ──
+  // Mounted right after broadcast() is defined so routes can broadcast to all
+  // connected clients. Lives alongside the existing TaskSpawner — does NOT
+  // replace it. SDK tasks emit the same `task:conversation:event` /
+  // `task:stateChanged` etc. WS kinds the frontend already understands, plus
+  // a couple of new sdk:* kinds for permission prompts.
+  attachSdkTaskRoutes(app, broadcast);
+
   // Flush batched broadcasts
   function flushBatchedBroadcasts(): void {
     // Send individual task state changes (deduplicated - only latest state per task)
@@ -780,9 +788,15 @@ export async function createApp(basePath?: string) {
       prevState === 'starting' ||
       prevState === 'waiting_input';
     if (task.state === 'idle' && wasActive) {
-      void emitMobileTaskSummary(task).catch((err) =>
-        console.error('[mobile-push] summary emit failed:', err),
-      );
+      // Mobile idle summaries can be turned off in the conversation settings
+      // popover. Default is on (undefined treated as true).
+      const summariesEnabled =
+        configStore.getConfig().mobileSummariesEnabled !== false;
+      if (summariesEnabled) {
+        void emitMobileTaskSummary(task).catch((err) =>
+          console.error('[mobile-push] summary emit failed:', err),
+        );
+      }
     }
     lastTaskState.set(task.id, task.state);
   }
@@ -998,65 +1012,40 @@ export async function createApp(basePath?: string) {
     { data: string; timer: ReturnType<typeof setTimeout> }
   >();
 
-  // ─── Minimal chat view: per-task narrators + ring buffer ──────────────────
-  // Tails Claude Code's session JSONL and emits each new assistant text block
-  // as a task:narration WS event. One narrator per active task; a ring buffer
-  // of recent narrations lets reconnecting clients paint the chat view instantly.
-  const narrators = new Map<string, TaskNarrator>();
-  const narrationHistory = new Map<string, NarrationMessage[]>();
-  const NARRATION_HISTORY_CAP = 50;
-  let narrationCounter = 0;
+  // ─── Rich React conversation view: per-task streamers ────────────────────
+  // The streamer emits the full ConversationEvent timeline (assistant text,
+  // tool calls, tool results, thinking) for each task. Frontend renders
+  // these directly with React components, bypassing xterm.js entirely.
+  const convStreamers = new Map<string, ConversationStreamer>();
 
-  function appendNarration(msg: NarrationMessage): void {
-    const list = narrationHistory.get(msg.taskId) ?? [];
-    list.push(msg);
-    if (list.length > NARRATION_HISTORY_CAP) {
-      list.splice(0, list.length - NARRATION_HISTORY_CAP);
-    }
-    narrationHistory.set(msg.taskId, list);
-  }
-
-  function broadcastNarration(taskId: string, text: string, timestamp?: string): NarrationMessage {
-    const msg: NarrationMessage = {
-      id: `narr-${Date.now()}-${++narrationCounter}`,
-      taskId,
-      text,
-      timestamp: timestamp ?? new Date().toISOString(),
-    };
-    appendNarration(msg);
-    broadcast({ type: 'task:narration' as WSMessageType, payload: { message: msg } });
-    return msg;
-  }
-
-  function ensureNarrator(taskId: string): TaskNarrator {
-    let n = narrators.get(taskId);
-    if (!n) {
-      n = new TaskNarrator({
+  function ensureConvStreamer(taskId: string): ConversationStreamer {
+    let s = convStreamers.get(taskId);
+    if (!s) {
+      s = new ConversationStreamer({
         taskId,
-        onNarration: ({ text, timestamp }) => {
-          broadcastNarration(taskId, text, timestamp);
+        onEvent: (ev) => {
+          broadcast({
+            type: 'task:conversation:event' as WSMessageType,
+            payload: { taskId, event: ev },
+          });
         },
       });
-      narrators.set(taskId, n);
+      convStreamers.set(taskId, s);
     }
-    return n;
+    return s;
   }
 
-  /**
-   * Attach the narrator to the task's JSONL session file. Called whenever a
-   * sessionId is captured or updated for a task. Idempotent.
-   */
-  function attachNarratorToSession(taskId: string, sessionId: string): void {
+  function attachConvStreamerToSession(taskId: string, sessionId: string): void {
     const task = taskSpawner.getTask(taskId);
     if (!task) return;
-    ensureNarrator(taskId).attach(task.workspaceId, sessionId);
+    void ensureConvStreamer(taskId).attach(task.workspaceId, sessionId);
   }
 
-  function disposeNarrator(taskId: string): void {
-    const n = narrators.get(taskId);
-    if (n) {
-      n.dispose();
-      narrators.delete(taskId);
+  function disposeConvStreamer(taskId: string): void {
+    const s = convStreamers.get(taskId);
+    if (s) {
+      s.dispose();
+      convStreamers.delete(taskId);
     }
   }
 
@@ -1178,8 +1167,7 @@ export async function createApp(basePath?: string) {
 
   taskSpawner.on('taskDestroyed', (taskId: string) => {
     broadcast({ type: 'task:destroyed', payload: { taskId } });
-    disposeNarrator(taskId);
-    narrationHistory.delete(taskId);
+    disposeConvStreamer(taskId);
     // Clean up any scheduled tasks for this task
     const removed = cronScheduler.removeAllForTask(taskId);
     if (removed > 0) {
@@ -1228,18 +1216,18 @@ export async function createApp(basePath?: string) {
   });
 
   // When a session id is captured (or updated on reconnect), attach the
-  // narrator to its JSONL file so we can stream assistant text turns into the
-  // minimal chat view.
+  // conversation streamer to its JSONL file so we can stream the structured
+  // event timeline to the React conversation view.
   taskSpawner.on('taskSessionCaptured', (taskId: string, sessionId: string) => {
-    attachNarratorToSession(taskId, sessionId);
+    attachConvStreamerToSession(taskId, sessionId);
   });
 
   // For tasks that already have a sessionId on startup (e.g. survived a tsx
-  // watch reload), attach narrators eagerly so the chat view is populated for
-  // anyone who reconnects.
+  // watch reload), attach the streamer eagerly so the conversation view is
+  // populated for anyone who reconnects.
   for (const t of taskSpawner.getAllTasks()) {
     if (t.sessionId) {
-      attachNarratorToSession(t.id, t.sessionId);
+      attachConvStreamerToSession(t.id, t.sessionId);
     }
   }
 
@@ -1348,6 +1336,14 @@ export async function createApp(basePath?: string) {
     if (tunnelStatus.active) {
       ws.send(JSON.stringify({ type: 'tunnel:status' as WSMessageType, payload: tunnelStatus }));
     }
+
+    // Seed reconnecting clients with SDK task state (snapshots + pending
+    // permission requests). Safe no-op when no SDK tasks exist.
+    seedSdkClient((msg) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(msg));
+      }
+    });
 
     ws.on('message', async (data: Buffer) => {
       let messageTypeForError: string | undefined;
@@ -1913,16 +1909,20 @@ export async function createApp(basePath?: string) {
                 }),
               );
             }
-            // Also replay any narration history we have for this task so the
-            // minimal chat view paints immediately on reconnect.
-            const narrations = narrationHistory.get(taskId);
-            if (narrations && narrations.length > 0) {
-              ws.send(
-                JSON.stringify({
-                  type: 'task:narration:restore',
-                  payload: { taskId, messages: narrations },
-                }),
-              );
+            // Replay the rich ConversationEvent snapshot for the React
+            // conversation view (full structured events: tool calls/results,
+            // thinking, assistant text).
+            const convStreamer = convStreamers.get(taskId);
+            if (convStreamer) {
+              const events = convStreamer.getSnapshot();
+              if (events.length > 0) {
+                ws.send(
+                  JSON.stringify({
+                    type: 'task:conversation:restore',
+                    payload: { taskId, events },
+                  }),
+                );
+              }
             }
             break;
           }
@@ -3125,6 +3125,31 @@ export async function createApp(basePath?: string) {
     res.json({ success: true, summary });
   });
 
+  // Dev-only: simulate a `task:waitingInput` broadcast for an existing task,
+  // so the conversation view's WaitingInputBanner + status-bar question chip
+  // can be exercised without waiting for Claude Code to genuinely park at a
+  // permission gate. Used by Playwright to verify the picker-rendering fix.
+  // Body: { taskId, inputType?, recentOutput? }.
+  app.post('/api/dev/simulate-waiting-input', (req, res) => {
+    const taskId = (req.body?.taskId as string) ?? '';
+    if (!taskId) {
+      res.status(400).json({ error: 'taskId is required' });
+      return;
+    }
+    const inputType = (req.body?.inputType as WaitingInputType) ?? 'permission';
+    const fallbackOutput =
+      "Bash command\n  cd /tmp && npm install react-native-webview\n\nDo you want to proceed?\n[34m❯[0m 1. Yes\n  2. Yes, and don't ask again for npm install\n  3. No, and tell Claude what to do differently";
+    const recentOutput =
+      typeof req.body?.recentOutput === 'string'
+        ? req.body.recentOutput
+        : fallbackOutput;
+    broadcast({
+      type: 'task:waitingInput',
+      payload: { taskId, inputType, recentOutput },
+    });
+    res.json({ success: true, taskId, inputType });
+  });
+
   // ─── Mobile single-agent chat ───────────────────────────────────────────
   // Per-workspace chat transcript between the user and the mobile agent.
   // The agent decides what to do (spawn task, send input, just reply) via
@@ -3979,6 +4004,45 @@ export async function createApp(basePath?: string) {
       mimetype: req.file.mimetype,
     });
   });
+
+  // Mobile-scoped image upload — same handler as /api/upload/image, but
+  // gated by the tunnel auth token. Mobile clients call this when the user
+  // attaches a photo to a task message; we save the bytes to the cache
+  // dir and return the absolute filePath so the client can reference it
+  // with "[Attached image: <filePath>]" — Claude Code reads that marker
+  // and ingests the file as an image attachment, same as the desktop.
+  app.post(
+    '/api/mobile/upload/image',
+    (req, res, next) => {
+      const token =
+        (req.query.token as string | undefined) ??
+        (req.headers['x-mobile-token'] as string | undefined);
+      if (!token || !tunnelManager.validateToken(token)) {
+        return res.status(401).json({ error: 'Invalid or missing mobile token' });
+      }
+      return next();
+    },
+    upload.single('image'),
+    (req, res) => {
+      if (!req.file) {
+        return res.status(400).json({ error: 'No image file provided' });
+      }
+      const filePath = join(uploadsDir, req.file.filename);
+      logger.info('Mobile image uploaded', {
+        filePath,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+      });
+      res.json({
+        success: true,
+        filePath,
+        filename: req.file.filename,
+        originalName: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+      });
+    },
+  );
 
   // Delete uploaded image endpoint
   app.delete('/api/upload/image/:filename', (req, res) => {
@@ -6608,6 +6672,47 @@ export async function createApp(basePath?: string) {
     } catch (error) {
       console.error('[Server] Failed to get conversation:', error);
       res.status(500).json({ error: 'Failed to get conversation' });
+    }
+  });
+
+  // Rich ConversationEvent[] for the React conversation view. Cold-load
+  // path used when the UI mounts before the live WS snapshot has arrived,
+  // and on full page refreshes. Live updates flow over the WS bus via
+  // `task:conversation:event` / `task:conversation:restore`.
+  app.get('/api/tasks/:taskId/conversation/events', async (req, res) => {
+    try {
+      const { taskId } = req.params;
+      const activeTask = taskSpawner.getTask(taskId);
+      const disconnectedTask = taskSpawner.getDisconnectedTask(taskId);
+      const task = activeTask || disconnectedTask;
+
+      if (!task) return res.status(404).json({ error: 'Task not found' });
+      if (!task.sessionId) return res.json({ events: [] });
+
+      const workspace = workspaceStore.getWorkspaces().find((w) => w.id === task.workspaceId);
+      if (!workspace) return res.status(404).json({ error: 'Workspace not found' });
+
+      const backendType =
+        'backendType' in task && task.backendType ? task.backendType : undefined;
+
+      // Prefer the live streamer's snapshot when available — it's already
+      // parsed in memory, no disk I/O needed.
+      const live = convStreamers.get(taskId)?.getSnapshot();
+      if (live && live.length > 0) {
+        return res.json({ events: live });
+      }
+
+      // Fall back to a fresh parse from disk.
+      const events = await parseConversationEvents(
+        workspace.id,
+        task.sessionId,
+        taskId,
+        backendType,
+      );
+      res.json({ events });
+    } catch (error) {
+      console.error('[Server] Failed to get conversation events:', error);
+      res.status(500).json({ error: 'Failed to get conversation events' });
     }
   });
 

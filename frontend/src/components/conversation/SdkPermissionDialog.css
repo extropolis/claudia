@@ -1,0 +1,134 @@
+/* SdkPermissionDialog — minimal, dark-first modal styles. Matches Claudia's
+   existing chrome: dark overlay, slight blur, accent button colors. */
+
+.sdk-perm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+
+.sdk-perm-card {
+  background: #15171a;
+  color: #e5e5e5;
+  border: 1px solid #2a2d33;
+  border-radius: 10px;
+  width: min(640px, 100%);
+  max-height: min(80vh, 720px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+
+.sdk-perm-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #23262b;
+}
+
+.sdk-perm-icon {
+  font-size: 18px;
+}
+
+.sdk-perm-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  flex: 1;
+}
+
+.sdk-perm-queue {
+  font-size: 11px;
+  background: #2a2d33;
+  color: #b8b8b8;
+  padding: 2px 8px;
+  border-radius: 8px;
+}
+
+.sdk-perm-input {
+  flex: 1;
+  margin: 0;
+  padding: 14px 18px;
+  background: #0d0e10;
+  border: none;
+  border-bottom: 1px solid #23262b;
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+  color: #d8d8d8;
+}
+
+.sdk-perm-actions {
+  display: flex;
+  gap: 8px;
+  padding: 12px 18px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.sdk-perm-btn {
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  background: #2a2d33;
+  color: #e5e5e5;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.sdk-perm-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sdk-perm-btn:not(:disabled):hover {
+  background: #34373e;
+}
+
+.sdk-perm-deny {
+  background: #2a2d33;
+  border-color: #3b3030;
+}
+.sdk-perm-deny:not(:disabled):hover {
+  background: #3a2a2a;
+  border-color: #5a3030;
+}
+
+.sdk-perm-allow {
+  background: #1a3a2a;
+  border-color: #2a5a3a;
+  color: #c8f0d0;
+}
+.sdk-perm-allow:not(:disabled):hover {
+  background: #2a4a3a;
+}
+
+.sdk-perm-allow-remember {
+  background: #1a2a4a;
+  border-color: #2a3a6a;
+  color: #c8d8f0;
+}
+.sdk-perm-allow-remember:not(:disabled):hover {
+  background: #2a3a5a;
+}
+
+.sdk-perm-allow-remember code {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  margin-left: 4px;
+}

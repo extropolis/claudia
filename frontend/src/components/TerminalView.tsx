@@ -58,6 +58,15 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
   const effectiveTheme = useEffectiveTheme();
   const setTaskViewMode = useTaskStore((s) => s.setTaskViewMode);
   const terminalRef = useRef<HTMLDivElement>(null);
+
+  // SDK tasks have no PTY — immediately redirect to conversation view instead
+  // of showing an empty terminal with a "no terminal output" notice.
+  useEffect(() => {
+    if (task.id.startsWith('sdk-')) {
+      setTaskViewMode(task.id, 'conversation');
+    }
+  }, [task.id, setTaskViewMode]);
+
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const webglAddonRef = useRef<WebglAddon | null>(null);
@@ -824,8 +833,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         </button>
         <button
           className="view-toggle-button"
-          onClick={() => setTaskViewMode(task.id, 'chat')}
-          title="Switch to minimal chat view"
+          onClick={() => setTaskViewMode(task.id, 'conversation')}
+          title="Switch to conversation view"
         >
           <MessageSquare size={14} />
           <span>Chat</span>
@@ -854,6 +863,27 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
       </div>
       <div className="terminal-container-wrapper">
         <div ref={terminalRef} className="terminal-container" />
+        {/* SDK tasks don't run a PTY — there's no terminal history to show.
+            Surface that explicitly with a one-click jump to the chat view
+            instead of leaving the user staring at an empty terminal. */}
+        {task.id.startsWith('sdk-') && (
+          <div className="terminal-sdk-notice">
+            <div className="terminal-sdk-notice-icon">💬</div>
+            <div className="terminal-sdk-notice-title">No terminal output for SDK tasks</div>
+            <div className="terminal-sdk-notice-msg">
+              This task runs through the Claude Agent SDK, which streams structured
+              events directly to the chat view — there's no PTY producing terminal
+              bytes. Switch to Chat to see the conversation.
+            </div>
+            <button
+              type="button"
+              className="terminal-sdk-notice-btn"
+              onClick={() => setTaskViewMode(task.id, 'conversation')}
+            >
+              Switch to Chat
+            </button>
+          </div>
+        )}
         {showSpinner && (
           <div className="terminal-loading-overlay">
             <div className="terminal-loading-spinner" />

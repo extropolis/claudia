@@ -1,13 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "mcp__*"
+      "mcp__voxelforge__*",
+      "mcp__claudia__*"
     ],
     "deny": []
   },
   "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
-    "playwright",
+    "voxelforge",
     "claudia"
   ]
 }

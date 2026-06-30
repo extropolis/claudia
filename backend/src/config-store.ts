@@ -119,6 +119,7 @@ export interface AppConfig {
   defaultBaseDirectory?: string; // Default base directory for new workspaces (optional)
   modelTiering?: ModelTieringConfig; // Complexity-based model selection for MCP-spawned tasks
   autoReloadEnabled?: boolean; // Auto-restart backend when src/ files change (read by dev-watcher.mjs)
+  mobileSummariesEnabled?: boolean; // Auto-generate chat-style summaries when tasks settle to idle (default: true)
 }
 
 
@@ -187,6 +188,7 @@ const DEFAULT_CONFIG: AppConfig = {
   tokenTrackingEnabled: true, // Token usage tracking enabled by default
   defaultBaseDirectory: undefined, // No default base directory set
   modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } },
+  mobileSummariesEnabled: true, // Auto idle summaries enabled by default
 };
 
 export class ConfigStore {
@@ -348,6 +350,9 @@ export class ConfigStore {
     }
     if (updates.autoReloadEnabled !== undefined) {
       this.config.autoReloadEnabled = updates.autoReloadEnabled;
+    }
+    if (updates.mobileSummariesEnabled !== undefined) {
+      this.config.mobileSummariesEnabled = updates.mobileSummariesEnabled;
     }
     this.saveConfig();
     return this.getConfig();

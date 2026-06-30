@@ -1,0 +1,1153 @@
+/*
+ * ConversationView styles
+ *
+ * Lives inside the same flex column TerminalView uses (the workspace task
+ * panel). Replaces the xterm container in the middle. Token names use
+ * neutral hex values rather than CSS variables so the component can drop in
+ * without depending on a theme system.
+ */
+
+.conv-view {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: #0a0a0a;
+  color: #e5e5e5;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.conv-view-empty {
+  align-items: center;
+  justify-content: center;
+}
+
+.conv-empty-msg {
+  color: #666;
+  font-size: 14px;
+}
+
+.conv-list {
+  flex: 1;
+  min-height: 0;
+  padding: 14px 18px 32px;
+}
+
+.conv-row {
+  padding: 2px 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── messenger-style row wrappers ───────────────────────────────────── */
+
+.conv-msg-row {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.conv-msg-row-user {
+  align-items: flex-end;
+}
+
+.conv-msg-row-assistant {
+  align-items: flex-start;
+}
+
+/* "Delivered at 2:14 PM" style footer under the latest bubble of a run.
+   Quiet, small, slightly indented so it visually hangs off the bubble. */
+.conv-msg-timestamp {
+  font-size: 11px;
+  color: #6e6e6e;
+  padding: 2px 6px 0;
+  margin-top: 2px;
+  letter-spacing: 0.01em;
+  user-select: none;
+}
+
+.conv-msg-timestamp-user {
+  text-align: right;
+}
+
+.conv-msg-timestamp-assistant {
+  text-align: left;
+}
+
+/* ── messages ───────────────────────────────────────────────────────── */
+
+.conv-msg {
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.conv-msg-user {
+  background: #1d3a5f;
+  border: 1px solid #2d5a8c;
+  color: #f0f6ff;
+  border-radius: 14px 14px 4px 14px;
+  padding: 10px 14px;
+  margin: 6px 0 6px auto;
+  max-width: 82%;
+  width: fit-content;
+  align-self: flex-end;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.conv-msg-user .conv-msg-user-label {
+  display: none;
+}
+
+.conv-msg-user p {
+  color: #f0f6ff;
+}
+
+.conv-msg-assistant {
+  padding: 4px 0;
+}
+
+.conv-msg p {
+  margin: 0 0 8px 0;
+}
+.conv-msg p:last-child {
+  margin-bottom: 0;
+}
+
+.conv-msg pre {
+  margin: 8px 0;
+}
+
+.conv-msg ul,
+.conv-msg ol {
+  margin: 6px 0;
+  padding-left: 24px;
+}
+
+.conv-msg blockquote {
+  border-left: 3px solid #444;
+  padding-left: 12px;
+  margin: 6px 0;
+  color: #b8b8b8;
+}
+
+.conv-msg table {
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+.conv-msg th,
+.conv-msg td {
+  border: 1px solid #333;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+/* ── thinking ───────────────────────────────────────────────────────── */
+
+.conv-thinking {
+  background: #141414;
+  border: 1px dashed #333;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 6px 0;
+  font-size: 13px;
+  color: #999;
+}
+
+.conv-thinking summary {
+  cursor: pointer;
+  user-select: none;
+  font-style: italic;
+}
+
+.conv-thinking-body {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #333;
+  color: #b0b0b0;
+}
+
+/* ── system / summary ───────────────────────────────────────────────── */
+
+.conv-system {
+  font-size: 12px;
+  color: #888;
+  background: #131313;
+  border: 1px solid #222;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin: 6px 0;
+  font-family: "SF Mono", "Monaco", monospace;
+}
+
+.conv-summary {
+  background: #1a1610;
+  border-color: #322a16;
+  color: #c8a460;
+}
+
+/* ── tool widgets ───────────────────────────────────────────────────── */
+
+.conv-tool {
+  background: #121212;
+  border: 1px solid #262626;
+  border-radius: 8px;
+  margin: 8px 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-family: "SF Mono", "Monaco", monospace;
+}
+
+.conv-tool-compact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+}
+
+.conv-tool-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.conv-tool-icon {
+  color: #6aa3d1;
+  font-weight: 600;
+  width: 14px;
+  text-align: center;
+}
+
+.conv-tool-name {
+  color: #d0d0d0;
+  font-weight: 600;
+}
+
+.conv-tool-meta {
+  color: #888;
+  font-weight: 400;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 12.5px;
+}
+
+.conv-tool-input {
+  margin: 0;
+  padding: 8px 10px;
+  background: #1a1a1a;
+  border-radius: 6px;
+  color: #e5e5e5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12.5px;
+}
+
+.conv-tool-result {
+  margin: 8px 0 0 0;
+  padding: 8px 10px;
+  background: #0d0d0d;
+  border: 1px solid #1f1f1f;
+  border-radius: 6px;
+  color: #ccc;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12.5px;
+  max-height: 800px;
+  overflow: auto;
+}
+
+.conv-tool-result.is-error {
+  border-color: #5c2222;
+  background: #1a0d0d;
+  color: #ffb3b3;
+}
+
+.conv-tool-result.is-collapsed {
+  max-height: 240px;
+}
+
+.conv-tool-toggle {
+  margin-top: 6px;
+  background: transparent;
+  border: 1px solid #333;
+  color: #aaa;
+  cursor: pointer;
+  padding: 3px 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.conv-tool-toggle:hover {
+  background: #222;
+  color: #fff;
+}
+
+.conv-tool-error-badge {
+  margin-left: auto;
+  background: #5c2222;
+  color: #ffb3b3;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+
+/* ── diff (Edit / Write) ────────────────────────────────────────────── */
+
+.conv-diff {
+  background: #0d0d0d;
+  border: 1px solid #1f1f1f;
+  border-radius: 6px;
+  margin-top: 6px;
+  padding: 4px 0;
+  font-size: 12.5px;
+  font-family: "SF Mono", "Monaco", monospace;
+  overflow-x: auto;
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.conv-diff-line {
+  display: flex;
+  gap: 6px;
+  padding: 0 10px;
+  white-space: pre;
+}
+
+.conv-diff-marker {
+  width: 14px;
+  text-align: right;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.conv-diff-text {
+  flex: 1;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.conv-diff-removed {
+  background: rgba(220, 60, 60, 0.10);
+  color: #ffb3b3;
+}
+.conv-diff-removed .conv-diff-marker {
+  color: #ff6b6b;
+}
+
+.conv-diff-added {
+  background: rgba(60, 180, 90, 0.10);
+  color: #b8efc6;
+}
+.conv-diff-added .conv-diff-marker {
+  color: #57c98a;
+}
+
+/* ── todos ──────────────────────────────────────────────────────────── */
+
+.conv-todos-list {
+  list-style: none;
+  margin: 6px 0 0 0;
+  padding: 0;
+}
+
+.conv-todo {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.conv-todo-icon {
+  width: 14px;
+  text-align: center;
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+
+.conv-todo-pending .conv-todo-icon { color: #888; }
+.conv-todo-in_progress .conv-todo-icon { color: #e8a040; }
+.conv-todo-completed .conv-todo-icon { color: #57c98a; }
+.conv-todo-completed .conv-todo-label { color: #888; text-decoration: line-through; }
+
+.conv-todo-label {
+  flex: 1;
+  color: #d8d8d8;
+}
+
+/* ── working indicator ─────────────────────────────────────────────── */
+
+/* ── typing bubble (assistant is composing) ────────────────────────── */
+
+/* The typing bubble lives inside the conv-view but OUTSIDE the virtual
+   list, pinned to the bottom of the scroll region. It mimics an
+   assistant message bubble so it looks like the next reply landing in
+   the thread. */
+.conv-typing-row {
+  padding: 4px 18px 8px;
+  pointer-events: none;
+}
+
+.conv-typing-bubble {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 14px 14px 14px 4px;
+  padding: 10px 14px;
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.conv-typing-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.conv-typing-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #9aa4ad;
+  display: inline-block;
+  animation: conv-typing-bounce 1.2s infinite ease-in-out both;
+}
+
+.conv-typing-dots span:nth-child(1) {
+  animation-delay: -0.32s;
+}
+.conv-typing-dots span:nth-child(2) {
+  animation-delay: -0.16s;
+}
+.conv-typing-dots span:nth-child(3) {
+  animation-delay: 0;
+}
+
+@keyframes conv-typing-bounce {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0) scale(0.7);
+    opacity: 0.4;
+  }
+  40% {
+    transform: translateY(-2px) scale(1);
+    opacity: 1;
+  }
+}
+
+.conv-typing-label {
+  font-style: italic;
+  opacity: 0.85;
+  font-size: 14px;
+}
+
+.conv-typing-elapsed {
+  font-style: normal;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+  margin-left: 2px;
+  font-size: 13px;
+}
+
+/* ── legacy working indicator (kept for any consumers still on it) ──── */
+
+.conv-working {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px 16px;
+  color: #888;
+  font-size: 13px;
+  font-style: italic;
+}
+
+.conv-working-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.conv-working-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #6aa3d1;
+  display: inline-block;
+  animation: conv-working-bounce 1.2s infinite ease-in-out both;
+}
+
+.conv-working-dots span:nth-child(1) {
+  animation-delay: -0.32s;
+}
+.conv-working-dots span:nth-child(2) {
+  animation-delay: -0.16s;
+}
+.conv-working-dots span:nth-child(3) {
+  animation-delay: 0;
+}
+
+@keyframes conv-working-bounce {
+  0%,
+  80%,
+  100% {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.conv-working-label {
+  color: #aaa;
+}
+
+/* ── waiting-for-input banner ───────────────────────────────────────── */
+
+.conv-waiting-banner {
+  border-top: 1px solid #2a2a2a;
+  background: #0f1a0f;
+  padding: 12px 18px;
+  flex-shrink: 0;
+}
+
+.conv-waiting-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #7ecf7e;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.conv-waiting-output {
+  margin: 0 0 8px 0;
+  padding: 8px 10px;
+  background: #0a0a0a;
+  border: 1px solid #1e2a1e;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-family: "SF Mono", "Monaco", monospace;
+  color: #d0e8d0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.conv-waiting-hint {
+  font-size: 11.5px;
+  color: #5a8a5a;
+  font-style: italic;
+}
+
+.conv-waiting-hint-inline {
+  margin-left: 8px;
+}
+
+.conv-waiting-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.conv-waiting-actions .conv-waiting-hint-inline {
+  margin-left: 0;
+  margin-top: 4px;
+}
+
+.conv-waiting-btn {
+  background: #1a3a1a;
+  border: 1px solid #2d5a2d;
+  color: #d0e8d0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  cursor: pointer;
+  text-align: left;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.35;
+}
+
+.conv-waiting-btn:hover {
+  background: #244e24;
+  border-color: #3d7a3d;
+  color: #fff;
+}
+
+.conv-waiting-btn-primary {
+  background: #1d3a5f;
+  border-color: #2d5a8c;
+  color: #f0f6ff;
+}
+.conv-waiting-btn-primary:hover {
+  background: #244e7a;
+  border-color: #3d7ab5;
+}
+
+.conv-waiting-btn-danger {
+  background: #3a1a1a;
+  border-color: #5c2a2a;
+  color: #ffd0d0;
+}
+.conv-waiting-btn-danger:hover {
+  background: #4e2424;
+  border-color: #7a3d3d;
+}
+
+.conv-jump-bottom {
+  position: absolute;
+  bottom: 18px;
+  right: 22px;
+  background: #1c1c1c;
+  border: 1px solid #333;
+  color: #d0d0d0;
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12.5px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  z-index: 5;
+}
+.conv-jump-bottom:hover {
+  background: #2a2a2a;
+  border-color: #555;
+}
+
+/* ── settings popover ───────────────────────────────────────────────── */
+
+.conv-settings-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.conv-settings-pop {
+  position: fixed;
+  /* top + right are set inline from the gear button's bounding rect — the
+     popover is rendered into a portal on document.body so it escapes the
+     .terminal-header's overflow:hidden, which used to clip it behind the
+     conversation panel below the header. */
+  min-width: 280px;
+  /* Cap height to the viewport so the trailing sections (e.g. Mobile) stay
+     reachable on shorter windows; the inner list scrolls when it overflows. */
+  max-height: calc(100vh - 24px);
+  display: flex;
+  flex-direction: column;
+  background: #161616;
+  border: 1px solid #2c2c2c;
+  border-radius: 10px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.55);
+  padding: 10px 4px 8px;
+  z-index: 1000;
+  color: #e0e0e0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.conv-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 12px 8px;
+  border-bottom: 1px solid #262626;
+}
+
+.conv-settings-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #888;
+  font-weight: 600;
+}
+
+.conv-settings-bulk {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.conv-settings-bulk-btn {
+  background: transparent;
+  border: none;
+  color: #6aa3d1;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.conv-settings-bulk-btn:hover:not(:disabled) {
+  background: #1f2a36;
+  color: #92c2eb;
+}
+.conv-settings-bulk-btn:disabled {
+  color: #555;
+  cursor: default;
+}
+
+.conv-settings-bulk-sep {
+  color: #444;
+  font-size: 12px;
+}
+
+.conv-settings-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px 0;
+  /* Lets the list shrink and scroll inside the flex column when the popover
+     hits its max-height (so trailing sections like Mobile stay reachable). */
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.conv-settings-row {
+  padding: 0;
+}
+
+.conv-settings-group {
+  padding: 8px 12px 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #6c6c6c;
+  pointer-events: none;
+}
+.conv-settings-group:first-child {
+  padding-top: 2px;
+}
+
+.conv-settings-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 6px 12px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.conv-settings-label:hover {
+  background: #1d1d1d;
+}
+
+.conv-settings-label input[type="checkbox"] {
+  margin-top: 3px;
+  accent-color: #6aa3d1;
+  cursor: pointer;
+}
+
+.conv-settings-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.3;
+}
+
+.conv-settings-name {
+  font-size: 13px;
+  color: #e8e8e8;
+}
+
+.conv-settings-hint {
+  font-size: 11.5px;
+  color: #777;
+}
+
+.conv-settings-footer {
+  padding: 8px 12px 2px;
+  font-size: 11.5px;
+  color: #6c6c6c;
+  border-top: 1px solid #262626;
+  margin-top: 4px;
+}
+
+/* Live status strip — mirrors the Claude Code TUI's bottom status line.
+ * Sits between the message list and the input bar. Stays mounted across
+ * state changes so the layout doesn't jump; idle state is faded out. */
+.conv-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: #9a9a9a;
+  background: #181818;
+  border-top: 1px solid #262626;
+  font-family: "SF Mono", "Monaco", "Inconsolata", "Fira Code", monospace;
+  min-height: 22px;
+  user-select: none;
+}
+
+.conv-status-bar.conv-status-idle,
+.conv-status-bar.conv-status-archived {
+  color: #5a5a5a;
+}
+
+.conv-status-bar.conv-status-busy,
+.conv-status-bar.conv-status-starting {
+  color: #b8b8b8;
+}
+
+.conv-status-bar.conv-status-waiting_input {
+  color: #d4a857;
+}
+
+.conv-status-bar.conv-status-interrupted,
+.conv-status-bar.conv-status-disconnected {
+  color: #d46a6a;
+}
+
+.conv-status-spinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid #333;
+  border-top-color: #0dbc79;
+  border-radius: 50%;
+  animation: conv-status-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes conv-status-spin {
+  to { transform: rotate(360deg); }
+}
+
+.conv-status-label {
+  font-weight: 500;
+}
+
+.conv-status-elapsed {
+  color: #6a6a6a;
+}
+
+/* "Claude is waiting on you" chip — appears in the status bar whenever a
+ * task is parked at a CLI prompt. Pulses to grab attention even when the
+ * user is scrolled up and the inline WaitingInputBanner is offscreen. */
+.conv-status-question {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px 2px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  background: rgba(245, 200, 80, 0.16);
+  color: #f3c66b;
+  border: 1px solid rgba(245, 200, 80, 0.35);
+  animation: conv-status-question-pulse 1.6s ease-in-out infinite;
+}
+
+.conv-status-question-permission {
+  background: rgba(255, 138, 110, 0.16);
+  color: #ff9f80;
+  border-color: rgba(255, 138, 110, 0.4);
+}
+
+.conv-status-question-confirmation {
+  background: rgba(120, 200, 255, 0.14);
+  color: #8ad0ff;
+  border-color: rgba(120, 200, 255, 0.35);
+}
+
+.conv-status-question-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 0 currentColor;
+  animation: conv-status-question-dot 1.6s ease-in-out infinite;
+}
+
+@keyframes conv-status-question-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+
+@keyframes conv-status-question-dot {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(245, 200, 80, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(245, 200, 80, 0);
+  }
+}
+
+/* Token total + cost chips on the right side of the status bar.
+ * Same muted treatment as the elapsed time so they don't compete with
+ * the live "Working…" state on the left. */
+.conv-status-sep {
+  color: #3a3a3a;
+}
+
+.conv-status-tokens {
+  color: #8a8a8a;
+}
+
+.conv-status-cost {
+  color: #6e9b6e;
+}
+
+/* Permission-mode chip — pinned to the right edge of the status bar.
+ * Mirrors what Claude Code prints in the terminal footer so a user in
+ * conversation view can still see what mode they're in and that
+ * Shift+Tab cycles. */
+.conv-status-spacer {
+  flex: 1 1 auto;
+}
+
+.conv-status-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.conv-status-mode-label {
+  font-weight: 500;
+  text-transform: lowercase;
+  letter-spacing: 0.01em;
+}
+
+.conv-status-mode-hint {
+  color: #5a5a5a;
+}
+
+.conv-status-mode-hint kbd {
+  font-family: inherit;
+  font-size: 10px;
+  padding: 0 4px;
+  margin: 0 1px;
+  border-radius: 3px;
+  background: #232323;
+  border: 1px solid #2e2e2e;
+  color: #9a9a9a;
+}
+
+/* Tone variants — match the existing status palette so the chip lives
+ * comfortably alongside busy/idle/waiting states. */
+.conv-status-mode.conv-status-mode-neutral .conv-status-mode-label {
+  color: #8a8a8a;
+}
+
+.conv-status-mode.conv-status-mode-plan .conv-status-mode-label {
+  color: #7aa9d4;
+}
+
+.conv-status-mode.conv-status-mode-warn .conv-status-mode-label {
+  color: #d4a857;
+}
+
+/* ─── AskUserQuestion widget ─────────────────────────────────────────── */
+/* Mirrors the Claude Code TUI selector: numbered list with a `❯` caret
+ * marking the focused/chosen option. Buttons are clickable while the
+ * call is pending; they disable + show a "chosen" badge once the
+ * tool_result arrives. */
+.conv-tool-ask {
+  background: #0f1620;
+  border-color: #2a3a4d;
+}
+
+.conv-ask-question {
+  margin-top: 10px;
+}
+.conv-ask-question:first-of-type {
+  margin-top: 6px;
+}
+
+.conv-ask-header-chip {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: #1d3a5f;
+  color: #a8c8eb;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-bottom: 6px;
+}
+
+.conv-ask-prompt {
+  font-size: 14px;
+  font-weight: 600;
+  color: #e6edf3;
+  margin-bottom: 8px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.conv-ask-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.conv-ask-option {
+  display: grid;
+  grid-template-columns: 14px 22px 1fr;
+  gap: 6px;
+  align-items: flex-start;
+  text-align: left;
+  background: #11151c;
+  border: 1px solid #233044;
+  color: #d6dee7;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  transition: background 0.12s, border-color 0.12s;
+}
+.conv-ask-option:hover:not(:disabled) {
+  background: #182030;
+  border-color: #3a5278;
+  color: #fff;
+}
+.conv-ask-option:disabled {
+  cursor: default;
+}
+.conv-ask-option.is-chosen {
+  background: #1a3a5a;
+  border-color: #4a7ab0;
+  color: #fff;
+}
+.conv-ask-option.is-pending {
+  background: #1f2a3a;
+  border-color: #4a6488;
+  opacity: 0.85;
+}
+.conv-ask-option.is-dim {
+  opacity: 0.55;
+}
+
+.conv-ask-caret {
+  color: #6ab0ff;
+  font-weight: 700;
+  font-family: "SF Mono", "Monaco", monospace;
+  width: 14px;
+  text-align: center;
+  line-height: 1.4;
+}
+.conv-ask-num {
+  color: #8a99ad;
+  font-family: "SF Mono", "Monaco", monospace;
+  line-height: 1.4;
+}
+.conv-ask-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.conv-ask-label {
+  font-weight: 600;
+  color: inherit;
+}
+.conv-ask-desc {
+  font-size: 12px;
+  color: #8b97a8;
+  line-height: 1.45;
+  white-space: normal;
+}
+.conv-ask-option.is-chosen .conv-ask-desc {
+  color: #b4c8e0;
+}
+.conv-ask-preview {
+  margin: 4px 0 0 0;
+  padding: 6px 8px;
+  background: #0a0d12;
+  border: 1px solid #1c2533;
+  border-radius: 4px;
+  font-size: 11.5px;
+  font-family: "SF Mono", "Monaco", monospace;
+  color: #b8c4d4;
+  white-space: pre-wrap;
+  overflow-x: auto;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.conv-ask-hint {
+  font-size: 11.5px;
+  color: #6b7a8e;
+  font-style: italic;
+  margin-top: 6px;
+}
+.conv-ask-hint-foot {
+  margin-top: 10px;
+  border-top: 1px dashed #233044;
+  padding-top: 8px;
+}
+
+.conv-ask-answer {
+  margin-top: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: #0a1220;
+  border: 1px solid #1d3a5f;
+  border-radius: 4px;
+  color: #cfdcec;
+}
+.conv-ask-answer-label {
+  color: #8aa9d4;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10.5px;
+  margin-right: 6px;
+}
+
+/* Error boundary fallback — replaces the conversation view when a child
+   render crashes. Sized to fill the parent so the surrounding chrome
+   (Conversation/Terminal toggle, header) stays usable. */
+.conv-error-boundary {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 20px;
+  margin: 12px;
+  background: #2a1f1f;
+  border: 1px solid #5a3030;
+  border-radius: 8px;
+  color: #f0d8d8;
+  font-size: 13px;
+}
+.conv-error-boundary-icon {
+  font-size: 22px;
+  line-height: 1;
+}
+.conv-error-boundary-body {
+  flex: 1;
+  min-width: 0;
+}
+.conv-error-boundary-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.conv-error-boundary-msg {
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #d8b8b8;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 10px;
+}
+.conv-error-boundary-retry {
+  background: #3a2a2a;
+  border: 1px solid #5a3030;
+  border-radius: 5px;
+  color: #f0d8d8;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.conv-error-boundary-retry:hover {
+  background: #4a3030;
+}

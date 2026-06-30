@@ -7,6 +7,7 @@ import {
   findSessionFile,
   findRecentSessionFiles,
   getWorkspaceSessions,
+  parseConversationEvents,
 } from '../conversation-parser.js';
 
 describe('parseConversationFile', () => {
@@ -422,5 +423,219 @@ describe('getWorkspaceSessions', () => {
     expect(result).toHaveLength(1);
     expect(result[0].sessionId).toBe('no-summary-session');
     expect(result[0].summary).toBeUndefined();
+  });
+});
+
+describe('parseConversationEvents', () => {
+  const testHome = join(tmpdir(), 'claudia-events-test-' + Date.now());
+  const testWorkspace = '/test/workspace';
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    originalHome = process.env.HOME;
+    process.env.HOME = testHome;
+    // Mirror folder-name rule used by the parser:
+    // non-alphanumeric chars (except dashes) become dashes.
+    const folder = testWorkspace.replace(/[^a-zA-Z0-9-]/g, '-');
+    mkdirSync(join(testHome, '.claude', 'projects', folder), { recursive: true });
+  });
+
+  afterEach(() => {
+    process.env.HOME = originalHome;
+    rmSync(testHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  });
+
+  function writeSession(sessionId: string, lines: object[]): void {
+    const folder = testWorkspace.replace(/[^a-zA-Z0-9-]/g, '-');
+    const file = join(testHome, '.claude', 'projects', folder, `${sessionId}.jsonl`);
+    writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n'));
+  }
+
+  it('emits assistant_message events with text', async () => {
+    writeSession('s1', [
+      {
+        type: 'assistant',
+        uuid: 'a1',
+        sessionId: 's1',
+        timestamp: '2024-01-01T00:00:00Z',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Hello world' }],
+        },
+      },
+    ]);
+
+    const events = await parseConversationEvents(testWorkspace, 's1', 'task-x', 'claude-code');
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('assistant_message');
+    expect(events[0].text).toBe('Hello world');
+    expect(events[0].taskId).toBe('task-x');
+    expect(events[0].sessionId).toBe('s1');
+  });
+
+  it('emits user_message events for plain user turns', async () => {
+    writeSession('s1', [
+      {
+        type: 'user',
+        uuid: 'u1',
+        sessionId: 's1',
+        timestamp: '2024-01-01T00:00:00Z',
+        message: { role: 'user', content: 'hi' },
+      },
+    ]);
+    const events = await parseConversationEvents(testWorkspace, 's1', 'task-x', 'claude-code');
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('user_message');
+    expect(events[0].text).toBe('hi');
+  });
+
+  it('emits separate tool_call and tool_result events with full payloads', async () => {
+    writeSession('s1', [
+      {
+        type: 'assistant',
+        uuid: 'a1',
+        sessionId: 's1',
+        timestamp: '2024-01-01T00:00:00Z',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Running ls' },
+            {
+              type: 'tool_use',
+              id: 'toolu_1',
+              name: 'Bash',
+              input: { command: 'ls -la' },
+            },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        uuid: 'u1',
+        sessionId: 's1',
+        timestamp: '2024-01-01T00:00:01Z',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_1',
+              content: 'total 0\nfoo.txt',
+              is_error: false,
+            },
+          ],
+        },
+      },
+    ]);
+
+    const events = await parseConversationEvents(testWorkspace, 's1', 'task-x', 'claude-code');
+    expect(events.map((e) => e.type)).toEqual([
+      'assistant_message',
+      'tool_call',
+      'tool_result',
+    ]);
+
+    const call = events[1];
+    expect(call.tool?.name).toBe('Bash');
+    expect(call.tool?.toolUseId).toBe('toolu_1');
+    expect(call.tool?.input).toEqual({ command: 'ls -la' });
+
+    const result = events[2];
+    expect(result.toolResult?.toolUseId).toBe('toolu_1');
+    expect(result.toolResult?.output).toBe('total 0\nfoo.txt');
+    expect(result.toolResult?.isError).toBe(false);
+  });
+
+  it('emits a separate thinking event before assistant_message', async () => {
+    writeSession('s1', [
+      {
+        type: 'assistant',
+        uuid: 'a1',
+        sessionId: 's1',
+        timestamp: '2024-01-01T00:00:00Z',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'Hmm, let me consider…' },
+            { type: 'text', text: 'Done.' },
+          ],
+        },
+      },
+    ]);
+    const events = await parseConversationEvents(testWorkspace, 's1', 'task-x', 'claude-code');
+    expect(events.map((e) => e.type)).toContain('thinking');
+    expect(events.map((e) => e.type)).toContain('assistant_message');
+    const thinking = events.find((e) => e.type === 'thinking');
+    expect(thinking?.text).toBe('Hmm, let me consider…');
+  });
+
+  it('handles tool_result with array content', async () => {
+    writeSession('s1', [
+      {
+        type: 'user',
+        uuid: 'u1',
+        sessionId: 's1',
+        timestamp: '2024-01-01T00:00:00Z',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_1',
+              content: [
+                { type: 'text', text: 'part1\n' },
+                { type: 'text', text: 'part2' },
+              ],
+            },
+          ],
+        },
+      },
+    ]);
+    const events = await parseConversationEvents(testWorkspace, 's1', 'task-x', 'claude-code');
+    expect(events).toHaveLength(1);
+    expect(events[0].toolResult?.output).toBe('part1\npart2');
+  });
+
+  it('emits summary event for /compact-style entries', async () => {
+    writeSession('s1', [
+      { type: 'summary', uuid: 'sum1', summary: 'A short conversation' },
+    ]);
+    const events = await parseConversationEvents(testWorkspace, 's1', 'task-x', 'claude-code');
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('summary');
+    expect(events[0].text).toBe('A short conversation');
+  });
+
+  it('returns [] when no session file exists', async () => {
+    const events = await parseConversationEvents(
+      testWorkspace,
+      'does-not-exist',
+      'task-x',
+      'claude-code',
+    );
+    expect(events).toEqual([]);
+  });
+
+  it('skips malformed lines without throwing', async () => {
+    writeSession('s1', []);
+    // Append garbage manually to exercise error path.
+    const folder = testWorkspace.replace(/[^a-zA-Z0-9-]/g, '-');
+    const file = join(testHome, '.claude', 'projects', folder, 's1.jsonl');
+    writeFileSync(
+      file,
+      [
+        'not valid json',
+        JSON.stringify({
+          type: 'user',
+          uuid: 'u1',
+          sessionId: 's1',
+          message: { role: 'user', content: 'ok' },
+        }),
+        '{ broken',
+      ].join('\n'),
+    );
+    const events = await parseConversationEvents(testWorkspace, 's1', 'task-x', 'claude-code');
+    expect(events).toHaveLength(1);
+    expect(events[0].text).toBe('ok');
   });
 });

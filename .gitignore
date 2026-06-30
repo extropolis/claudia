@@ -72,3 +72,4 @@ vite
 
 # Playwright MCP snapshots
 .playwright-mcp/
+backend/atlases/

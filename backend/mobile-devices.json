@@ -1,0 +1,18 @@
+{
+  "devices": {
+    "claudia-mqilfy6e-ad21tcp0": {
+      "deviceId": "claudia-mqilfy6e-ad21tcp0",
+      "pushToken": "ExponentPushToken[Gt1a-ABxOYibxafYd8lz2l]",
+      "platform": "ios",
+      "registeredAt": "2026-06-17T21:39:34.693Z",
+      "lastSeenAt": "2026-06-17T21:49:32.268Z"
+    },
+    "claudia-mqilwmsl-w4b4qzai": {
+      "deviceId": "claudia-mqilwmsl-w4b4qzai",
+      "pushToken": "ExponentPushToken[Gt1a-ABxOYibxafYd8lz2l]",
+      "platform": "ios",
+      "registeredAt": "2026-06-17T21:52:24.428Z",
+      "lastSeenAt": "2026-06-18T01:09:52.795Z"
+    }
+  }
+}

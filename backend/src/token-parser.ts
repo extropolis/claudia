@@ -24,6 +24,14 @@ function getClaudeProjectsDir(workspacePath: string): string {
   return path.join(homeDir, '.claude', 'projects', folderName);
 }
 
+/**
+ * Resolve the path to a session's JSONL file. Useful for callers that want to
+ * stat the file (e.g. for mtime-based throttling) without reparsing it.
+ */
+export function getSessionFilePath(workspacePath: string, sessionId: string): string {
+  return path.join(getClaudeProjectsDir(workspacePath), `${sessionId}.jsonl`);
+}
+
 /** Usage fields from a Claude Code API response */
 interface JsonlUsage {
   input_tokens?: number;

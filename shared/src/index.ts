@@ -155,6 +155,58 @@ export interface ScheduledTask {
     fireCount: number;             // How many times it has fired
 }
 
+// ─── Conversation events (rich React-rendered chat) ────────────────────
+// Canonical event types emitted by the conversation parser/streamer. They
+// describe a Claude Code (or OpenCode) session as a flat timeline of
+// fully-typed events that the React conversation view renders directly.
+// This bypasses the PTY/xterm pipeline that's prone to ANSI garbling.
+export type ConversationEventType =
+    | 'user_message'        // Plain user text turn
+    | 'assistant_message'   // Plain assistant text turn (markdown)
+    | 'thinking'            // Assistant's hidden chain-of-thought
+    | 'tool_call'           // Assistant invoked a tool
+    | 'tool_result'         // Result returned to the assistant for a prior tool_call
+    | 'system'              // System reminder, error notice, side-channel info
+    | 'summary'             // Session summary (e.g. /compact result)
+    | 'session_meta';       // Session-level metadata (model, working dir, …)
+
+export interface ConversationToolCall {
+    name: string;
+    input: Record<string, unknown>;
+    /** Claude's tool_use_id — pairs a call with its later result. */
+    toolUseId: string;
+}
+
+export interface ConversationToolResult {
+    /** Matches the originating tool_call's toolUseId. */
+    toolUseId: string;
+    /** Raw output text from the tool (may contain ANSI). */
+    output: string;
+    isError?: boolean;
+}
+
+export interface ConversationEvent {
+    /** Stable dedup key. Derived from JSONL uuid; suffixed for sub-blocks. */
+    uuid: string;
+    /** Task that produced this event. */
+    taskId: string;
+    /** Session this event belongs to. May change after /compact. */
+    sessionId: string;
+    type: ConversationEventType;
+    /** ISO timestamp from the source JSONL. */
+    timestamp: string;
+    /** Parent UUID from the source JSONL (when present). */
+    parentUuid?: string;
+    /** Markdown text payload for user/assistant/thinking/system/summary. */
+    text?: string;
+    /** Populated when type === 'tool_call'. */
+    tool?: ConversationToolCall;
+    /** Populated when type === 'tool_result'. */
+    toolResult?: ConversationToolResult;
+    /** Free-form forward-compatibility bag (model name, cwd, …). */
+    meta?: Record<string, unknown>;
+}
+
 // WebSocket message types
 export type WSMessageType =
     // Task lifecycle
@@ -162,6 +214,8 @@ export type WSMessageType =
     | 'task:stateChanged'
     | 'task:output'
     | 'task:restore'
+    | 'task:conversation:event'   // One new ConversationEvent (live tail)
+    | 'task:conversation:restore' // Full ConversationEvent[] snapshot on reconnect/cold load
     | 'task:destroyed'
     | 'task:stopped'
     | 'task:stopAll:result'
@@ -223,6 +277,10 @@ export type WSMessageType =
     | 'init'
     // Tunnel status
     | 'tunnel:status'
+    // SDK-driven tasks (Claude Agent SDK, no PTY)
+    | 'sdk:permission:request'    // Tool approval requested by the SDK runner
+    | 'sdk:permission:resolved'   // Tool approval resolved (allow/deny acknowledged)
+    | 'sdk:task:complete'         // SDK run finished — carries cost / token totals
     // Error handling
     | 'error';
 
@@ -285,3 +343,70 @@ export interface UsageDashboardData {
     taskCount: number;
     lastUpdated: string;
 }
+
+// ─── Mobile companion types ─────────────────────────────────────────────
+// Used by the mobile bridge (mobile-agent, mobile-chat-store, mobile-push)
+// and the React Native companion app to keep the message wire-format
+// consistent across desktop ↔ phone.
+
+export interface MobileChatQuickAction {
+    label: string;
+    prompt: string;
+}
+
+export interface MobileChatAttachment {
+    /** What kind of media this is. Drives how the mobile client renders it. */
+    kind: 'video' | 'image';
+    /**
+     * URL the mobile client can fetch. Typically an absolute https URL on the
+     * tunnel (e.g. `https://<tunnel>/api/mobile/video/<id>.mp4?token=<t>`).
+     * The backend signs/templates this when persisting the message so paired
+     * devices can fetch the asset directly.
+     */
+    url: string;
+    mimeType?: string;
+    /** Approx duration for video attachments. */
+    durationMs?: number;
+    /** Optional poster/thumbnail URL for video attachments. */
+    posterUrl?: string;
+    /** Width in pixels (when known). */
+    width?: number;
+    /** Height in pixels (when known). */
+    height?: number;
+}
+
+export interface MobileChatMessage {
+    id: string;
+    workspaceId: string;
+    role: 'user' | 'agent' | 'system';
+    text: string;
+    taskId?: string;
+    quickActions?: MobileChatQuickAction[];
+    /**
+     * Optional media attachments — populated by the verifier flow when a task
+     * completes and Playwright captures a short demo video of the change.
+     */
+    attachments?: MobileChatAttachment[];
+    createdAt: string;
+}
+
+/**
+ * Legacy card-style summary payload broadcast over the `task:summary` WS
+ * event when a task settles to idle. Older mobile UI consumed these as
+ * cards; the chat-style flow (MobileChatMessage above) is now the
+ * primary path, but `task:summary` is still emitted for back-compat.
+ */
+export interface MobileTaskSummary {
+    taskId: string;
+    workspaceId: string;
+    workspaceName?: string;
+    taskName?: string;
+    state: TaskState;
+    summary: string;
+    spendUsd?: number;
+    /** Optional iteration count for tasks that ran multiple internal loops. */
+    iterations?: number;
+    nextActions: MobileChatQuickAction[];
+    timestamp: string;
+}
+

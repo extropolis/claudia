@@ -42,6 +42,7 @@ import { generateLLMResponse, resolveLlmEndpoint } from './llm-service.js';
 import type { TaskSpawner } from './task-spawner.js';
 import type { WorkspaceStore } from './workspace-store.js';
 import type { MobileChatStore } from './mobile-chat-store.js';
+import { summarizeViaClaudeP } from './claude-summarize.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -157,8 +158,19 @@ export class MobileAgent {
   /**
    * Generate a chat-style summary message for a task that just settled to
    * idle. Appends it to the workspace transcript and returns the new
-   * message. Quick actions are dynamically generated from the user's past
-   * prompts when an LLM is reachable, falling back to a static set.
+   * message.
+   *
+   * Quality plan:
+   *   1. PREFERRED — call `claude -p --resume <sessionId>` so the
+   *      summariser sees the full structured conversation context. This
+   *      produces vastly better summaries than feeding a chunk of PTY
+   *      output to a separate model. We run this in parallel with the
+   *      quick-actions LLM call so the wall-time is roughly the slower
+   *      of the two, not the sum.
+   *   2. FALLBACK — if `claude -p` returns null (no session id, CLI
+   *      timeout, non-zero exit, etc.) we use the previous all-SDK path
+   *      that summarises from a stripped PTY snippet. Always works, just
+   *      lower fidelity.
    */
   async summarizeIdleTask(task: Task): Promise<MobileChatMessage> {
     const workspaceName = this.getWorkspaceName(task.workspaceId);
@@ -168,29 +180,75 @@ export class MobileAgent {
     );
     const pastPrompts = this.gatherPastUserPrompts(task.workspaceId, MAX_PAST_PROMPTS);
 
-    let text: string;
+    // Kick off both calls in parallel. claude -p generates the summary
+    // text; the SDK call generates the quick-action chips. Either may fail
+    // and we handle each independently.
+    const summaryPromise: Promise<string | null> = task.sessionId
+      ? summarizeViaClaudeP({
+          workspacePath: task.workspaceId,
+          sessionId: task.sessionId,
+        }).then((r) => (r ? clamp(r.text, 320) : null))
+      : Promise.resolve(null);
+
+    const actionsPromise: Promise<MobileChatQuickAction[]> = this.callJsonLLM(
+      SUMMARY_SYSTEM_PROMPT,
+      buildSummaryUserMessage({
+        task,
+        workspaceName,
+        recentOutput,
+        pastPrompts,
+      }),
+      500,
+    )
+      .then((result) => {
+        const actions = sanitizeActions(result.nextActions);
+        return actions.length > 0 ? actions : STUB_ACTIONS;
+      })
+      .catch((err) => {
+        console.warn(
+          `[MobileAgent] action LLM failed for task ${task.id}, using stubs:`,
+          err instanceof Error ? err.message : err,
+        );
+        return STUB_ACTIONS;
+      });
+
+    // The SDK call also produces a `summary` field in its JSON. We use it
+    // as the second-tier fallback (better than the static fallbackSummary
+    // since at least the model wrote it). The third tier is the static
+    // fallback. Only run this SDK-summary path if claude -p returned null,
+    // to avoid burning tokens we don't need. We do it serially after the
+    // race is settled; it's quick (~3s) compared to claude -p (~30s).
+    let text: string | null = null;
     let actions: MobileChatQuickAction[];
     try {
-      const result = await this.callJsonLLM(
-        SUMMARY_SYSTEM_PROMPT,
-        buildSummaryUserMessage({
-          task,
-          workspaceName,
-          recentOutput,
-          pastPrompts,
-        }),
-        500,
-      );
-      text = clamp(result.summary ?? '', 320) || fallbackSummary(task, recentOutput);
-      actions = sanitizeActions(result.nextActions) || [];
-      if (actions.length === 0) actions = STUB_ACTIONS;
-    } catch (err) {
-      console.warn(
-        `[MobileAgent] summary LLM failed for task ${task.id}, using stub:`,
-        err instanceof Error ? err.message : err,
-      );
-      text = fallbackSummary(task, recentOutput);
+      [text, actions] = await Promise.all([summaryPromise, actionsPromise]);
+    } catch {
       actions = STUB_ACTIONS;
+    }
+
+    if (!text) {
+      // claude -p produced nothing — fall back to the SDK-summary path.
+      try {
+        const result = await this.callJsonLLM(
+          SUMMARY_SYSTEM_PROMPT,
+          buildSummaryUserMessage({
+            task,
+            workspaceName,
+            recentOutput,
+            pastPrompts,
+          }),
+          500,
+        );
+        text = clamp(result.summary ?? '', 320) || null;
+      } catch (err) {
+        console.warn(
+          `[MobileAgent] SDK summary fallback failed for task ${task.id}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+    if (!text) {
+      text = fallbackSummary(task, recentOutput);
     }
 
     return this.deps.chatStore.appendMessage({

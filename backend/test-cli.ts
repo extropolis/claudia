@@ -52,6 +52,7 @@ interface TestConfig {
     backendStatus: boolean;       // Get backend status (no WebSocket needed)
     setBackend: string | null;    // Set backend ('claude-code' or 'opencode')
     watchOutput: boolean;         // Stream task output to console
+    watchConversation: boolean;   // Stream parsed ConversationEvents to console
     waitForIdle: boolean;         // Wait for task to become idle before exiting
     listMcpServers: boolean;      // List available MCP servers (no WebSocket needed)
     testMcpServer: string | null; // Test a specific MCP server by name
@@ -921,6 +922,14 @@ class TestCLI {
                 this.handleTaskOutput(message.payload as { taskId: string; data: string });
                 break;
 
+            case 'task:conversation:event':
+                this.handleConversationEvent(message.payload as { taskId: string; event: any });
+                break;
+
+            case 'task:conversation:restore':
+                this.handleConversationRestore(message.payload as { taskId: string; events: any[] });
+                break;
+
             case 'supervisor:chat:response':
                 this.handleSupervisorChatResponse(message.payload as { message: ChatMessage });
                 break;
@@ -991,6 +1000,72 @@ class TestCLI {
             const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
             const preview = payload.data.substring(0, 80).replace(/\n/g, ' ');
             console.log(`[${elapsed}s] OUTPUT    │ [${payload.taskId.substring(0, 8)}...] ${preview}...`);
+        }
+    }
+
+    /**
+     * Pretty-print one ConversationEvent to stdout when --watch-conversation
+     * is on. Designed to make the JSONL→event pipeline easy to eyeball: each
+     * event renders as a typed line with the most useful payload field
+     * inlined (text, tool name+input, tool result preview).
+     */
+    private formatConversationEvent(ev: any): string {
+        const time = ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : '';
+        const head = `[${time}] ${ev.type}`;
+        switch (ev.type) {
+            case 'user_message':
+            case 'assistant_message':
+            case 'thinking':
+            case 'system':
+            case 'summary': {
+                const text = (ev.text ?? '').replace(/\n/g, '\\n');
+                const preview = text.length > 200 ? text.slice(0, 200) + '…' : text;
+                return `${head} │ ${preview}`;
+            }
+            case 'tool_call': {
+                const t = ev.tool;
+                const input = JSON.stringify(t?.input ?? {});
+                const inputPreview = input.length > 200 ? input.slice(0, 200) + '…' : input;
+                return `${head} │ ${t?.name} ${inputPreview}`;
+            }
+            case 'tool_result': {
+                const r = ev.toolResult;
+                const out = (r?.output ?? '').replace(/\n/g, '\\n');
+                const preview = out.length > 200 ? out.slice(0, 200) + '…' : out;
+                const errFlag = r?.isError ? ' ERROR' : '';
+                return `${head}${errFlag} │ ${preview}`;
+            }
+            default:
+                return `${head} │ ${JSON.stringify(ev).slice(0, 200)}`;
+        }
+    }
+
+    private handleConversationEvent(payload: { taskId: string; event: any }): void {
+        this.lastActivityTime = Date.now();
+        if (this.config.watchConversation) {
+            console.log(this.formatConversationEvent(payload.event));
+        } else if (this.config.verbose) {
+            const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+            console.log(
+                `[${elapsed}s] CONV.EV   │ [${payload.taskId.substring(0, 8)}...] ${payload.event.type}`,
+            );
+        }
+    }
+
+    private handleConversationRestore(payload: { taskId: string; events: any[] }): void {
+        if (this.config.watchConversation) {
+            console.log(
+                `── conversation restore: ${payload.events.length} events for ${payload.taskId.substring(0, 8)}… ──`,
+            );
+            for (const ev of payload.events) {
+                console.log(this.formatConversationEvent(ev));
+            }
+            console.log('── end restore ──');
+        } else if (this.config.verbose) {
+            const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+            console.log(
+                `[${elapsed}s] CONV.RST  │ [${payload.taskId.substring(0, 8)}...] ${payload.events.length} events`,
+            );
         }
     }
 
@@ -1333,6 +1408,7 @@ function parseArgs(): TestConfig {
     let backendStatus = false;
     let setBackend: string | null = null;
     let watchOutput = false;
+    let watchConversation = false;
     let waitForIdle = false;
     let listMcpServers = false;
     let testMcpServer: string | null = null;
@@ -1499,6 +1575,10 @@ function parseArgs(): TestConfig {
             case '--watch-output':
             case '-o':
                 watchOutput = true;
+                break;
+            case '--watch-conversation':
+            case '-W':
+                watchConversation = true;
                 break;
             case '--wait-idle':
                 waitForIdle = true;
@@ -1863,6 +1943,7 @@ Examples:
         backendStatus,
         setBackend,
         watchOutput,
+        watchConversation,
         waitForIdle,
         listMcpServers,
         testMcpServer,

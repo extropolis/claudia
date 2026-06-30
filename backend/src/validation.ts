@@ -92,6 +92,7 @@ export interface ConfigUpdatePayload {
             high?: string;
         };
     };
+    mobileSummariesEnabled?: boolean;
 }
 
 /**
@@ -199,7 +200,8 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
         'skipPermissions',
         'autoFocusOnInput',
         'supervisorEnabled',
-        'claudiaMcpServerEnabled'
+        'claudiaMcpServerEnabled',
+        'mobileSummariesEnabled'
     ];
 
     for (const field of booleanFields) {

@@ -7,10 +7,10 @@ import {
   WaitingInputType,
   ScheduledTask,
   TaskTokenUsage,
-  NarrationMessage,
 } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
 import { ThemePreference } from '../types/theme';
+import type { PermissionMode } from '../utils/permissionModes';
 
 // Info about a task that is waiting for user input
 export interface WaitingInputInfo {
@@ -36,6 +36,37 @@ interface VoiceSettings {
   pitch: number;
   volume: number;
 }
+
+// Filter checkboxes for the React conversation view. When all are true,
+// the view shows everything we receive from Claude Code (mirrors the raw
+// terminal). Toggling any to false hides those rows in the rendered list.
+export interface ConversationFilterSettings {
+  userMessages: boolean;
+  assistantMessages: boolean;
+  thinking: boolean;
+  toolCalls: boolean;
+  system: boolean;
+  summary: boolean;
+  sessionMeta: boolean;
+  // Display chrome around the message list. These don't filter events —
+  // they toggle the auxiliary UI strips at the bottom of the pane.
+  statusBar: boolean;   // bottom "Working… (1m 52s)" status strip
+  tokenStats: boolean;  // token chip in status bar + the TaskTokenStats panel
+  cost: boolean;        // cost chip + cost line in TaskTokenStats panel
+}
+
+export const DEFAULT_CONVERSATION_FILTERS: ConversationFilterSettings = {
+  userMessages: true,
+  assistantMessages: true,
+  thinking: true,
+  toolCalls: true,
+  system: true,
+  summary: true,
+  sessionMeta: true,
+  statusBar: true,
+  tokenStats: true,
+  cost: true,
+};
 
 interface TaskStore {
   // State
@@ -82,13 +113,24 @@ interface TaskStore {
   // Task summaries
   taskSummaries: Map<string, TaskSummary>;
 
-  // Minimal chat view — narrations per task + per-task view mode toggle
-  // (per-task: each task remembers if the user prefers terminal or chat)
-  narrations: Map<string, NarrationMessage[]>;
-  taskViewMode: Map<string, 'terminal' | 'chat'>;
+  // Per-task view mode toggle. Each task remembers if the user prefers
+  // terminal or conversation view. 'conversation' is the React-rendered
+  // view that replaces xterm; 'terminal' is the xterm fallback.
+  taskViewMode: Map<string, 'terminal' | 'conversation'>;
+
+  // Conversation view filter settings — which event types to show in the
+  // React conversation view. When all flags are true, the view shows
+  // everything Claude Code emits (parity with the raw terminal output).
+  conversationFilters: ConversationFilterSettings;
 
   // Waiting input notifications
   waitingInputNotifications: Map<string, WaitingInputInfo>;
+
+  // Permission mode per task — parsed from Claude Code's PTY footer.
+  // Drives the mode chip in the conversation status bar; sticky between
+  // updates so the chip doesn't blank out when output chunks lack a footer
+  // line.
+  permissionModeByTask: Map<string, PermissionMode>;
 
   // Draft input per task (preserved when switching tasks)
   taskDraftInputs: Map<string, string>;
@@ -114,6 +156,7 @@ interface TaskStore {
   voiceProgressUpdateInterval: number; // milliseconds between progress updates
   themePreference: ThemePreference;
   tokenCostEnabled: boolean;
+  skipPermissions: boolean;
 
   // Actions
   setConnected: (connected: boolean) => void;
@@ -164,16 +207,22 @@ interface TaskStore {
   setTaskSummary: (summary: TaskSummary) => void;
   clearTaskSummary: (taskId: string) => void;
 
-  // Narration actions (minimal chat view)
-  appendNarration: (msg: NarrationMessage) => void;
-  setNarrationsForTask: (taskId: string, msgs: NarrationMessage[]) => void;
-  clearNarrationsForTask: (taskId: string) => void;
-  setTaskViewMode: (taskId: string, mode: 'terminal' | 'chat') => void;
-  getTaskViewMode: (taskId: string) => 'terminal' | 'chat';
+  // View mode actions
+  setTaskViewMode: (taskId: string, mode: 'terminal' | 'conversation') => void;
+  getTaskViewMode: (taskId: string) => 'terminal' | 'conversation';
+
+  // Conversation filter actions
+  setConversationFilter: (key: keyof ConversationFilterSettings, value: boolean) => void;
+  setAllConversationFilters: (value: boolean) => void;
+  resetConversationFilters: () => void;
 
   // Waiting input actions
   setWaitingInput: (info: WaitingInputInfo) => void;
   clearWaitingInput: (taskId: string) => void;
+
+  // Permission mode (per task)
+  setPermissionMode: (taskId: string, mode: PermissionMode) => void;
+  clearPermissionMode: (taskId: string) => void;
 
   // Draft input actions
   setTaskDraftInput: (taskId: string, input: string) => void;
@@ -212,6 +261,7 @@ interface TaskStore {
   setVoiceProgressUpdateInterval: (interval: number) => void;
   setThemePreference: (pref: ThemePreference) => void;
   setTokenCostEnabled: (enabled: boolean) => void;
+  setSkipPermissions: (enabled: boolean) => void;
 }
 
 // Storage key for localStorage
@@ -251,7 +301,8 @@ interface PersistedState {
   themePreference: ThemePreference;
   tokenCostEnabled: boolean;
   taskSummaries: [string, TaskSummary][]; // Stored as entries array
-  taskViewMode: [string, 'terminal' | 'chat'][]; // per-task minimal chat preference
+  taskViewMode: [string, 'terminal' | 'conversation'][]; // per-task view mode preference
+  conversationFilters: ConversationFilterSettings; // which event types to show in conversation view
 }
 
 export const useTaskStore = create<TaskStore>()(
@@ -299,12 +350,15 @@ export const useTaskStore = create<TaskStore>()(
       // Task summary initial state
       taskSummaries: new Map(),
 
-      // Narration initial state
-      narrations: new Map(),
+      // View mode initial state
       taskViewMode: new Map(),
+
+      // Conversation filter initial state — everything visible by default
+      conversationFilters: { ...DEFAULT_CONVERSATION_FILTERS },
 
       // Waiting input initial state
       waitingInputNotifications: new Map(),
+      permissionModeByTask: new Map(),
 
       // Draft input initial state
       taskDraftInputs: new Map(),
@@ -330,6 +384,7 @@ export const useTaskStore = create<TaskStore>()(
       voiceProgressUpdateInterval: 180000, // 3 minutes (180 seconds)
       themePreference: 'system' as ThemePreference,
       tokenCostEnabled: false,
+      skipPermissions: false,
 
       // Actions
       setConnected: (connected) => {
@@ -759,30 +814,6 @@ export const useTaskStore = create<TaskStore>()(
         set({ taskSummaries: newSummaries });
       },
 
-      // Narration actions
-      appendNarration: (msg) => {
-        const { narrations } = get();
-        const list = narrations.get(msg.taskId) ?? [];
-        // Deduplicate by id to prevent doubles from restore+live overlap.
-        if (list.some((m) => m.id === msg.id)) return;
-        const next = [...list, msg].slice(-100);
-        const newMap = new Map(narrations);
-        newMap.set(msg.taskId, next);
-        set({ narrations: newMap });
-      },
-      setNarrationsForTask: (taskId, msgs) => {
-        const { narrations } = get();
-        const newMap = new Map(narrations);
-        newMap.set(taskId, msgs.slice(-100));
-        set({ narrations: newMap });
-      },
-      clearNarrationsForTask: (taskId) => {
-        const { narrations } = get();
-        if (!narrations.has(taskId)) return;
-        const newMap = new Map(narrations);
-        newMap.delete(taskId);
-        set({ narrations: newMap });
-      },
       setTaskViewMode: (taskId, mode) => {
         const { taskViewMode } = get();
         const newMap = new Map(taskViewMode);
@@ -791,7 +822,37 @@ export const useTaskStore = create<TaskStore>()(
       },
       getTaskViewMode: (taskId) => {
         const { taskViewMode } = get();
-        return taskViewMode.get(taskId) ?? 'terminal';
+        // Default: 'conversation' (React-rendered view that bypasses
+        // xterm.js entirely — fixes the terminal-width-drift garbling
+        // class of bugs). 'terminal' remains available as a fallback
+        // via the view-toggle button.
+        return taskViewMode.get(taskId) ?? 'conversation';
+      },
+
+      // Conversation filter actions
+      setConversationFilter: (key, value) => {
+        set((state) => ({
+          conversationFilters: { ...state.conversationFilters, [key]: value },
+        }));
+      },
+      setAllConversationFilters: (value) => {
+        set({
+          conversationFilters: {
+            userMessages: value,
+            assistantMessages: value,
+            thinking: value,
+            toolCalls: value,
+            system: value,
+            summary: value,
+            sessionMeta: value,
+            statusBar: value,
+            tokenStats: value,
+            cost: value,
+          },
+        });
+      },
+      resetConversationFilters: () => {
+        set({ conversationFilters: { ...DEFAULT_CONVERSATION_FILTERS } });
       },
 
       // Waiting input actions
@@ -806,6 +867,24 @@ export const useTaskStore = create<TaskStore>()(
         const newNotifications = new Map(waitingInputNotifications);
         newNotifications.delete(taskId);
         set({ waitingInputNotifications: newNotifications });
+      },
+
+      // Permission mode actions — only update the store when the parsed mode
+      // actually changes, so we don't trigger a re-render on every PTY chunk
+      // that re-prints the same footer line.
+      setPermissionMode: (taskId, mode) => {
+        const { permissionModeByTask } = get();
+        if (permissionModeByTask.get(taskId) === mode) return;
+        const next = new Map(permissionModeByTask);
+        next.set(taskId, mode);
+        set({ permissionModeByTask: next });
+      },
+      clearPermissionMode: (taskId) => {
+        const { permissionModeByTask } = get();
+        if (!permissionModeByTask.has(taskId)) return;
+        const next = new Map(permissionModeByTask);
+        next.delete(taskId);
+        set({ permissionModeByTask: next });
       },
 
       // Draft input actions
@@ -844,6 +923,7 @@ export const useTaskStore = create<TaskStore>()(
       setVoiceProgressUpdateInterval: (interval) => set({ voiceProgressUpdateInterval: interval }),
       setThemePreference: (pref) => set({ themePreference: pref }),
       setTokenCostEnabled: (enabled) => set({ tokenCostEnabled: enabled }),
+      setSkipPermissions: (enabled) => set({ skipPermissions: enabled }),
     }),
     {
       name: STORAGE_KEY,
@@ -883,6 +963,7 @@ export const useTaskStore = create<TaskStore>()(
         tokenCostEnabled: state.tokenCostEnabled,
         taskSummaries: Array.from(state.taskSummaries.entries()),
         taskViewMode: Array.from(state.taskViewMode.entries()),
+        conversationFilters: state.conversationFilters,
       }),
       // Merge persisted state with initial state, converting arrays back to Set/Map
       merge: (persistedState, currentState) => {
@@ -943,8 +1024,17 @@ export const useTaskStore = create<TaskStore>()(
             ? new Map(persisted.taskSummaries)
             : currentState.taskSummaries,
           taskViewMode: persisted.taskViewMode
-            ? new Map(persisted.taskViewMode)
+            ? new Map(
+                // Migrate legacy 'chat' mode → 'conversation' (chat view was removed).
+                persisted.taskViewMode.map(([taskId, mode]) => [
+                  taskId,
+                  mode === ('chat' as unknown) ? 'conversation' : mode,
+                ]),
+              )
             : currentState.taskViewMode,
+          conversationFilters: persisted.conversationFilters
+            ? { ...DEFAULT_CONVERSATION_FILTERS, ...persisted.conversationFilters }
+            : currentState.conversationFilters,
         };
       },
     },

@@ -1,0 +1,107 @@
+/* SlashMenu — floating typeahead anchored to the textarea caret. */
+
+.slash-menu {
+  background: #161616;
+  border: 1px solid #2c2c2c;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  max-height: 320px;
+  overflow-y: auto;
+  z-index: 9999;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  color: #e5e5e5;
+  animation: slash-menu-fade-in 90ms ease-out;
+}
+
+@keyframes slash-menu-fade-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.slash-menu-section {
+  padding: 4px 0;
+}
+
+.slash-menu-section-header {
+  padding: 6px 12px 4px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6f6f6f;
+  font-weight: 600;
+}
+
+.slash-menu-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  user-select: none;
+  border-left: 2px solid transparent;
+}
+
+.slash-menu-item.is-selected {
+  background: #1f2a3b;
+  border-left-color: #4a90e2;
+}
+
+.slash-menu-item:hover:not(.is-selected) {
+  background: #1c1c1c;
+}
+
+.slash-menu-name {
+  color: #e5e5e5;
+  font-family: "SF Mono", "Monaco", monospace;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.slash-menu-item.is-selected .slash-menu-name {
+  color: #f0f6ff;
+}
+
+.slash-menu-arg {
+  color: #6aa3d1;
+  font-family: "SF Mono", "Monaco", monospace;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.slash-menu-desc {
+  color: #888;
+  font-size: 12px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-menu-item.is-selected .slash-menu-desc {
+  color: #b8b8b8;
+}
+
+.slash-menu-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-top: 1px solid #2c2c2c;
+  font-size: 10.5px;
+  color: #666;
+  background: #131313;
+  position: sticky;
+  bottom: 0;
+}
+
+.slash-menu-footer span:nth-child(odd) {
+  background: #222;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: "SF Mono", "Monaco", monospace;
+}
+
+.slash-menu-footer-label {
+  margin-right: 6px;
+}
