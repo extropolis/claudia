@@ -25,9 +25,11 @@ import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
 import { registerDevice, unregisterDevice, listDevices, sendPush } from './mobile-push.js';
-import { generateMobileSummary, buildSimulatedSummary } from './task-summary.js';
+import { generateMobileSummary, buildSimulatedSummary, shouldEmitIdleSummary } from './task-summary.js';
 import { MobileChatStore } from './mobile-chat-store.js';
-import { MobileAgent } from './mobile-agent.js';
+import { MobileAgent, validateMobileChatInput } from './mobile-agent.js';
+import { createTunnelAuthMiddleware, isTunnelHost } from './tunnel-auth.js';
+import { createRateLimiter } from './rate-limiter.js';
 import { getVoiceAgentPageHtml } from './voice-agent-page.js';
 import { VoiceSupervisor } from './voice-supervisor.js';
 // import { ElevenLabsTTS } from './elevenlabs-tts.js'; // TODO: Implement ElevenLabs TTS
@@ -395,10 +397,12 @@ export async function createApp(basePath?: string) {
     // Instead of relying on env vars, we try Vite first and fall back to static
     // if Vite isn't running (connection refused = production mode).
 
-    function isTunnelHost(host: string): boolean {
-        return host.includes('.loca.lt') || host.includes('localtunnel') ||
-               host.includes('.ngrok-free.app') || host.includes('.ngrok.io') || host.includes('ngrok');
-    }
+    // Tunnel auth for sensitive REST APIs: when the request arrives via the
+    // public tunnel, /api/mobile/* and /api/voice/* require the same session
+    // token the WebSocket upgrade path enforces. Local requests are untouched.
+    app.use(createTunnelAuthMiddleware({
+        validateToken: (token) => tunnelManager.validateToken(token),
+    }));
 
     app.use((req, res, next) => {
         const host = req.headers.host || '';
@@ -698,11 +702,7 @@ export async function createApp(basePath?: string) {
         pendingTaskStateChanges.set(task.id, task);
         scheduleBatchedBroadcast();
 
-        const wasActive =
-            prevState === 'busy' ||
-            prevState === 'starting' ||
-            prevState === 'waiting_input';
-        if (task.state === 'idle' && wasActive) {
+        if (shouldEmitIdleSummary(prevState, task.state)) {
             void emitMobileTaskSummary(task).catch((err) =>
                 console.error('[mobile-push] summary emit failed:', err),
             );
@@ -2687,6 +2687,15 @@ export async function createApp(basePath?: string) {
     // handles that). Locally these are open so the RN web build on
     // http://localhost can hit them without ceremony.
 
+    // Rate limits for endpoints that spend LLM tokens or fan out push
+    // notifications. Keyed per deviceId (body) falling back to client IP.
+    // Wrapped as express.RequestHandler so route-handler type inference is
+    // unaffected by the limiter's minimal structural types.
+    const llmLimiter = createRateLimiter({ windowMs: 60_000, max: 20, name: 'mobile-llm' });
+    const pushLimiter = createRateLimiter({ windowMs: 60_000, max: 10, name: 'mobile-push' });
+    const mobileLlmRateLimit: express.RequestHandler = (req, res, next) => llmLimiter(req, res, next);
+    const mobilePushRateLimit: express.RequestHandler = (req, res, next) => pushLimiter(req, res, next);
+
     // Bridge metadata for the mobile app to display after connecting.
     app.get('/api/mobile/bridge-info', (_req, res) => {
         const tunnelStatus = tunnelManager.getStatus();
@@ -2726,7 +2735,7 @@ export async function createApp(basePath?: string) {
 
     // Send a test push (used by the mobile app's "Send test" button and by
     // the test-cli's --simulate-mobile-event flag).
-    app.post('/api/mobile/test-push', async (req, res) => {
+    app.post('/api/mobile/test-push', mobilePushRateLimit, async (req, res) => {
         const title = (req.body?.title as string) ?? 'Claudia';
         const body = (req.body?.body as string) ?? 'Test notification from your bridge.';
         const result = await sendPush({ title, body, data: { kind: 'test' } });
@@ -2735,7 +2744,7 @@ export async function createApp(basePath?: string) {
 
     // Simulate a `task:summary` event end-to-end. Used by --simulate-mobile-event
     // to verify the mobile feed without spawning a real task.
-    app.post('/api/mobile/simulate-summary', async (req, res) => {
+    app.post('/api/mobile/simulate-summary', mobilePushRateLimit, async (req, res) => {
         const taskId = (req.body?.taskId as string) ?? 'sim-task';
         const summary = buildSimulatedSummary(taskId);
         broadcast({ type: 'task:summary' as WSMessageType, payload: summary });
@@ -2773,20 +2782,21 @@ export async function createApp(basePath?: string) {
     // appends both the user message and any agent/system messages it
     // produces, broadcasts each new message over WS, and returns them so the
     // device can update its UI immediately even before the WS event lands.
-    app.post('/api/mobile/chat', async (req, res) => {
+    app.post('/api/mobile/chat', mobileLlmRateLimit, async (req, res) => {
         const workspaceId =
             (typeof req.body?.workspaceId === 'string' ? req.body.workspaceId : '') ||
             (req.query.workspaceId as string | undefined) ||
             '';
-        const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
         if (!workspaceId) {
             res.status(400).json({ error: 'workspaceId is required' });
             return;
         }
-        if (!text) {
-            res.status(400).json({ error: 'text is required and must be non-empty' });
+        const inputCheck = validateMobileChatInput(req.body?.text);
+        if (!inputCheck.ok) {
+            res.status(400).json({ error: inputCheck.error });
             return;
         }
+        const text = inputCheck.text;
         const ws = workspaceStore.getWorkspaces().find((w) => w.id === workspaceId);
         if (!ws) {
             res.status(404).json({ error: `Workspace '${workspaceId}' not found` });
@@ -2830,7 +2840,7 @@ export async function createApp(basePath?: string) {
     // Run the idle-task summary path on demand (test/debug). Bypasses the
     // need to wait for a real busy→idle transition — handy for `test-cli
     // --mobile-summary --task-id <id>` when iterating on the LLM prompt.
-    app.post('/api/mobile/chat/summarize-task', async (req, res) => {
+    app.post('/api/mobile/chat/summarize-task', mobileLlmRateLimit, async (req, res) => {
         const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId : '';
         if (!taskId) {
             res.status(400).json({ error: 'body.taskId is required' });
@@ -2857,23 +2867,70 @@ export async function createApp(basePath?: string) {
     });
 
     // ─── Voice (Deepgram) ────────────────────────────────────────────────
-    // The RN app uses Deepgram's streaming WebSocket directly. We serve the
-    // user's saved Deepgram key (stored via the desktop Settings → Voice
-    // panel, persisted to config.json by `setDeepgramApiKey`) so the device
-    // never has to hold it long-term — it just opens a WS, streams a clip,
-    // and discards. If no key is configured we return configured:false and
-    // the mobile app falls back to text-only input.
+    // The RN app uses Deepgram's streaming WebSocket directly. This endpoint
+    // is tunnel-token-gated by the tunnel auth middleware above, and we
+    // additionally try to mint a SHORT-LIVED access token via Deepgram's
+    // token-grant API (POST /v1/auth/grant, authorized with the long-lived
+    // key) so the stored key never leaves the bridge. The grant returns a
+    // JWT the client uses as `Authorization: Bearer <token>` (or the
+    // ['bearer', <token>] WS subprotocol) — signalled by tokenType: 'bearer'.
     //
-    // For production tunnel deployments we should mint a short-lived member
-    // key via Deepgram's Management API instead of forwarding the long-lived
-    // one. That's a v2 hardening pass.
+    // If the grant call fails (offline, self-hosted Deepgram, older API) we
+    // fall back to forwarding the raw key with tokenType: 'api-key'.
+    // NOTE: that fallback key is LONG-LIVED — `expiresIn` is informational
+    // only and does not expire the key. The tunnel auth gate is the only
+    // protection in that mode.
     app.get('/api/voice/deepgram-token', async (_req, res) => {
         const apiKey =
             configStore.getConfig().deepgramApiKey || process.env.DEEPGRAM_API_KEY;
         if (!apiKey) {
             return res.json({ success: true, configured: false });
         }
-        res.json({ success: true, configured: true, key: apiKey, expiresIn: 30 });
+
+        // Attempt an ephemeral, scoped token (default usage::write, TTL 60s).
+        try {
+            const ctl = new AbortController();
+            const timer = setTimeout(() => ctl.abort(), 5_000);
+            try {
+                const grantRes = await fetch('https://api.deepgram.com/v1/auth/grant', {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Token ${apiKey}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ ttl_seconds: 60 }),
+                    signal: ctl.signal,
+                });
+                if (grantRes.ok) {
+                    const grant = (await grantRes.json()) as {
+                        access_token?: string;
+                        expires_in?: number;
+                    };
+                    if (grant.access_token) {
+                        return res.json({
+                            success: true,
+                            configured: true,
+                            key: grant.access_token,
+                            tokenType: 'bearer',
+                            expiresIn: grant.expires_in ?? 60,
+                        });
+                    }
+                } else {
+                    logger.warn('Deepgram token grant failed, falling back to raw key', {
+                        status: grantRes.status,
+                    });
+                }
+            } finally {
+                clearTimeout(timer);
+            }
+        } catch (err) {
+            logger.warn('Deepgram token grant errored, falling back to raw key', {
+                error: err instanceof Error ? err.message : String(err),
+            });
+        }
+
+        // Fallback: LONG-LIVED key (see note above).
+        res.json({ success: true, configured: true, key: apiKey, tokenType: 'api-key', expiresIn: 30 });
     });
 
     // Byte-range read of a task's history file. Used by the terminal's

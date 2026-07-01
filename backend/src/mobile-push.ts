@@ -10,11 +10,13 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
+import { atomicWriteFileSync } from './utils/atomic-write.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Persisted to disk so registrations survive backend restarts.
-const STORE_PATH = path.join(__dirname, '..', 'mobile-devices.json');
+let storePath = path.join(__dirname, '..', 'mobile-devices.json');
 
 export interface MobileDevice {
   deviceId: string; // Stable device-generated id
@@ -31,8 +33,8 @@ interface DeviceStore {
 
 function loadStore(): DeviceStore {
   try {
-    if (fs.existsSync(STORE_PATH)) {
-      const raw = fs.readFileSync(STORE_PATH, 'utf-8');
+    if (fs.existsSync(storePath)) {
+      const raw = fs.readFileSync(storePath, 'utf-8');
       return JSON.parse(raw) as DeviceStore;
     }
   } catch (err) {
@@ -43,7 +45,10 @@ function loadStore(): DeviceStore {
 
 function saveStore(store: DeviceStore): void {
   try {
-    fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2), 'utf-8');
+    // Atomic write (temp file + rename) so a crash mid-write can never leave
+    // mobile-devices.json truncated — loadStore would otherwise silently
+    // reset every registration to empty on the next boot.
+    atomicWriteFileSync(storePath, JSON.stringify(store, null, 2));
   } catch (err) {
     console.error('[mobile-push] Failed to save device store:', err);
   }
@@ -144,4 +149,15 @@ export async function sendPush(input: {
  */
 export function reloadStore(): void {
   store = loadStore();
+}
+
+/**
+ * Test-only: point the device store at a different file and reload from it.
+ * Returns the previous path so tests can restore it.
+ */
+export function _setStorePathForTests(newPath: string): string {
+  const prev = storePath;
+  storePath = newPath;
+  store = loadStore();
+  return prev;
 }

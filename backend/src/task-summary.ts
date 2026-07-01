@@ -24,6 +24,21 @@ import type { MobileTaskSummary, Task } from '@claudia/shared';
 
 import { generateLLMResponse } from './llm-service.js';
 
+/**
+ * True when a task just settled from an active state to idle — the exact
+ * transition on which the mobile companion emits a `task:summary` event and
+ * chat message (see queueTaskStateChange in server.ts). Kept as a pure
+ * function so the trigger logic is unit-testable.
+ */
+export function shouldEmitIdleSummary(
+  prevState: Task['state'] | undefined,
+  nextState: Task['state'],
+): boolean {
+  const wasActive =
+    prevState === 'busy' || prevState === 'starting' || prevState === 'waiting_input';
+  return nextState === 'idle' && wasActive;
+}
+
 interface SummaryInput {
   task: Task;
   workspaceName?: string;
