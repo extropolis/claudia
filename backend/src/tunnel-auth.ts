@@ -120,10 +120,18 @@ export function createTunnelAuthMiddleware(options: TunnelAuthOptions) {
     const prefixes = options.protectedPrefixes ?? TUNNEL_PROTECTED_API_PREFIXES;
 
     return (req: TunnelAuthRequest, res: TunnelAuthResponse, next: () => void): void => {
-        // Gate on whether the server is currently exposed, NOT on the Host
-        // header (which an attacker hitting the tunnel URL fully controls).
-        // No tunnel → only reachable locally → nothing to protect.
-        if (!options.isTunnelActive()) {
+        // Enforce whenever the server may be remotely reachable. The primary
+        // signal is the non-spoofable server-side tunnel state. We ALSO enforce
+        // when the Host looks like a tunnel domain — belt-and-suspenders for a
+        // tunnel the app did NOT create (e.g. an operator running
+        // `ngrok http 4001` after startup), which isTunnelActive() would miss.
+        // Adding the Host check can only ADD enforcement, never remove it, so it
+        // introduces no bypass: a spoofed non-tunnel Host still faces the
+        // isTunnelActive() gate, and while a tunnel is active every protected
+        // request is gated regardless of Host.
+        const host = typeof req.headers.host === 'string' ? req.headers.host : '';
+        if (!options.isTunnelActive() && !isTunnelHost(host)) {
+            // Not remotely reachable → only reachable locally → nothing to protect.
             next();
             return;
         }

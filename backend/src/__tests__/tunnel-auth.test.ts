@@ -254,13 +254,38 @@ describe('createTunnelAuthMiddleware', () => {
     // With no public tunnel the server is only reachable over loopback, so the
     // protected endpoints pass through untouched regardless of Host or token —
     // this is what keeps the local desktop UI working.
-    describe('passes everything through when no tunnel is active', () => {
-        const hosts = ['localhost:4001', 'abc.ngrok.io', 'ABC.NGROK.IO', 'evil.com', ''];
+    describe('passes local (non-tunnel-Host) requests through when no tunnel is active', () => {
+        // With no tunnel active AND a non-tunnel Host, the server is only
+        // reachable over loopback, so there is nothing to protect.
+        const hosts = ['localhost:4001', '127.0.0.1', 'evil.com', ''];
         for (const host of hosts) {
             it(`allows /api/mobile/chat with no token (host: ${host || '(empty)'})`, () => {
                 const res = makeRes();
                 const next = vi.fn();
                 middlewareNoTunnel({ headers: { host }, path: '/api/mobile/chat', query: {} }, res, next);
+                expect(res.statusCode, host).toBeUndefined();
+                expect(next, host).toHaveBeenCalledOnce();
+            });
+        }
+    });
+
+    describe('gates a tunnel-looking Host even when isTunnelActive() is false (externally-started tunnel)', () => {
+        // Belt-and-suspenders: if an operator exposes the server via a tunnel the
+        // app did not create, getStatus().active is false, but the recognized
+        // tunnel Host must still trip the gate rather than fail open.
+        const tunnelHosts = ['abc.ngrok.io', 'ABC.NGROK.IO', 'foo.ngrok-free.app', 'bar.loca.lt'];
+        for (const host of tunnelHosts) {
+            it(`401s /api/mobile/chat with no token (host: ${host})`, () => {
+                const res = makeRes();
+                const next = vi.fn();
+                middlewareNoTunnel({ headers: { host }, path: '/api/mobile/chat', query: {} }, res, next);
+                expect(res.statusCode, host).toBe(401);
+                expect(next, host).not.toHaveBeenCalled();
+            });
+            it(`allows /api/mobile/chat with a valid token (host: ${host})`, () => {
+                const res = makeRes();
+                const next = vi.fn();
+                middlewareNoTunnel({ headers: { host }, path: '/api/mobile/chat', query: { token: VALID } }, res, next);
                 expect(res.statusCode, host).toBeUndefined();
                 expect(next, host).toHaveBeenCalledOnce();
             });
