@@ -7,10 +7,11 @@ export function isTaskSettled(state: string, sawBusy: boolean, elapsedMs: number
         case 'interrupted':
         case 'disconnected':
         case 'waiting_input':
+        case 'archived': // a subtask archived mid-wait is terminal — settle rather than block until timeout
             return true;
         case 'idle':
             return sawBusy || elapsedMs >= IDLE_GRACE_MS;
-        default: // starting, busy, archived-in-flight, unknown
+        default: // starting, busy, unknown
             return false;
     }
 }

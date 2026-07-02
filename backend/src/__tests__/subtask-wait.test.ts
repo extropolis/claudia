@@ -22,4 +22,7 @@ describe('isTaskSettled', () => {
         expect(isTaskSettled('busy', true, 60_000)).toBe(false);
         expect(isTaskSettled('starting', false, 60_000)).toBe(false);
     });
+    it('archived settles (terminal — do not block the wait until timeout)', () => {
+        expect(isTaskSettled('archived', false, 0)).toBe(true);
+    });
 });

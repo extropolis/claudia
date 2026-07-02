@@ -4503,6 +4503,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             displayName: task.displayName,
             wasInterrupted: true, // Mark as interrupted so it shows correct state on resume
             shouldContinue: false,
+            parentTaskId: task.parentTaskId, // Preserve subtask link across disconnect (sleep/wake, idle-reap)
         };
 
         this.disconnectedTasks.set(taskId, persisted);
