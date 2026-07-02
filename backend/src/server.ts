@@ -23,6 +23,7 @@ import { listAgents, setOpencodePortProvider } from './agents/index.js';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
+import { UsageService } from './usage-service.js';
 import { validateConfigUpdate, validateWorkspacePath, isPathInside, isValidNgrokDomain } from './validation.js';
 import { isVoiceTokenAcceptable } from './voice-auth.js';
 import { evaluateCorsOrigin, CORS_REJECTED } from './cors-policy.js';
@@ -138,6 +139,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'checkpoint:restore-force',
     'checkpoint:delete',
     'checkpoint:fork',
+    'usage:get',
     'jira:writeRequest',
     'jira:writeApproved',
     'jira:writeRejected',
@@ -414,6 +416,10 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
     // This is critical for tunnel access: Vite HMR WebSocket connections need
     // to be proxied to the Vite dev server, not handled by our app's WSS.
     const wss = new WebSocketServer({ noServer: true });
+
+    // Plan usage service (Anthropic OAuth usage endpoint). Hard-cached and
+    // slowly polled — see usage-service.ts for the rate-limit discipline.
+    const usageService = new UsageService();
 
     // TunnelManager for mobile remote access (ngrok-based). Created before the
     // CORS middleware because that middleware needs to consult the active
@@ -2230,6 +2236,15 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
                         break;
                     }
 
+                    case 'usage:get': {
+                        // Reply with current plan usage to just this socket.
+                        const usage = await usageService.getUsage();
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ type: 'usage:updated', payload: usage }));
+                        }
+                        break;
+                    }
+
                     case 'task:input': {
                         // Send input to a task's terminal
                         const { taskId, input } = payload as { taskId?: string; input?: string };
@@ -3774,6 +3789,12 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
             authRequired: true,
             ...(isLoopbackPeer(req) ? { dataDir: dataDir ?? null } : {}),
         });
+    });
+
+    // Anthropic plan usage (session + weekly limits). Served from the hard cache
+    // in UsageService; this never triggers an unthrottled upstream fetch.
+    app.get('/api/usage', async (_req, res) => {
+        res.json(await usageService.getUsage());
     });
 
     // Short-ref resolution for REST: every route with a :taskId param accepts
@@ -8038,6 +8059,7 @@ Guidelines:
 
         // Clear heartbeat interval
         clearInterval(heartbeatInterval);
+        usageService.stopPolling();
         clearInterval(prInfoInterval);
         clearInterval(worktreeScanInterval);
         clearInterval(worktreeSweepInterval);
@@ -8063,6 +8085,14 @@ Guidelines:
         }, 500);
     }
 
+    // Begin slow background polling of plan usage. Only fetches while at least
+    // one WS client is connected; the service enforces TTL + 429 backoff so this
+    // never hammers the upstream endpoint. Broadcasts on change.
+    usageService.startPolling(
+        () => wss.clients.size > 0,
+        (usage) => broadcast({ type: 'usage:updated', payload: usage })
+    );
+
     // Note: SIGINT/SIGTERM handlers are set up in index.ts to avoid duplicate handlers
     // The gracefulShutdown function is exported for use by the restart endpoint
 
@@ -8076,6 +8106,7 @@ Guidelines:
      */
     async function shutdownForTests(): Promise<void> {
         clearInterval(heartbeatInterval);
+        usageService.stopPolling();
         clearInterval(prInfoInterval);
         clearInterval(worktreeScanInterval);
         // Union of both teardown paths: each branch cleared only the timers it
