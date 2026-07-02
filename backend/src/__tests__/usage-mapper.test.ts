@@ -73,4 +73,52 @@ describe('mapUsageResponse', () => {
         expect(u.sevenDayByModel).toEqual([]);
         expect(u.extraUsage).toBeUndefined();
     });
+
+    // Real-world payload shape observed 2026-07-02: per-model weekly data does
+    // NOT arrive as `seven_day_<model>` keys (those are null); it arrives in a
+    // `limits[]` array as `kind:"weekly_scoped"` with `scope.model.display_name`.
+    it('derives per-model weekly windows from the limits[] array', () => {
+        const realish = {
+            five_hour: { utilization: 45, resets_at: '2026-07-02T20:30:00Z' },
+            seven_day: { utilization: 31, resets_at: '2026-07-08T15:00:00Z' },
+            seven_day_opus: null,
+            seven_day_sonnet: null,
+            seven_day_cowork: null,
+            tangelo: null,
+            iguana_necktie: null,
+            limits: [
+                { kind: 'session', percent: 45, resets_at: '2026-07-02T20:30:00Z', scope: null },
+                { kind: 'weekly_all', percent: 31, resets_at: '2026-07-08T15:00:00Z', scope: null },
+                {
+                    kind: 'weekly_scoped',
+                    percent: 41,
+                    resets_at: '2026-07-08T15:00:00Z',
+                    scope: { model: { id: null, display_name: 'Fable' } },
+                },
+            ],
+        };
+        const u = mapUsageResponse(realish, 'Max (20x)', 'now');
+        expect(u.sevenDayByModel).toEqual([
+            { model: 'fable', utilization: 41, resetsAt: '2026-07-08T15:00:00Z' },
+        ]);
+    });
+
+    it('prefers a non-null seven_day_<model> key over a duplicate limits[] entry', () => {
+        const both = {
+            five_hour: { utilization: 0, resets_at: 'x' },
+            seven_day: { utilization: 0, resets_at: 'x' },
+            seven_day_opus: { utilization: 20, resets_at: 'a' },
+            limits: [
+                {
+                    kind: 'weekly_scoped',
+                    percent: 99,
+                    resets_at: 'b',
+                    scope: { model: { display_name: 'Opus' } },
+                },
+            ],
+        };
+        const u = mapUsageResponse(both, 'Max (20x)', 'now');
+        const opus = u.sevenDayByModel.filter((m) => m.model === 'opus');
+        expect(opus).toEqual([{ model: 'opus', utilization: 20, resetsAt: 'a' }]);
+    });
 });
