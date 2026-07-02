@@ -3619,10 +3619,18 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // race ahead of the not-yet-delivered prompt and arrive out of order (or be
         // dropped by the not-yet-ready TUI). Queue it so it is delivered in order once
         // the pending prompt lands and the task returns to idle.
-        if (hasMessageContent && !isInternalRedelivery && !task.initialPromptSent && task.pendingPrompt != null) {
+        //
+        // Also queue when a follow-up is already outstanding (pendingFollowupInputs
+        // non-empty): the initial prompt may have been sent (initialPromptSent=true)
+        // and the task gone busy, but an earlier-typed message is still waiting to
+        // flush on the next idle. Writing this one raw now would let it land ahead of
+        // that earlier message — an ordering inversion. Queue it to preserve FIFO.
+        const followupOutstanding = (task.pendingFollowupInputs?.length ?? 0) > 0;
+        if (hasMessageContent && !isInternalRedelivery &&
+            ((!task.initialPromptSent && task.pendingPrompt != null) || followupOutstanding)) {
             task.pendingFollowupInputs = task.pendingFollowupInputs || [];
             task.pendingFollowupInputs.push(data);
-            console.log(`[TaskSpawner] Task ${taskId} still delivering its initial prompt — queued follow-up message (${data.length} chars) behind it (queue depth ${task.pendingFollowupInputs.length})`);
+            console.log(`[TaskSpawner] Task ${taskId} still delivering earlier input — queued follow-up message (${data.length} chars) behind it (queue depth ${task.pendingFollowupInputs.length})`);
             return;
         }
 
