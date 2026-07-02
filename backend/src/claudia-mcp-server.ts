@@ -28,6 +28,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { isTaskSettled } from './subtask-wait.js';
 
 // Backend URL - defaults to localhost:4001, can be overridden via env
 const BACKEND_URL = process.env.CLAUDIA_BACKEND_URL || 'http://localhost:4001';
@@ -609,6 +610,46 @@ if (MODEL_TIERING_ENABLED) {
         async (args) => handleCreateTask(args)
     );
 }
+
+// ============================================================================
+// Tool: claudia_wait_for_tasks
+// ============================================================================
+server.tool(
+    'claudia_wait_for_tasks',
+    'Block until the given tasks settle (idle after working, exited, or waiting for input), then return each task\'s final state and recent output. Use after claudia_create_task to collect subtask results. Polls every 3s.',
+    {
+        taskIds: z.array(z.string()).min(1).max(16).describe('Task ids to wait for (from claudia_create_task)'),
+        timeoutSeconds: z.number().min(5).max(1800).optional().describe('Give up after this many seconds (default 600)'),
+    },
+    async (args) => {
+        const timeoutMs = (args.timeoutSeconds ?? 600) * 1000;
+        const start = Date.now();
+        const sawBusy = new Map<string, boolean>(args.taskIds.map(id => [id, false]));
+        const settled = new Map<string, string>(); // id -> final state
+        while (settled.size < args.taskIds.length && Date.now() - start < timeoutMs) {
+            for (const id of args.taskIds) {
+                if (settled.has(id)) continue;
+                const res = await backendFetch(`/api/tasks/${encodeURIComponent(id)}/status`);
+                if (!res.ok) { settled.set(id, 'not_found'); continue; }
+                const { state } = await res.json() as { state: string };
+                if (state === 'busy' || state === 'waiting_input') sawBusy.set(id, true);
+                if (isTaskSettled(state, sawBusy.get(id)!, Date.now() - start)) settled.set(id, state);
+            }
+            if (settled.size < args.taskIds.length) await new Promise(r => setTimeout(r, 3000));
+        }
+        const sections: string[] = [];
+        for (const id of args.taskIds) {
+            const state = settled.get(id) ?? 'timeout (still running)';
+            let tail = '';
+            if (settled.has(id) && settled.get(id) !== 'not_found') {
+                const out = await backendFetch(`/api/tasks/${encodeURIComponent(id)}/output?maxBytes=8192`);
+                if (out.ok) tail = (await out.json() as { output?: string }).output ?? '';
+            }
+            sections.push(`## Task ${id} — ${state}\n${tail ? '```\n' + tail + '\n```' : '(no output captured)'}`);
+        }
+        return { content: [{ type: 'text' as const, text: sections.join('\n\n') }] };
+    }
+);
 
 // ============================================================================
 // Tool: claudia_send_input
