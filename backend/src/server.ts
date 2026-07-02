@@ -19,6 +19,7 @@ import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, Checkpoint, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { CheckpointStore } from './checkpoint-store.js';
+import { UsageService } from './usage-service.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
 import { WorktreeManager } from './worktree-manager.js';
@@ -110,6 +111,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'checkpoint:restore-force',
     'checkpoint:delete',
     'checkpoint:fork',
+    'usage:get',
 ]);
 
 // WebSocket message validation
@@ -366,6 +368,10 @@ export async function createApp(basePath?: string) {
     // This is critical for tunnel access: Vite HMR WebSocket connections need
     // to be proxied to the Vite dev server, not handled by our app's WSS.
     const wss = new WebSocketServer({ noServer: true });
+
+    // Plan usage service (Anthropic OAuth usage endpoint). Hard-cached and
+    // slowly polled — see usage-service.ts for the rate-limit discipline.
+    const usageService = new UsageService();
 
     // Middleware
     // Restrict CORS to localhost origins only — Claudia is a local-first app
@@ -1471,6 +1477,15 @@ export async function createApp(basePath?: string) {
                                 logger.error('Failed to activate task', { taskId, error: errorMessage });
                                 sendWSError(ws, `Failed to activate task: ${errorMessage}`, message.type, 'TASK_SELECT_FAILED');
                             }
+                        }
+                        break;
+                    }
+
+                    case 'usage:get': {
+                        // Reply with current plan usage to just this socket.
+                        const usage = await usageService.getUsage();
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ type: 'usage:updated', payload: usage }));
                         }
                         break;
                     }
@@ -2765,6 +2780,12 @@ export async function createApp(basePath?: string) {
     // REST API routes
     app.get('/api/health', (_req, res) => {
         res.json({ status: 'ok' });
+    });
+
+    // Anthropic plan usage (session + weekly limits). Served from the hard cache
+    // in UsageService; this never triggers an unthrottled upstream fetch.
+    app.get('/api/usage', async (_req, res) => {
+        res.json(await usageService.getUsage());
     });
 
     // Byte-range read of a task's history file. Used by the terminal's
@@ -6559,6 +6580,14 @@ Guidelines:
 
     // Note: SIGINT/SIGTERM handlers are set up in index.ts to avoid duplicate handlers
     // The gracefulShutdown function is exported for use by the restart endpoint
+
+    // Begin slow background polling of plan usage. Only fetches while at least
+    // one WS client is connected; the service enforces TTL + 429 backoff so this
+    // never hammers the upstream endpoint. Broadcasts on change.
+    usageService.startPolling(
+        () => wss.clients.size > 0,
+        (usage) => broadcast({ type: 'usage:updated', payload: usage })
+    );
 
     return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, tunnelManager };
 }
