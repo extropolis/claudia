@@ -11,6 +11,7 @@ import { SystemPromptModal } from './SystemPromptModal';
 import { ConfirmModal } from './ConfirmModal';
 import { ScheduledTasksModal } from './ScheduledTasksModal';
 import { WorkspaceManager } from './WorkspaceManager';
+import { SessionUsageMeter } from './SessionUsageMeter';
 import './WorkspacePanel.css';
 
 // Simple notification sound using Web Audio API
@@ -2472,6 +2473,8 @@ export function WorkspacePanel({
                     )}
                 </div>
             </div>
+
+            <SessionUsageMeter />
 
             {showArchivedTasks && (
                 <div className="archived-tasks-section">
