@@ -61,6 +61,7 @@ export class UsageService {
     private cachedUA: string | null = null;
     private inFlight: Promise<PlanUsage> | null = null;
     private pollTimer: ReturnType<typeof setInterval> | null = null;
+    private lastBroadcastSig: string | null = null;
 
     constructor(deps: UsageServiceDeps = {}) {
         this.fetchImpl = deps.fetchImpl ?? defaultFetch;
@@ -85,6 +86,17 @@ export class UsageService {
         return this.lastGood ? { ...this.lastGood, stale: true } : null;
     }
 
+    /**
+     * A stable signature of the meaningful usage fields, excluding `fetchedAt`.
+     * Two states with identical utilization/limits/reason but different fetch
+     * timestamps produce the same signature, so an unchanged poll result (e.g.
+     * a repeated `unavailable`) does not churn `onUpdate` every interval.
+     */
+    private static signature(u: PlanUsage): string {
+        const { fetchedAt: _fetchedAt, ...rest } = u;
+        return JSON.stringify(rest);
+    }
+
     private applyBackoff(nowMs: number): void {
         const step = Math.min(this.backoffStep, BACKOFF_STEPS_MS.length - 1);
         this.nextAllowedFetchAt = nowMs + BACKOFF_STEPS_MS[step];
@@ -104,12 +116,15 @@ export class UsageService {
      * failures are encoded in `unavailable`/`stale`/`reason`.
      */
     async getUsage(forceRefresh = false): Promise<PlanUsage> {
-        // Coalesce concurrent callers onto a single in-flight fetch.
+        // Coalesce concurrent callers onto a single in-flight fetch. This guard
+        // must be the first thing we do — and inFlight must be assigned before
+        // any `await` — so that two callers arriving in the same tick cannot
+        // both slip past it and start independent fetches.
         if (this.inFlight) return this.inFlight;
 
-        const creds = await this.readCreds();
-        if (!creds) return this.unavailable('no_token');
-
+        // Synchronous gating first: serve the TTL cache or honor the 429 backoff
+        // window without ever touching credentials or the network. Reading creds
+        // (a keychain shell-out on macOS) now happens only on the fetch path.
         const nowMs = this.now();
         if (!forceRefresh) {
             if (this.lastGood && nowMs - this.lastGoodAtMs < TTL_MS) {
@@ -120,7 +135,11 @@ export class UsageService {
             }
         }
 
-        this.inFlight = this.performFetch(creds, nowMs);
+        this.inFlight = (async () => {
+            const creds = await this.readCreds();
+            if (!creds) return this.unavailable('no_token');
+            return this.performFetch(creds, nowMs);
+        })();
         try {
             return await this.inFlight;
         } finally {
@@ -181,9 +200,14 @@ export class UsageService {
         if (this.pollTimer) return;
         this.pollTimer = setInterval(() => {
             if (!hasClients()) return;
-            const prev = this.lastGood ? JSON.stringify(this.lastGood) : null;
             void this.getUsage().then((u) => {
-                if (onUpdate && JSON.stringify(u) !== prev) onUpdate(u);
+                // Broadcast only when the meaningful state changed since the last
+                // broadcast. Ignoring `fetchedAt` prevents an unchanged
+                // unavailable/usage result from churning every poll interval.
+                const sig = UsageService.signature(u);
+                if (sig === this.lastBroadcastSig) return;
+                this.lastBroadcastSig = sig;
+                if (onUpdate) onUpdate(u);
             });
         }, POLL_INTERVAL_MS);
         // Do not keep the process alive solely for polling.
