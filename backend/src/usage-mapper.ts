@@ -36,8 +36,13 @@ export function mapUsageResponse(
     //  1. `seven_day_<model>` top-level keys (documented; often null in practice).
     //  2. A `limits[]` array with `kind:"weekly_scoped"` and
     //     `scope.model.display_name` — the source actually populated by the live
-    //     API (observed 2026-07-02). We merge both, keyed by lowercase model name,
-    //     preferring the explicit `seven_day_<model>` key when both are present.
+    //     API (observed 2026-07-02). We merge both keyed by lowercase model name.
+    //     Note the two sources use different naming (a `seven_day_<codename>`
+    //     suffix like "opus" vs. a `display_name` like "Claude Opus 4"), so the
+    //     key-based dedup only collapses genuinely identical strings and will not
+    //     recognize the same model expressed both ways. In practice only source
+    //     (2) is populated, so this is not observed; the `has()` check simply
+    //     gives the explicit `seven_day_<model>` key precedence when it appears.
     const byModel = new Map<string, UsageModelWindow>();
     for (const [key, value] of Object.entries(src)) {
         const match = /^seven_day_(.+)$/.exec(key);

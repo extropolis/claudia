@@ -42,6 +42,30 @@ describe('UsageService', () => {
         expect(fetchImpl).toHaveBeenCalledTimes(1);
     });
 
+    it('coalesces concurrent callers in the same tick onto a single fetch', async () => {
+        const { now } = makeClock();
+        const fetchImpl = scriptedFetch([{ status: 200, body: OK_BODY }]);
+        // readCreds yields (awaits a resolved promise) to widen the async gap,
+        // mimicking the macOS keychain shell-out that exposed the coalescing bug.
+        const yieldingCreds = async () => {
+            await Promise.resolve();
+            return { accessToken: 'tok', subscriptionType: 'max' };
+        };
+        const svc = new UsageService({
+            fetchImpl,
+            readCreds: yieldingCreds,
+            detectVersion: version,
+            now,
+        });
+
+        // Both calls start in the same tick, before either awaits creds/fetch.
+        const [a, b] = await Promise.all([svc.getUsage(), svc.getUsage()]);
+
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+        expect(a).toBe(b);
+        expect(a.fiveHour.utilization).toBe(45);
+    });
+
     it('sends the required headers on the fetch', async () => {
         const { now } = makeClock();
         const fetchImpl = scriptedFetch([{ status: 200, body: OK_BODY }]);
