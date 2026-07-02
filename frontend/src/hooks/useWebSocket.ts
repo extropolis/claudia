@@ -164,6 +164,12 @@ export function useWebSocket() {
             setConnected(true);
             // Reset reconnection attempts on successful connection
             reconnectAttempts.current = 0;
+            // Request current plan usage on (re)connect.
+            try {
+                ws.send(JSON.stringify({ type: 'usage:get' }));
+            } catch (err) {
+                console.warn('[WebSocket] Failed to request usage on connect:', err);
+            }
         };
 
         ws.onclose = (event) => {
@@ -559,6 +565,11 @@ export function useWebSocket() {
                     case 'task:tokenUsage': {
                         const payload = message.payload as { taskId: string; tokenUsage: import('@claudia/shared').TaskTokenUsage };
                         useTaskStore.getState().updateTaskTokenUsage(payload.taskId, payload.tokenUsage);
+                        break;
+                    }
+                    case 'usage:updated': {
+                        const payload = message.payload as import('@claudia/shared').PlanUsage;
+                        useTaskStore.getState().setPlanUsage(payload);
                         break;
                     }
                     case 'task:archived:list': {
