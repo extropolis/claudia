@@ -1318,6 +1318,7 @@ function parseArgs(): TestConfig {
     let setProject = false;
     let projectPath: string | null = null;
     let listTasks = false;
+    let usage = false;
     let viewTaskFiles = false;
     let getConfig = false;
     let imagePath: string | null = null;
@@ -1454,6 +1455,9 @@ function parseArgs(): TestConfig {
                 break;
             case '--list-tasks':
                 listTasks = true;
+                break;
+            case '--usage':
+                usage = true;
                 break;
             case '--view-files':
                 viewTaskFiles = true;
@@ -1635,6 +1639,7 @@ TASK OPERATIONS:
   --delete-task            Delete a specific task (requires --task-id)
   --clear-tasks            Clear all tasks
   --list-tasks             List all tasks with their status
+  --usage                  Show Anthropic plan usage (session, weekly, per-model)
   --view-files             View code files for a task (requires --task-id)
   --archive-task           Archive a task (requires --task-id)
   --disconnect             Disconnect a task (requires --task-id)
@@ -1849,6 +1854,7 @@ Examples:
         setProject,
         projectPath,
         listTasks,
+        usage,
         viewTaskFiles,
         getConfig,
         imagePath,
@@ -2422,6 +2428,79 @@ async function toggleAutoWorktreeCmd(baseHttpUrl: string, workspaceId: string, e
 }
 
 // Main execution
+/** Format an ISO reset time into a "in Xh Ym (local time)" string. */
+function formatReset(resetsAt: string): string {
+    if (!resetsAt) return 'unknown';
+    const target = new Date(resetsAt).getTime();
+    if (Number.isNaN(target)) return resetsAt;
+    const diffMs = target - Date.now();
+    const local = new Date(target).toLocaleString();
+    if (diffMs <= 0) return `now (${local})`;
+    const mins = Math.round(diffMs / 60000);
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    const rel = h > 0 ? `${h}h ${m}m` : `${m}m`;
+    return `in ${rel} (${local})`;
+}
+
+function bar(pct: number): string {
+    const clamped = Math.max(0, Math.min(100, Math.round(pct)));
+    const filled = Math.round(clamped / 5);
+    return `[${'█'.repeat(filled)}${'░'.repeat(20 - filled)}] ${clamped}%`;
+}
+
+async function printPlanUsage(baseHttpUrl: string): Promise<void> {
+    try {
+        const response = await fetch(`${baseHttpUrl}/api/usage`);
+        if (!response.ok) {
+            console.error(`❌ /api/usage returned HTTP ${response.status}`);
+            process.exit(1);
+        }
+        const u = await response.json() as any;
+
+        console.log('\n📊 Plan Usage');
+        console.log('─'.repeat(50));
+        console.log(`Plan: ${u.planLabel ?? 'Unknown'}`);
+        console.log(`Fetched: ${u.fetchedAt ?? 'n/a'}`);
+
+        if (u.unavailable) {
+            console.log(`\n⚠️  Usage unavailable (reason: ${u.reason ?? 'unknown'})`);
+            if (u.reason === 'auth' || u.reason === 'no_token') {
+                console.log('   Tip: run `claude` once to refresh authentication.');
+            }
+            return;
+        }
+        if (u.stale) {
+            console.log('⚠️  (stale — served from cache after a failed refresh)');
+        }
+
+        console.log('\nCurrent session (5h):');
+        console.log(`  ${bar(u.fiveHour?.utilization ?? 0)}  resets ${formatReset(u.fiveHour?.resetsAt)}`);
+
+        console.log('\nWeekly (all models):');
+        console.log(`  ${bar(u.sevenDay?.utilization ?? 0)}  resets ${formatReset(u.sevenDay?.resetsAt)}`);
+
+        if (Array.isArray(u.sevenDayByModel) && u.sevenDayByModel.length > 0) {
+            console.log('\nWeekly (per model):');
+            for (const m of u.sevenDayByModel) {
+                const name = String(m.model || '').replace(/^\w/, (c: string) => c.toUpperCase());
+                console.log(`  ${name.padEnd(8)} ${bar(m.utilization ?? 0)}  resets ${formatReset(m.resetsAt)}`);
+            }
+        } else {
+            console.log('\nWeekly (per model): none reported');
+        }
+
+        if (u.extraUsage?.isEnabled) {
+            console.log('\nExtra usage:');
+            console.log(`  ${u.extraUsage.usedCredits ?? 0} / ${u.extraUsage.monthlyLimit ?? '∞'} credits (${u.extraUsage.utilization ?? 0}%)`);
+        }
+        console.log('');
+    } catch (error) {
+        console.error('❌ Failed to fetch usage:', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+    }
+}
+
 async function main() {
     const config = parseArgs() as any;
 
@@ -2454,6 +2533,11 @@ async function main() {
 
     if (config.checkApiConfig) {
         await checkApiConfig(baseHttpUrl);
+        process.exit(0);
+    }
+
+    if (config.usage) {
+        await printPlanUsage(baseHttpUrl);
         process.exit(0);
     }
 
