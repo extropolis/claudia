@@ -180,10 +180,20 @@ export class WorkspaceStore {
         // passed parentId is itself a worktree — walk up to the root repo so the sidebar
         // can group it. A worktree parented to another worktree renders nowhere in the
         // toolbar (the grouping only handles one level under a top-level workspace).
+        // Guard against a cyclic or self-referential worktreeParentId chain (corrupted
+        // config) — a bare `while (walk?.worktreeParentId)` would spin forever. Track the
+        // ids we've visited and stop if we'd revisit one; cap the hops as a backstop.
+        const visited = new Set<string>([parentId]);
         let walk = this.getWorkspace(parentId);
-        while (walk?.worktreeParentId) {
+        let hops = 0;
+        while (walk?.worktreeParentId && !visited.has(walk.worktreeParentId) && hops < 50) {
             parentId = walk.worktreeParentId;
+            visited.add(parentId);
             walk = this.getWorkspace(parentId);
+            hops++;
+        }
+        if (walk?.worktreeParentId && visited.has(walk.worktreeParentId)) {
+            console.warn(`[WorkspaceStore] Cyclic worktreeParentId detected while resolving root for ${resolvedPath}; stopping walk at ${parentId}`);
         }
 
         const parentWorkspace = this.getWorkspace(parentId);
