@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useTaskStore } from '../stores/taskStore';
-import { Task, Workspace, TaskSummary, ChatMessage } from '@claudia/shared';
+import { Task, Workspace, TaskSummary, ChatMessage, PlanUsage } from '@claudia/shared';
 
 describe('taskStore', () => {
     beforeEach(() => {
@@ -15,6 +15,7 @@ describe('taskStore', () => {
             isServerReloading: false,
             isOffline: false,
             errorNotification: null,
+            planUsage: null,
             workspaces: [],
             expandedWorkspaces: new Set(),
             expandedWorkspacesInitialized: false,
@@ -733,6 +734,44 @@ describe('taskStore', () => {
             // Should keep the local (newer) task
             const task = useTaskStore.getState().tasks.get('task-1');
             expect(task?.state).toBe('busy');
+        });
+    });
+
+    describe('plan usage', () => {
+        const mockUsage: PlanUsage = {
+            fiveHour: { utilization: 45, resetsAt: '2026-07-02T20:30:00Z' },
+            sevenDay: { utilization: 31, resetsAt: '2026-07-08T15:00:00Z' },
+            sevenDayByModel: [{ model: 'fable', utilization: 41, resetsAt: '2026-07-08T15:00:00Z' }],
+            planLabel: 'Max (20x)',
+            fetchedAt: '2026-07-02T01:00:00Z',
+        };
+
+        it('defaults to null', () => {
+            expect(useTaskStore.getState().planUsage).toBeNull();
+        });
+
+        it('setPlanUsage populates state', () => {
+            useTaskStore.getState().setPlanUsage(mockUsage);
+            expect(useTaskStore.getState().planUsage).toEqual(mockUsage);
+        });
+
+        it('reflects a usage:updated dispatch (the WS handler calls setPlanUsage)', () => {
+            // The useWebSocket `usage:updated` case delegates to setPlanUsage with
+            // the message payload; simulate that dispatch path here.
+            const dispatch = (message: { type: string; payload: unknown }) => {
+                if (message.type === 'usage:updated') {
+                    useTaskStore.getState().setPlanUsage(message.payload as PlanUsage);
+                }
+            };
+            dispatch({ type: 'usage:updated', payload: mockUsage });
+            expect(useTaskStore.getState().planUsage?.planLabel).toBe('Max (20x)');
+            expect(useTaskStore.getState().planUsage?.sevenDayByModel[0].model).toBe('fable');
+        });
+
+        it('setPlanUsage(null) clears state', () => {
+            useTaskStore.getState().setPlanUsage(mockUsage);
+            useTaskStore.getState().setPlanUsage(null);
+            expect(useTaskStore.getState().planUsage).toBeNull();
         });
     });
 
