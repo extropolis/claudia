@@ -429,6 +429,9 @@ export type WSMessageType =
     | 'jira:writeRequest'
     | 'jira:writeApproved'
     | 'jira:writeRejected'
+    // Plan usage (Anthropic OAuth usage endpoint)
+    | 'usage:get'
+    | 'usage:updated'
     // Server status
     | 'server:reloading'
     | 'server:reconnecting'
@@ -527,6 +530,39 @@ export interface UsageDashboardData {
     taskCount: number;
     lastUpdated: string;
 }
+
+// ---------------------------------------------------------------------------
+// Plan usage (Anthropic plan limits, sourced from GET /api/oauth/usage)
+// ---------------------------------------------------------------------------
+
+/** A single usage window. `utilization` is a percentage in [0, 100]. */
+export interface UsageWindow {
+    utilization: number;
+    resetsAt: string; // ISO8601
+}
+
+/** A per-model weekly window (e.g. model "opus", "sonnet", "fable"). */
+export interface UsageModelWindow extends UsageWindow {
+    model: string;
+}
+
+export interface PlanUsage {
+    fiveHour: UsageWindow;
+    sevenDay: UsageWindow;
+    sevenDayByModel: UsageModelWindow[];
+    extraUsage?: {
+        isEnabled: boolean;
+        monthlyLimit: number | null;
+        usedCredits: number | null;
+        utilization: number | null;
+    };
+    planLabel: string; // "Max (20x)" | "Pro" | "Unknown"
+    fetchedAt: string; // ISO
+    stale?: boolean; // served from cache after a failed refresh
+    unavailable?: boolean; // could not fetch at all
+    reason?: 'auth' | 'rate_limited' | 'no_token' | 'network' | 'unsupported_platform';
+}
+
 // NOTE: the .js extension is REQUIRED. This package is ESM ("type": "module")
 // and Node's ESM resolver does not add extensions, so an extensionless
 // specifier crashes `node backend/dist/index.js` with ERR_MODULE_NOT_FOUND —
