@@ -77,6 +77,7 @@ interface TestConfig {
     cronRecurring: boolean;           // Whether the cron is recurring (default true)
     cronPause: boolean | null;        // true to pause, false to resume, null = not set
     complexity: string | null;        // Optional complexity tier for task:create (low/medium/high)
+    parentTaskId: string | null;       // Optional parent task id — links the new task as a subtask
 }
 
 class TestCLI {
@@ -331,6 +332,9 @@ class TestCLI {
         if (this.config.complexity) {
             payload.complexity = this.config.complexity;
         }
+        if (this.config.parentTaskId) {
+            payload.parentTaskId = this.config.parentTaskId;
+        }
         const message = {
             type: 'task:create',
             payload
@@ -343,6 +347,9 @@ class TestCLI {
         }
         if (this.config.complexity) {
             console.log(`   Complexity: ${this.config.complexity}`);
+        }
+        if (this.config.parentTaskId) {
+            console.log(`   Parent: ${this.config.parentTaskId}`);
         }
         this.ws.send(JSON.stringify(message));
     }
@@ -807,8 +814,9 @@ class TestCLI {
 
                 console.log(`  ${statusIcon} [${task.id.substring(0, 8)}...] ${task.name}`);
                 console.log(`     Status: ${task.status || (task as any).state}`);
-                if (task.parentId) {
-                    console.log(`     Parent: ${task.parentId.substring(0, 8)}...`);
+                const parentTaskId = (task as any).parentTaskId || task.parentId;
+                if (parentTaskId) {
+                    console.log(`     Parent: ${parentTaskId.substring(0, 8)}... (parentTaskId=${parentTaskId})`);
                 }
             });
         });
@@ -1357,6 +1365,7 @@ function parseArgs(): TestConfig {
     let cronRecurring = true;
     let cronPause: boolean | null = null;
     let complexity: string | null = null;
+    let parentTaskId: string | null = null;
     // Worktree operations
     let listWorktrees = false;
     let createWorktree = false;
@@ -1394,6 +1403,9 @@ function parseArgs(): TestConfig {
             case '--workspace':
             case '-w':
                 workspaceId = args[++i];
+                break;
+            case '--parent':
+                parentTaskId = args[++i];
                 break;
             case '--verbose':
             case '-v':
@@ -1629,6 +1641,7 @@ TASK OPERATIONS:
   --task-name, -n <name>   Name for the task when using --task
   --complexity <tier>      Pass a complexity tier (low|medium|high) on task:create.
                            Requires "Model tiering" enabled in Settings; otherwise ignored.
+  --parent <taskId>        Link the new task as a subtask of an existing task
   --task-id <id>           Task ID for operations (stop, delete, input, view-files)
   --task-input             Send input to a task (requires --task-id and --message)
   --stop-task              Stop a running task (requires --task-id)
@@ -1887,6 +1900,7 @@ Examples:
         cronRecurring,
         cronPause,
         complexity,
+        parentTaskId,
         // Worktree fields aren't in the TestConfig interface — handled directly in main()
         // We'll pass them as extra properties via type assertion in main()
         listWorktrees: listWorktrees as any,
