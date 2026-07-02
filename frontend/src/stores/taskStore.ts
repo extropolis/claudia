@@ -45,6 +45,8 @@ interface TaskStore {
     workspaces: Workspace[];
     expandedWorkspaces: Set<string>;
     expandedWorkspacesInitialized: boolean;  // True once persisted state is loaded or first workspaces set
+    collapsedWorktreeGroups: Set<string>;  // Worktree group section ids the user has collapsed
+    taskListHeight: number | null;  // User-set height (px) of the resizable task list; null = default
     showProjectPicker: boolean;
     workspaceColumns: number; // 0 = auto, 1-4 = fixed column count
     workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
@@ -136,6 +138,8 @@ interface TaskStore {
     removeWorkspace: (workspaceId: string) => void;
     reorderWorkspaces: (fromIndex: number, toIndex: number) => void;
     toggleWorkspaceExpanded: (workspaceId: string) => void;
+    toggleWorktreeGroupCollapsed: (groupId: string) => void;
+    setTaskListHeight: (height: number | null) => void;
     setShowProjectPicker: (show: boolean) => void;
 
     // Task reordering
@@ -218,6 +222,8 @@ interface PersistedState {
     showArchivedTasks: boolean;
     expandedWorkspaces: string[];  // Stored as array, converted to Set
     expandedWorkspacesInitialized: boolean;  // Track if user has interacted with workspaces
+    collapsedWorktreeGroups: string[];  // Stored as array, converted to Set
+    taskListHeight: number | null;  // User-set resizable task-list height
     workspaceColumns: number; // 0 = auto, 1-4 = fixed
     workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
     taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
@@ -266,6 +272,8 @@ export const useTaskStore = create<TaskStore>()(
             workspaces: [],
             expandedWorkspaces: new Set<string>(),
             expandedWorkspacesInitialized: false,
+            collapsedWorktreeGroups: new Set<string>(),
+            taskListHeight: null,
             showProjectPicker: false,
             workspaceColumns: 0, // 0 = auto
             workspaceSortBy: 'date-created', // Default to date created
@@ -514,10 +522,17 @@ export const useTaskStore = create<TaskStore>()(
                             newExpanded.add(w.id);
                         }
                     });
-                } else {
-                    // First load or page refresh - expand all workspaces by default
-                    console.log('[TaskStore] Initial load - expanding all workspaces');
+                } else if (!expandedWorkspacesInitialized) {
+                    // Genuine first run — no persisted expand/collapse state exists yet,
+                    // so default to all-expanded.
+                    console.log('[TaskStore] First run (no persisted state) - expanding all workspaces');
                     uniqueWorkspaces.forEach(w => newExpanded.add(w.id));
+                } else {
+                    // Page refresh / reconnect: `workspaces` is transient (not persisted) so
+                    // it starts empty, but `expandedWorkspaces` was rehydrated from
+                    // localStorage. Respect the user's persisted collapsed state instead of
+                    // re-expanding everything (which was wiping minimized workspaces on every reset).
+                    console.log('[TaskStore] Reload with persisted state - preserving collapsed workspaces');
                 }
                 // Remove any workspaces that no longer exist
                 const workspaceIds = new Set(uniqueWorkspaces.map(w => w.id));
@@ -583,6 +598,18 @@ export const useTaskStore = create<TaskStore>()(
                 }
                 set({ expandedWorkspaces: newExpanded });
             },
+
+            toggleWorktreeGroupCollapsed: (groupId) => {
+                const newCollapsed = new Set(get().collapsedWorktreeGroups);
+                if (newCollapsed.has(groupId)) {
+                    newCollapsed.delete(groupId);
+                } else {
+                    newCollapsed.add(groupId);
+                }
+                set({ collapsedWorktreeGroups: newCollapsed });
+            },
+
+            setTaskListHeight: (height) => set({ taskListHeight: height }),
 
             setShowProjectPicker: (show) => set({ showProjectPicker: show }),
 
@@ -810,6 +837,8 @@ export const useTaskStore = create<TaskStore>()(
                 showArchivedTasks: state.showArchivedTasks,
                 expandedWorkspaces: Array.from(state.expandedWorkspaces),
                 expandedWorkspacesInitialized: state.expandedWorkspacesInitialized,
+                collapsedWorktreeGroups: Array.from(state.collapsedWorktreeGroups),
+                taskListHeight: state.taskListHeight,
                 workspaceColumns: state.workspaceColumns,
                 workspaceSortBy: state.workspaceSortBy,
                 taskSortBy: state.taskSortBy,
@@ -864,6 +893,10 @@ export const useTaskStore = create<TaskStore>()(
                     // Use persisted initialized flag, or mark as initialized if we have any persisted expanded state
                     expandedWorkspacesInitialized: persisted.expandedWorkspacesInitialized ??
                         (persisted.expandedWorkspaces !== undefined),
+                    collapsedWorktreeGroups: persisted.collapsedWorktreeGroups
+                        ? new Set(persisted.collapsedWorktreeGroups)
+                        : currentState.collapsedWorktreeGroups,
+                    taskListHeight: persisted.taskListHeight ?? currentState.taskListHeight,
                     workspaceColumns: persisted.workspaceColumns ?? currentState.workspaceColumns,
                     workspaceSortBy: persisted.workspaceSortBy ?? currentState.workspaceSortBy,
                     taskSortBy: persisted.taskSortBy ?? currentState.taskSortBy,
