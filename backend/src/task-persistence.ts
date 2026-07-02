@@ -32,6 +32,7 @@ export interface PersistedTask {
     shouldContinue?: boolean;
     displayName?: string;
     displayNameEditedByUser?: boolean;
+    parentTaskId?: string;   // Subtask linkage — id of the task that spawned this one
 }
 
 /**

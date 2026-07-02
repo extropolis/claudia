@@ -50,6 +50,7 @@ export interface Task {
     // annotate the task row with a worktree badge. Undefined = no worktree detected.
     sessionWorktreeBranch?: string;
     sessionWorktreePrInfo?: WorkspacePrInfo | null; // PR for that branch (if any)
+    parentTaskId?: string;   // If set, this task was spawned by another task (subtask)
 }
 
 export interface WorkspaceReference {

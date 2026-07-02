@@ -96,6 +96,15 @@ describe('TaskPersistenceManager', () => {
             expect(loaded.migratedCount).toBe(0);
         });
 
+        it('round-trips parentTaskId on persisted tasks', () => {
+            const parent = makeTask({ id: 'parent-1' });
+            const child = makeTask({ id: 'child-1', parentTaskId: 'parent-1' });
+            manager.saveTasks([parent, child], []);
+            const loaded = manager.loadPersistedTasks();
+            expect(loaded.tasks.find(t => t.id === 'child-1')?.parentTaskId).toBe('parent-1');
+            expect(loaded.tasks.find(t => t.id === 'parent-1')?.parentTaskId).toBeUndefined();
+        });
+
         it('writes a versioned envelope to disk', () => {
             manager.saveTasks([makeTask()], []);
             const raw = JSON.parse(readFileSync(persistencePath, 'utf-8'));
