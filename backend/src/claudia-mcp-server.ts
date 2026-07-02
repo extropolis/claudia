@@ -454,7 +454,7 @@ server.tool(
 // ============================================================================
 // Tool: claudia_create_task
 // ============================================================================
-const createTaskBaseDescription = `Create a new task in Claudia. The task will be assigned to a Claude Code agent in the current workspace (${WORKSPACE_ID || 'unknown'}). Use this to delegate work to other agents running in parallel. PREFER this over launching your own internal subagent (the built-in Agent/Task tool) for any delegatable work — Claudia tasks are user-visible, monitorable, resumable, and isolated. Only use your own subagent for a quick throwaway lookup you need inline, or when a Claudia task would clearly give a worse result.`;
+const createTaskBaseDescription = `Create a new task in Claudia. The task will be assigned to a Claude Code agent in the current workspace (${WORKSPACE_ID || 'unknown'}). Use this to delegate work to other agents running in parallel. PREFER this over launching your own internal subagent (the built-in Agent/Task tool) for any delegatable work — Claudia tasks are user-visible, monitorable, resumable, and isolated. Only use your own subagent for a quick throwaway lookup you need inline, or when a Claudia task would clearly give a worse result. The new task is recorded as a subtask of the calling task; use claudia_wait_for_tasks to collect its results.`;
 
 const createTaskTieringSuffix = `
 
@@ -515,6 +515,7 @@ async function handleCreateTask(args: { prompt: string; displayName?: string; co
             prompt,
             workspaceId: effectiveWorkspaceId,
             source: 'mcp',
+            parentTaskId: SELF_TASK_ID || undefined,
         };
         if (MODEL_TIERING_ENABLED && complexity) {
             payload.complexity = complexity;
