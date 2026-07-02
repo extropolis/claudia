@@ -117,6 +117,72 @@ function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } {
     return { command: 'cmd.exe', prefixArgs: ['/c', 'claude.cmd'] };
 }
 
+/** Window and cap for the context-destroying-input (/clear, /compact, /reset) throttle. */
+export const DESTRUCTIVE_INPUT_WINDOW_MS = 30_000;
+export const DESTRUCTIVE_INPUT_MAX_PER_WINDOW = 1;
+
+/** True if `data` is a context-destroying slash command (/clear, /compact, /reset). */
+export function isContextDestroyingInput(data: string): boolean {
+    const cmd = data.replace(/[\r\n]+$/, '').trim();
+    return /^\/(clear|compact|reset)\b/i.test(cmd);
+}
+
+/**
+ * Decide whether a context-destroying command should be blocked as runaway input.
+ * Pure: the caller supplies the recent-timestamp list and the current time; this
+ * prunes entries outside the window, records `now`, and reports whether the count
+ * now exceeds the per-window cap. The updated list is returned for the caller to
+ * store. Internal re-deliveries must NOT be passed through here — the external
+ * entry point already counted the command, so re-counting it would spuriously
+ * trip the guard and drop a legitimate command.
+ */
+export function evaluateDestructiveInputThrottle(
+    recentTimestamps: number[],
+    now: number,
+    windowMs: number = DESTRUCTIVE_INPUT_WINDOW_MS,
+    maxPerWindow: number = DESTRUCTIVE_INPUT_MAX_PER_WINDOW,
+): { blocked: boolean; timestamps: number[] } {
+    const recent = recentTimestamps.filter(t => now - t < windowMs);
+    recent.push(now);
+    return { blocked: recent.length > maxPerWindow, timestamps: recent };
+}
+
+export interface ReconnectDeliveryPlan {
+    /** What to deliver once Claude signals ready: 'continue', the user's message, or null. */
+    deliverOnReady: string | null;
+    /** Inputs to deliver, in order, after the initial delivery completes and the task is idle. */
+    followupInputs: string[];
+    /** True if there is anything to deliver (initial prompt/continuation). */
+    needsDelivery: boolean;
+}
+
+/**
+ * Decide what a reconnecting task should deliver.
+ *
+ * - Interrupted mid-turn (`shouldContinue`): resume by delivering a `'continue'`
+ *   first, then re-deliver the user's typed message (if any) once the continuation
+ *   settles back to idle — never silently drop the user's message.
+ * - Otherwise: deliver the user's typed message (if any) on ready.
+ *
+ * The trailing newline is stripped from `pendingInput` — the delivery path appends
+ * Enter itself (via sendPromptWithRetry / writeToTask).
+ */
+export function planReconnectDelivery(opts: {
+    shouldContinue: boolean;
+    pendingInput?: string;
+}): ReconnectDeliveryPlan {
+    const queuedInput = opts.pendingInput ? opts.pendingInput.replace(/[\r\n]+$/, '') : '';
+    if (opts.shouldContinue) {
+        return {
+            deliverOnReady: 'continue',
+            followupInputs: queuedInput ? [queuedInput] : [],
+            needsDelivery: true,
+        };
+    }
+    const deliverOnReady = queuedInput || null;
+    return { deliverOnReady, followupInputs: [], needsDelivery: deliverOnReady != null };
+}
+
 /**
  * Check if Claude Code CLI is installed and available
  */
@@ -195,6 +261,11 @@ interface InternalTask extends Task {
     isActive: boolean;
     initialPromptSent: boolean;
     pendingPrompt: string | null;
+    // Input queued to deliver, in order, AFTER the initial prompt/continuation is
+    // delivered and the task returns to idle. Used to (a) re-deliver a user's typed
+    // message on a mid-turn reconnect that also auto-continues, and (b) preserve
+    // ordering when a second message arrives while a reconnect is still in flight.
+    pendingFollowupInputs?: string[];
     sessionId: string | null;
     promptSubmitAttempts?: number;
     gitStateBefore?: Partial<TaskGitState>;
@@ -1287,6 +1358,30 @@ export class TaskSpawner extends EventEmitter {
             task.state = newState;
             task.waitingInputType = waitingInputType;
             this.emit('taskStateChanged', this.toPublicTask(task));
+
+            // The task just settled to idle and has queued follow-up input (a message
+            // re-delivered after a mid-turn 'continue' resolved, or a second message
+            // that arrived while a reconnect was still in flight). Deliver the next one
+            // in order — but only once the initial prompt/continuation itself has landed
+            // (initialPromptSent && no pendingPrompt), so we never jump the queue.
+            if (newState === 'idle'
+                && task.initialPromptSent
+                && task.pendingPrompt == null
+                && task.pendingFollowupInputs
+                && task.pendingFollowupInputs.length > 0) {
+                const next = task.pendingFollowupInputs.shift()!;
+                if (task.pendingFollowupInputs.length === 0) {
+                    task.pendingFollowupInputs = undefined;
+                }
+                // Ensure a trailing Enter (the queued 'continue' follow-up is stored
+                // without one; a queued raw message already ends in \r).
+                const toSend = /[\r\n]$/.test(next) ? next : `${next}\r`;
+                console.log(`[TaskSpawner] Task ${task.id} idle — delivering queued follow-up input (${toSend.length} chars)`);
+                // Deliver outside the state-transition lock, and give the TUI a moment to
+                // settle after idle. Mark as an internal re-delivery so the destructive-
+                // input guard doesn't double-count input already accepted upstream.
+                setTimeout(() => this.writeToTask(task.id, toSend, 'internal-followup', true), 300);
+            }
         } finally {
             // Release lock
             task.stateTransitionLock = false;
@@ -3441,27 +3536,31 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         }
     }
 
-    writeToTask(taskId: string, data: string, source: string = 'internal'): void {
+    writeToTask(taskId: string, data: string, source: string = 'internal', isInternalRedelivery: boolean = false): void {
         // Safety guard: a runaway client looping a context-destroying slash command
-        // (/clear, /compact, /reset) can wipe a Claude session. Allow a couple of
-        // legitimate manual uses, then drop the input once it repeats rapidly to the
-        // same task within a short window — and log the source so the culprit is named.
-        const destructiveCmd = data.replace(/[\r\n]+$/, '').trim();
-        if (/^\/(clear|compact|reset)\b/i.test(destructiveCmd)) {
+        // (/clear, /compact, /reset) can wipe a Claude session. Allow one legitimate
+        // manual use, then drop the input once it repeats rapidly to the same task
+        // within a short window — and log the source so the culprit is named.
+        //
+        // Internal re-deliveries (e.g. a queued follow-up flushed once the task returns
+        // to idle) bypass the guard entirely: the external entry point that first
+        // received the command already counted it, so counting it again here would
+        // spuriously trip the guard and drop a legitimate command.
+        if (!isInternalRedelivery && isContextDestroyingInput(data)) {
+            const destructiveCmd = data.replace(/[\r\n]+$/, '').trim();
             const now = Date.now();
-            const WINDOW_MS = 30_000;
-            const recent = (this.recentDestructiveInputs.get(taskId) || []).filter(t => now - t < WINDOW_MS);
-            recent.push(now);
-            this.recentDestructiveInputs.set(taskId, recent);
-            // Allow only ONE context-destroying command per task per 30s. A real user
-            // rarely re-clears within seconds; an injected/looping source does. This caps
-            // the damage to one wipe per window while we identify/close the source.
-            if (recent.length > 1) {
-                console.warn(`[TaskSpawner] BLOCKED '${destructiveCmd}' to task ${taskId} — ${recent.length}x in 30s from source=${source} (runaway client — close that client!)`);
-                logger.warn('Blocked repeated context-destroying input', { taskId, command: destructiveCmd, countIn30s: recent.length, source });
+            const { blocked, timestamps } = evaluateDestructiveInputThrottle(
+                this.recentDestructiveInputs.get(taskId) || [],
+                now,
+            );
+            this.recentDestructiveInputs.set(taskId, timestamps);
+            const windowSec = DESTRUCTIVE_INPUT_WINDOW_MS / 1000;
+            if (blocked) {
+                console.warn(`[TaskSpawner] BLOCKED '${destructiveCmd}' to task ${taskId} — ${timestamps.length}x in ${windowSec}s from source=${source} (runaway client — close that client!)`);
+                logger.warn('Blocked repeated context-destroying input', { taskId, command: destructiveCmd, countInWindow: timestamps.length, windowSec, source });
                 return;
             }
-            console.log(`[TaskSpawner] '${destructiveCmd}' -> task ${taskId} from source=${source} (${recent.length}/2 allowed in 10s window)`);
+            console.log(`[TaskSpawner] '${destructiveCmd}' -> task ${taskId} from source=${source} (${timestamps.length}/${DESTRUCTIVE_INPUT_MAX_PER_WINDOW} allowed in ${windowSec}s window)`);
         }
 
         let task = this.tasks.get(taskId);
@@ -3514,6 +3613,19 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         const endsWithEnter = data.endsWith('\r') || data.endsWith('\n');
         const hasMessageContent = data.length > 1 && endsWithEnter;
 
+        // A reconnect (or fresh start) is still delivering its initial prompt /
+        // continuation (queued as pendingPrompt, sent when the TUI signals ready).
+        // If a second message arrives in that window, DON'T write it raw — that would
+        // race ahead of the not-yet-delivered prompt and arrive out of order (or be
+        // dropped by the not-yet-ready TUI). Queue it so it is delivered in order once
+        // the pending prompt lands and the task returns to idle.
+        if (hasMessageContent && !isInternalRedelivery && !task.initialPromptSent && task.pendingPrompt != null) {
+            task.pendingFollowupInputs = task.pendingFollowupInputs || [];
+            task.pendingFollowupInputs.push(data);
+            console.log(`[TaskSpawner] Task ${taskId} still delivering its initial prompt — queued follow-up message (${data.length} chars) behind it (queue depth ${task.pendingFollowupInputs.length})`);
+            return;
+        }
+
         if (hasMessageContent && (task.state === 'idle' || task.state === 'waiting_input')) {
             // Split message from Enter key - write message first, then retry Enter
             const messageContent = data.slice(0, -1);
@@ -3533,34 +3645,21 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             // Use consolidated retry mechanism with follow-up input options (5 retries for reliability)
             setTimeout(() => this.sendEnterWithRetry(task, 5, { isInitialPrompt: false, enterKey }), enterDelayMs);
         } else if (task.state === 'exited') {
-            // Task's PTY has exited — reconnect it (with --resume) and deliver the write
+            // Task's PTY has exited — reconnect it (with --resume) and hand the write to
+            // reconnectTask so it is delivered through the SAME ready-detection path used
+            // for disconnected tasks (queued as pendingPrompt, sent once the resumed TUI
+            // signals ready). The previous approach attached a post-hoc 'idle' listener
+            // AFTER reconnectTask ran and then recursively called writeToTask, which:
+            //   (a) raced the 'idle' transition reconnectTask may already have emitted —
+            //       causing a possible 15s stall until the fallback fired; and
+            //   (b) re-entered the context-destroying-input guard, so a legitimate
+            //       /clear (already counted on this external call) was blocked as a
+            //       "2nd hit in 30s" and never reached the PTY.
+            // Routing through reconnectTask's pendingPrompt eliminates both.
             console.log(`[TaskSpawner] Task ${taskId} is exited, auto-reconnecting before write`);
-            const reconnected = this.reconnectTask(taskId);
-            if (reconnected) {
-                const newTask = this.tasks.get(taskId);
-                if (newTask) {
-                    newTask.isActive = true;
-                    this.emit('tasksUpdated');
-                    // Wait for idle state before delivering write (same pattern as disconnected reconnect)
-                    let delivered = false;
-                    const onStateChanged = (changedTask: Task) => {
-                        if (changedTask.id === taskId && changedTask.state === 'idle' && !delivered) {
-                            delivered = true;
-                            this.removeListener('taskStateChanged', onStateChanged);
-                            console.log(`[TaskSpawner] Task ${taskId} reached idle after exited-reconnect, delivering pending write`);
-                            this.writeToTask(taskId, data);
-                        }
-                    };
-                    this.on('taskStateChanged', onStateChanged);
-                    setTimeout(() => {
-                        if (!delivered) {
-                            delivered = true;
-                            this.removeListener('taskStateChanged', onStateChanged);
-                            console.log(`[TaskSpawner] Fallback: delivering pending write after 15s for exited-reconnect ${taskId}`);
-                            this.writeToTask(taskId, data);
-                        }
-                    }, 15000);
-                }
+            const reconnectedTask = this.reconnectTask(taskId, data);
+            if (!reconnectedTask) {
+                console.log(`[TaskSpawner] Failed to reconnect exited task ${taskId} for write`);
             }
         } else {
             // Single keypress or task is busy — write directly.
@@ -4282,13 +4381,17 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // A message the user typed into a disconnected task (pendingInput) is delivered
         // the same way as a new task's initial prompt: queued as pendingPrompt and sent
         // by the ready-detection in setupProcessHandlers (with the fallback timer below)
-        // once the resumed Claude TUI actually signals it can accept input. Strip a
-        // trailing newline — sendPromptWithRetry appends Enter itself via sendEnterWithRetry.
-        const queuedInput = pendingInput ? pendingInput.replace(/[\r\n]+$/, '') : '';
-        // What to deliver once Claude is ready: a continuation (interrupted mid-turn),
-        // the user's first message, or nothing (a plain background reconnect).
-        const deliverOnReady = shouldContinue ? 'continue' : (queuedInput || null);
-        const needsDelivery = deliverOnReady != null;
+        // once the resumed Claude TUI actually signals it can accept input.
+        //
+        // planReconnectDelivery decides WHAT to deliver: an interrupted mid-turn task
+        // (shouldContinue) resumes with a 'continue' first and then re-delivers the
+        // user's typed message (if any) as a follow-up once the continuation returns to
+        // idle — so the user's message is never silently dropped. Otherwise the user's
+        // message is delivered on ready.
+        const { deliverOnReady, followupInputs, needsDelivery } = planReconnectDelivery({
+            shouldContinue: !!shouldContinue,
+            pendingInput,
+        });
 
         const task: InternalTask = {
             id: persisted.id,
@@ -4307,6 +4410,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             isActive: false,
             initialPromptSent: !needsDelivery,  // False if we have a prompt/message to deliver on ready
             pendingPrompt: deliverOnReady,  // Continuation or the user's first message
+            pendingFollowupInputs: followupInputs.length > 0 ? [...followupInputs] : undefined,  // User's message, delivered after a 'continue' resolves
             // Use sessionIdToUse (not persisted.sessionId) — if the session file was missing,
             // sessionIdToUse was cleared to null so the PTY handler can capture the new session ID.
             sessionId: sessionIdToUse,
