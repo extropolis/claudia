@@ -175,6 +175,17 @@ export class WorkspaceStore {
             throw new Error(`Workspace already exists: ${resolvedPath}`);
         }
 
+        // Worktrees must nest under a top-level (repo) workspace, never under another
+        // worktree. When a task running inside a worktree spawns a new worktree, the
+        // passed parentId is itself a worktree — walk up to the root repo so the sidebar
+        // can group it. A worktree parented to another worktree renders nowhere in the
+        // toolbar (the grouping only handles one level under a top-level workspace).
+        let walk = this.getWorkspace(parentId);
+        while (walk?.worktreeParentId) {
+            parentId = walk.worktreeParentId;
+            walk = this.getWorkspace(parentId);
+        }
+
         const parentWorkspace = this.getWorkspace(parentId);
         const parentDisplayName = parentWorkspace?.displayName ?? parentWorkspace?.name ?? basename(parentId);
         const shortBranch = branch.replace(/^refs\/heads\//, '');

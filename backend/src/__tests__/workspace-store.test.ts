@@ -684,6 +684,25 @@ describe('WorkspaceStore', () => {
             expect(ws.references?.length).toBe(1);
         });
 
+        it('resolves the parent to the root repo when spawned from inside a worktree (no nesting)', async () => {
+            store.addWorkspace(testWorkspace1); // root repo
+
+            const wtA = join(testBaseDir, 'wt-parent');
+            const wtB = join(testBaseDir, 'wt-nested');
+            mkdirSync(wtA, { recursive: true });
+            mkdirSync(wtB, { recursive: true });
+
+            const a = await store.addWorktreeWorkspace(wtA, testWorkspace1, 'a');
+            expect(a.worktreeParentId).toBe(testWorkspace1);
+
+            // A task running inside wtA spawns another worktree, passing wtA (itself a
+            // worktree) as the parent. It must re-parent to the ROOT repo, not nest under
+            // wtA — otherwise the sidebar can't render it.
+            const b = await store.addWorktreeWorkspace(wtB, wtA, 'b');
+            expect(b.worktreeParentId).toBe(testWorkspace1);
+            expect(b.worktreeParentId).not.toBe(wtA);
+        });
+
         it('should position the worktree directly after its parent', async () => {
             store.addWorkspace(testWorkspace1);
             store.addWorkspace(testWorkspace2);
