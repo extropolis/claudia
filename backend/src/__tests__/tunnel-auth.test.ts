@@ -134,14 +134,61 @@ describe('createTunnelAuthMiddleware', () => {
         expect(next).toHaveBeenCalledOnce();
     });
 
-    it('does not accidentally match /api/voice-agent/* (own token handling)', () => {
+    it('gates /api/voice-agent/* over the tunnel (persisted system prompt)', () => {
+        for (const path of ['/api/voice-agent/system-prompt', '/api/voice-agent/tools']) {
+            const res = makeRes();
+            const next = vi.fn();
+            middleware(makeReq({ path }), res, next);
+            expect(res.statusCode, path).toBe(401);
+            expect(next, path).not.toHaveBeenCalled();
+        }
+    });
+
+    it('still allows /api/voice-agent/* with a valid token', () => {
         const res = makeRes();
         const next = vi.fn();
-        middleware(makeReq({ path: '/api/voice-agent/tools' }), res, next);
+        middleware(makeReq({ path: '/api/voice-agent/system-prompt', query: { token: VALID } }), res, next);
+        expect(res.statusCode).toBeUndefined();
         expect(next).toHaveBeenCalledOnce();
     });
 
-    it('covers exactly the mobile and voice API prefixes', () => {
-        expect(TUNNEL_PROTECTED_API_PREFIXES).toEqual(['/api/mobile/', '/api/voice/']);
+    it('does not confuse /api/voice/ with /api/voice-agent/ boundaries', () => {
+        // Both are protected, but via distinct prefixes; a path that is neither
+        // (e.g. /api/voiceless) must still pass through.
+        const res = makeRes();
+        const next = vi.fn();
+        middleware(makeReq({ path: '/api/voiceless/ping' }), res, next);
+        expect(next).toHaveBeenCalledOnce();
+    });
+
+    it('gates mixed-CASE protected paths (case-insensitive routing bypass)', () => {
+        // Express matches routes case-insensitively, so these reach the real
+        // handler. A case-sensitive prefix check would wrongly let them
+        // through unauthenticated. Every variant must be gated (401, no next()).
+        const bypassPaths = [
+            '/API/MOBILE/chat',
+            '/Api/Mobile/Chat',
+            '/api/voice/DEEPGRAM-TOKEN',
+            '/API/VOICE/deepgram-token',
+            '/API/VOICE-AGENT/system-prompt',
+        ];
+        for (const path of bypassPaths) {
+            const res = makeRes();
+            const next = vi.fn();
+            middleware(makeReq({ path }), res, next);
+            expect(res.statusCode, path).toBe(401);
+            expect(next, path).not.toHaveBeenCalled();
+        }
+    });
+
+    it('covers exactly the mobile, voice, and voice-agent API prefixes (all lowercase)', () => {
+        expect(TUNNEL_PROTECTED_API_PREFIXES).toEqual([
+            '/api/mobile/',
+            '/api/voice/',
+            '/api/voice-agent/',
+        ]);
+        for (const p of TUNNEL_PROTECTED_API_PREFIXES) {
+            expect(p, p).toBe(p.toLowerCase());
+        }
     });
 });

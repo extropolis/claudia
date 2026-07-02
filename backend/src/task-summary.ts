@@ -23,6 +23,7 @@
 import type { MobileTaskSummary, Task } from '@claudia/shared';
 
 import { generateLLMResponse } from './llm-service.js';
+import { wrapUntrustedTaskOutput } from './mobile-agent.js';
 
 /**
  * True when a task just settled from an active state to idle — the exact
@@ -181,9 +182,9 @@ function buildUserMessage(input: SummaryInput): string {
   }
   parts.push('');
   parts.push('Recent terminal output (most recent at the bottom):');
-  parts.push('---');
-  parts.push(recent || '(no output captured)');
-  parts.push('---');
+  // Terminal output is untrusted (prompt-injection vector) — wrap it in
+  // explicit delimiters with an untrusted-data notice instead of bare '---'.
+  parts.push(wrapUntrustedTaskOutput(recent));
   parts.push('');
   parts.push('Now produce the JSON.');
   return parts.join('\n');

@@ -48,7 +48,9 @@ function saveStore(store: DeviceStore): void {
     // Atomic write (temp file + rename) so a crash mid-write can never leave
     // mobile-devices.json truncated — loadStore would otherwise silently
     // reset every registration to empty on the next boot.
-    atomicWriteFileSync(storePath, JSON.stringify(store, null, 2));
+    // backup:true keeps the prior good file as mobile-devices.json.bak so
+    // external corruption isn't silently overwritten with no recovery point.
+    atomicWriteFileSync(storePath, JSON.stringify(store, null, 2), { backup: true });
   } catch (err) {
     console.error('[mobile-push] Failed to save device store:', err);
   }

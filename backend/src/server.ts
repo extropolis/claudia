@@ -380,7 +380,13 @@ export async function createApp(basePath?: string) {
             callback(new Error('CORS: origin not allowed'));
         },
     }));
-    app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests
+    // Tunnel-reachable mobile/voice endpoints get a tight body cap that is
+    // enforced BEFORE the tunnel-auth gate runs — so an unauthenticated tunnel
+    // request can never make us parse a 50MB body. Mounting these first means
+    // the global 50mb parser below sees the body already parsed and skips it.
+    // (Path mounts are case-insensitive, matching the tunnel-auth behavior.)
+    app.use(['/api/mobile', '/api/voice', '/api/voice-agent'], express.json({ limit: '64kb' }));
+    app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests (desktop/local)
 
     // TunnelManager for mobile remote access (ngrok-based, created early for middleware use)
     const tunnelManager = new TunnelManager(PORTS.BACKEND);

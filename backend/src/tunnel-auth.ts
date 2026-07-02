@@ -33,10 +33,20 @@ export function isTunnelHost(host: string): boolean {
 
 /**
  * Route prefixes that require a valid tunnel token when accessed via the
- * tunnel. Trailing slashes are intentional: '/api/voice/' must NOT match
- * '/api/voice-agent/...' (which has its own token handling in /voice).
+ * tunnel. All entries MUST be lowercase — the middleware lowercases the
+ * request path before matching (Express routes case-insensitively, so a
+ * mixed-case path like /API/MOBILE/chat still reaches the real handler and
+ * would otherwise slip past a case-sensitive prefix check).
+ *
+ * '/api/voice/' has a trailing slash so it does NOT match '/api/voice-agent/'
+ * — the latter is listed separately so its (persisted, security-sensitive)
+ * system-prompt/tools routes are also gated over the tunnel.
  */
-export const TUNNEL_PROTECTED_API_PREFIXES = ['/api/mobile/', '/api/voice/'];
+export const TUNNEL_PROTECTED_API_PREFIXES = [
+    '/api/mobile/',
+    '/api/voice/',
+    '/api/voice-agent/',
+];
 
 /**
  * Pull the auth token off a request. Accepted (in priority order):
@@ -86,7 +96,11 @@ export function createTunnelAuthMiddleware(options: TunnelAuthOptions) {
             return;
         }
 
-        const path = req.path ?? '';
+        // Lowercase before matching: Express routing is case-insensitive by
+        // default, so /API/MOBILE/chat reaches the real handler. A
+        // case-sensitive startsWith would return false here and let that
+        // request through with NO token check. `prefixes` are all lowercase.
+        const path = (req.path ?? '').toLowerCase();
         if (!prefixes.some((p) => path.startsWith(p))) {
             next();
             return;
