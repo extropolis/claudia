@@ -32,13 +32,43 @@ export function mapUsageResponse(
 ): PlanUsage {
     const src = (raw ?? {}) as Record<string, unknown>;
 
-    const sevenDayByModel: UsageModelWindow[] = [];
+    // Per-model weekly windows come from two sources:
+    //  1. `seven_day_<model>` top-level keys (documented; often null in practice).
+    //  2. A `limits[]` array with `kind:"weekly_scoped"` and
+    //     `scope.model.display_name` — the source actually populated by the live
+    //     API (observed 2026-07-02). We merge both, keyed by lowercase model name,
+    //     preferring the explicit `seven_day_<model>` key when both are present.
+    const byModel = new Map<string, UsageModelWindow>();
     for (const [key, value] of Object.entries(src)) {
         const match = /^seven_day_(.+)$/.exec(key);
         if (!match) continue;
         if (value === null || value === undefined) continue;
-        sevenDayByModel.push({ model: match[1], ...readWindow(value) });
+        const model = match[1].toLowerCase();
+        byModel.set(model, { model, ...readWindow(value) });
     }
+
+    const limits = Array.isArray(src.limits) ? src.limits : [];
+    for (const entry of limits) {
+        if (!entry || typeof entry !== 'object') continue;
+        const lim = entry as Record<string, unknown>;
+        if (lim.kind !== 'weekly_scoped') continue;
+        const scope = lim.scope as Record<string, unknown> | null | undefined;
+        const modelInfo = scope?.model as Record<string, unknown> | undefined;
+        const displayName =
+            (typeof modelInfo?.display_name === 'string' && modelInfo.display_name) ||
+            (typeof modelInfo?.id === 'string' && modelInfo.id) ||
+            '';
+        if (!displayName) continue;
+        const model = displayName.toLowerCase();
+        if (byModel.has(model)) continue; // prefer the seven_day_<model> key
+        byModel.set(model, {
+            model,
+            utilization: clampUtilization(lim.percent),
+            resetsAt: typeof lim.resets_at === 'string' ? lim.resets_at : '',
+        });
+    }
+
+    const sevenDayByModel: UsageModelWindow[] = Array.from(byModel.values());
 
     const usage: PlanUsage = {
         fiveHour: readWindow(src.five_hour),
