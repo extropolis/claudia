@@ -15,6 +15,7 @@ import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
+import { resolveParentLink, collectOrphanedChildIds } from './task-links.js';
 import { randomBytes } from 'crypto';
 
 const logger = createLogger('[TaskSpawner]');
@@ -162,6 +163,7 @@ interface PersistedTask {
     processStartedAt?: string; // When the current processing run started (preserved across reconnect)
     order?: number;            // Display order within workspace (lower = higher in list)
     tokenUsage?: TaskTokenUsage; // Aggregated token usage for this task
+    parentTaskId?: string;     // Subtask linkage — id of the task that spawned this one
 }
 
 // Lightweight metadata for archived tasks (no outputHistory - loaded lazily from disk)
@@ -1667,6 +1669,7 @@ export class TaskSpawner extends EventEmitter {
                     processStartedAt: task.processStartedAt?.toISOString(),
                     order: task.order,
                     tokenUsage: task.tokenUsage,
+                    parentTaskId: task.parentTaskId,
                 });
             }
 
@@ -2336,7 +2339,12 @@ export class TaskSpawner extends EventEmitter {
      * @param systemPrompt - Optional system prompt override
      * @returns The created task object
      */
-    async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number, modelOverride?: string): Promise<Task> {
+    async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number, modelOverride?: string, parentTaskId?: string): Promise<Task> {
+        // Resolve the requested parent against live + disconnected tasks; unknown
+        // parents silently degrade to a top-level task (dangling link never stored).
+        const existingIds = new Set<string>([...this.tasks.keys(), ...this.disconnectedTasks.keys()]);
+        const resolvedParent = resolveParentLink(parentTaskId, existingIds);
+
         // Sanitize prompt to prevent command injection and other issues
         const sanitizedPrompt = sanitizePrompt(prompt);
         let sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
@@ -2407,6 +2415,17 @@ export class TaskSpawner extends EventEmitter {
         }).catch(err => {
             logger.warn('Learnings promise rejected (post-spawn)', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
         });
+
+        // Record the subtask link on the internal record and return a fresh projection
+        // that carries parentTaskId, so callers and the initial broadcast see the link.
+        if (resolvedParent) {
+            const internal = this.tasks.get(task.id);
+            if (internal) {
+                internal.parentTaskId = resolvedParent;
+                this.scheduleSave();
+                return this.toPublicTask(internal);
+            }
+        }
 
         return task;
     }
@@ -2863,6 +2882,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             tokenUsage: task.tokenUsage,
             sessionWorktreeBranch: task.sessionWorktreeBranch,
             sessionWorktreePrInfo: task.sessionWorktreePrInfo,
+            parentTaskId: task.parentTaskId,
         };
     }
 
@@ -3656,6 +3676,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                     displayNameEditedByUser: disconnected.displayNameEditedByUser,
                     sessionId: disconnected.sessionId || undefined,
                     backendType: disconnected.backendType || 'claude-code',
+                    parentTaskId: disconnected.parentTaskId,
                 });
                 return true;
             }
@@ -3685,11 +3706,30 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     }
 
     /**
+     * Clears the parentTaskId of every task that pointed at the removed task.
+     * Deleting/archiving a parent orphans its children (they keep running) rather
+     * than cascade-killing them — an agent's children may still be doing useful work.
+     */
+    private orphanChildrenOf(removedTaskId: string): void {
+        const liveOrphans = collectOrphanedChildIds(this.tasks.values(), removedTaskId);
+        for (const id of liveOrphans) {
+            const t = this.tasks.get(id)!;
+            t.parentTaskId = undefined;
+            this.emit('taskStateChanged', this.toPublicTask(t)); // pushes the cleared link to clients
+        }
+        for (const [, pt] of this.disconnectedTasks) {
+            if (pt.parentTaskId === removedTaskId) pt.parentTaskId = undefined;
+        }
+        if (liveOrphans.length > 0) this.scheduleSave();
+    }
+
+    /**
      * Destroys a task, killing its process and removing it from all maps
      * @param taskId - The task ID to destroy
      */
     destroyTask(taskId: string): void {
         logger.info(`Destroying task`, { taskId });
+        this.orphanChildrenOf(taskId);
         let destroyed = false;
         let source = '';
 
@@ -3773,6 +3813,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
     archiveTask(taskId: string): void {
         // Archive moves task from active list to archived storage
+        this.orphanChildrenOf(taskId);
         let archived = false;
         let wasLive = false;
 
@@ -4056,6 +4097,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             backendType: this.taskBackends.get(persisted.id) || 'claude-code' as const,
             order: persisted.order,
             tokenUsage: persisted.tokenUsage,
+            parentTaskId: persisted.parentTaskId,
         }));
 
         return [...liveTasks, ...disconnectedTasks];
@@ -4087,6 +4129,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 displayNameEditedByUser: existing.displayNameEditedByUser,
                 order: existing.order,
                 tokenUsage: existing.tokenUsage,
+                parentTaskId: existing.parentTaskId,
             };
             this.disconnectedTasks.set(taskId, persisted);
             this.tasks.delete(taskId);
@@ -4321,6 +4364,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             systemPrompt: persisted.systemPrompt,  // Preserve custom system prompt
             gitStateBefore: persisted.gitState ? persisted.gitState : undefined,  // Preserve git state
             tokenUsage: persisted.tokenUsage,  // Preserve token usage across reconnection
+            parentTaskId: persisted.parentTaskId,  // Preserve subtask link across reconnection
         };
 
         // Remove from disconnectedTasks FIRST before registering handlers or emitting events.
