@@ -32,8 +32,18 @@ function makeRes(): TunnelAuthResponse & { statusCode?: number; body?: unknown }
 }
 
 const VALID = 'good-token';
+// Middleware wired as it is in production while a public tunnel IS active:
+// every protected-prefix request must carry a valid token, whatever Host it
+// claims. The gate keys on isTunnelActive(), never on the Host header.
 const middleware = createTunnelAuthMiddleware({
     validateToken: (t) => t === VALID,
+    isTunnelActive: () => true,
+});
+// Middleware while NO tunnel is active: everything passes through (the server
+// is only reachable over loopback, so there is nothing to protect).
+const middlewareNoTunnel = createTunnelAuthMiddleware({
+    validateToken: (t) => t === VALID,
+    isTunnelActive: () => false,
 });
 
 describe('isTunnelHost', () => {
@@ -41,6 +51,12 @@ describe('isTunnelHost', () => {
         expect(isTunnelHost('abc.ngrok-free.app')).toBe(true);
         expect(isTunnelHost('foo.ngrok.io')).toBe(true);
         expect(isTunnelHost('bar.loca.lt')).toBe(true);
+    });
+
+    it('matches mixed/upper-case tunnel hosts (case-insensitive)', () => {
+        expect(isTunnelHost('ABC.NGROK.IO')).toBe(true);
+        expect(isTunnelHost('Foo.Ngrok-Free.App')).toBe(true);
+        expect(isTunnelHost('BAR.LOCA.LT')).toBe(true);
     });
 
     it('does not match local hosts', () => {
@@ -119,14 +135,6 @@ describe('createTunnelAuthMiddleware', () => {
         expect(next).not.toHaveBeenCalled();
     });
 
-    it('leaves local (non-tunnel) requests unchanged, even without a token', () => {
-        const res = makeRes();
-        const next = vi.fn();
-        middleware(makeReq({ host: 'localhost:4001', path: '/api/mobile/chat' }), res, next);
-        expect(res.statusCode).toBeUndefined();
-        expect(next).toHaveBeenCalledOnce();
-    });
-
     it('does not gate unprotected API paths over the tunnel', () => {
         const res = makeRes();
         const next = vi.fn();
@@ -190,5 +198,100 @@ describe('createTunnelAuthMiddleware', () => {
         for (const p of TUNNEL_PROTECTED_API_PREFIXES) {
             expect(p, p).toBe(p.toLowerCase());
         }
+    });
+
+    // ===== Host-spoofing regression =====
+    // ngrok/localtunnel forward the client-supplied Host header verbatim, so an
+    // attacker hitting the public URL can claim ANY Host. While the tunnel is
+    // active, NONE of these may skip the token check on a protected prefix.
+    describe('does not let a spoofed Host bypass the gate while the tunnel is active', () => {
+        const spoofedHosts: Array<string | undefined> = [
+            'ABC.NGROK.IO',        // uppercased real tunnel host
+            'localhost',           // pretend to be local
+            'localhost:4001',
+            '127.0.0.1',
+            'evil.com',            // arbitrary attacker host
+            '',                    // empty Host
+            undefined,             // missing Host header
+        ];
+
+        for (const host of spoofedHosts) {
+            const label = host === undefined ? '(missing Host)' : host === '' ? '(empty Host)' : host;
+
+            it(`401s ${label} with no token`, () => {
+                const res = makeRes();
+                const next = vi.fn();
+                const headers: Record<string, string> = {};
+                if (host !== undefined) headers.host = host;
+                middleware({ headers, path: '/api/mobile/chat', query: {} }, res, next);
+                expect(res.statusCode, label).toBe(401);
+                expect(next, label).not.toHaveBeenCalled();
+            });
+
+            it(`401s ${label} with an invalid token`, () => {
+                const res = makeRes();
+                const next = vi.fn();
+                const headers: Record<string, string> = {};
+                if (host !== undefined) headers.host = host;
+                middleware({ headers, path: '/api/mobile/chat', query: { token: 'wrong' } }, res, next);
+                expect(res.statusCode, label).toBe(401);
+                expect(next, label).not.toHaveBeenCalled();
+            });
+
+            it(`allows ${label} once it presents a VALID token`, () => {
+                const res = makeRes();
+                const next = vi.fn();
+                const headers: Record<string, string> = {};
+                if (host !== undefined) headers.host = host;
+                middleware({ headers, path: '/api/mobile/chat', query: { token: VALID } }, res, next);
+                expect(res.statusCode, label).toBeUndefined();
+                expect(next, label).toHaveBeenCalledOnce();
+            });
+        }
+    });
+
+    // ===== No tunnel active =====
+    // With no public tunnel the server is only reachable over loopback, so the
+    // protected endpoints pass through untouched regardless of Host or token —
+    // this is what keeps the local desktop UI working.
+    describe('passes everything through when no tunnel is active', () => {
+        const hosts = ['localhost:4001', 'abc.ngrok.io', 'ABC.NGROK.IO', 'evil.com', ''];
+        for (const host of hosts) {
+            it(`allows /api/mobile/chat with no token (host: ${host || '(empty)'})`, () => {
+                const res = makeRes();
+                const next = vi.fn();
+                middlewareNoTunnel({ headers: { host }, path: '/api/mobile/chat', query: {} }, res, next);
+                expect(res.statusCode, host).toBeUndefined();
+                expect(next, host).toHaveBeenCalledOnce();
+            });
+        }
+    });
+
+    // ===== Local desktop / mobile app happy paths (tunnel active) =====
+    // The local desktop voice page and the mobile app both attach the real
+    // tunnel token (query param, X-Claudia-Token, or Authorization: Bearer),
+    // so they keep working while the tunnel is active — regardless of Host.
+    describe('legitimate tunnel-token flows still pass while the tunnel is active', () => {
+        it('mobile app POST with token query param', () => {
+            const res = makeRes();
+            const next = vi.fn();
+            middleware(makeReq({ host: 'abc.ngrok-free.app', path: '/api/mobile/chat', query: { token: VALID } }), res, next);
+            expect(next).toHaveBeenCalledOnce();
+        });
+
+        it('desktop voice page GET with X-Claudia-Token header and localhost Host', () => {
+            const res = makeRes();
+            const next = vi.fn();
+            middleware({ headers: { host: 'localhost:4001', 'x-claudia-token': VALID }, path: '/api/voice/deepgram-token', query: {} }, res, next);
+            expect(res.statusCode).toBeUndefined();
+            expect(next).toHaveBeenCalledOnce();
+        });
+
+        it('Authorization: Bearer with an arbitrary Host', () => {
+            const res = makeRes();
+            const next = vi.fn();
+            middleware({ headers: { host: 'whatever.example', authorization: `Bearer ${VALID}` }, path: '/api/voice-agent/system-prompt', query: {} }, res, next);
+            expect(next).toHaveBeenCalledOnce();
+        });
     });
 });

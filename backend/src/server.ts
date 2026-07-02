@@ -403,11 +403,15 @@ export async function createApp(basePath?: string) {
     // Instead of relying on env vars, we try Vite first and fall back to static
     // if Vite isn't running (connection refused = production mode).
 
-    // Tunnel auth for sensitive REST APIs: when the request arrives via the
-    // public tunnel, /api/mobile/* and /api/voice/* require the same session
-    // token the WebSocket upgrade path enforces. Local requests are untouched.
+    // Tunnel auth for sensitive REST APIs: while a public tunnel is active,
+    // /api/mobile/*, /api/voice/* and /api/voice-agent/* require the same
+    // session token the WebSocket upgrade path enforces — for EVERY request,
+    // regardless of the (attacker-controllable) Host header. When no tunnel is
+    // active the server is only reachable over loopback, so requests pass
+    // through untouched and the local desktop UI is unaffected.
     app.use(createTunnelAuthMiddleware({
         validateToken: (token) => tunnelManager.validateToken(token),
+        isTunnelActive: () => tunnelManager.getStatus().active,
     }));
 
     app.use((req, res, next) => {
@@ -3503,9 +3507,15 @@ export async function createApp(basePath?: string) {
             }
         }
 
-        // Allow local tokens (starting with 'local-') or validate tunnel tokens
-        const isLocalToken = token.startsWith('local-');
-        if (!isLocalToken && !tunnelManager.validateToken(token)) {
+        // `local-` tokens are an unauthenticated convenience for LOCAL desktop
+        // use only (the desktop UI mints one when no tunnel is running). They
+        // are not secret, so they must NOT be honored once the server is
+        // publicly reachable — otherwise an attacker over the tunnel could load
+        // this page (which embeds the Deepgram API key) with `?token=local-x`,
+        // regardless of the Host header they send. While a tunnel is active,
+        // require the real tunnel token.
+        const localTokenOk = token.startsWith('local-') && !tunnelManager.getStatus().active;
+        if (!localTokenOk && !tunnelManager.validateToken(token)) {
             res.status(401).send('Access denied: Invalid or expired token');
             return;
         }
