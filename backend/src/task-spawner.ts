@@ -2399,7 +2399,10 @@ export class TaskSpawner extends EventEmitter {
             // accepts on a genuine active-turn marker ("esc to interrupt").
             const currentOutputLength = task.totalOutputSize;
             const outputDelta = currentOutputLength - outputLengthBeforeEnter;
-            const recentOutput = this.getRecentOutput(task, 2048);
+            // Sample 4096 bytes (matching the ready-detection window) so the idle
+            // input footer isn't pushed out of view by a partial repaint above it,
+            // which could otherwise let growth be accepted while Enter was dropped.
+            const recentOutput = this.getRecentOutput(task, 4096);
             const activeTurn = hasActiveTurnIndicator(recentOutput);
             // Guard growth-based acceptance against startup/resume churn only for the
             // initial-prompt/reconnect delivery; a plain follow-up is already
