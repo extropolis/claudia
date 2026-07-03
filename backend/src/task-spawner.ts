@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlink
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
+import { buildSettingsLocalContent } from './settings-local.js';
 import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
 import { sanitizePrompt, decodeHtmlEntities } from './validation.js';
@@ -757,22 +758,28 @@ export class TaskSpawner extends EventEmitter {
      * every tool call — including resumed sessions.
      */
     private writeSettingsLocalJson(workspaceId: string, skipPermissions: boolean | undefined, serverNames: string[]): void {
-        const settingsContent = {
-            permissions: {
-                allow: skipPermissions ? ['*'] : ['mcp__*'],
-                deny: []
-            },
-            enableAllProjectMcpServers: true,
-            enabledMcpjsonServers: serverNames
-        };
-
         const claudeSettingsDir = `${workspaceId}/.claude`;
         const claudeSettingsFile = `${claudeSettingsDir}/settings.local.json`;
+
+        // Read the existing file (if any) so buildSettingsLocalContent can
+        // parse-modify-serialize: preserve unrelated keys and HEAL a corrupted
+        // file rather than blindly overwriting or compounding bad JSON.
+        let existingRaw: string | null = null;
+        try {
+            if (existsSync(claudeSettingsFile)) {
+                existingRaw = readFileSync(claudeSettingsFile, 'utf-8');
+            }
+        } catch (err) {
+            logger.warn('Could not read existing settings.local.json', { workspaceId, error: err });
+        }
+
+        const settingsContent = buildSettingsLocalContent({ skipPermissions, serverNames, existingRaw });
+
         try {
             if (!existsSync(claudeSettingsDir)) {
                 mkdirSync(claudeSettingsDir, { recursive: true });
             }
-            atomicWriteFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
+            atomicWriteFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2) + '\n');
         } catch (err) {
             logger.error('Failed to write settings.local.json', { workspaceId, error: err });
         }
