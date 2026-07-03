@@ -52,7 +52,9 @@ export function isReadyForInitialInput(str: string): boolean {
  * to avoid.
  */
 export function hasActiveTurnIndicator(str: string): boolean {
-    return /esc to interrupt/i.test(str);
+    // Whitespace-tolerant so a narrow-terminal line wrap (e.g. "esc to\ninterrupt")
+    // still matches; stripAnsi preserves newlines.
+    return /esc\s+to\s+interrupt/i.test(str);
 }
 
 /**
