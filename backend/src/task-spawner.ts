@@ -18,6 +18,7 @@ import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
+import { classifyEnterOutcome, hasActiveTurnIndicator } from './task-state-detection.js';
 import { randomBytes, randomUUID } from 'crypto';
 import { SharedMcpManager } from './shared-mcp-manager.js';
 import {
@@ -3248,7 +3249,11 @@ export class TaskSpawner extends EventEmitter {
         return task.state;
     }
 
-    private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 5): void {
+    // Initial-prompt Enter is retried more times than a normal follow-up: on a
+    // fresh create the TUI can take several seconds to become truly interactive,
+    // and each attempt only re-sends Enter (never re-types the prompt), so extra
+    // attempts are safe — an Enter on an already-submitted/empty box is a no-op.
+    private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 8): void {
         // Guard: abort if PTY has exited — writing to a dead native handle causes segfaults
         if (task.state === 'exited' || !this.tasks.has(task.id)) {
             console.log(`[TaskSpawner] Aborting prompt write: task ${task.id} is no longer alive`);
@@ -3298,30 +3303,9 @@ export class TaskSpawner extends EventEmitter {
 
             setTimeout(() => {
                 if (task.state === 'exited' || !this.tasks.has(task.id)) return;
-                this.sendEnterWithRetry(task, 5, { isInitialPrompt: true });
+                this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true });
             }, delayMs);
         }
-    }
-
-    /**
-     * Check if recent output indicates Claude has started processing
-     * Look for spinner characters, "Thinking", "Working", etc.
-     */
-    private hasProcessingIndicators(task: InternalTask): boolean {
-        const recentOutput = this.getRecentOutput(task, 1024);
-        // Look for Claude processing indicators
-        const processingPatterns = [
-            /Thinking/i,
-            /Working/i,
-            /Concocting/i,
-            /Analyzing/i,
-            /Reading/i,
-            /Writing/i,
-            /⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/,  // Spinner characters
-            /✶|✳|✢|·|✻|✽|✺/,  // Claude spinner chars
-            /───.*Claude/,  // Header lines
-        ];
-        return processingPatterns.some(pattern => pattern.test(recentOutput));
     }
 
     /**
@@ -3346,7 +3330,10 @@ export class TaskSpawner extends EventEmitter {
         }
 
         if (retriesLeft <= 0) {
-            console.log(`[TaskSpawner] Max retries reached for ${context} on task ${task.id}, giving up`);
+            // Diagnostic: dump the recent tail so a future non-delivery is debuggable.
+            // If the prompt is still visibly sitting in the input box here, the TUI
+            // never accepted any of our Enters within the retry budget.
+            console.log(`[TaskSpawner] Max retries reached for ${context} on task ${task.id}, giving up. Recent output: ${JSON.stringify(this.getRecentOutput(task, 512))}`);
             // Just return, do not send burst to avoid PTY crashes
             return;
         }
@@ -3370,14 +3357,30 @@ export class TaskSpawner extends EventEmitter {
         task.process.write(enterKey);
 
         setTimeout(() => {
-            // Check if output has grown since we sent Enter (more reliable than pattern matching)
-            // even small output changes (≥10 bytes) indicate Claude accepted the Enter
+            // Decide whether the Enter was actually accepted (prompt submitted, turn
+            // started) or dropped and needs a retry. We deliberately do NOT treat raw
+            // output growth alone as success: on a fresh create the TUI is still
+            // streaming startup output (MCP load, rotating tips, footer repaints),
+            // which would cross a byte threshold and make a DROPPED Enter look
+            // accepted — leaving the typed prompt sitting unsubmitted in the input
+            // box (the intermittent bug). classifyEnterOutcome only accepts growth
+            // when we are no longer parked at the idle input prompt, and always
+            // accepts on a genuine active-turn marker ("esc to interrupt").
             const currentOutputLength = task.totalOutputSize;
-            const outputGrew = currentOutputLength > outputLengthBeforeEnter + 10;
+            const outputDelta = currentOutputLength - outputLengthBeforeEnter;
+            const recentOutput = this.getRecentOutput(task, 2048);
+            const activeTurn = hasActiveTurnIndicator(recentOutput);
+            // Guard growth-based acceptance against startup/resume churn only for the
+            // initial-prompt/reconnect delivery; a plain follow-up is already
+            // interactive, so growth there reliably means the message was accepted.
+            const outcome = classifyEnterOutcome({
+                outputDeltaBytes: outputDelta,
+                recentOutput,
+                guardAgainstIdleChurn: isInitialPrompt,
+            });
 
-            // Check if Claude started processing (pattern-based or output-growth-based)
-            if (outputGrew || this.hasProcessingIndicators(task)) {
-                console.log(`[TaskSpawner] Claude processing detected for ${context} after attempt ${task.promptSubmitAttempts} (outputGrew=${outputGrew}, outputDelta=${currentOutputLength - outputLengthBeforeEnter})`);
+            if (outcome === 'accepted') {
+                console.log(`[TaskSpawner] Submission accepted for ${context} after attempt ${task.promptSubmitAttempts} (activeTurn=${activeTurn}, outputDelta=${outputDelta})`);
                 if (isInitialPrompt && task.state === 'starting' && !task.hasStartedProcessing) {
                     task.hasStartedProcessing = true;
                     task.state = 'busy';
@@ -3387,8 +3390,10 @@ export class TaskSpawner extends EventEmitter {
                 return;
             }
 
-            // Not started yet - schedule retry with longer delay
-            console.log(`[TaskSpawner] No processing indicators found for ${context} (outputDelta=${currentOutputLength - outputLengthBeforeEnter}), will retry Enter in 500ms`);
+            // Not accepted — the Enter was dropped or the TUI is still at the idle
+            // input prompt. Retry (re-send Enter only; the prompt text is already in
+            // the box and must never be re-typed) until a real turn starts.
+            console.log(`[TaskSpawner] ${context} not yet accepted for task ${task.id} (activeTurn=${activeTurn}, outputDelta=${outputDelta}, stillIdleAtInput=${!activeTurn && this.isReadyForInitialInput(recentOutput)}), retrying Enter in 500ms (${retriesLeft - 1} retries left)`);
             setTimeout(() => this.sendEnterWithRetry(task, retriesLeft - 1, { ...options, outputLengthAtSend: outputLengthBeforeEnter }), 500);
         }, 800);
     }
