@@ -3,6 +3,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask, TaskTokenUsage, TodoItem } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
 import { ThemePreference } from '../types/theme';
+import { compareTasksForDisplay } from '../utils/taskSort';
 
 // Info about a task that is waiting for user input
 export interface WaitingInputInfo {
@@ -738,24 +739,16 @@ export const useTaskStore = create<TaskStore>()(
 
             // Task reordering within a workspace
             reorderTasks: (workspaceId, fromIndex, toIndex) => {
-                const { tasks } = get();
+                const { tasks, taskSortBy } = get();
                 if (fromIndex === toIndex) return;
 
-                // Get tasks for this workspace, sorted EXACTLY like the display
-                // (must match WorkspacePanel's getTasksForWorkspace sorting)
+                // Get tasks for this workspace, sorted EXACTLY like the display.
+                // Uses the shared canonical comparator (respecting taskSortBy) so
+                // the fromIndex/toIndex the UI computes map to the same tasks here.
+                // A mismatched tie-break here silently moves the wrong task.
                 const workspaceTasks = Array.from(tasks.values())
                     .filter(t => t.workspaceId === workspaceId)
-                    .sort((a, b) => {
-                        // If both have order, sort by order (ascending)
-                        if (a.order !== undefined && b.order !== undefined) {
-                            return a.order - b.order;
-                        }
-                        // If only one has order, it comes first
-                        if (a.order !== undefined) return -1;
-                        if (b.order !== undefined) return 1;
-                        // Neither has order, sort by creation time (newest first)
-                        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-                    });
+                    .sort((a, b) => compareTasksForDisplay(a, b, taskSortBy));
 
                 if (fromIndex < 0 || fromIndex >= workspaceTasks.length) return;
                 if (toIndex < 0 || toIndex >= workspaceTasks.length) return;
