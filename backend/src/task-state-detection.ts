@@ -23,12 +23,92 @@ export function stripAnsi(str: string): string {
 }
 
 /**
- * Check if terminal output indicates Claude is ready for initial input
+ * Check if terminal output indicates Claude is ready for initial input.
+ *
+ * These markers all belong to the idle input prompt / its footer hint bar
+ * (rendered only when Claude Code is sitting at an empty, ready-to-accept input
+ * box). They are ALSO used, inverted, as the "still idle at the input" signal
+ * when confirming that a submitted Enter was actually accepted — see
+ * {@link classifyEnterOutcome}.
  */
 export function isReadyForInitialInput(str: string): boolean {
     return str.includes('Try "') ||
         str.includes('? for shortcuts') ||
+        str.includes('bypass permissions') ||
+        str.includes('shift+tab') ||
         (str.includes('───') && str.includes('❯'));
+}
+
+/**
+ * Detect a genuine in-progress turn (Claude actively processing a submission).
+ *
+ * "esc to interrupt" is Claude Code's definitive active-turn marker: it is shown
+ * for the entire duration of a turn (thinking, tool calls, streaming) and NEVER
+ * at the idle input prompt nor during startup/banner rendering. We deliberately
+ * do NOT reuse {@link hasProcessingIndicators} here — its spinner glyphs (✻, ✳)
+ * and "───Claude" header pattern also appear in the startup "✻ Welcome to Claude
+ * Code" banner, so they cannot distinguish "turn started" from "still starting
+ * up". Using them would reintroduce the false-positive that this function exists
+ * to avoid.
+ */
+export function hasActiveTurnIndicator(str: string): boolean {
+    return /esc to interrupt/i.test(str);
+}
+
+/**
+ * Decide whether an Enter we just sent was actually accepted (the prompt was
+ * submitted and a turn began), or whether it was dropped and must be retried.
+ *
+ * ROOT-CAUSE NOTE: the previous heuristic treated ANY output growth (> ~10
+ * bytes) as "accepted". On a fresh task create the Claude Code TUI is still
+ * streaming startup output (MCP servers finishing, rotating tips, footer/token
+ * counter repaints, re-layouts) when the queued prompt is typed and Enter is
+ * sent. That unrelated churn crosses the growth threshold within the observation
+ * window, so a DROPPED Enter looked "accepted" and the retry loop stopped — the
+ * typed prompt then sat in the input box unsubmitted (the reported symptom). It
+ * was intermittent because it only triggered when startup output happened to
+ * still be streaming during the post-Enter window.
+ *
+ * The robust rule: growth only counts as acceptance when we are NOT still parked
+ * at the idle input prompt. If the recent output still shows the idle input
+ * footer ("? for shortcuts" / "bypass permissions" / "❯" box) and there is no
+ * active-turn marker, the Enter was NOT accepted regardless of byte growth —
+ * keep retrying. A positive active-turn marker ("esc to interrupt") always wins.
+ */
+export function classifyEnterOutcome(opts: {
+    /** Bytes of output that arrived after Enter was written. */
+    outputDeltaBytes: number;
+    /** Stripped recent output tail observed after Enter. */
+    recentOutput: string;
+    /** Minimum growth (bytes) that counts as meaningful. Default 10. */
+    growthThreshold?: number;
+    /**
+     * Veto acceptance-by-growth while the output still shows the idle input
+     * prompt. Needed for the initial-prompt / reconnect delivery, where startup
+     * or resume churn produces growth that must NOT be mistaken for submission.
+     * For a plain follow-up (the task is already interactive, no startup churn)
+     * pass false: there, growth reliably means the message was accepted, and the
+     * veto would otherwise cause spurious retries on near-instant turns
+     * (e.g. `/clear`, a one-line answer) that redraw back to the idle prompt
+     * before we sample. Default true.
+     */
+    guardAgainstIdleChurn?: boolean;
+}): 'accepted' | 'retry' {
+    const threshold = opts.growthThreshold ?? 10;
+    const guardIdle = opts.guardAgainstIdleChurn ?? true;
+
+    // Strong positive: a real turn is underway.
+    if (hasActiveTurnIndicator(opts.recentOutput)) return 'accepted';
+
+    // Still sitting at the idle input prompt → the Enter did not submit, even if
+    // the screen repainted. This is the case that kills the startup-churn false
+    // positive on fresh create / reconnect.
+    if (guardIdle && isReadyForInitialInput(opts.recentOutput)) return 'retry';
+
+    // Output advanced meaningfully → the submission took.
+    if (opts.outputDeltaBytes > threshold) return 'accepted';
+
+    return 'retry';
 }
 
 /**

@@ -4,6 +4,8 @@ import {
     isReadyForInitialInput,
     extractSessionId,
     hasProcessingIndicators,
+    hasActiveTurnIndicator,
+    classifyEnterOutcome,
     detectWaitingForInput,
     getRecentOutput,
 } from '../task-state-detection.js';
@@ -72,12 +74,97 @@ describe('isReadyForInitialInput', () => {
         expect(isReadyForInitialInput('───────────\n❯')).toBe(true);
     });
 
+    it('should detect the "bypass permissions" footer marker', () => {
+        expect(isReadyForInitialInput('⏵⏵ bypass permissions on')).toBe(true);
+    });
+
+    it('should detect the "shift+tab" footer marker', () => {
+        expect(isReadyForInitialInput('shift+tab to cycle')).toBe(true);
+    });
+
     it('should return false for unrelated text', () => {
         expect(isReadyForInitialInput('Processing your request...')).toBe(false);
     });
 
     it('should return false for empty string', () => {
         expect(isReadyForInitialInput('')).toBe(false);
+    });
+});
+
+describe('hasActiveTurnIndicator', () => {
+    it('detects the "esc to interrupt" active-turn marker', () => {
+        expect(hasActiveTurnIndicator('✻ Baking… (esc to interrupt · ctrl+t to show todos)')).toBe(true);
+    });
+
+    it('is case-insensitive', () => {
+        expect(hasActiveTurnIndicator('Esc To Interrupt')).toBe(true);
+    });
+
+    it('does NOT fire on the startup welcome banner (avoids false positive)', () => {
+        // ✻ and "───Claude" appear at startup; they must NOT read as an active turn.
+        expect(hasActiveTurnIndicator('✻ Welcome to Claude Code!')).toBe(false);
+        expect(hasActiveTurnIndicator('─── Claude Code ───')).toBe(false);
+    });
+
+    it('does NOT fire on the idle input footer', () => {
+        expect(hasActiveTurnIndicator('? for shortcuts   ⏵⏵ bypass permissions on')).toBe(false);
+    });
+
+    it('returns false for empty string', () => {
+        expect(hasActiveTurnIndicator('')).toBe(false);
+    });
+});
+
+describe('classifyEnterOutcome (Enter accepted vs. dropped)', () => {
+    const idleFooter = '───────────\n❯ my queued prompt text\n? for shortcuts   ⏵⏵ bypass permissions on';
+    const activeTurn = '✻ Thinking… (esc to interrupt)';
+
+    it('ROOT CAUSE: growth while still parked at the idle input prompt is NOT acceptance', () => {
+        // Startup churn (MCP load, rotating tips, footer repaints) crosses the byte
+        // threshold, but the TUI is still at the idle input box — the Enter was
+        // dropped and must be retried. This is the exact case the old
+        // "any output grew" heuristic mis-classified as success.
+        expect(classifyEnterOutcome({ outputDeltaBytes: 5000, recentOutput: idleFooter })).toBe('retry');
+    });
+
+    it('accepts when a genuine active-turn marker appears, regardless of byte delta', () => {
+        expect(classifyEnterOutcome({ outputDeltaBytes: 0, recentOutput: activeTurn })).toBe('accepted');
+    });
+
+    it('accepts meaningful growth once we are no longer at the idle input prompt', () => {
+        expect(classifyEnterOutcome({ outputDeltaBytes: 200, recentOutput: 'Here is the answer to your question…' })).toBe('accepted');
+    });
+
+    it('retries when nothing advanced and we are still idle at input', () => {
+        expect(classifyEnterOutcome({ outputDeltaBytes: 0, recentOutput: idleFooter })).toBe('retry');
+    });
+
+    it('retries on sub-threshold growth (e.g. cursor blink) away from the input prompt', () => {
+        expect(classifyEnterOutcome({ outputDeltaBytes: 3, recentOutput: 'some quiet output' })).toBe('retry');
+    });
+
+    it('honours a custom growth threshold', () => {
+        expect(classifyEnterOutcome({ outputDeltaBytes: 50, recentOutput: 'x', growthThreshold: 100 })).toBe('retry');
+        expect(classifyEnterOutcome({ outputDeltaBytes: 150, recentOutput: 'x', growthThreshold: 100 })).toBe('accepted');
+    });
+
+    it('follow-up path (guard off): growth back at the idle prompt still counts as accepted', () => {
+        // A near-instant follow-up (e.g. /clear or a one-line answer) redraws to the
+        // idle prompt before we sample. With no startup churn to defend against, that
+        // growth reliably means the message was accepted — do NOT spuriously retry.
+        expect(classifyEnterOutcome({
+            outputDeltaBytes: 5000,
+            recentOutput: idleFooter,
+            guardAgainstIdleChurn: false,
+        })).toBe('accepted');
+    });
+
+    it('follow-up path (guard off): no growth at idle prompt still retries', () => {
+        expect(classifyEnterOutcome({
+            outputDeltaBytes: 0,
+            recentOutput: idleFooter,
+            guardAgainstIdleChurn: false,
+        })).toBe('retry');
     });
 });
 
