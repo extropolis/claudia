@@ -1,10 +1,9 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { WSMessage, WSErrorPayload, Task, Workspace, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
-import { getWebSocketUrl, getApiBaseUrl, isTunnelAccess } from '../config/api-config';
+import { getAuthenticatedWebSocketUrl, getApiBaseUrl, isTunnelAccess } from '../config/api-config';
 import { playTaskCompletionSound, sendTaskCompletionNotification, sendTaskWaitingInputNotification } from '../utils/browserCapabilities';
 
-const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
 
 /**
@@ -121,8 +120,11 @@ export function useWebSocket() {
             console.log('[WebSocket] ✓ Tunnel warmup SUCCESS - proceeding with WebSocket...');
         }
 
-        console.log('[WebSocket] Creating WebSocket connection to:', WS_URL);
-        const ws = new WebSocket(WS_URL);
+        // Resolve the URL on every connect so a local connection that reconnects
+        // while a tunnel is active picks up the now-required auth token.
+        const wsUrl = await getAuthenticatedWebSocketUrl();
+        console.log('[WebSocket] Creating WebSocket connection to:', wsUrl.replace(/token=[^&]+/, 'token=***'));
+        const ws = new WebSocket(wsUrl);
         console.log('[WebSocket] WebSocket object created, readyState:', ws.readyState);
 
         ws.onopen = () => {

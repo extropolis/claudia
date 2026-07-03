@@ -19,7 +19,7 @@ import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
 import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff, BarChart3, ChevronRight } from 'lucide-react';
 import { UsageDashboard } from './components/UsageDashboard';
-import { getApiBaseUrl } from './config/api-config';
+import { getApiBaseUrl, getMobileToken } from './config/api-config';
 import { isSoundEnabled, setSoundEnabled } from './utils/browserCapabilities';
 
 // Hook: returns true when viewport is ≤768px wide
@@ -389,11 +389,19 @@ function App() {
     // Open voice agent in new tab
     const handleOpenVoiceAgent = useCallback(async () => {
         try {
-            const res = await fetch(`${getApiBaseUrl()}/api/tunnel/status`);
-            const data = await res.json();
-            let token = data.token;
+            // Prefer the token already in this page's URL — a tunnel-origin page
+            // carries the real token there, and /api/tunnel/status no longer
+            // reveals the token to tunnel requests. Fall back to the status fetch
+            // for a genuinely local desktop (which still receives it).
+            let token = getMobileToken() ?? undefined;
+            if (!token) {
+                const res = await fetch(`${getApiBaseUrl()}/api/tunnel/status`);
+                const data = await res.json();
+                token = data.token || undefined;
+            }
 
-            // If no tunnel token, generate a temporary local token
+            // If still no token (no tunnel), use a temporary local token — only
+            // honored by /voice when no tunnel is active (local desktop use).
             if (!token) {
                 token = 'local-' + Math.random().toString(36).substring(2, 15);
             }

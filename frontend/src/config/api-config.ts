@@ -66,6 +66,45 @@ export function getWebSocketUrl(): string {
 }
 
 /**
+ * Resolve the WebSocket URL, attaching an auth token when the backend requires
+ * one.
+ *
+ * The local desktop UI connects tokenless — UNLESS a public tunnel is active.
+ * Once a tunnel is up the backend is remotely reachable and requires a valid
+ * session token on EVERY WebSocket (see decideWebSocketAuth in the backend), so
+ * a plain tokenless local connection would be rejected. We fetch the real token
+ * from /api/tunnel/status (served only to local requests) and append it.
+ *
+ * Tunnel-origin pages already carry their token in the page URL, so
+ * getWebSocketUrl() has already embedded it there and we leave those untouched.
+ *
+ * Because this runs on every (re)connect attempt, a local connection that drops
+ * and reconnects while a tunnel is active automatically picks up the token.
+ */
+export async function getAuthenticatedWebSocketUrl(): Promise<string> {
+    const base = getWebSocketUrl();
+
+    // Tunnel-origin pages: token (if any) is already in the URL via getWebSocketUrl().
+    if (isTunnelAccess()) return base;
+    // Already tokenized (shouldn't happen for local, but be safe).
+    if (base.includes('token=')) return base;
+
+    // Local/Electron: only need a token when a tunnel is currently active.
+    try {
+        const res = await fetch(`${getApiBaseUrl()}/api/tunnel/status`);
+        if (!res.ok) return base;
+        const data = (await res.json()) as { active?: boolean; token?: string | null };
+        if (data.active && data.token) {
+            const sep = base.includes('?') ? '&' : '?';
+            return `${base}${sep}token=${encodeURIComponent(data.token)}`;
+        }
+    } catch {
+        // No tunnel / status unreachable → tokenless is correct for local use.
+    }
+    return base;
+}
+
+/**
  * Check if running in Electron
  * @returns true if in Electron, false otherwise
  */
