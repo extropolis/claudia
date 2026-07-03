@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
     createTunnelAuthMiddleware,
     extractRequestToken,
+    isRequestViaTunnel,
     isTunnelHost,
     TUNNEL_PROTECTED_API_PREFIXES,
     type TunnelAuthRequest,
@@ -63,6 +64,33 @@ describe('isTunnelHost', () => {
         expect(isTunnelHost('localhost:4001')).toBe(false);
         expect(isTunnelHost('127.0.0.1:4001')).toBe(false);
         expect(isTunnelHost('')).toBe(false);
+    });
+});
+
+describe('isRequestViaTunnel', () => {
+    const h = (headers: Record<string, string>) => ({ headers });
+
+    it('returns false when no tunnel is active (server only reachable via loopback)', () => {
+        expect(isRequestViaTunnel(h({ host: 'abc.ngrok.io' }), false)).toBe(false);
+        expect(isRequestViaTunnel(h({ host: 'localhost:4001' }), false)).toBe(false);
+    });
+
+    it('treats a recognized tunnel Host as via-tunnel when a tunnel is active', () => {
+        expect(isRequestViaTunnel(h({ host: 'abc.ngrok.io' }), true)).toBe(true);
+        expect(isRequestViaTunnel(h({ host: 'ABC.NGROK.IO' }), true)).toBe(true);
+        expect(isRequestViaTunnel(h({ host: 'bar.loca.lt' }), true)).toBe(true);
+    });
+
+    it('treats a spoofed local Host WITH forwarding headers as via-tunnel (ngrok always adds X-Forwarded-*)', () => {
+        expect(isRequestViaTunnel(h({ host: 'localhost', 'x-forwarded-for': '1.2.3.4' }), true)).toBe(true);
+        expect(isRequestViaTunnel(h({ host: 'localhost:4001', 'x-forwarded-host': 'abc.ngrok.io' }), true)).toBe(true);
+        expect(isRequestViaTunnel(h({ host: '127.0.0.1', 'x-forwarded-proto': 'https' }), true)).toBe(true);
+    });
+
+    it('treats a genuine local request (non-tunnel Host, no forwarding headers) as NOT via-tunnel — token may be revealed', () => {
+        expect(isRequestViaTunnel(h({ host: 'localhost:4001' }), true)).toBe(false);
+        expect(isRequestViaTunnel(h({ host: '127.0.0.1:4001' }), true)).toBe(false);
+        expect(isRequestViaTunnel(h({}), true)).toBe(false);
     });
 });
 

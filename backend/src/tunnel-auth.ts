@@ -58,6 +58,39 @@ export function isTunnelHost(host: string): boolean {
 }
 
 /**
+ * Decide whether a request most likely ARRIVED over the public tunnel (as
+ * opposed to a genuine loopback request from the local desktop UI).
+ *
+ * This is used ONLY to decide whether it is safe to reveal the session token to
+ * a caller (e.g. GET /api/tunnel/status, the `/` redirect, the /voice page). It
+ * is the *inverse* polarity of the auth gate: here a false positive merely
+ * withholds the token from a local request, and a false negative would leak it —
+ * so we err toward treating a request as "via tunnel" (withholding).
+ *
+ *   • No tunnel active → the server is only reachable over loopback, so every
+ *     request is genuinely local → return false (reveal the token).
+ *   • Tunnel active → treat as via-tunnel if EITHER the Host looks like a tunnel
+ *     domain OR the request carries proxy-forwarding headers (X-Forwarded-*),
+ *     which ngrok/localtunnel always add and a genuine loopback request never
+ *     has (the local desktop hits the server directly / via Vite's non-xfwd
+ *     proxy). This closes the `Host: localhost` spoof: an attacker over the
+ *     tunnel can fake the Host but cannot strip ngrok's X-Forwarded-For.
+ */
+export function isRequestViaTunnel(
+    req: { headers: Record<string, string | string[] | undefined> },
+    isTunnelActive: boolean,
+): boolean {
+    if (!isTunnelActive) return false;
+    const host = typeof req.headers.host === 'string' ? req.headers.host : '';
+    if (isTunnelHost(host)) return true;
+    const forwarded =
+        req.headers['x-forwarded-for'] ??
+        req.headers['x-forwarded-host'] ??
+        req.headers['x-forwarded-proto'];
+    return forwarded !== undefined && forwarded !== '';
+}
+
+/**
  * Route prefixes that require a valid tunnel token when accessed via the
  * tunnel. All entries MUST be lowercase — the middleware lowercases the
  * request path before matching (Express routes case-insensitively, so a

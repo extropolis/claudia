@@ -28,7 +28,8 @@ import { registerDevice, unregisterDevice, listDevices, sendPush } from './mobil
 import { generateMobileSummary, buildSimulatedSummary, shouldEmitIdleSummary } from './task-summary.js';
 import { MobileChatStore } from './mobile-chat-store.js';
 import { MobileAgent, validateMobileChatInput } from './mobile-agent.js';
-import { createTunnelAuthMiddleware, isTunnelHost } from './tunnel-auth.js';
+import { createTunnelAuthMiddleware, isTunnelHost, isRequestViaTunnel } from './tunnel-auth.js';
+import { decideWebSocketAuth } from './ws-auth.js';
 import { createRateLimiter } from './rate-limiter.js';
 import { getVoiceAgentPageHtml } from './voice-agent-page.js';
 import { VoiceSupervisor } from './voice-supervisor.js';
@@ -420,19 +421,15 @@ export async function createApp(basePath?: string) {
             return next();
         }
 
-        // Tunnel visitor at root: redirect with the current token if missing or stale.
-        // This handles server restarts (tsx watch) where the token changes — mobile
-        // browsers that still have the old URL/token get seamlessly refreshed.
-        if (req.path === '/') {
-            const status = tunnelManager.getStatus();
-            if (status.active && status.token) {
-                const requestToken = req.query.token as string | undefined;
-                if (!requestToken || !tunnelManager.validateToken(requestToken)) {
-                    logger.info('Tunnel visitor at root with missing/stale token, redirecting', { host });
-                    return res.redirect(`/?token=${status.token}`);
-                }
-            }
-        }
+        // NOTE: we deliberately do NOT auto-redirect a token-less tunnel visitor
+        // at `/` to `/?token=<real>`. Doing so handed the session token to ANY
+        // visitor who knew the tunnel URL, defeating the WS/REST token auth. The
+        // legitimate token-delivery channel is the QR code (generated locally,
+        // which already embeds the token). A tunnel visitor without a valid token
+        // still gets the SPA shell — but with no token it cannot open the
+        // (now token-gated) WebSocket, so no task data or control leaks. If a
+        // mobile client's token has rotated (e.g. a tunnel restart), it must
+        // re-scan the freshly generated QR.
 
         // Let API routes pass through
         if (req.path.startsWith('/api/')) {
@@ -1283,32 +1280,34 @@ export async function createApp(basePath?: string) {
     // non-app connections so they don't create noise or compete with the real WS.
     server.on('upgrade', (req, socket, head) => {
         const host = req.headers.host || '';
-        const isTunnel = host.includes('.loca.lt') || host.includes('localtunnel') ||
-                         host.includes('.ngrok-free.app') || host.includes('.ngrok.io') || host.includes('ngrok');
         const url = new URL(req.url || '/', `http://${host || 'localhost'}`);
+        const token = url.searchParams.get('token') ?? undefined;
+
+        // Fail-closed auth: when a public tunnel is active (or the Host looks
+        // like a tunnel) the server is remotely reachable, so EVERY WebSocket —
+        // desktop or mobile — must present a valid token. When no tunnel is
+        // active only loopback can reach us, so tokenless local connections are
+        // allowed. This also silently rejects Vite's HMR WebSocket over the
+        // tunnel (it carries no token) without a special case.
+        const decision = decideWebSocketAuth(
+            { token, host, isTunnelActive: tunnelManager.getStatus().active },
+            { validateToken: (t) => tunnelManager.validateToken(t), isTunnelHost },
+        );
 
         logger.info('WebSocket upgrade request', {
             url: req.url,
             host,
-            isTunnel,
             hasToken: url.searchParams.has('token'),
             mobile: url.searchParams.get('mobile'),
+            allowed: decision.allowed,
+            reason: decision.reason,
         });
 
-        if (isTunnel) {
-            const hasToken = url.searchParams.has('token');
-            const isMobile = url.searchParams.get('mobile') === '1';
-
-            if (!hasToken && !isMobile) {
-                // Vite HMR or other non-app WebSocket — silently reject.
-                // HMR isn't needed through the tunnel (mobile users don't need it).
-                logger.info('Tunnel WebSocket: rejecting non-app upgrade (likely Vite HMR)', { path: req.url });
-                socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
-                socket.destroy();
-                return;
-            }
-
-            logger.info('Tunnel WebSocket: routing to app WSS');
+        if (!decision.allowed) {
+            logger.info('WebSocket upgrade rejected', { reason: decision.reason, host, path: req.url });
+            socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+            socket.destroy();
+            return;
         }
 
         wss.handleUpgrade(req, socket, head, (ws) => {
@@ -1318,18 +1317,25 @@ export async function createApp(basePath?: string) {
 
     // WebSocket connection handling
     wss.on('connection', async (ws: WebSocket, req) => {
-        // Check for mobile token auth on query string
+        // Re-run the same fail-closed auth decision as the upgrade gate, as a
+        // defense-in-depth single source of truth: whenever the server is (or
+        // looks) remotely reachable, EVERY connection — desktop or mobile —
+        // must carry a valid token, regardless of the `mobile` flag. When no
+        // tunnel is active, tokenless local connections are allowed so the
+        // local desktop UI keeps working.
         const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-        const mobileToken = url.searchParams.get('token');
+        const token = url.searchParams.get('token') ?? undefined;
         const isMobile = url.searchParams.get('mobile') === '1';
+        const host = req.headers.host || '';
 
-        if (isMobile) {
-            if (!mobileToken || !tunnelManager.validateToken(mobileToken)) {
-                logger.error('Mobile WebSocket rejected: invalid token');
-                ws.close(4001, 'Invalid token');
-                return;
-            }
-            logger.info('Mobile client connected via tunnel');
+        const decision = decideWebSocketAuth(
+            { token, host, isTunnelActive: tunnelManager.getStatus().active },
+            { validateToken: (t) => tunnelManager.validateToken(t), isTunnelHost },
+        );
+        if (!decision.allowed) {
+            logger.error('WebSocket connection rejected', { reason: decision.reason, host });
+            ws.close(4001, 'Invalid token');
+            return;
         }
 
         console.log('[Server] Client connected' + (isMobile ? ' (mobile)' : ''));
@@ -3307,8 +3313,19 @@ export async function createApp(basePath?: string) {
         }
     });
 
-    app.get('/api/tunnel/status', (_req, res) => {
-        res.json(tunnelManager.getStatus());
+    app.get('/api/tunnel/status', (req, res) => {
+        const status = tunnelManager.getStatus();
+        // NEVER hand the session token to a request that arrived over the
+        // tunnel. The token is the secret that gates remote WS/REST access, so
+        // revealing it to any tunnel visitor would completely defeat that auth
+        // (they could just read it here and connect). Genuine loopback requests
+        // — the local desktop UI building its QR code and attaching the token to
+        // its own WebSocket — still receive it.
+        if (isRequestViaTunnel(req, status.active)) {
+            res.json({ ...status, token: null });
+            return;
+        }
+        res.json(status);
     });
 
     // ===== Voice Agent API =====
@@ -3496,10 +3513,13 @@ export async function createApp(basePath?: string) {
         let token = req.query.token as string;
 
         if (!token) {
-            const host = req.headers.host || '';
             const tunnelStatus = tunnelManager.getStatus();
 
-            if (isTunnelHost(host) && tunnelStatus.active && tunnelStatus.token) {
+            // Only auto-fill the real token for genuine LOCAL requests. Over the
+            // tunnel the caller must present the token in the URL (the SPA builds
+            // /voice?token=..); auto-filling it here would embed the session
+            // token in a page served to any tunnel visitor and defeat the auth.
+            if (!isRequestViaTunnel(req, tunnelStatus.active) && tunnelStatus.active && tunnelStatus.token) {
                 token = tunnelStatus.token;
             } else {
                 res.status(401).send('Access denied: Missing token');
@@ -3556,10 +3576,11 @@ export async function createApp(basePath?: string) {
         let token = req.query.token as string;
 
         if (!token) {
-            const host = req.headers.host || '';
             const tunnelStatus = tunnelManager.getStatus();
 
-            if (isTunnelHost(host) && tunnelStatus.active && tunnelStatus.token) {
+            // Only auto-fill the real token for genuine LOCAL requests — see the
+            // /voice route above. Over the tunnel the caller must present it.
+            if (!isRequestViaTunnel(req, tunnelStatus.active) && tunnelStatus.active && tunnelStatus.token) {
                 token = tunnelStatus.token;
             } else {
                 res.status(401).send('Access denied: Missing token');
