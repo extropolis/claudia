@@ -2343,6 +2343,63 @@
     color: var(--accent-secondary);
 }
 
+/* ── Spawned subtask list (tasks created by a parent task via MCP) ───────────── */
+.subtask-section {
+    margin-bottom: 2px;
+}
+
+.subtask-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    width: 100%;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 2px 8px 2px 20px;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    text-align: left;
+    user-select: none;
+    opacity: 0.7;
+    transition: opacity 0.1s ease;
+}
+
+.subtask-toggle:hover {
+    opacity: 1;
+    color: var(--text-secondary);
+}
+
+.subtask-active-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-secondary);
+    flex-shrink: 0;
+    animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+.subtask-list {
+    padding-left: 12px;
+    border-left: 2px solid rgba(88, 166, 255, 0.2);
+    margin-left: 10px;
+    margin-bottom: 2px;
+}
+
+.subtask-list .task-item {
+    font-size: 0.8rem;
+    opacity: 0.9;
+}
+
+.subtask-list .task-item:hover {
+    opacity: 1;
+}
+
 /* ── Inline worktree group section ──────────────────────────────────────────── */
 .worktree-group {
     margin-top: 4px;
@@ -2418,4 +2475,18 @@
 
 .worktree-group-tasks {
     padding-left: 12px;
+}
+
+/* Nested worktree groups (worktrees-within-worktrees) */
+.worktree-group-tasks .worktree-group {
+    margin-left: 4px;
+    border-left: 2px solid rgba(88, 166, 255, 0.15);
+    padding-left: 4px;
+    border-top: none;
+    margin-top: 2px;
+}
+
+.worktree-group-tasks .worktree-group-header {
+    font-size: 0.75rem;
+    opacity: 0.85;
 }

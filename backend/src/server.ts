@@ -18,6 +18,7 @@ import { getConversationHistory, getWorkspaceSessions } from './conversation-par
 import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
+import { TodoStore } from './todo-store.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
 import { WorktreeManager } from './worktree-manager.js';
@@ -509,6 +510,9 @@ export async function createApp(basePath?: string) {
         }
     );
     cronScheduler.start();
+
+    // TodoStore for per-task user TODOs
+    const todoStore = new TodoStore();
 
     // Wire up tunnel events for broadcasting
     tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
@@ -1307,7 +1311,7 @@ export async function createApp(basePath?: string) {
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId, initialCols, initialRows, source, complexity, isolate } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string; complexity?: string; isolate?: boolean };
+                        const { prompt, workspaceId, initialCols, initialRows, source, complexity, isolate, parentTaskId } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string; complexity?: string; isolate?: boolean; parentTaskId?: string };
                         if (!prompt || !workspaceId) {
                             logger.error('task:create requires prompt and workspaceId');
                             sendWSError(ws, 'task:create requires prompt and workspaceId', message.type, 'MISSING_PARAMS');
@@ -1396,7 +1400,7 @@ export async function createApp(basePath?: string) {
 
                         // Pass initial dimensions if provided
                         try {
-                            const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows, modelOverride);
+                            const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows, modelOverride, parentTaskId);
                             // Broadcast task:created to all clients (UI sidebar update).
                             // Done here (not in the taskCreated event handler) so the source
                             // field is always correct even with concurrent creates.
@@ -3795,6 +3799,103 @@ export async function createApp(basePath?: string) {
         } catch (error) {
             res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
         }
+    });
+
+    // ===== Per-task TODO endpoints =====
+
+    app.post('/api/tasks/:taskId/todos', (req, res) => {
+        const { taskId } = req.params;
+        const { title, description, status, priority, source, kind, url, externalRef, parentId, order } = req.body;
+
+        if (!title || typeof title !== 'string' || !title.trim()) {
+            return res.status(400).json({ error: 'title is required' });
+        }
+
+        try {
+            const todo = todoStore.create(taskId, title.trim(), {
+                description: description?.trim(),
+                status, priority, source, kind,
+                url: url?.trim(), externalRef: externalRef?.trim(), parentId, order,
+            });
+            broadcast({ type: 'todo:created' as WSMessageType, payload: { todo } });
+            res.json(todo);
+        } catch (error) {
+            res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+
+    app.get('/api/tasks/:taskId/todos', (req, res) => {
+        const { taskId } = req.params;
+        res.json(todoStore.listForTask(taskId));
+    });
+
+    // Progress + active/next summary for a task's work-plan.
+    app.get('/api/tasks/:taskId/todos/summary', (req, res) => {
+        const { taskId } = req.params;
+        res.json(todoStore.summaryForTask(taskId));
+    });
+
+    // Set execution order from an ordered id list.
+    app.post('/api/tasks/:taskId/todos/reorder', (req, res) => {
+        const { taskId } = req.params;
+        const { orderedIds } = req.body;
+        if (!Array.isArray(orderedIds)) {
+            return res.status(400).json({ error: 'orderedIds (string[]) is required' });
+        }
+        const todos = todoStore.reorder(taskId, orderedIds);
+        broadcast({ type: 'todos:reordered' as WSMessageType, payload: { taskId, todos } });
+        res.json(todos);
+    });
+
+    app.get('/api/todos', (_req, res) => {
+        res.json(todoStore.list());
+    });
+
+    app.patch('/api/todos/:todoId', (req, res) => {
+        const { todoId } = req.params;
+        const { title, description, completed, status, priority, order, parentId } = req.body;
+
+        const oldTodo = todoStore.get(todoId);
+        if (!oldTodo) {
+            return res.status(404).json({ error: 'TODO not found' });
+        }
+
+        const wasCompleted = oldTodo.completed;
+        let todo;
+        try {
+            todo = todoStore.update(todoId, { title, description, completed, status, priority, order, parentId });
+        } catch (error) {
+            return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+        }
+        if (!todo) {
+            return res.status(404).json({ error: 'TODO not found' });
+        }
+
+        broadcast({ type: 'todo:updated' as WSMessageType, payload: { todo } });
+
+        // Notify the task when completion flips — whether driven by `completed` or `status`.
+        if (todo.completed !== wasCompleted) {
+            const msg = todo.completed
+                ? `[TODO COMPLETED] "${todo.title}" was checked off by the user. You may proceed with any work that was blocked on this.\r`
+                : `[TODO UNCHECKED] "${todo.title}" was unchecked by the user.\r`;
+            try {
+                taskSpawner.writeToTask(todo.taskId, msg);
+            } catch (err) {
+                logger.warn('Failed to notify task of TODO change', { todoId, taskId: todo.taskId, error: err });
+            }
+        }
+
+        res.json(todo);
+    });
+
+    app.delete('/api/todos/:todoId', (req, res) => {
+        const { todoId } = req.params;
+        const todo = todoStore.delete(todoId);
+        if (!todo) {
+            return res.status(404).json({ error: 'TODO not found' });
+        }
+        broadcast({ type: 'todo:deleted' as WSMessageType, payload: { todoId, taskId: todo.taskId } });
+        res.json({ success: true });
     });
 
     app.get('/api/workspaces', (_req, res) => {

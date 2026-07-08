@@ -576,74 +576,50 @@ interface WorktreeGroup {
     workspace: Workspace;
     branch: string; // short branch name
     tasks: Task[];
+    subGroups?: WorktreeGroup[]; // nested worktrees (worktrees-within-worktrees)
 }
 
-interface WorktreeGroupSectionProps {
-    group: WorktreeGroup;
+interface SubtaskListProps {
+    parentId: string;
+    children: Task[];
     selectedTaskId: string | null;
     lastSelectedTaskId: string | null;
     waitingInputTaskIds: Set<string>;
     unreadTaskIds: Set<string>;
-    onDeleteTask: (taskId: string) => void;
-    onInterruptTask: (taskId: string) => void;
-    onArchiveTask: (taskId: string) => void;
-    onRevertTask: (taskId: string) => void;
-    onSelectTask: (taskId: string) => void;
-    onRenameTask?: (taskId: string, displayName: string) => void;
-    onOpenScheduledTasks?: (taskId: string) => void;
-    onRemoveWorktree?: (workspaceId: string, force?: boolean) => Promise<void>;
+    onDeleteTask: (id: string) => void;
+    onInterruptTask: (id: string) => void;
+    onArchiveTask: (id: string) => void;
+    onRevertTask: (id: string) => void;
+    onSelectTask: (id: string) => void;
+    onRenameTask?: (id: string, name: string) => void;
+    onOpenScheduledTasks?: (id: string) => void;
 }
 
-function WorktreeGroupSection({ group, selectedTaskId, lastSelectedTaskId, waitingInputTaskIds, unreadTaskIds, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, onOpenScheduledTasks, onRemoveWorktree }: WorktreeGroupSectionProps) {
+function SubtaskList({ parentId, children, selectedTaskId, lastSelectedTaskId, waitingInputTaskIds, unreadTaskIds, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, onOpenScheduledTasks }: SubtaskListProps) {
     const [collapsed, setCollapsed] = useState(false);
-    const [removing, setRemoving] = useState(false);
-
-    const hasActive = group.tasks.some(t => t.state === 'busy' || t.state === 'starting' || t.state === 'waiting_input');
-
-    const handleRemove = async (e: React.MouseEvent) => {
-        e.stopPropagation();
-        if (!onRemoveWorktree) return;
-        if (!window.confirm(`Remove worktree branch "${group.branch}"? The directory and branch will be deleted.`)) return;
-        setRemoving(true);
-        try {
-            await onRemoveWorktree(group.workspace.id, false);
-        } catch (err) {
-            console.error('[WorktreeGroupSection] remove failed:', err);
-        } finally {
-            setRemoving(false);
-        }
-    };
-
+    const hasActive = children.some(t => t.state === 'busy' || t.state === 'starting' || t.state === 'waiting_input');
     return (
-        <div className={`worktree-group${collapsed ? ' collapsed' : ''}`}>
-            <div className="worktree-group-header" onClick={() => setCollapsed(c => !c)}>
-                {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-                <GitBranch size={12} />
-                <span className="worktree-group-branch" title={group.workspace.worktreeBranch || group.branch}>{group.branch}</span>
-                {group.workspace.prInfo && <PrBadge prInfo={group.workspace.prInfo} />}
-                {hasActive && <span className="worktree-group-active-dot" title="Has active tasks" />}
-                {!collapsed && onRemoveWorktree && (
-                    <button
-                        className="worktree-group-remove"
-                        title={hasActive ? 'Archive tasks first' : 'Remove worktree'}
-                        disabled={removing || hasActive}
-                        onClick={handleRemove}
-                    >
-                        <Trash2 size={10} />
-                    </button>
-                )}
-            </div>
+        <div className="subtask-section">
+            <button
+                className={`subtask-toggle${collapsed ? ' collapsed' : ''}`}
+                onClick={() => setCollapsed(c => !c)}
+                title={collapsed ? 'Show subtasks' : 'Hide subtasks'}
+            >
+                {collapsed ? <ChevronRight size={10} /> : <ChevronDown size={10} />}
+                <span>{children.length} subtask{children.length !== 1 ? 's' : ''}</span>
+                {hasActive && <span className="subtask-active-dot" title="Has active subtasks" />}
+            </button>
             {!collapsed && (
-                <div className="worktree-group-tasks">
-                    {group.tasks.map((task, idx) => (
+                <div className="subtask-list">
+                    {children.map((child, cidx) => (
                         <TaskItem
-                            key={task.id}
-                            task={task}
-                            index={idx}
-                            isSelected={selectedTaskId === task.id}
-                            isLastSelected={lastSelectedTaskId === task.id}
-                            hasActiveQuestion={waitingInputTaskIds.has(task.id)}
-                            hasUnreadActivity={unreadTaskIds.has(task.id)}
+                            key={child.id}
+                            task={child}
+                            index={cidx}
+                            isSelected={selectedTaskId === child.id}
+                            isLastSelected={lastSelectedTaskId === child.id}
+                            hasActiveQuestion={waitingInputTaskIds.has(child.id)}
+                            hasUnreadActivity={unreadTaskIds.has(child.id)}
                             onDeleteTask={onDeleteTask}
                             onInterruptTask={onInterruptTask}
                             onArchiveTask={onArchiveTask}
@@ -657,12 +633,17 @@ function WorktreeGroupSection({ group, selectedTaskId, lastSelectedTaskId, waiti
                             onDragStart={() => {}}
                             onDragEnter={() => {}}
                             onDragEnd={() => {}}
+                            worktreeInfo={child.sessionWorktreeBranch
+                                ? { branch: child.sessionWorktreeBranch, prInfo: child.sessionWorktreePrInfo }
+                                : undefined}
                         />
                     ))}
                 </div>
             )}
         </div>
     );
+    // parentId used as React key at call site, kept here to satisfy linter
+    void parentId;
 }
 
 interface WorkspaceSectionProps {
@@ -1797,8 +1778,22 @@ function WorkspaceSection({
 
                                     const items: RenderItem[] = [];
 
-                                    // Add regular tasks
-                                    tasks.forEach((task, idx) => {
+                                    // Build subtask map: parentTaskId → child tasks (only for parents in this workspace)
+                                    const taskIds = new Set(tasks.map(t => t.id));
+                                    const subtaskMap = new Map<string, Task[]>();
+                                    const topLevelTasks: Task[] = [];
+                                    tasks.forEach(task => {
+                                        if (task.parentTaskId && taskIds.has(task.parentTaskId)) {
+                                            const children = subtaskMap.get(task.parentTaskId) ?? [];
+                                            children.push(task);
+                                            subtaskMap.set(task.parentTaskId, children);
+                                        } else {
+                                            topLevelTasks.push(task);
+                                        }
+                                    });
+
+                                    // Add regular tasks (top-level only)
+                                    topLevelTasks.forEach((task, idx) => {
                                         items.push({ type: 'task', task, idx });
                                     });
 
@@ -1831,81 +1826,166 @@ function WorkspaceSection({
 
                                     return items.map((item) => {
                                         if (item.type === 'task') {
+                                            const children = subtaskMap.get(item.task.id);
                                             return (
-                                                <TaskItem
-                                                    key={item.task.id}
-                                                    task={item.task}
-                                                    index={item.idx}
-                                                    isSelected={selectedTaskId === item.task.id}
-                                                    isLastSelected={lastSelectedTaskId === item.task.id}
-                                                    hasActiveQuestion={waitingInputTaskIds.has(item.task.id)}
-                                                    hasUnreadActivity={unreadTaskIds.has(item.task.id)}
-                                                    onDeleteTask={onDeleteTask}
-                                                    onInterruptTask={onInterruptTask}
-                                                    onArchiveTask={onArchiveTask}
-                                                    onRevertTask={onRevertTask}
-                                                    onSelectTask={onSelectTask}
-                                                    onRenameTask={onRenameTask}
-                                                    onOpenScheduledTasks={onOpenScheduledTasks}
-                                                    isDragging={taskDragIndex !== null}
-                                                    dragIndex={taskDragIndex}
-                                                    dragOverIndex={taskDragOverIndex}
-                                                    onDragStart={handleTaskDragStart}
-                                                    onDragEnter={handleTaskDragEnter}
-                                                    onDragEnd={handleTaskDragEnd}
-                                                    worktreeInfo={item.task.sessionWorktreeBranch
-                                                        ? { branch: item.task.sessionWorktreeBranch, prInfo: item.task.sessionWorktreePrInfo }
-                                                        : undefined}
-                                                />
+                                                <div key={item.task.id} className={children ? 'task-with-subtasks' : undefined}>
+                                                    <TaskItem
+                                                        task={item.task}
+                                                        index={item.idx}
+                                                        isSelected={selectedTaskId === item.task.id}
+                                                        isLastSelected={lastSelectedTaskId === item.task.id}
+                                                        hasActiveQuestion={waitingInputTaskIds.has(item.task.id)}
+                                                        hasUnreadActivity={unreadTaskIds.has(item.task.id)}
+                                                        onDeleteTask={onDeleteTask}
+                                                        onInterruptTask={onInterruptTask}
+                                                        onArchiveTask={onArchiveTask}
+                                                        onRevertTask={onRevertTask}
+                                                        onSelectTask={onSelectTask}
+                                                        onRenameTask={onRenameTask}
+                                                        onOpenScheduledTasks={onOpenScheduledTasks}
+                                                        isDragging={taskDragIndex !== null}
+                                                        dragIndex={taskDragIndex}
+                                                        dragOverIndex={taskDragOverIndex}
+                                                        onDragStart={handleTaskDragStart}
+                                                        onDragEnter={handleTaskDragEnter}
+                                                        onDragEnd={handleTaskDragEnd}
+                                                        worktreeInfo={item.task.sessionWorktreeBranch
+                                                            ? { branch: item.task.sessionWorktreeBranch, prInfo: item.task.sessionWorktreePrInfo }
+                                                            : undefined}
+                                                    />
+                                                    {children && (
+                                                        <SubtaskList
+                                                            parentId={item.task.id}
+                                                            children={children}
+                                                            selectedTaskId={selectedTaskId}
+                                                            lastSelectedTaskId={lastSelectedTaskId}
+                                                            waitingInputTaskIds={waitingInputTaskIds}
+                                                            unreadTaskIds={unreadTaskIds}
+                                                            onDeleteTask={onDeleteTask}
+                                                            onInterruptTask={onInterruptTask}
+                                                            onArchiveTask={onArchiveTask}
+                                                            onRevertTask={onRevertTask}
+                                                            onSelectTask={onSelectTask}
+                                                            onRenameTask={onRenameTask}
+                                                            onOpenScheduledTasks={onOpenScheduledTasks}
+                                                        />
+                                                    )}
+                                                </div>
                                             );
                                         } else if (item.type === 'worktree-single') {
                                             const t = item.group.tasks[0];
+                                            // Flatten all tasks from subGroups into a single indented list
+                                            const flatSubtasks: Task[] = [];
+                                            const collectSubtasks = (groups: WorktreeGroup[]) => {
+                                                for (const sg of groups) {
+                                                    flatSubtasks.push(...sg.tasks);
+                                                    if (sg.subGroups) collectSubtasks(sg.subGroups);
+                                                }
+                                            };
+                                            if (item.group.subGroups) collectSubtasks(item.group.subGroups);
                                             return (
-                                                <TaskItem
-                                                    key={item.group.workspace.id}
-                                                    task={t}
-                                                    index={0}
-                                                    isSelected={selectedTaskId === t.id}
-                                                    isLastSelected={lastSelectedTaskId === t.id}
-                                                    hasActiveQuestion={waitingInputTaskIds.has(t.id)}
-                                                    hasUnreadActivity={unreadTaskIds.has(t.id)}
-                                                    onDeleteTask={onDeleteTask}
-                                                    onInterruptTask={onInterruptTask}
-                                                    onArchiveTask={onArchiveTask}
-                                                    onRevertTask={onRevertTask}
-                                                    onSelectTask={onSelectTask}
-                                                    onRenameTask={onRenameTask}
-                                                    onOpenScheduledTasks={onOpenScheduledTasks}
-                                                    isDragging={false}
-                                                    dragIndex={null}
-                                                    dragOverIndex={null}
-                                                    onDragStart={() => {}}
-                                                    onDragEnter={() => {}}
-                                                    onDragEnd={() => {}}
-                                                    worktreeInfo={{
-                                                        branch: item.group.workspace.worktreeBranch || item.group.branch,
-                                                        prInfo: item.group.workspace.prInfo,
-                                                    }}
-                                                />
+                                                <div key={item.group.workspace.id} className={flatSubtasks.length > 0 ? 'task-with-subtasks' : undefined}>
+                                                    <TaskItem
+                                                        task={t}
+                                                        index={0}
+                                                        isSelected={selectedTaskId === t.id}
+                                                        isLastSelected={lastSelectedTaskId === t.id}
+                                                        hasActiveQuestion={waitingInputTaskIds.has(t.id)}
+                                                        hasUnreadActivity={unreadTaskIds.has(t.id)}
+                                                        onDeleteTask={onDeleteTask}
+                                                        onInterruptTask={onInterruptTask}
+                                                        onArchiveTask={onArchiveTask}
+                                                        onRevertTask={onRevertTask}
+                                                        onSelectTask={onSelectTask}
+                                                        onRenameTask={onRenameTask}
+                                                        onOpenScheduledTasks={onOpenScheduledTasks}
+                                                        isDragging={false}
+                                                        dragIndex={null}
+                                                        dragOverIndex={null}
+                                                        onDragStart={() => {}}
+                                                        onDragEnter={() => {}}
+                                                        onDragEnd={() => {}}
+                                                        worktreeInfo={{
+                                                            branch: item.group.workspace.worktreeBranch || item.group.branch,
+                                                            prInfo: item.group.workspace.prInfo,
+                                                        }}
+                                                    />
+                                                    {flatSubtasks.length > 0 && (
+                                                        <SubtaskList
+                                                            parentId={item.group.workspace.id}
+                                                            children={flatSubtasks}
+                                                            selectedTaskId={selectedTaskId}
+                                                            lastSelectedTaskId={lastSelectedTaskId}
+                                                            waitingInputTaskIds={waitingInputTaskIds}
+                                                            unreadTaskIds={unreadTaskIds}
+                                                            onDeleteTask={onDeleteTask}
+                                                            onInterruptTask={onInterruptTask}
+                                                            onArchiveTask={onArchiveTask}
+                                                            onRevertTask={onRevertTask}
+                                                            onSelectTask={onSelectTask}
+                                                            onRenameTask={onRenameTask}
+                                                            onOpenScheduledTasks={onOpenScheduledTasks}
+                                                        />
+                                                    )}
+                                                </div>
                                             );
                                         } else {
+                                            // worktree-multi: render all tasks flat, then subtasks indented
+                                            const flatSubtasks: Task[] = [];
+                                            const collectSubtasks = (groups: WorktreeGroup[]) => {
+                                                for (const sg of groups) {
+                                                    flatSubtasks.push(...sg.tasks);
+                                                    if (sg.subGroups) collectSubtasks(sg.subGroups);
+                                                }
+                                            };
+                                            if (item.group.subGroups) collectSubtasks(item.group.subGroups);
                                             return (
-                                                <WorktreeGroupSection
-                                                    key={item.group.workspace.id}
-                                                    group={item.group}
-                                                    selectedTaskId={selectedTaskId}
-                                                    lastSelectedTaskId={lastSelectedTaskId}
-                                                    waitingInputTaskIds={waitingInputTaskIds}
-                                                    unreadTaskIds={unreadTaskIds}
-                                                    onDeleteTask={onDeleteTask}
-                                                    onInterruptTask={onInterruptTask}
-                                                    onArchiveTask={onArchiveTask}
-                                                    onRevertTask={onRevertTask}
-                                                    onSelectTask={onSelectTask}
-                                                    onRenameTask={onRenameTask}
-                                                    onOpenScheduledTasks={onOpenScheduledTasks}
-                                                    onRemoveWorktree={onRemoveWorktree}
-                                                />
+                                                <div key={item.group.workspace.id}>
+                                                    {item.group.tasks.map((t, idx) => (
+                                                        <TaskItem
+                                                            key={t.id}
+                                                            task={t}
+                                                            index={idx}
+                                                            isSelected={selectedTaskId === t.id}
+                                                            isLastSelected={lastSelectedTaskId === t.id}
+                                                            hasActiveQuestion={waitingInputTaskIds.has(t.id)}
+                                                            hasUnreadActivity={unreadTaskIds.has(t.id)}
+                                                            onDeleteTask={onDeleteTask}
+                                                            onInterruptTask={onInterruptTask}
+                                                            onArchiveTask={onArchiveTask}
+                                                            onRevertTask={onRevertTask}
+                                                            onSelectTask={onSelectTask}
+                                                            onRenameTask={onRenameTask}
+                                                            onOpenScheduledTasks={onOpenScheduledTasks}
+                                                            isDragging={false}
+                                                            dragIndex={null}
+                                                            dragOverIndex={null}
+                                                            onDragStart={() => {}}
+                                                            onDragEnter={() => {}}
+                                                            onDragEnd={() => {}}
+                                                            worktreeInfo={t.sessionWorktreeBranch
+                                                                ? { branch: t.sessionWorktreeBranch, prInfo: t.sessionWorktreePrInfo }
+                                                                : undefined}
+                                                        />
+                                                    ))}
+                                                    {flatSubtasks.length > 0 && (
+                                                        <SubtaskList
+                                                            parentId={item.group.workspace.id + '-multi'}
+                                                            children={flatSubtasks}
+                                                            selectedTaskId={selectedTaskId}
+                                                            lastSelectedTaskId={lastSelectedTaskId}
+                                                            waitingInputTaskIds={waitingInputTaskIds}
+                                                            unreadTaskIds={unreadTaskIds}
+                                                            onDeleteTask={onDeleteTask}
+                                                            onInterruptTask={onInterruptTask}
+                                                            onArchiveTask={onArchiveTask}
+                                                            onRevertTask={onRevertTask}
+                                                            onSelectTask={onSelectTask}
+                                                            onRenameTask={onRenameTask}
+                                                            onOpenScheduledTasks={onOpenScheduledTasks}
+                                                        />
+                                                    )}
+                                                </div>
                                             );
                                         }
                                     });
@@ -2305,15 +2385,20 @@ export function WorkspacePanel({
         return sortTasks(Array.from(tasks.values()).filter(t => t.workspaceId === workspaceId));
     };
 
-    // Build inline worktree groups for a parent workspace
-    const getWorktreeGroupsForWorkspace = (parentId: string): WorktreeGroup[] => {
+    // Build inline worktree groups for a parent workspace (recursive for nested worktrees)
+    const getWorktreeGroupsForWorkspace = (parentId: string, depth = 0): WorktreeGroup[] => {
+        if (depth > 3) return []; // guard against pathological nesting
         const childWorkspaces = workspaces.filter(w => w.worktreeParentId === parentId);
-        return childWorkspaces.map(ws => ({
-            workspace: ws,
-            // Show human-readable name if task has been named, otherwise fall back to branch
-            branch: ws.displayName || ws.worktreeBranch || ws.name,
-            tasks: sortTasks(Array.from(tasks.values()).filter(t => t.workspaceId === ws.id)),
-        })).filter(g => g.tasks.length > 0); // only show groups that have tasks
+        return childWorkspaces.map(ws => {
+            const wsTasks = sortTasks(Array.from(tasks.values()).filter(t => t.workspaceId === ws.id));
+            const subGroups = getWorktreeGroupsForWorkspace(ws.id, depth + 1);
+            return {
+                workspace: ws,
+                branch: ws.displayName || ws.worktreeBranch || ws.name,
+                tasks: wsTasks,
+                subGroups: subGroups.length > 0 ? subGroups : undefined,
+            };
+        }).filter(g => g.tasks.length > 0 || (g.subGroups && g.subGroups.length > 0));
     };
 
 

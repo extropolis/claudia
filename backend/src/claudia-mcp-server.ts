@@ -43,6 +43,9 @@ const SELF_TASK_ID = process.env.CLAUDIA_TASK_ID || '';
 // `complexity` parameter is exposed on claudia_create_task.
 const MODEL_TIERING_ENABLED = process.env.CLAUDIA_MODEL_TIERING_ENABLED === '1';
 
+// Whether per-task TODO list is enabled. Controls whether claudia_todo_* tools are registered.
+const TODO_ENABLED = process.env.CLAUDIA_TODO_ENABLED === '1';
+
 /**
  * Format a duration in milliseconds to a human-readable string
  */
@@ -515,6 +518,7 @@ async function handleCreateTask(args: { prompt: string; displayName?: string; co
             prompt,
             workspaceId: effectiveWorkspaceId,
             source: 'mcp',
+            ...(SELF_TASK_ID ? { parentTaskId: SELF_TASK_ID } : {}),
         };
         if (MODEL_TIERING_ENABLED && complexity) {
             payload.complexity = complexity;
@@ -1177,6 +1181,219 @@ server.tool(
         }
     }
 );
+
+// ============================================================================
+// TODO Tools (only registered when TODO_ENABLED)
+// ============================================================================
+if (TODO_ENABLED) {
+server.tool(
+    'claudia_todo_create',
+    `Add an item to your task's TODO work-plan, shown live in the Claudia toolbar. This list is YOUR working plan for the task — seed it up front with the steps you intend to take, keep it current as you work, and the user watches progress at a glance.
+
+Track every kind of work item here:
+- Your own steps ('source: claude', 'kind: action') — what you're going to do.
+- Actions the user must take ('source: user', 'kind: manual') — run a VPN, approve a deploy, test in a browser; you're notified when they check it off.
+- GitHub issues/PRs the task involves ('source: github', 'kind: github-issue' | 'github-pr', with 'url' + 'externalRef' like "amd/gaia#1859") — these render as clickable links.
+
+Order items in execution sequence ('order', lower = earlier) and set 'priority'. Use 'parentId' to break a big item into subtasks (one level only). Mark exactly one item 'status: active' as you work it (via claudia_todo_update).${SELF_TASK_ID ? ` Your task ID is: ${SELF_TASK_ID}` : ''}`,
+    {
+        title: z.string().describe('Concise, actionable work item'),
+        description: z.string().optional().describe('Optional details or instructions'),
+        status: z.enum(['pending', 'active', 'completed']).optional().describe("Item state; default 'pending'. Set 'active' for the one item you're working on now."),
+        priority: z.enum(['high', 'normal', 'low']).optional().describe("Priority badge; default 'normal'"),
+        source: z.enum(['user', 'claude', 'github']).optional().describe("Who owns it: 'user' (needs the human), 'claude' (your step), 'github'. Default 'user'."),
+        kind: z.enum(['manual', 'action', 'github-issue', 'github-pr']).optional().describe("Item type; default 'manual'. Use github-issue/github-pr for GitHub work."),
+        url: z.string().optional().describe('External link (GitHub issue/PR URL) — rendered clickable'),
+        externalRef: z.string().optional().describe('Short ref like "amd/gaia#1859"; re-adding the same ref updates it instead of duplicating'),
+        parentId: z.string().optional().describe('Parent TODO id to make this a subtask (one level of nesting only)'),
+        order: z.number().optional().describe('Execution sequence (lower = earlier); defaults to end of list'),
+    },
+    async ({ title, description, status, priority, source, kind, url, externalRef, parentId, order }) => {
+        const taskId = SELF_TASK_ID;
+        if (!taskId) {
+            return { content: [{ type: 'text', text: 'Error: No task ID configured (CLAUDIA_TASK_ID not set).' }] };
+        }
+
+        try {
+            log.info(`Creating TODO for task ${taskId}: ${title}`);
+            const response = await backendFetch(`/api/tasks/${taskId}/todos`, {
+                method: 'POST',
+                body: JSON.stringify({ title, description, status, priority, source, kind, url, externalRef, parentId, order }),
+            });
+
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                return { content: [{ type: 'text', text: `Error: ${error.error || response.statusText}` }] };
+            }
+
+            const todo = await response.json();
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        todoId: todo.id,
+                        title: todo.title,
+                        status: todo.status,
+                        message: `TODO created: "${todo.title}". It's live in the toolbar work-plan.`
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to create TODO:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_todo_list
+// ============================================================================
+server.tool(
+    'claudia_todo_list',
+    'Read back your task work-plan: all items ordered by execution sequence, plus a progress summary (percent done, which item is active now, which is next). Call this to re-orient on what is left and keep the plan in sync with reality.',
+    {
+        taskId: z.string().optional().describe(`Task ID to list TODOs for. Defaults to your own task.${SELF_TASK_ID ? ` Your task ID is: ${SELF_TASK_ID}` : ''}`),
+    },
+    async ({ taskId }) => {
+        const effectiveTaskId = taskId || SELF_TASK_ID;
+        try {
+            const url = effectiveTaskId ? `/api/tasks/${effectiveTaskId}/todos` : '/api/todos';
+            const response = await backendFetch(url);
+
+            if (!response.ok) {
+                return { content: [{ type: 'text', text: `Error: Failed to list TODOs (HTTP ${response.status})` }] };
+            }
+
+            const todos = await response.json();
+
+            if (!todos || todos.length === 0) {
+                return { content: [{ type: 'text', text: effectiveTaskId ? `No TODOs for this task yet. Seed your work-plan with claudia_todo_create.` : 'No TODOs.' }] };
+            }
+
+            let summary: any = null;
+            if (effectiveTaskId) {
+                const sres = await backendFetch(`/api/tasks/${effectiveTaskId}/todos/summary`).catch(() => null);
+                if (sres && sres.ok) summary = await sres.json();
+            }
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        summary,
+                        todos: todos.map((t: any) => ({
+                            id: t.id,
+                            title: t.title,
+                            description: t.description || null,
+                            status: t.status || (t.completed ? 'completed' : 'pending'),
+                            priority: t.priority || 'normal',
+                            order: t.order ?? null,
+                            source: t.source || 'user',
+                            kind: t.kind || 'manual',
+                            url: t.url || null,
+                            externalRef: t.externalRef || null,
+                            parentId: t.parentId || null,
+                            completedAt: t.completedAt || null,
+                            createdAt: t.createdAt,
+                        })),
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_todo_update
+// ============================================================================
+server.tool(
+    'claudia_todo_update',
+    "Update a work-plan item: retitle, edit details, change priority/order/parent, or set status. Setting status:'active' marks it as what you're working on now (any previously-active item in the task is demoted to pending — only one is active at a time). Mark status:'completed' as you finish each item so the progress bar advances.",
+    {
+        todoId: z.string().describe('The TODO item ID to update'),
+        title: z.string().optional().describe('New title'),
+        description: z.string().optional().describe('New description'),
+        completed: z.boolean().optional().describe('Shortcut: true marks completed, false reopens as pending'),
+        status: z.enum(['pending', 'active', 'completed']).optional().describe("New state. 'active' = working on it now (single active per task)."),
+        priority: z.enum(['high', 'normal', 'low']).optional().describe('New priority'),
+        order: z.number().optional().describe('New execution-sequence index (lower = earlier)'),
+        parentId: z.string().nullable().optional().describe('Set a parent id to make this a subtask, or null to detach'),
+    },
+    async ({ todoId, title, description, completed, status, priority, order, parentId }) => {
+        try {
+            log.info(`Updating TODO ${todoId}`, { title, description, completed, status, priority, order, parentId });
+            const response = await backendFetch(`/api/todos/${todoId}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ title, description, completed, status, priority, order, parentId }),
+            });
+
+            if (!response.ok) {
+                if (response.status === 404) {
+                    return { content: [{ type: 'text', text: `Error: TODO '${todoId}' not found.` }] };
+                }
+                const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                return { content: [{ type: 'text', text: `Error: ${error.error || response.statusText}` }] };
+            }
+
+            const todo = await response.json();
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        todo: { id: todo.id, title: todo.title, status: todo.status, completed: todo.completed },
+                        message: `TODO '${todo.title}' updated.`
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to update TODO:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_todo_reorder
+// ============================================================================
+server.tool(
+    'claudia_todo_reorder',
+    'Set the execution sequence of your work-plan by listing item ids in the order you intend to do them. The first id becomes order 0, and so on. Use this when priorities shift.',
+    {
+        orderedIds: z.array(z.string()).describe('Item ids in the desired execution order'),
+        taskId: z.string().optional().describe(`Task whose TODOs to reorder. Defaults to your own task.${SELF_TASK_ID ? ` Your task ID is: ${SELF_TASK_ID}` : ''}`),
+    },
+    async ({ orderedIds, taskId }) => {
+        const effectiveTaskId = taskId || SELF_TASK_ID;
+        if (!effectiveTaskId) {
+            return { content: [{ type: 'text', text: 'Error: No task ID configured (CLAUDIA_TASK_ID not set).' }] };
+        }
+        try {
+            const response = await backendFetch(`/api/tasks/${effectiveTaskId}/todos/reorder`, {
+                method: 'POST',
+                body: JSON.stringify({ orderedIds }),
+            });
+            if (!response.ok) {
+                return { content: [{ type: 'text', text: `Error: Failed to reorder TODOs (HTTP ${response.status})` }] };
+            }
+            const todos = await response.json();
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({ success: true, count: todos.length, message: 'Work-plan reordered.' }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to reorder TODOs:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+} // end if (TODO_ENABLED)
 
 // ============================================================================
 // Start the server

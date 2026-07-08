@@ -162,6 +162,7 @@ interface PersistedTask {
     processStartedAt?: string; // When the current processing run started (preserved across reconnect)
     order?: number;            // Display order within workspace (lower = higher in list)
     tokenUsage?: TaskTokenUsage; // Aggregated token usage for this task
+    parentTaskId?: string;     // Task that spawned this one via MCP claudia_create_task
 }
 
 // Lightweight metadata for archived tasks (no outputHistory - loaded lazily from disk)
@@ -565,6 +566,9 @@ export class TaskSpawner extends EventEmitter {
             // should be exposed on claudia_create_task.
             if (this.configStore?.getModelTiering().enabled) {
                 mcpEnv.CLAUDIA_MODEL_TIERING_ENABLED = '1';
+            }
+            if (this.configStore?.getTodoEnabled()) {
+                mcpEnv.CLAUDIA_TODO_ENABLED = '1';
             }
             if (Object.keys(mcpEnv).length > 0) {
                 claudiaConfig.env = mcpEnv;
@@ -1665,6 +1669,7 @@ export class TaskSpawner extends EventEmitter {
                     processStartedAt: task.processStartedAt?.toISOString(),
                     order: task.order,
                     tokenUsage: task.tokenUsage,
+                    parentTaskId: task.parentTaskId,
                 });
             }
 
@@ -2334,7 +2339,7 @@ export class TaskSpawner extends EventEmitter {
      * @param systemPrompt - Optional system prompt override
      * @returns The created task object
      */
-    async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number, modelOverride?: string): Promise<Task> {
+    async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number, modelOverride?: string, parentTaskId?: string): Promise<Task> {
         // Sanitize prompt to prevent command injection and other issues
         const sanitizedPrompt = sanitizePrompt(prompt);
         let sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
@@ -2389,6 +2394,14 @@ export class TaskSpawner extends EventEmitter {
             // on the task once resolved (non-blocking).
             logger.info('Using Claude Code backend for task creation');
             task = await this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStatePromise, initialCols, initialRows, modelOverride);
+        }
+
+        // Attach parentTaskId if this task was spawned by another via MCP
+        if (parentTaskId) {
+            task.parentTaskId = parentTaskId;
+            const internalTask = this.tasks.get(task.id);
+            if (internalTask) internalTask.parentTaskId = parentTaskId;
+            logger.info('Task spawned by parent', { taskId: task.id, parentTaskId });
         }
 
         // Resolve learnings and inject into system prompt / track after task is created
@@ -2579,7 +2592,13 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - While waiting for spawned tasks, do NOT start implementing features that overlap with what they're doing
 - **Deleting tasks**: You can request task deletion via \`claudia_delete_task\`, but it requires **explicit user approval** — a confirmation popup appears in the UI and the user must click "Delete" before the task is removed. NEVER call this automatically after tasks complete. Only call it when the user explicitly asks to delete/remove/clean up tasks.
 
-**Scheduling prompts (self-scheduling):**
+${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the toolbar):**
+- The Claudia toolbar shows a live TODO work-plan for this task. Treat it as YOUR working plan and keep it current so the user can watch progress at a glance.
+- **The moment a new user request arrives, reflect it in the work-plan BEFORE doing the work.** Call 'claudia_todo_create' to capture the task. If it is multi-step, decompose it into an ordered set of items in the sequence you will execute them — use 'parentId' to nest one level of subtasks under a parent item for the overall request.
+- As you work: set the item you are starting to status "active" (only one active at a time), and status "completed" as you finish each — the progress bar advances automatically. Re-read the plan any time with 'claudia_todo_list', and use 'claudia_todo_reorder' when priorities shift.
+- Track every kind of item here, tagged by 'source': your own steps ('source: "claude"'), GitHub issues/PRs you are acting on ('source: "github"', 'kind: "github-pr"' or '"github-issue"', with 'url' + 'externalRef' like "amd/gaia#1859"), and actions the USER must take themselves ('source: "user"' — run a VPN, approve a deploy, test in a browser). You are notified with a '[TODO COMPLETED]' message when the user checks off one of their items.
+- Do NOT put work you can do yourself into user-action items — use 'source: "claude"' for your own steps. Keep titles short and actionable.
+` : ''}**Scheduling prompts (self-scheduling):**
 - You can schedule prompts to be sent to any task (including your own) on a cron schedule using \`claudia_cron_create\`.
 - Use this to set up recurring checks, periodic polling, or delayed follow-ups — e.g. "check CI status every 10 minutes" or "remind me to review in 2 hours".
 - Your own task ID is \`${id}\` — pass it as \`taskId\` to schedule prompts on yourself.
@@ -2860,6 +2879,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             tokenUsage: task.tokenUsage,
             sessionWorktreeBranch: task.sessionWorktreeBranch,
             sessionWorktreePrInfo: task.sessionWorktreePrInfo,
+            parentTaskId: task.parentTaskId,
         };
     }
 
@@ -4044,6 +4064,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             backendType: this.taskBackends.get(persisted.id) || 'claude-code' as const,
             order: persisted.order,
             tokenUsage: persisted.tokenUsage,
+            parentTaskId: persisted.parentTaskId,
         }));
 
         return [...liveTasks, ...disconnectedTasks];
@@ -4075,6 +4096,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 displayNameEditedByUser: existing.displayNameEditedByUser,
                 order: existing.order,
                 tokenUsage: existing.tokenUsage,
+                parentTaskId: existing.parentTaskId,
             };
             this.disconnectedTasks.set(taskId, persisted);
             this.tasks.delete(taskId);
@@ -4289,6 +4311,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             systemPrompt: persisted.systemPrompt,  // Preserve custom system prompt
             gitStateBefore: persisted.gitState ? persisted.gitState : undefined,  // Preserve git state
             tokenUsage: persisted.tokenUsage,  // Preserve token usage across reconnection
+            parentTaskId: persisted.parentTaskId,  // Preserve spawner relationship across reconnection
         };
 
         // Remove from disconnectedTasks FIRST before registering handlers or emitting events.
@@ -4418,6 +4441,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             displayName: task.displayName,
             wasInterrupted: true, // Mark as interrupted so it shows correct state on resume
             shouldContinue: false,
+            parentTaskId: task.parentTaskId,
         };
 
         this.disconnectedTasks.set(taskId, persisted);
