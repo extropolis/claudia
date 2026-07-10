@@ -37,7 +37,18 @@ function stripScreenClears(history: string): string {
         // Strip accumulated "Resuming session" / "Session reconnected" separator lines.
         // These accumulate across server restarts and fill the terminal with noise,
         // hiding the actual conversation content.
-        .replace(/\r?\n?\x1b\[90m─── (Resuming session [a-f0-9-]+|Session reconnected) ───\x1b\[0m\r?\n?\r?\n?/g, '');
+        .replace(/\r?\n?\x1b\[90m─── (Resuming session [a-f0-9-]+|Session reconnected) ───\x1b\[0m\r?\n?\r?\n?/g, '')
+        // Strip terminal QUERY sequences from replayed history. A headless Claude
+        // (resumed with no client attached) spams cursor-position queries; thousands
+        // of them end up in saved history. If replayed, xterm.js dutifully ANSWERS
+        // every stale query, and those responses get sent to the live PTY as input —
+        // injecting garbage like ";1;1R?1;2c" into the session (and submitting it).
+        // Queries are meaningless in history; only a live process can consume answers.
+        .replace(/\x1b\[\??[56]n/g, '')      // DSR/CPR/DECXCPR cursor & status queries
+        .replace(/\x1b\[[>=]?0?c/g, '')      // DA1/DA2/DA3 device-attribute queries
+        .replace(/\x1b\[>0?q/g, '')          // XTVERSION query
+        .replace(/\x1b\[\?\d+\$p/g, '')      // DECRQM mode queries
+        .replace(/\x1b\](?:1[0-2]|4;\d+);\?(?:\x07|\x1b\\)/g, ''); // OSC color queries
 }
 
 

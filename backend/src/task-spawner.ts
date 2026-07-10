@@ -908,6 +908,25 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Strip terminal QUERY escape sequences before history is persisted.
+     * A headless Claude (resumed with no client attached) spams cursor-position
+     * queries (\x1b[?6n) at a high rate — observed 5000+ per file. Persisting them
+     * (a) bloats files toward the rotation cap, pushing out real scrollback, and
+     * (b) poisons replay: a client's xterm ANSWERS every stale query it replays,
+     * and those responses reach the live PTY as typed input — injecting garbage
+     * like ";1;1R?1;2c" into the session. Queries are only meaningful to a live
+     * terminal at the moment they're emitted; they are pure noise in history.
+     */
+    private stripTerminalQueries(data: string): string {
+        return data
+            .replace(/\x1b\[\??[56]n/g, '')      // DSR/CPR/DECXCPR cursor & status queries
+            .replace(/\x1b\[[>=]?0?c/g, '')      // DA1/DA2/DA3 device-attribute queries
+            .replace(/\x1b\[>0?q/g, '')          // XTVERSION query
+            .replace(/\x1b\[\?\d+\$p/g, '')      // DECRQM mode queries
+            .replace(/\x1b\](?:1[0-2]|4;\d+);\?(?:\x07|\x1b\\)/g, ''); // OSC color queries
+    }
+
+    /**
      * Atomically write history to disk via a per-process temp file + rename.
      * Mirrors the pattern used for tasks.json so a crash mid-write can't leave
      * a truncated history file. Per-process tmp name avoids races between
@@ -915,7 +934,7 @@ export class TaskSpawner extends EventEmitter {
      */
     private atomicWriteHistorySync(historyPath: string, data: string): void {
         const tmpPath = `${historyPath}.${process.pid}.tmp`;
-        writeFileSync(tmpPath, data);
+        writeFileSync(tmpPath, this.stripTerminalQueries(data));
         try {
             renameSync(tmpPath, historyPath);
         } catch (e) {
@@ -1661,6 +1680,9 @@ export class TaskSpawner extends EventEmitter {
                     }
                 }
             }
+
+            // Repair any tasks whose sessionId was orphaned by a bad reconnect.
+            this.applySessionRecoveryMap();
         } catch (error) {
             console.error('[TaskSpawner] Failed to load persisted tasks:', error);
         }
@@ -1729,7 +1751,7 @@ export class TaskSpawner extends EventEmitter {
                         // semantics don't apply to incremental appends.
                         const newBuffers = task.outputHistory.slice(task.savedBufferCount);
                         if (newBuffers.length > 0) {
-                            const newData = Buffer.concat(newBuffers).toString('utf8');
+                            const newData = this.stripTerminalQueries(Buffer.concat(newBuffers).toString('utf8'));
                             appendFileSync(historyPath, newData);
                             task.savedBufferCount = task.outputHistory.length;
                             // Cap on-disk growth. Without this the file grew unbounded
@@ -1853,6 +1875,63 @@ export class TaskSpawner extends EventEmitter {
         const homeDir = process.env.HOME || process.env.USERPROFILE || '';
         const folderName = this.workspaceToClaudeFolder(workspacePath);
         return join(homeDir, '.claude', 'projects', folderName);
+    }
+
+    /**
+     * Find the Claude session that belongs to a task by scanning a workspace's
+     * project dir for the most recently-modified .jsonl that references the
+     * task's ID. Claude embeds the owning task ID (via the claudia MCP "context
+     * update"), so this reliably re-links a task to its real conversation when
+     * the persisted session pointer was lost. Returns null if none found.
+     */
+    private findSessionForTask(taskId: string, claudeDir: string): string | null {
+        try {
+            if (!existsSync(claudeDir)) return null;
+            let best: { sid: string; mtime: number } | null = null;
+            for (const f of readdirSync(claudeDir)) {
+                if (!f.endsWith('.jsonl')) continue;
+                const fp = join(claudeDir, f);
+                let content: string;
+                try { content = readFileSync(fp, 'utf-8'); } catch { continue; }
+                if (!content.includes(taskId)) continue;
+                let mtime = 0;
+                try { mtime = statSync(fp).mtimeMs; } catch { /* ignore */ }
+                if (!best || mtime > best.mtime) best = { sid: f.replace(/\.jsonl$/, ''), mtime };
+            }
+            return best ? best.sid : null;
+        } catch (e) {
+            console.error('[TaskSpawner] findSessionForTask failed:', (e as Error).message);
+            return null;
+        }
+    }
+
+    /**
+     * One-time repair hook: if a `session-recovery.json` map ({ taskId: sessionId })
+     * sits next to tasks.json, correct any disconnected task whose sessionId drifted
+     * (e.g. orphaned by a reconnect that started a fresh session). Idempotent and a
+     * safe no-op when the file is absent. Runs once during loadPersistedTasks.
+     */
+    private applySessionRecoveryMap(): void {
+        try {
+            const mapPath = join(dirname(this.persistencePath), 'session-recovery.json');
+            if (!existsSync(mapPath)) return;
+            const map = JSON.parse(readFileSync(mapPath, 'utf-8')) as Record<string, string>;
+            let fixed = 0;
+            for (const [taskId, sessionId] of Object.entries(map)) {
+                const t = this.disconnectedTasks.get(taskId);
+                if (t && typeof sessionId === 'string' && t.sessionId !== sessionId) {
+                    console.log(`[TaskSpawner] session-recovery: ${taskId} ${t.sessionId} -> ${sessionId}`);
+                    t.sessionId = sessionId;
+                    fixed++;
+                }
+            }
+            if (fixed > 0) {
+                this.saveTasks();
+                console.log(`[TaskSpawner] session-recovery applied ${fixed} correction(s)`);
+            }
+        } catch (e) {
+            console.error('[TaskSpawner] session-recovery failed:', (e as Error).message);
+        }
     }
 
     /**
@@ -4242,12 +4321,27 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             const claudeDir = this.getClaudeProjectsDir(persisted.workspaceId);
             const sessionFilePath = join(claudeDir, `${sessionIdToUse}.jsonl`);
             if (!existsSync(sessionFilePath)) {
-                console.log(`[TaskSpawner] Session file not found for ${taskId}: ${sessionFilePath}`);
-                console.log(`[TaskSpawner] Will start fresh session instead of resuming`);
-                sessionIdToUse = null;
-                // Clear the invalid session ID from persisted data
-                persisted.sessionId = null;
-                this.scheduleSave();
+                // The persisted session file is gone. Starting fresh here would make the
+                // PTY capture a brand-new empty session ID and permanently orphan the
+                // task's real conversation (this is exactly how a chaotic multi-task
+                // restart lost sessions). Before giving up, try to recover the real
+                // session: scan this workspace's Claude project dir for the most recent
+                // session that references this task's ID (Claude embeds the owning task
+                // ID via the claudia MCP context) and resume that instead.
+                const recovered = this.findSessionForTask(taskId, claudeDir);
+                if (recovered) {
+                    console.log(`[TaskSpawner] Session file missing for ${taskId}; recovered real session ${recovered}`);
+                    sessionIdToUse = recovered;
+                    persisted.sessionId = recovered;
+                    this.scheduleSave();
+                } else {
+                    console.log(`[TaskSpawner] Session file not found for ${taskId}: ${sessionFilePath}`);
+                    console.log(`[TaskSpawner] Will start fresh session instead of resuming`);
+                    sessionIdToUse = null;
+                    // Clear the invalid session ID from persisted data
+                    persisted.sessionId = null;
+                    this.scheduleSave();
+                }
             }
         }
 
