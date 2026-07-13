@@ -119,6 +119,7 @@ export interface AppConfig {
     tokenCostEnabled?: boolean;  // Enable cost calculation display (default: false)
     defaultBaseDirectory?: string;  // Default base directory for new workspaces (optional)
     modelTiering?: ModelTieringConfig;  // Complexity-based model selection for MCP-spawned tasks
+    todoEnabled?: boolean;  // Enable per-task TODO list feature (default: false)
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
@@ -576,6 +577,15 @@ export class ConfigStore {
 
     setDefaultBaseDirectory(directory: string | undefined): void {
         this.config.defaultBaseDirectory = directory;
+        this.saveConfig();
+    }
+
+    getTodoEnabled(): boolean {
+        return this.config.todoEnabled ?? false;
+    }
+
+    setTodoEnabled(enabled: boolean): void {
+        this.config.todoEnabled = enabled;
         this.saveConfig();
     }
 }

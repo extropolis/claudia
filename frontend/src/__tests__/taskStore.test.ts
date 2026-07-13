@@ -18,6 +18,8 @@ describe('taskStore', () => {
             workspaces: [],
             expandedWorkspaces: new Set(),
             expandedWorkspacesInitialized: false,
+            collapsedWorktreeGroups: new Set(),
+            taskListHeight: null,
             showProjectPicker: false,
             voiceEnabled: false,
             autoSpeakResponses: false,
@@ -47,6 +49,60 @@ describe('taskStore', () => {
         });
         // Clear localStorage
         localStorage.clear();
+    });
+
+    describe('workspace expand/collapse persistence', () => {
+        const ws = (id: string): Workspace =>
+            ({ id, name: id, createdAt: '2026-01-01T00:00:00.000Z' } as unknown as Workspace);
+
+        it('expands all workspaces on a genuine first run (no persisted state)', () => {
+            useTaskStore.getState().setWorkspaces([ws('/a'), ws('/b')]);
+            const { expandedWorkspaces, expandedWorkspacesInitialized } = useTaskStore.getState();
+            expect(expandedWorkspacesInitialized).toBe(true);
+            expect(expandedWorkspaces.has('/a')).toBe(true);
+            expect(expandedWorkspaces.has('/b')).toBe(true);
+        });
+
+        it('preserves collapsed workspaces across a reset (reload / reconnect)', () => {
+            // First run: both expanded
+            useTaskStore.getState().setWorkspaces([ws('/a'), ws('/b')]);
+            // User collapses /a
+            useTaskStore.getState().toggleWorkspaceExpanded('/a');
+            expect(useTaskStore.getState().expandedWorkspaces.has('/a')).toBe(false);
+
+            // Simulate a reset: `workspaces` is transient and clears to [], but
+            // `expandedWorkspaces`/`expandedWorkspacesInitialized` were rehydrated from
+            // localStorage. Re-fetching workspaces must NOT re-expand the collapsed one.
+            useTaskStore.setState({ workspaces: [] });
+            useTaskStore.getState().setWorkspaces([ws('/a'), ws('/b')]);
+
+            const { expandedWorkspaces } = useTaskStore.getState();
+            expect(expandedWorkspaces.has('/a')).toBe(false); // stays collapsed
+            expect(expandedWorkspaces.has('/b')).toBe(true);  // stays expanded
+        });
+
+        it('auto-expands a genuinely new workspace added mid-session', () => {
+            useTaskStore.getState().setWorkspaces([ws('/a')]);
+            useTaskStore.getState().toggleWorkspaceExpanded('/a'); // collapse /a
+            useTaskStore.getState().setWorkspaces([ws('/a'), ws('/b')]); // /b is new
+            const { expandedWorkspaces } = useTaskStore.getState();
+            expect(expandedWorkspaces.has('/a')).toBe(false); // unchanged (stays collapsed)
+            expect(expandedWorkspaces.has('/b')).toBe(true);  // new -> expanded
+        });
+
+        it('holds the resizable task-list height in store state', () => {
+            expect(useTaskStore.getState().taskListHeight).toBeNull();
+            useTaskStore.getState().setTaskListHeight(240);
+            expect(useTaskStore.getState().taskListHeight).toBe(240);
+        });
+
+        it('toggles worktree-group collapsed state by id', () => {
+            const { toggleWorktreeGroupCollapsed } = useTaskStore.getState();
+            toggleWorktreeGroupCollapsed('grp-1');
+            expect(useTaskStore.getState().collapsedWorktreeGroups.has('grp-1')).toBe(true);
+            toggleWorktreeGroupCollapsed('grp-1');
+            expect(useTaskStore.getState().collapsedWorktreeGroups.has('grp-1')).toBe(false);
+        });
     });
 
     describe('connection state', () => {

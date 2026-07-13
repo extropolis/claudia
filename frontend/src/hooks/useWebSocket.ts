@@ -727,6 +727,7 @@ export function useWebSocket() {
         sendMessage('task:refreshPr', { taskId });
     }, [sendMessage]);
 
+
     const revertTask = useCallback((taskId: string, cleanUntracked: boolean = false) => {
         sendMessage('task:revert', { taskId, cleanUntracked });
     }, [sendMessage]);

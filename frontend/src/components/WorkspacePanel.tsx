@@ -893,8 +893,10 @@ function WorkspaceSection({
     const fileInputRef = useRef<HTMLInputElement>(null);
     const imagesRef = useRef<UploadedImage[]>(images);
 
-    // Task list resize state
-    const [taskListHeight, setTaskListHeight] = useState<number | null>(null);
+    // Task list resize state — height is persisted in the store so it survives
+    // reconnect/reload; isResizing is transient (only true during an active drag).
+    const taskListHeight = useTaskStore((s) => s.taskListHeight);
+    const setTaskListHeight = useTaskStore((s) => s.setTaskListHeight);
     const [isResizing, setIsResizing] = useState(false);
     const taskListRef = useRef<HTMLDivElement>(null);
 
@@ -2272,7 +2274,6 @@ export function WorkspacePanel({
         selectedTaskId,
         expandedWorkspaces,
         toggleWorkspaceExpanded,
-        setShowProjectPicker,
         waitingInputNotifications,
         unreadTaskIds,
         archivedTasks,
@@ -2432,7 +2433,7 @@ export function WorkspacePanel({
     }, [waitingInputNotifications]);
 
     const handleAddWorkspace = () => {
-        setShowProjectPicker(true);
+        setShowWorkspaceManager(true);
     };
 
     const handleToggleArchivedTasks = () => {

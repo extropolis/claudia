@@ -16,9 +16,10 @@ import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
+import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, Checkpoint, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { TodoStore } from './todo-store.js';
+import { CheckpointStore } from './checkpoint-store.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
 import { WorktreeManager } from './worktree-manager.js';
@@ -104,6 +105,13 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'worktree:remove',
     'worktree:prune',
     'workspace:autoWorktree',
+    'checkpoint:create',
+    'checkpoint:list',
+    'checkpoint:restore',
+    'checkpoint:restore-selective',
+    'checkpoint:restore-force',
+    'checkpoint:delete',
+    'checkpoint:fork',
 ]);
 
 // WebSocket message validation
@@ -515,6 +523,9 @@ export async function createApp(basePath?: string) {
     // TodoStore for per-task user TODOs
     const todoStore = new TodoStore();
 
+    // CheckpointStore for per-task git snapshots / restore points
+    const checkpointStore = new CheckpointStore(basePath);
+
     // Wire up tunnel events for broadcasting
     tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
         logger.info('Tunnel ready, broadcasting status', { url: data.url });
@@ -853,6 +864,7 @@ export async function createApp(basePath?: string) {
             }
         }
     }
+
 
     // ===== Worktree discovery (session attribution) =====
     // A task's Claude session may create a git worktree (raw `git worktree add`)
@@ -1272,11 +1284,15 @@ export async function createApp(basePath?: string) {
     });
 
     // WebSocket connection handling
+    let wsClientSeq = 0;
     wss.on('connection', async (ws: WebSocket, req) => {
         // Check for mobile token auth on query string
         const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
         const mobileToken = url.searchParams.get('token');
         const isMobile = url.searchParams.get('mobile') === '1';
+        // Stable per-connection id so writes can be attributed to a specific client
+        // (used to attribute task:input — e.g. to catch a runaway client looping /clear).
+        const clientId = `${isMobile ? 'mobile' : 'web'}:${req.socket.remoteAddress || 'local'}#${++wsClientSeq}`;
 
         if (isMobile) {
             if (!mobileToken || !tunnelManager.validateToken(mobileToken)) {
@@ -1452,6 +1468,23 @@ export async function createApp(basePath?: string) {
                             if (internalTask) {
                                 internalTask.lastRefKey = validRefs.map(r => r.id).sort().join(',');
                             }
+                            // Create initial checkpoint capturing repo state before any agent action.
+                            // Best-effort: failures don't block task creation.
+                            checkpointStore
+                                .createCheckpoint(newTask.id, validatedPath, 'Initial state')
+                                .then((cp) => {
+                                    logger.info('Initial checkpoint created for new task', {
+                                        taskId: newTask.id,
+                                        checkpointId: cp.id,
+                                    });
+                                    broadcast({ type: 'checkpoint:created', payload: cp });
+                                })
+                                .catch((err) => {
+                                    logger.warn('Failed to create initial checkpoint', {
+                                        taskId: newTask.id,
+                                        error: String(err),
+                                    });
+                                });
                         } catch (err) {
                             const errorMessage = err instanceof Error ? err.message : String(err);
                             logger.error('Failed to create task', { error: errorMessage });
@@ -1559,7 +1592,7 @@ export async function createApp(basePath?: string) {
                                     }
                                 }
                             }
-                            taskSpawner.writeToTask(taskId, filteredInput);
+                            taskSpawner.writeToTask(taskId, filteredInput, clientId);
                         }
                         break;
                     }
@@ -2627,6 +2660,138 @@ export async function createApp(basePath?: string) {
                         }
                         const updatedWs = workspaceStore.getWorkspace(workspaceId);
                         broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updatedWs } });
+                        break;
+                    }
+
+                    // ===== Checkpoints / Timeline =====
+
+                    case 'checkpoint:create': {
+                        const {
+                            taskId: cpTaskId,
+                            workspaceId: cpWsId,
+                            name: cpName,
+                            description: cpDesc,
+                        } = payload as {
+                            taskId?: string;
+                            workspaceId?: string;
+                            name?: string;
+                            description?: string;
+                        };
+                        if (!cpTaskId || !cpWsId) {
+                            sendWSError(ws, 'checkpoint:create requires taskId and workspaceId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        try {
+                            const checkpoint = await checkpointStore.createCheckpoint(cpTaskId, cpWsId, cpName, cpDesc);
+                            ws.send(JSON.stringify({ type: 'checkpoint:created', payload: checkpoint }));
+                        } catch (err) {
+                            sendWSError(ws, `Failed to create checkpoint: ${err}`, message.type, 'CHECKPOINT_ERROR');
+                        }
+                        break;
+                    }
+
+                    case 'checkpoint:list': {
+                        const { taskId: cpListTaskId, workspaceId: cpListWsId } = payload as {
+                            taskId?: string;
+                            workspaceId?: string;
+                        };
+                        let checkpoints: Checkpoint[] = [];
+                        if (cpListTaskId) {
+                            checkpoints = checkpointStore.listCheckpoints(cpListTaskId);
+                        } else if (cpListWsId) {
+                            checkpoints = checkpointStore.listCheckpointsByWorkspace(cpListWsId);
+                        }
+                        ws.send(JSON.stringify({ type: 'checkpoint:list', payload: { checkpoints } }));
+                        break;
+                    }
+
+                    case 'checkpoint:restore': {
+                        const { checkpointId: restoreId } = payload as { checkpointId?: string };
+                        if (!restoreId) {
+                            sendWSError(ws, 'checkpoint:restore requires checkpointId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const result = await checkpointStore.restoreCheckpoint(restoreId);
+                        if (result.success) {
+                            ws.send(JSON.stringify({ type: 'checkpoint:restored', payload: { checkpointId: restoreId } }));
+                        } else {
+                            ws.send(JSON.stringify({ type: 'checkpoint:error', payload: { error: result.error, checkpointId: restoreId } }));
+                        }
+                        break;
+                    }
+
+                    case 'checkpoint:restore-selective': {
+                        const { checkpointId: selRestoreId } = payload as { checkpointId?: string };
+                        if (!selRestoreId) {
+                            sendWSError(ws, 'checkpoint:restore-selective requires checkpointId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const selResult = await checkpointStore.restoreCheckpointSelective(selRestoreId);
+                        ws.send(JSON.stringify({
+                            type: 'checkpoint:restore-selective-result',
+                            payload: {
+                                checkpointId: selRestoreId,
+                                success: selResult.success,
+                                restoredFiles: selResult.restoredFiles,
+                                conflictingFiles: selResult.conflictingFiles,
+                                error: selResult.error,
+                            },
+                        }));
+                        break;
+                    }
+
+                    case 'checkpoint:restore-force': {
+                        const { checkpointId: forceId, files: forceFiles } = payload as {
+                            checkpointId?: string;
+                            files?: string[];
+                        };
+                        if (!forceId || !forceFiles || forceFiles.length === 0) {
+                            sendWSError(ws, 'checkpoint:restore-force requires checkpointId and files[]', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const forceResult = await checkpointStore.forceRestoreFiles(forceId, forceFiles);
+                        ws.send(JSON.stringify({
+                            type: 'checkpoint:restore-force-result',
+                            payload: {
+                                checkpointId: forceId,
+                                success: forceResult.success,
+                                restoredFiles: forceResult.restoredFiles,
+                                error: forceResult.error,
+                            },
+                        }));
+                        break;
+                    }
+
+                    case 'checkpoint:delete': {
+                        const { checkpointId: deleteId } = payload as { checkpointId?: string };
+                        if (!deleteId) {
+                            sendWSError(ws, 'checkpoint:delete requires checkpointId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const deleted = checkpointStore.deleteCheckpoint(deleteId);
+                        if (deleted) {
+                            ws.send(JSON.stringify({ type: 'checkpoint:deleted', payload: { checkpointId: deleteId } }));
+                        } else {
+                            sendWSError(ws, 'Checkpoint not found', message.type, 'CHECKPOINT_NOT_FOUND');
+                        }
+                        break;
+                    }
+
+                    case 'checkpoint:fork': {
+                        const { checkpointId: forkId, branchName } = payload as {
+                            checkpointId?: string;
+                            branchName?: string;
+                        };
+                        if (!forkId) {
+                            sendWSError(ws, 'checkpoint:fork requires checkpointId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const forkResult = await checkpointStore.forkFromCheckpoint(forkId, branchName);
+                        if (forkResult.success) {
+                            ws.send(JSON.stringify({ type: 'checkpoint:forked', payload: { checkpointId: forkId, branch: forkResult.branch } }));
+                        } else {
+                            ws.send(JSON.stringify({ type: 'checkpoint:error', payload: { error: forkResult.error, checkpointId: forkId } }));
+                        }
                         break;
                     }
                 }

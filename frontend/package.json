@@ -1,6 +1,6 @@
 {
   "name": "frontend",
-  "version": "0.2.30",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,7 +15,9 @@
     "@claudia/shared": "*",
     "@types/qrcode": "^1.5.6",
     "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-unicode11": "^0.8.0",
     "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
     "lucide-react": "^0.312.0",
     "qrcode": "^1.5.4",
@@ -32,6 +34,7 @@
     "@types/react": "^18.2.48",
     "@types/react-dom": "^18.2.18",
     "@vitejs/plugin-react": "^4.2.1",
+    "@vitest/coverage-v8": "^4.0.17",
     "jsdom": "^27.4.0",
     "typescript": "^5.3.3",
     "vite": "^8.0.3",
