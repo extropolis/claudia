@@ -21,6 +21,7 @@ import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Ac
 import { UsageDashboard } from './components/UsageDashboard';
 import { getApiBaseUrl } from './config/api-config';
 import { isSoundEnabled, setSoundEnabled } from './utils/browserCapabilities';
+import { useNotification } from './components/NotificationContainer';
 
 // Hook: returns true when viewport is ≤768px wide
 function useIsMobile(breakpoint = 768) {
@@ -72,6 +73,7 @@ function App() {
         requestRecentWorkspaces,
         clearRecentWorkspace,
         rejectDeleteRequest,
+        refreshTaskPr,
         wsRef
     } = useWebSocket();
 
@@ -436,6 +438,19 @@ function App() {
         return () => window.removeEventListener('claudia:tunnelStatus', handler);
     }, []);
 
+    // Show toast when a Claude session creates a TODO for the user
+    const { showInfo } = useNotification();
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const todo = (e as CustomEvent).detail;
+            if (todo?.title) {
+                showInfo('New TODO', todo.title);
+            }
+        };
+        window.addEventListener('claudia:todoCreated', handler);
+        return () => window.removeEventListener('claudia:todoCreated', handler);
+    }, [showInfo]);
+
     // Start tunnel (used by both the header button and the modal's Start button)
     const startTunnel = useCallback(async () => {
         setTunnelLoading(true);
@@ -640,6 +655,7 @@ function App() {
                                 onRemoveReference={removeReference}
                                 onResetWorkspace={resetWorkspace}
                                 onRejectDeleteRequest={rejectDeleteRequest}
+                                onRefreshTaskPr={refreshTaskPr}
                             />
                         </aside>
                     )
@@ -691,6 +707,7 @@ function App() {
                                 onRemoveReference={removeReference}
                                 onResetWorkspace={resetWorkspace}
                                 onRejectDeleteRequest={rejectDeleteRequest}
+                                onRefreshTaskPr={refreshTaskPr}
                                 onCollapse={toggleSidebar}
                             />
                         </aside>

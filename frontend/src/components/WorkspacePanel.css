@@ -2344,55 +2344,38 @@
 }
 
 /* ── Spawned subtask list (tasks created by a parent task via MCP) ───────────── */
-.subtask-section {
-    margin-bottom: 2px;
-}
 
-.subtask-toggle {
-    display: flex;
+/* Inline toggle button that lives inside the parent task row */
+.workspace-panel .task-item .task-subtask-toggle {
+    display: inline-flex;
     align-items: center;
-    gap: 4px;
-    width: 100%;
-    background: none;
-    border: none;
+    gap: 2px;
+    background: rgba(88, 166, 255, 0.12);
+    border: 1px solid rgba(88, 166, 255, 0.25);
+    border-radius: 10px;
+    padding: 1px 5px;
     cursor: pointer;
-    padding: 2px 8px 2px 20px;
-    color: var(--text-muted);
-    font-size: 0.7rem;
-    text-align: left;
-    user-select: none;
-    opacity: 0.7;
-    transition: opacity 0.1s ease;
-}
-
-.subtask-toggle:hover {
-    opacity: 1;
-    color: var(--text-secondary);
-}
-
-.subtask-active-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent-secondary);
+    color: var(--accent-secondary);
+    font-size: 0.65rem;
+    font-weight: 600;
     flex-shrink: 0;
-    animation: pulse-dot 2s ease-in-out infinite;
+    transition: background 0.15s, border-color 0.15s;
+    user-select: none;
 }
 
-@keyframes pulse-dot {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
+.workspace-panel .task-item .task-subtask-toggle:hover {
+    background: rgba(88, 166, 255, 0.22);
+    border-color: rgba(88, 166, 255, 0.45);
 }
 
 .subtask-list {
     padding-left: 12px;
-    border-left: 2px solid rgba(88, 166, 255, 0.2);
+    border-left: 2px solid rgba(88, 166, 255, 0.18);
     margin-left: 10px;
     margin-bottom: 2px;
 }
 
 .subtask-list .task-item {
-    font-size: 0.8rem;
     opacity: 0.9;
 }
 

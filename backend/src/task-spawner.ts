@@ -631,12 +631,15 @@ export class TaskSpawner extends EventEmitter {
         // (it's inside .claude/ which tsx doesn't watch).
         const selfRoot = resolve(join(__dirname, '..', '..'));
 
-        // When skip-permissions is enabled, allow ALL tools in project settings
+        // When skip-permissions is enabled (either via the dedicated toggle or via
+        // permissionMode=bypassPermissions), allow ALL tools in project settings
         // so resumed sessions don't get permission prompts from the narrow
         // MCP-only allowlist. This is the primary mechanism for making skip-
         // permissions work on --resume'd sessions, since CLI flags from the
         // original spawn are baked into the session state.
-        const skipPermsSync = this.configStore?.getSkipPermissions();
+        const switches = this.configStore?.getClaudeCodeSwitches();
+        const permModeIsBypass = switches?.permissionMode === 'bypassPermissions' || switches?.permissionMode === 'dangerous';
+        const skipPermsSync = this.configStore?.getSkipPermissions() || permModeIsBypass;
 
         let syncCount = 0;
         for (const workspaceId of workspaceIds) {
@@ -2520,9 +2523,12 @@ export class TaskSpawner extends EventEmitter {
 
         const claudeArgs = [...customArgs];
 
-        if (this.configStore?.getSkipPermissions()) {
+        const skipPerms = this.configStore?.getSkipPermissions();
+        const switchesForPerms = this.configStore?.getClaudeCodeSwitches();
+        const bypassViaMode = switchesForPerms?.permissionMode === 'bypassPermissions' || switchesForPerms?.permissionMode === 'dangerous';
+        if (skipPerms || bypassViaMode) {
             claudeArgs.push('--dangerously-skip-permissions');
-            logger.info(`Skip permissions enabled`);
+            logger.info(`Skip permissions enabled (skipPermissions=${skipPerms}, permissionMode=${switchesForPerms?.permissionMode})`);
         }
 
         // Inject Claudia MCP orchestration guidance into system prompt when enabled
@@ -2648,8 +2654,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // When skip-permissions is enabled, allow ALL tools so the narrow
         // allowlist doesn't reintroduce permission prompts. Otherwise, only
         // auto-approve MCP tools (non-MCP tools go through normal permission flow).
-        const skipPerms = this.configStore?.getSkipPermissions();
-        if (skipPerms) {
+        if (skipPerms || bypassViaMode) {
             claudeArgs.push('--allowedTools', '*');
         } else {
             claudeArgs.push('--allowedTools', 'mcp__*');

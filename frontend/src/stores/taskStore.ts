@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask, TaskTokenUsage } from '@claudia/shared';
+import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask, TaskTokenUsage, TodoItem } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
 import { ThemePreference } from '../types/theme';
 
@@ -87,13 +87,17 @@ interface TaskStore {
     // Scheduled tasks (cron) - keyed by scheduled task ID
     scheduledTasks: Map<string, ScheduledTask>;
 
+    // Per-task TODOs - keyed by todo ID
+    todos: Map<string, TodoItem>;
+
     // Activity tracking - tasks with unread events + activity log
     unreadTaskIds: Set<string>;
     activityLog: ActivityEvent[];
 
-    // Pending delete confirmation (from MCP agent)
-    pendingDeleteRequest: { taskId: string; requestId: string; taskName: string } | null;
-    setPendingDeleteRequest: (request: { taskId: string; requestId: string; taskName: string } | null) => void;
+    // Pending delete confirmations (from MCP agent) — batched into one modal
+    pendingDeleteRequests: { taskId: string; requestId: string; taskName: string }[];
+    addPendingDeleteRequest: (request: { taskId: string; requestId: string; taskName: string }) => void;
+    removePendingDeleteRequests: (requestIds: string[]) => void;
 
     // Settings
     autoFocusOnInput: boolean;
@@ -110,6 +114,8 @@ interface TaskStore {
     voiceProgressUpdateInterval: number; // milliseconds between progress updates
     themePreference: ThemePreference;
     tokenCostEnabled: boolean;
+    todoEnabled: boolean;
+    setTodoEnabled: (enabled: boolean) => void;
 
     // Actions
     setConnected: (connected: boolean) => void;
@@ -181,6 +187,12 @@ interface TaskStore {
     addScheduledTask: (task: ScheduledTask) => void;
     removeScheduledTask: (cronId: string) => void;
     getScheduledTasksForTask: (taskId: string) => ScheduledTask[];
+
+    // TODO actions
+    setTodos: (todos: TodoItem[]) => void;
+    addTodo: (todo: TodoItem) => void;
+    updateTodo: (todo: TodoItem) => void;
+    removeTodo: (todoId: string) => void;
 
     // Activity actions
     addActivityEvent: (event: ActivityEvent, markUnread?: boolean) => void;
@@ -308,13 +320,23 @@ export const useTaskStore = create<TaskStore>()(
             // Scheduled tasks initial state
             scheduledTasks: new Map(),
 
+            // TODOs initial state
+            todos: new Map(),
+
             // Activity tracking initial state
             unreadTaskIds: new Set(),
             activityLog: [],
 
-            // Pending delete confirmation
-            pendingDeleteRequest: null,
-            setPendingDeleteRequest: (request) => set({ pendingDeleteRequest: request }),
+            // Pending delete confirmations (batched)
+            pendingDeleteRequests: [],
+            addPendingDeleteRequest: (request) => set(s => ({
+                pendingDeleteRequests: s.pendingDeleteRequests.some(r => r.requestId === request.requestId)
+                    ? s.pendingDeleteRequests
+                    : [...s.pendingDeleteRequests, request]
+            })),
+            removePendingDeleteRequests: (requestIds) => set(s => ({
+                pendingDeleteRequests: s.pendingDeleteRequests.filter(r => !requestIds.includes(r.requestId))
+            })),
 
             // Settings initial state
             autoFocusOnInput: false,
@@ -331,6 +353,7 @@ export const useTaskStore = create<TaskStore>()(
             voiceProgressUpdateInterval: 180000, // 3 minutes (180 seconds)
             themePreference: 'system' as ThemePreference,
             tokenCostEnabled: false,
+            todoEnabled: false,
 
             // Actions
             setConnected: (connected) => {
@@ -615,6 +638,31 @@ export const useTaskStore = create<TaskStore>()(
                 return Array.from(scheduledTasks.values()).filter(s => s.taskId === taskId);
             },
 
+            // TODO actions
+            setTodos: (todos) => {
+                const map = new Map<string, TodoItem>();
+                for (const t of todos) map.set(t.id, t);
+                set({ todos: map });
+            },
+            addTodo: (todo) => {
+                const { todos } = get();
+                const next = new Map(todos);
+                next.set(todo.id, todo);
+                set({ todos: next });
+            },
+            updateTodo: (todo) => {
+                const { todos } = get();
+                const next = new Map(todos);
+                next.set(todo.id, todo);
+                set({ todos: next });
+            },
+            removeTodo: (todoId) => {
+                const { todos } = get();
+                const next = new Map(todos);
+                next.delete(todoId);
+                set({ todos: next });
+            },
+
             // Activity tracking actions
             addActivityEvent: (event, markUnread = true) => {
                 const { unreadTaskIds, activityLog } = get();
@@ -799,7 +847,8 @@ export const useTaskStore = create<TaskStore>()(
             setVoiceProgressUpdatesEnabled: (enabled) => set({ voiceProgressUpdatesEnabled: enabled }),
             setVoiceProgressUpdateInterval: (interval) => set({ voiceProgressUpdateInterval: interval }),
             setThemePreference: (pref) => set({ themePreference: pref }),
-            setTokenCostEnabled: (enabled) => set({ tokenCostEnabled: enabled })
+            setTokenCostEnabled: (enabled) => set({ tokenCostEnabled: enabled }),
+            setTodoEnabled: (enabled) => set({ todoEnabled: enabled })
         }),
         {
             name: STORAGE_KEY,

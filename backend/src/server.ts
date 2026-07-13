@@ -46,6 +46,7 @@ const __dirname = dirname(__filename);
 const VALID_WS_MESSAGE_TYPES = new Set([
     'task:create',
     'task:select',
+    'task:refreshPr',
     'task:input',
     'task:resize',
     'task:destroy',
@@ -722,8 +723,8 @@ export async function createApp(basePath?: string) {
     // Resolve (repoPath, branch) for a workspace, then look up its PR.
     // If `force` is false (default), skips the expensive `gh` call when the
     // branch hasn't changed since the last check.
-    async function refreshPrInfoFor(workspaceId: string, force = false): Promise<void> {
-        if (prInfoInFlight.has(workspaceId)) return;
+    async function refreshPrInfoFor(workspaceId: string, force = false, userTriggered = false): Promise<void> {
+        if (!userTriggered && prInfoInFlight.has(workspaceId)) return;
         const ws = workspaceStore.getWorkspace(workspaceId);
         if (!ws) return;
 
@@ -767,9 +768,12 @@ export async function createApp(basePath?: string) {
         prInfoInFlight.add(workspaceId);
         prInfoSeen.add(workspaceId);
         try {
-            const repoPath = ws.id;
+            const repoPath = ws.worktreeParentId || ws.id;
+            logger.debug('refreshPrInfoFor: fetching PR', { workspaceId: workspaceId.slice(-30), branch, repoPath: repoPath.slice(-30), userTriggered });
             const prInfo = branch ? await getPrForBranch(repoPath, branch) : null;
+            logger.debug('refreshPrInfoFor: got PR', { workspaceId: workspaceId.slice(-30), state: prInfo?.state ?? 'null', number: prInfo?.number });
             if (workspaceStore.setPrInfo(workspaceId, prInfo)) {
+                logger.info('refreshPrInfoFor: PR info changed, broadcasting', { workspaceId: workspaceId.slice(-30), state: prInfo?.state });
                 const updated = workspaceStore.getWorkspace(workspaceId);
                 if (updated) broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updated } });
             }
@@ -789,30 +793,66 @@ export async function createApp(basePath?: string) {
         if (!(await isGhAvailable())) return;
         prRefreshPassInFlight = true;
         try {
-        const tasks = taskSpawner.getAllTasks();
-        // Workspaces with at least one active task → refresh every interval.
-        const activeWorkspaceIds = new Set(
-            tasks.filter(t => t.state === 'busy' || t.state === 'starting' || t.state === 'waiting_input')
-                 .map(t => t.workspaceId)
-        );
-        // Workspaces with any task we haven't looked up yet → one-time lazy fetch.
-        const lazyWorkspaceIds = new Set(
-            tasks.map(t => t.workspaceId).filter(id => !prInfoSeen.has(id))
-        );
-        const toRefresh = new Set<string>([...activeWorkspaceIds, ...lazyWorkspaceIds]);
-        for (const id of toRefresh) {
-            await refreshPrInfoFor(id, true);  // force=true: periodic re-checks CI even if branch same
-        }
+            const tasks = taskSpawner.getAllTasks();
+
+            // Refresh workspace-level prInfo for:
+            // - Active tasks (busy/starting/waiting_input): need timely CI status
+            // - Recently idle tasks: PR may have just been merged after task completed
+            // - Lazy first-fetch for any workspace we've never looked up
+            const activeStates = new Set(['busy', 'starting', 'waiting_input', 'idle', 'interrupted']);
+            const workspaceIds = new Set(
+                tasks
+                    .filter(t => activeStates.has(t.state) || !prInfoSeen.has(t.workspaceId))
+                    .map(t => t.workspaceId)
+            );
+            for (const id of workspaceIds) {
+                await refreshPrInfoFor(id, true);  // force=true: re-check CI even if branch unchanged
+            }
+
+            // Also refresh task-level sessionWorktreePrInfo for tasks that have a
+            // session worktree branch. This is set once on discovery but never updated,
+            // so merged PRs and CI results never appear unless we re-fetch here.
+            const tasksWithWorktree = tasks.filter(t => t.sessionWorktreeBranch);
+            for (const task of tasksWithWorktree) {
+                try {
+                    const ws = workspaceStore.getWorkspace(task.workspaceId);
+                    const repoPath = ws?.worktreeParentId || task.workspaceId;
+                    const prInfo = await getPrForBranch(repoPath, task.sessionWorktreeBranch!);
+                    taskSpawner.setSessionWorktree(task.id, task.sessionWorktreeBranch, prInfo);
+                } catch (err) {
+                    logger.debug('Failed to refresh sessionWorktreePrInfo', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+                }
+            }
         } finally {
             prRefreshPassInFlight = false;
         }
     }
 
-    // Poll on an interval (90s) — only touches active/unseen workspaces, not all.
-    const PR_INFO_INTERVAL_MS = 90_000;
+    // Poll on an interval (30s) — covers all tasks with active states or a session worktree branch.
+    const PR_INFO_INTERVAL_MS = 30_000;
     const prInfoInterval = setInterval(() => { void refreshActiveWorkspacePrInfo(); }, PR_INFO_INTERVAL_MS);
     // Kick off an initial pass shortly after startup.
     setTimeout(() => { void refreshActiveWorkspacePrInfo(); }, 5_000);
+
+    // Immediately refresh PR info for a single task (workspace + session worktree).
+    // Called on task:select and task:refreshPr (hover) — fire-and-forget, no await needed.
+    async function refreshTaskPrInfo(taskId: string): Promise<void> {
+        const task = taskSpawner.getAllTasks().find(t => t.id === taskId);
+        if (!task) return;
+        // Workspace-level prInfo — bypass in-flight guard since this is user-triggered
+        void refreshPrInfoFor(task.workspaceId, true, true);
+        // Task session worktree prInfo (branch created by Claude inside the session)
+        if (task.sessionWorktreeBranch) {
+            try {
+                const ws = workspaceStore.getWorkspace(task.workspaceId);
+                const repoPath = ws?.worktreeParentId || task.workspaceId;
+                const prInfo = await getPrForBranch(repoPath, task.sessionWorktreeBranch);
+                taskSpawner.setSessionWorktree(task.id, task.sessionWorktreeBranch, prInfo);
+            } catch (err) {
+                logger.debug('refreshTaskPrInfo: session worktree lookup failed', { taskId, error: err instanceof Error ? err.message : String(err) });
+            }
+        }
+    }
 
     // ===== Worktree discovery (session attribution) =====
     // A task's Claude session may create a git worktree (raw `git worktree add`)
@@ -1443,7 +1483,16 @@ export async function createApp(basePath?: string) {
                                 logger.error('Failed to activate task', { taskId, error: errorMessage });
                                 sendWSError(ws, `Failed to activate task: ${errorMessage}`, message.type, 'TASK_SELECT_FAILED');
                             }
+                            // Immediately refresh PR info for the selected task
+                            void refreshTaskPrInfo(taskId);
                         }
+                        break;
+                    }
+
+                    case 'task:refreshPr': {
+                        // Lightweight trigger from frontend hover — refresh PR info immediately
+                        const { taskId } = payload as { taskId?: string };
+                        if (taskId) void refreshTaskPrInfo(taskId);
                         break;
                     }
 

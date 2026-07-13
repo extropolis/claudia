@@ -9,6 +9,7 @@ import { TaskTokenStats } from './TaskTokenStats';
 import { useEffectiveTheme } from '../hooks/useTheme';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
 import { getApiBaseUrl } from '../config/api-config';
+import { lastKnownTerminalSize } from '../config/terminal-size';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
 
@@ -321,6 +322,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             if (Math.abs(cols - lastSentCols) <= 2 && rows === lastSentRows) return;
             lastSentCols = cols;
             lastSentRows = rows;
+            lastKnownTerminalSize.cols = cols;
+            lastKnownTerminalSize.rows = rows;
 
             // Start buffering output during the resize transition
             if (resizeBufferTimer) window.clearTimeout(resizeBufferTimer);
@@ -505,6 +508,9 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 const { cols, rows } = term;
                 lastSentCols = cols;
                 lastSentRows = rows;
+                // Store so future task creations start with the right PTY size
+                lastKnownTerminalSize.cols = cols;
+                lastKnownTerminalSize.rows = rows;
                 if (wsRef.current?.readyState === WebSocket.OPEN) {
                     wsRef.current.send(JSON.stringify({
                         type: 'task:resize',
