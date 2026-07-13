@@ -1274,12 +1274,12 @@ export class TaskSpawner extends EventEmitter {
                 return;
             }
 
-            console.log(`[TaskSpawner] Polling: task ${task.id} → ${newState} (${reason})`);
+            logger.debug(`Polling: task ${task.id} → ${newState} (${reason})`);
 
             // Reset processStartedAt when transitioning into busy/starting from a non-active state
             if ((newState === 'busy' || newState === 'starting') && oldState !== 'busy' && oldState !== 'starting') {
                 task.processStartedAt = new Date();
-                console.log(`[TaskSpawner] Reset processStartedAt for task ${task.id} to ${task.processStartedAt.toISOString()} (transition: ${oldState} → ${newState})`);
+                logger.debug(`Reset processStartedAt for task ${task.id} (transition: ${oldState} → ${newState})`);
             }
 
             task.state = newState;
@@ -1334,7 +1334,7 @@ export class TaskSpawner extends EventEmitter {
         });
 
         if (tasksToReconnect.length === 0) {
-            console.log(`[TaskSpawner] No eligible tasks to auto-reconnect. ${disconnectedIds.length} tasks in lazy load.`);
+            logger.debug(`No eligible tasks to auto-reconnect. ${disconnectedIds.length} tasks in lazy load.`);
             this.autoReconnectPromise = null;
             this.scheduleSave(); // Persist cleared shouldContinue flags
             return;
@@ -1361,7 +1361,7 @@ export class TaskSpawner extends EventEmitter {
 
         this.isReconnecting = true;
         this.emit('reconnectStart', tasksToReconnect.length);
-        console.log(`[TaskSpawner] Auto-reconnecting ${tasksToReconnect.length} tasks in batches of ${BATCH_SIZE}...`);
+        logger.info(`Auto-reconnecting ${tasksToReconnect.length} tasks in batches of ${BATCH_SIZE}...`);
 
         const failedTasks: string[] = [];
 
@@ -1372,17 +1372,17 @@ export class TaskSpawner extends EventEmitter {
 
             const batchNum = Math.floor(i / BATCH_SIZE) + 1;
             const totalBatches = Math.ceil(tasksToReconnect.length / BATCH_SIZE);
-            console.log(`[TaskSpawner] Auto-reconnecting task ${i + 1}/${tasksToReconnect.length} (batch ${batchNum}/${totalBatches}): ${taskId}`);
+            logger.debug(`Auto-reconnecting task ${i + 1}/${tasksToReconnect.length} (batch ${batchNum}/${totalBatches}): ${taskId}`);
 
             let success = false;
             try {
                 const task = this.reconnectTask(taskId);
                 if (task) {
-                    console.log(`[TaskSpawner] Successfully reconnected task ${taskId}`);
+                    logger.debug(`Successfully reconnected task ${taskId}`);
                     success = true;
                 }
             } catch (error) {
-                console.error(`[TaskSpawner] Error reconnecting task ${taskId}:`, error);
+                logger.error(`Error reconnecting task ${taskId}`, { error: error instanceof Error ? error.message : String(error) });
             }
 
             if (!success) {
@@ -1411,9 +1411,9 @@ export class TaskSpawner extends EventEmitter {
         });
 
         if (failedTasks.length > 0) {
-            console.log(`[TaskSpawner] Auto-reconnect complete. ${failedTasks.length}/${tasksToReconnect.length} task(s) failed to reconnect.`);
+            logger.warn(`Auto-reconnect complete. ${failedTasks.length}/${tasksToReconnect.length} task(s) failed to reconnect.`);
         } else {
-            console.log(`[TaskSpawner] Auto-reconnect complete. All ${tasksToReconnect.length} tasks reconnected successfully.`);
+            logger.info(`Auto-reconnect complete. All ${tasksToReconnect.length} tasks reconnected successfully.`);
         }
     }
 

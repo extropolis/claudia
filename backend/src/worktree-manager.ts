@@ -136,7 +136,7 @@ export class WorktreeManager {
                 ['worktree', 'list', '--porcelain'],
                 { cwd: repoPath }
             );
-            logger.info('listWorktrees', { repoPath, outputLen: stdout.length });
+            logger.debug('listWorktrees', { repoPath, outputLen: stdout.length });
             return parseWorktreeListOutput(stdout);
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
