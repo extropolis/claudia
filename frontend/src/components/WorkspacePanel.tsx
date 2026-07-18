@@ -893,6 +893,7 @@ function WorkspaceSection({
         const startY = e.clientY;
         const startHeight = taskListRef.current?.offsetHeight || 160;
         let lastHeight = startHeight;
+        let moved = false;
 
         const handleMouseMove = (moveEvent: MouseEvent) => {
             const delta = moveEvent.clientY - startY;
@@ -900,14 +901,18 @@ function WorkspaceSection({
             // show many tasks (was a fixed 400px cap)
             const maxHeight = Math.max(400, window.innerHeight - 240);
             const newHeight = Math.max(64, Math.min(maxHeight, startHeight + delta));
+            moved = true;
             lastHeight = newHeight;
             setTaskListHeight(newHeight);
         };
 
         const handleMouseUp = () => {
             setIsResizing(false);
-            // Persist the final height so it survives reloads/remounts
-            useTaskStore.getState().setWorkspaceTaskListHeight(workspace.id, lastHeight);
+            // Persist only if the user actually dragged — a zero-movement click
+            // would otherwise pin the CSS-default height as a chosen value
+            if (moved) {
+                useTaskStore.getState().setWorkspaceTaskListHeight(workspace.id, lastHeight);
+            }
             document.removeEventListener('mousemove', handleMouseMove);
             document.removeEventListener('mouseup', handleMouseUp);
         };

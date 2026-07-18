@@ -287,3 +287,4 @@ export interface UsageDashboardData {
     taskCount: number;
     lastUpdated: string;
 }
+export * from './terminal';

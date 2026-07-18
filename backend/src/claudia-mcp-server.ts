@@ -83,6 +83,28 @@ const log = {
  * Also returns the workspace map so callers can annotate tasks with the
  * worktree they run in.
  */
+/** Cycle-guarded walk up worktreeParentId links to the root workspace. */
+function resolveWorktreeRoot(wsById: Map<string, any>, startId: string): string {
+    let root = startId;
+    const seen = new Set<string>();
+    while (wsById.get(root)?.worktreeParentId && !seen.has(root) && seen.size < 50) {
+        seen.add(root);
+        root = wsById.get(root)!.worktreeParentId;
+    }
+    return root;
+}
+
+/**
+ * READ scope for a session: the ROOT workspace plus every workspace whose own
+ * root-walk lands on the same root (transitive — covers legacy grandchild
+ * worktrees, not just direct children). Used by claudia_list_tasks so fleet
+ * coordinators inside worktrees see their siblings.
+ *
+ * NOTE: claudia_stop_all_tasks deliberately does NOT use this — stopping is
+ * destructive, and widening its blast radius to the whole workspace meant a
+ * worktree session's cleanup could kill the coordinator and every sibling.
+ * Stop keeps the original self+children scope via getStopScope().
+ */
 async function getWorkspaceScope(): Promise<{ ids: Set<string>; wsById: Map<string, any> }> {
     const ids = new Set<string>();
     const wsById = new Map<string, any>();
@@ -95,17 +117,10 @@ async function getWorkspaceScope(): Promise<{ ids: Set<string>; wsById: Map<stri
             const workspaces = data.workspaces || data;
             for (const ws of workspaces) wsById.set(ws.id, ws);
 
-            // Walk up to the root workspace (cycle-guarded)
-            let root = WORKSPACE_ID;
-            const seen = new Set<string>();
-            while (wsById.get(root)?.worktreeParentId && !seen.has(root)) {
-                seen.add(root);
-                root = wsById.get(root)!.worktreeParentId;
-            }
-
+            const root = resolveWorktreeRoot(wsById, WORKSPACE_ID);
             ids.add(root);
             for (const ws of workspaces) {
-                if (ws.worktreeParentId === root) ids.add(ws.id);
+                if (resolveWorktreeRoot(wsById, ws.id) === root && ws.worktreeParentId) ids.add(ws.id);
             }
         }
     } catch {
@@ -117,6 +132,28 @@ async function getWorkspaceScope(): Promise<{ ids: Set<string>; wsById: Map<stri
     ids.add(WORKSPACE_ID);
 
     return { ids, wsById };
+}
+
+/**
+ * STOP scope: the session's own workspace + its direct worktree children only
+ * (the pre-widening semantics). A worktree session stopping "all" tasks must
+ * not reach the parent workspace or sibling worktrees.
+ */
+async function getStopScope(): Promise<Set<string>> {
+    const ids = new Set<string>();
+    if (!WORKSPACE_ID) return ids;
+    ids.add(WORKSPACE_ID);
+    try {
+        const response = await backendFetch('/api/workspaces');
+        if (response.ok) {
+            const data = await response.json();
+            const workspaces = data.workspaces || data;
+            for (const ws of workspaces) {
+                if (ws.worktreeParentId === WORKSPACE_ID) ids.add(ws.id);
+            }
+        }
+    } catch { /* self-only fallback */ }
+    return ids;
 }
 
 /**
@@ -319,7 +356,11 @@ server.tool(
     {},
     async () => {
         try {
-            const response = await backendFetch('/api/tasks');
+            // The two fetches are independent — run them in parallel
+            const [response, scope] = await Promise.all([
+                backendFetch('/api/tasks'),
+                WORKSPACE_ID ? getWorkspaceScope() : Promise.resolve({ ids: new Set<string>(), wsById: new Map<string, any>() }),
+            ]);
             if (!response.ok) {
                 return { content: [{ type: 'text', text: `Error: Failed to list tasks (HTTP ${response.status})` }] };
             }
@@ -327,10 +368,8 @@ server.tool(
 
             // Filter to the root workspace and all of its worktrees (a session
             // inside a worktree sees the whole workspace's fleet)
-            let wsById = new Map<string, any>();
+            const wsById = scope.wsById;
             if (WORKSPACE_ID) {
-                const scope = await getWorkspaceScope();
-                wsById = scope.wsById;
                 tasks = tasks.filter((t: any) => scope.ids.has(t.workspaceId));
             }
 
@@ -839,8 +878,9 @@ server.tool(
         try {
             log.info(`Stopping all tasks in workspace: ${WORKSPACE_ID}${SELF_TASK_ID ? ` (excluding self: ${SELF_TASK_ID})` : ''}`);
 
-            // Stop tasks in the root workspace and all child worktrees
-            const { ids: scopedIds } = await getWorkspaceScope();
+            // Stop tasks in this session's OWN workspace + direct children only
+            // (never the parent workspace or sibling worktrees — see getStopScope)
+            const scopedIds = await getStopScope();
             let totalStopped = 0;
             const allStoppedIds: string[] = [];
 

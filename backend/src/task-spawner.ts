@@ -1,6 +1,6 @@
 import { spawn, IPty } from 'node-pty';
 import { EventEmitter } from 'events';
-import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, TaskTokenUsage } from '@claudia/shared';
+import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, TaskTokenUsage, stripTerminalQueries, incompleteEscapeSuffixStart } from '@claudia/shared';
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
@@ -144,8 +144,12 @@ export function evaluateDestructiveInputThrottle(
     maxPerWindow: number = DESTRUCTIVE_INPUT_MAX_PER_WINDOW,
 ): { blocked: boolean; timestamps: number[] } {
     const recent = recentTimestamps.filter(t => now - t < windowMs);
-    recent.push(now);
-    return { blocked: recent.length > maxPerWindow, timestamps: recent };
+    const blocked = recent.length >= maxPerWindow;
+    // Only DELIVERED commands count toward the window. Recording blocked
+    // attempts re-armed the window on every retry, so a user re-typing a
+    // swallowed /clear stayed blocked indefinitely until they paused >30s.
+    if (!blocked) recent.push(now);
+    return { blocked, timestamps: recent };
 }
 
 export interface ReconnectDeliveryPlan {
@@ -908,23 +912,15 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
-     * Strip terminal QUERY escape sequences before history is persisted.
-     * A headless Claude (resumed with no client attached) spams cursor-position
-     * queries (\x1b[?6n) at a high rate — observed 5000+ per file. Persisting them
-     * (a) bloats files toward the rotation cap, pushing out real scrollback, and
-     * (b) poisons replay: a client's xterm ANSWERS every stale query it replays,
-     * and those responses reach the live PTY as typed input — injecting garbage
-     * like ";1;1R?1;2c" into the session. Queries are only meaningful to a live
-     * terminal at the moment they're emitted; they are pure noise in history.
+     * Per-task carry-over of an incomplete trailing escape sequence between
+     * incremental history appends. Without this, a query split across two save
+     * batches (batch 1 ends "\x1b[", batch 2 starts "?6n") matches neither
+     * batch's strip regex yet reassembles INTACT in the file — defeating the
+     * query stripping and re-enabling replay injection. The partial is held
+     * back and prepended to the next append. (Canonical stripping lives in
+     * @claudia/shared stripTerminalQueries so backend and frontend can't drift.)
      */
-    private stripTerminalQueries(data: string): string {
-        return data
-            .replace(/\x1b\[\??[56]n/g, '')      // DSR/CPR/DECXCPR cursor & status queries
-            .replace(/\x1b\[[>=]?0?c/g, '')      // DA1/DA2/DA3 device-attribute queries
-            .replace(/\x1b\[>0?q/g, '')          // XTVERSION query
-            .replace(/\x1b\[\?\d+\$p/g, '')      // DECRQM mode queries
-            .replace(/\x1b\](?:1[0-2]|4;\d+);\?(?:\x07|\x1b\\)/g, ''); // OSC color queries
-    }
+    private historyAppendCarry: Map<string, string> = new Map();
 
     /**
      * Atomically write history to disk via a per-process temp file + rename.
@@ -934,7 +930,7 @@ export class TaskSpawner extends EventEmitter {
      */
     private atomicWriteHistorySync(historyPath: string, data: string): void {
         const tmpPath = `${historyPath}.${process.pid}.tmp`;
-        writeFileSync(tmpPath, this.stripTerminalQueries(data));
+        writeFileSync(tmpPath, stripTerminalQueries(data));
         try {
             renameSync(tmpPath, historyPath);
         } catch (e) {
@@ -1390,7 +1386,13 @@ export class TaskSpawner extends EventEmitter {
             // that arrived while a reconnect was still in flight). Deliver the next one
             // in order — but only once the initial prompt/continuation itself has landed
             // (initialPromptSent && no pendingPrompt), so we never jump the queue.
-            if (newState === 'idle'
+            // Flush on waiting_input too: a continuation that ends at a
+            // permission/question prompt previously trapped the queue forever
+            // (flush required exactly 'idle'), and — since followupOutstanding
+            // queues every NEW typed message behind the stuck one — wedged all
+            // input-bar traffic for the task. The queued message IS the user's
+            // intended input; deliver it to the waiting prompt.
+            if ((newState === 'idle' || newState === 'waiting_input')
                 && task.initialPromptSent
                 && task.pendingPrompt == null
                 && task.pendingFollowupInputs
@@ -1751,7 +1753,17 @@ export class TaskSpawner extends EventEmitter {
                         // semantics don't apply to incremental appends.
                         const newBuffers = task.outputHistory.slice(task.savedBufferCount);
                         if (newBuffers.length > 0) {
-                            const newData = this.stripTerminalQueries(Buffer.concat(newBuffers).toString('utf8'));
+                            // Prepend any incomplete escape prefix held back from the
+                            // previous append so split queries can't reassemble on disk.
+                            let raw = (this.historyAppendCarry.get(task.id) || '') + Buffer.concat(newBuffers).toString('utf8');
+                            const cut = incompleteEscapeSuffixStart(raw);
+                            if (cut >= 0 && raw.length - cut <= 16) {
+                                this.historyAppendCarry.set(task.id, raw.slice(cut));
+                                raw = raw.slice(0, cut);
+                            } else {
+                                this.historyAppendCarry.delete(task.id);
+                            }
+                            const newData = stripTerminalQueries(raw);
                             appendFileSync(historyPath, newData);
                             task.savedBufferCount = task.outputHistory.length;
                             // Cap on-disk growth. Without this the file grew unbounded
@@ -1887,18 +1899,40 @@ export class TaskSpawner extends EventEmitter {
     private findSessionForTask(taskId: string, claudeDir: string): string | null {
         try {
             if (!existsSync(claudeDir)) return null;
-            let best: { sid: string; mtime: number } | null = null;
-            for (const f of readdirSync(claudeDir)) {
-                if (!f.endsWith('.jsonl')) continue;
-                const fp = join(claudeDir, f);
+            // Newest-first so the common case reads 1-2 files, not the whole
+            // dir (measured dirs reach 95 files / 59MB — readFileSync of all
+            // of them on the reconnect path stalls the event loop).
+            const files = readdirSync(claudeDir)
+                .filter(f => f.endsWith('.jsonl'))
+                .map(f => {
+                    const fp = join(claudeDir, f);
+                    let mtime = 0;
+                    try { mtime = statSync(fp).mtimeMs; } catch { /* ignore */ }
+                    return { f, fp, mtime };
+                })
+                .sort((a, b) => b.mtime - a.mtime);
+
+            // A bare substring match is NOT ownership: coordinator/audit
+            // sessions embed other tasks' IDs via claudia_list_tasks tool
+            // results. Adopting the newest match once relinked a task into its
+            // coordinator's conversation. Only adopt when the match is
+            // UNAMBIGUOUS (exactly one session mentions the ID); otherwise
+            // decline and let the caller start fresh — wrong-session adoption
+            // is strictly worse than a fresh session, because it gets
+            // persisted and resumed forever.
+            const matches: string[] = [];
+            for (const { f, fp } of files) {
                 let content: string;
                 try { content = readFileSync(fp, 'utf-8'); } catch { continue; }
                 if (!content.includes(taskId)) continue;
-                let mtime = 0;
-                try { mtime = statSync(fp).mtimeMs; } catch { /* ignore */ }
-                if (!best || mtime > best.mtime) best = { sid: f.replace(/\.jsonl$/, ''), mtime };
+                matches.push(f.replace(/\.jsonl$/, ''));
+                if (matches.length > 1) break; // ambiguous — no need to scan further
             }
-            return best ? best.sid : null;
+            if (matches.length === 1) return matches[0];
+            if (matches.length > 1) {
+                console.warn(`[TaskSpawner] findSessionForTask: ${taskId} matched multiple sessions (${matches.join(', ')}…) — declining ambiguous recovery`);
+            }
+            return null;
         } catch (e) {
             console.error('[TaskSpawner] findSessionForTask failed:', (e as Error).message);
             return null;
@@ -1928,6 +1962,15 @@ export class TaskSpawner extends EventEmitter {
             if (fixed > 0) {
                 this.saveTasks();
                 console.log(`[TaskSpawner] session-recovery applied ${fixed} correction(s)`);
+            }
+            // Retire the map after one application. Leaving it in place made it a
+            // permanent override: every restart would re-pin the mapped sessionIds,
+            // clobbering any legitimately newer session a task captured since.
+            try {
+                renameSync(mapPath, `${mapPath}.applied`);
+                console.log('[TaskSpawner] session-recovery map retired to .applied');
+            } catch (e) {
+                console.warn('[TaskSpawner] failed to retire session-recovery map:', (e as Error).message);
             }
         } catch (e) {
             console.error('[TaskSpawner] session-recovery failed:', (e as Error).message);
