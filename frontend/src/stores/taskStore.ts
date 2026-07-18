@@ -137,6 +137,9 @@ interface TaskStore {
     reorderWorkspaces: (fromIndex: number, toIndex: number) => void;
     toggleWorkspaceExpanded: (workspaceId: string) => void;
     setShowProjectPicker: (show: boolean) => void;
+    /** Per-workspace task-list height (px) from the user's manual resize; persisted */
+    workspaceTaskListHeights: Record<string, number>;
+    setWorkspaceTaskListHeight: (workspaceId: string, height: number) => void;
 
     // Task reordering
     reorderTasks: (workspaceId: string, fromIndex: number, toIndex: number) => void;
@@ -218,6 +221,7 @@ interface PersistedState {
     showArchivedTasks: boolean;
     expandedWorkspaces: string[];  // Stored as array, converted to Set
     expandedWorkspacesInitialized: boolean;  // Track if user has interacted with workspaces
+    workspaceTaskListHeights?: Record<string, number>;  // Per-workspace manual task-list heights (px)
     workspaceColumns: number; // 0 = auto, 1-4 = fixed
     workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
     taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
@@ -266,6 +270,7 @@ export const useTaskStore = create<TaskStore>()(
             workspaces: [],
             expandedWorkspaces: new Set<string>(),
             expandedWorkspacesInitialized: false,
+            workspaceTaskListHeights: {},
             showProjectPicker: false,
             workspaceColumns: 0, // 0 = auto
             workspaceSortBy: 'date-created', // Default to date created
@@ -514,10 +519,16 @@ export const useTaskStore = create<TaskStore>()(
                             newExpanded.add(w.id);
                         }
                     });
-                } else {
-                    // First load or page refresh - expand all workspaces by default
-                    console.log('[TaskStore] Initial load - expanding all workspaces');
+                } else if (!expandedWorkspacesInitialized) {
+                    // True first run (no persisted UI state): expand all by default
+                    console.log('[TaskStore] First-ever load - expanding all workspaces');
                     uniqueWorkspaces.forEach(w => newExpanded.add(w.id));
+                } else {
+                    // Page reload / app reopen with persisted state: respect the
+                    // user's saved expand/collapse choices. Previously this branch
+                    // expanded ALL workspaces, clobbering persisted collapsed state
+                    // every time the tab reloaded (e.g. after PC sleep).
+                    console.log('[TaskStore] Fresh load with persisted state - keeping saved expand/collapse');
                 }
                 // Remove any workspaces that no longer exist
                 const workspaceIds = new Set(uniqueWorkspaces.map(w => w.id));
@@ -571,6 +582,11 @@ export const useTaskStore = create<TaskStore>()(
                 const [removed] = newWorkspaces.splice(fromIndex, 1);
                 newWorkspaces.splice(toIndex, 0, removed);
                 set({ workspaces: newWorkspaces });
+            },
+
+            setWorkspaceTaskListHeight: (workspaceId, height) => {
+                const { workspaceTaskListHeights } = get();
+                set({ workspaceTaskListHeights: { ...workspaceTaskListHeights, [workspaceId]: height } });
             },
 
             toggleWorkspaceExpanded: (workspaceId) => {
@@ -810,6 +826,7 @@ export const useTaskStore = create<TaskStore>()(
                 showArchivedTasks: state.showArchivedTasks,
                 expandedWorkspaces: Array.from(state.expandedWorkspaces),
                 expandedWorkspacesInitialized: state.expandedWorkspacesInitialized,
+                workspaceTaskListHeights: state.workspaceTaskListHeights,
                 workspaceColumns: state.workspaceColumns,
                 workspaceSortBy: state.workspaceSortBy,
                 taskSortBy: state.taskSortBy,
@@ -864,6 +881,7 @@ export const useTaskStore = create<TaskStore>()(
                     // Use persisted initialized flag, or mark as initialized if we have any persisted expanded state
                     expandedWorkspacesInitialized: persisted.expandedWorkspacesInitialized ??
                         (persisted.expandedWorkspaces !== undefined),
+                    workspaceTaskListHeights: persisted.workspaceTaskListHeights ?? currentState.workspaceTaskListHeights,
                     workspaceColumns: persisted.workspaceColumns ?? currentState.workspaceColumns,
                     workspaceSortBy: persisted.workspaceSortBy ?? currentState.workspaceSortBy,
                     taskSortBy: persisted.taskSortBy ?? currentState.taskSortBy,

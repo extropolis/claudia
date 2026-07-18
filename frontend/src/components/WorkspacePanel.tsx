@@ -6,6 +6,7 @@ import {
     Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
+import { isSoundEnabled } from '../utils/browserCapabilities';
 import { PrBadge } from './PrBadge';
 import { SystemPromptModal } from './SystemPromptModal';
 import { ConfirmModal } from './ConfirmModal';
@@ -15,6 +16,8 @@ import './WorkspacePanel.css';
 
 // Simple notification sound using Web Audio API
 function playNotificationSound() {
+    // Respect the global mute toggle (previously this beep ignored it)
+    if (!isSoundEnabled()) return;
     try {
         const audioContext = new (window.AudioContext || (window as typeof window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
         const oscillator = audioContext.createOscillator();
@@ -832,8 +835,11 @@ function WorkspaceSection({
     const fileInputRef = useRef<HTMLInputElement>(null);
     const imagesRef = useRef<UploadedImage[]>(images);
 
-    // Task list resize state
-    const [taskListHeight, setTaskListHeight] = useState<number | null>(null);
+    // Task list resize state — initialized from the persisted per-workspace height
+    // so a manual resize survives reloads and remounts (e.g. after PC sleep)
+    const [taskListHeight, setTaskListHeight] = useState<number | null>(
+        () => useTaskStore.getState().workspaceTaskListHeights[workspace.id] ?? null
+    );
     const [isResizing, setIsResizing] = useState(false);
     const taskListRef = useRef<HTMLDivElement>(null);
 
@@ -867,22 +873,26 @@ function WorkspaceSection({
 
         const startY = e.clientY;
         const startHeight = taskListRef.current?.offsetHeight || 160;
+        let lastHeight = startHeight;
 
         const handleMouseMove = (moveEvent: MouseEvent) => {
             const delta = moveEvent.clientY - startY;
             const newHeight = Math.max(64, Math.min(400, startHeight + delta)); // Min 64px (~2 tasks), Max 400px
+            lastHeight = newHeight;
             setTaskListHeight(newHeight);
         };
 
         const handleMouseUp = () => {
             setIsResizing(false);
+            // Persist the final height so it survives reloads/remounts
+            useTaskStore.getState().setWorkspaceTaskListHeight(workspace.id, lastHeight);
             document.removeEventListener('mousemove', handleMouseMove);
             document.removeEventListener('mouseup', handleMouseUp);
         };
 
         document.addEventListener('mousemove', handleMouseMove);
         document.addEventListener('mouseup', handleMouseUp);
-    }, []);
+    }, [workspace.id]);
 
     const {
         globalVoiceEnabled,
