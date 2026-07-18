@@ -3,7 +3,7 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace, WorkspacePrInfo } from '@claudia/shared';
 import {
     Loader2, Circle, ChevronRight, ChevronDown, ChevronLeft,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp, Sparkles
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { isSoundEnabled } from '../utils/browserCapabilities';
@@ -13,6 +13,25 @@ import { ConfirmModal } from './ConfirmModal';
 import { ScheduledTasksModal } from './ScheduledTasksModal';
 import { WorkspaceManager } from './WorkspaceManager';
 import './WorkspacePanel.css';
+
+// Prompt template for the "Analyze Sessions → Issues" quick action.
+// Spawns a task that mines this machine's Claude Code session history for
+// recurring workflows and synthesizes them into scoped GitHub issues
+// (agents/features). Self-contained so it works in any workspace; if the
+// repo has a session-audit skill installed it will be picked up instead.
+const SESSION_AUDIT_PROMPT = `Perform a session-intelligence audit of this machine's Claude Code usage and synthesize scoped feature/agent issues.
+
+If a "session-audit" skill is available, invoke it and follow it. Otherwise:
+
+1. INVENTORY: List session transcripts under ~/.claude/projects/ (each subdir is an encoded workspace path; each *.jsonl is one session). Note per-workspace counts and sizes. If a Claudia backend is present (backend/tasks.json), include its task metadata (prompts, displayNames, workspaces, timestamps, states).
+
+2. MINE PATTERNS (sample smartly, do not read whole files): for each session extract the opening user prompt and first ~15 user messages (type:"user" records; skip tool_results and entries starting with '[' or '<'). Cluster into task archetypes with counts (review, fix, orchestrate, analyze, brainstorm, deploy...). Identify: repeated multi-step rituals, parallel fan-out patterns (several similar tasks created within minutes), pain points (interrupts, repeated "continue"/"status?" nudges, session-resume failures), and scheduled/recurring jobs.
+
+3. CROSS-REFERENCE: Run \`gh issue list --limit 200 --state open\` on this repo. Match each discovered pattern against existing issues. For matches: comment with the new evidence (counts, representative quotes) and, if the pattern recurs on this machine too, recommend a priority bump.
+
+4. SYNTHESIZE: For each unmatched pattern worth automating, draft a scoped issue: problem, evidence from sessions (counts + anonymized quotes), proposed agent/feature, acceptance criteria. Present ALL drafts and proposed issue updates to me for approval BEFORE creating or editing anything on GitHub.
+
+Rules: never paste raw session content containing secrets/personal data into issues; anonymize quotes; read-only until I approve the final issue plan.`;
 
 // Simple notification sound using Web Audio API
 function playNotificationSound() {
@@ -1550,6 +1569,18 @@ function WorkspaceSection({
                             >
                                 <Search size={14} />
                                 <span>Code Review</span>
+                            </button>
+                            <button
+                                className="workspace-dropdown-item"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    onCreateTask(SESSION_AUDIT_PROMPT);
+                                    onToggleMenu();
+                                }}
+                                title="Analyze this machine's Claude Code sessions and synthesize scoped feature/agent issues"
+                            >
+                                <Sparkles size={14} />
+                                <span>Analyze Sessions → Issues</span>
                             </button>
                             {tasks.length > 1 && (
                                 <>
