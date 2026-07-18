@@ -877,7 +877,10 @@ function WorkspaceSection({
 
         const handleMouseMove = (moveEvent: MouseEvent) => {
             const delta = moveEvent.clientY - startY;
-            const newHeight = Math.max(64, Math.min(400, startHeight + delta)); // Min 64px (~2 tasks), Max 400px
+            // Min 64px (~2 tasks); max is viewport-relative so large screens can
+            // show many tasks (was a fixed 400px cap)
+            const maxHeight = Math.max(400, window.innerHeight - 240);
+            const newHeight = Math.max(64, Math.min(maxHeight, startHeight + delta));
             lastHeight = newHeight;
             setTaskListHeight(newHeight);
         };
