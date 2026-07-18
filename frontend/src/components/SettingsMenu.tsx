@@ -2266,20 +2266,21 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     <span className="permission-label">Default Model</span>
                                     <span className="permission-description">
                                         Model used for new tasks. Passed as --model to Claude Code CLI. Use the text box for custom model IDs.
+                                        Note: "Let Claude decide" uses the CLI's built-in default (currently Fable, a small/fast model) — pick an Opus option below if you want Opus on every task.
                                     </span>
                                 </div>
                                 <select
                                     className="cli-switch-select"
-                                    value={['', 'claude-opus-latest', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'opus', 'sonnet', 'haiku'].includes(cliSwitches.defaultModel || '') ? (cliSwitches.defaultModel || '') : '__custom__'}
+                                    value={['', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'opus', 'sonnet', 'haiku'].includes(cliSwitches.defaultModel || '') ? (cliSwitches.defaultModel || '') : '__custom__'}
                                     onChange={(e) => { if (e.target.value !== '__custom__') handleCliSwitchToggle({ defaultModel: e.target.value }); }}
                                 >
-                                    <option value="">Let Claude decide (default)</option>
-                                    <option value="claude-opus-latest">Opus 4.7</option>
-                                    <option value="claude-sonnet-4-6">Sonnet 4.6</option>
-                                    <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+                                    <option value="">Let Claude decide (currently Fable)</option>
                                     <option value="opus">Opus (latest alias)</option>
+                                    <option value="claude-opus-4-8">Opus 4.8</option>
                                     <option value="sonnet">Sonnet (latest alias)</option>
+                                    <option value="claude-sonnet-4-6">Sonnet 4.6</option>
                                     <option value="haiku">Haiku (latest alias)</option>
+                                    <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
                                     <option value="__custom__" disabled>Custom (use text box below)</option>
                                 </select>
                             </div>
