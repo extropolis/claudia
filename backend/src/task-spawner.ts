@@ -686,10 +686,17 @@ export class TaskSpawner extends EventEmitter {
      * every tool call — including resumed sessions.
      */
     private writeSettingsLocalJson(workspaceId: string, skipPermissions: boolean | undefined, serverNames: string[]): void {
+        // "Allow everything" must be expressed via defaultMode: 'bypassPermissions',
+        // NOT allow: ['*'] — current Claude Code rejects a wildcard tool name in
+        // allow rules ("Wildcard tool name '*' is not supported"), which spams a
+        // warning on every session and leaves the file partially skipped. The
+        // allow list only ever names concrete, valid rules (mcp__* is valid because
+        // the glob follows a literal mcp__ prefix).
         const settingsContent = {
             permissions: {
-                allow: skipPermissions ? ['*'] : ['mcp__*'],
-                deny: []
+                allow: ['mcp__*'],
+                deny: [],
+                ...(skipPermissions ? { defaultMode: 'bypassPermissions' } : {})
             },
             enableAllProjectMcpServers: true,
             enabledMcpjsonServers: serverNames
