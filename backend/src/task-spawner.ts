@@ -103,17 +103,17 @@ function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } {
         // corrupts long/multiline args (e.g. dropping --model after the prompt).
         const exePath = join(pkgDir, 'bin', 'claude.exe');
         if (existsSync(exePath)) {
-            console.log(`[TaskSpawner] Resolved Claude CLI exe via APPDATA: ${exePath}`);
+            logger.info('Resolved Claude CLI exe via APPDATA', { exePath });
             return { command: exePath, prefixArgs: [] };
         }
         // Older layout: cli.js run via node.
         const cliPath = join(pkgDir, 'cli.js');
         if (existsSync(cliPath)) {
-            console.log(`[TaskSpawner] Resolved Claude CLI via APPDATA: ${process.execPath} ${cliPath}`);
+            logger.info('Resolved Claude CLI via APPDATA', { execPath: process.execPath, cliPath });
             return { command: process.execPath, prefixArgs: [cliPath] };
         }
     }
-    console.warn('[TaskSpawner] APPDATA-based Claude CLI not found, falling back to cmd.exe /c claude.cmd');
+    logger.warn('APPDATA-based Claude CLI not found, falling back to cmd.exe /c claude.cmd');
     return { command: 'cmd.exe', prefixArgs: ['/c', 'claude.cmd'] };
 }
 
@@ -1151,7 +1151,7 @@ export class TaskSpawner extends EventEmitter {
         const CONSECUTIVE_CHANGES_FOR_BUSY = 2;
 
         if (process.env.DEBUG_POLLING) {
-            console.log(`[TaskSpawner] checking state for ${this.tasks.size} tasks`);
+            logger.debug(`Checking state for ${this.tasks.size} tasks`);
         }
 
         for (const task of this.tasks.values()) {
@@ -1461,8 +1461,8 @@ export class TaskSpawner extends EventEmitter {
                 const data = readFileSync(this.persistencePath, 'utf-8');
                 // Use 'any' for raw persistence to handle migration from old format
                 const persistence = JSON.parse(data) as { tasks: PersistedTask[]; archivedTasks?: any[] };
-                console.log(`[TaskSpawner] ========== LOADING PERSISTED TASKS ==========`);
-                console.log(`[TaskSpawner] Loading ${persistence.tasks.length} active tasks, ${persistence.archivedTasks?.length || 0} archived tasks`);
+                logger.info('Loading persisted tasks');
+                logger.info('Loaded persisted tasks', { active: persistence.tasks.length, archived: persistence.archivedTasks?.length || 0 });
 
                 // Ensure history directory exists
                 const historyDir = this.getHistoryDir();
@@ -1485,18 +1485,18 @@ export class TaskSpawner extends EventEmitter {
                             }
                             atomicWriteFileSync(this.getTaskHistoryPath(persisted.id), contentToWrite);
                             if (process.env.DEBUG_TASKS) {
-                                console.log(`[TaskSpawner] Migrated history for task ${persisted.id} to file`);
+                                logger.debug('Migrated history for task to file', { taskId: persisted.id });
                             }
                             // Remove from object to free memory
                             delete persisted.outputHistory;
                         } catch (e) {
-                            console.error(`[TaskSpawner] Failed to migrate history for task ${persisted.id}:`, e);
+                            logger.error('Failed to migrate history for task', { taskId: persisted.id, error: e instanceof Error ? e.message : String(e) });
                         }
                     }
 
                     // Debug: log each task being loaded
                     if (process.env.DEBUG_TASKS) {
-                        console.log(`[TaskSpawner] Loading task ${persisted.id}`);
+                        logger.debug('Loading task', { taskId: persisted.id });
                     }
                     this.disconnectedTasks.set(persisted.id, persisted);
 
@@ -1508,7 +1508,7 @@ export class TaskSpawner extends EventEmitter {
 
                 // Load archived tasks - migrate old format if needed
                 if (persistence.archivedTasks) {
-                    console.log(`[TaskSpawner] Loading ${persistence.archivedTasks.length} archived tasks (metadata only)`);
+                    logger.info('Loading archived tasks', { count: persistence.archivedTasks.length });
                     let migratedCount = 0;
                     const historyDir = this.getArchivedHistoryDir();
 
@@ -1527,7 +1527,7 @@ export class TaskSpawner extends EventEmitter {
                                 atomicWriteFileSync(this.getArchivedHistoryPath(archived.id), contentToWrite);
                                 migratedCount++;
                             } catch (e) {
-                                console.error(`[TaskSpawner] Failed to migrate history for ${archived.id}:`, e);
+                                logger.error('Failed to migrate archived history', { taskId: archived.id, error: e instanceof Error ? e.message : String(e) });
                             }
                         }
 
@@ -1551,14 +1551,14 @@ export class TaskSpawner extends EventEmitter {
                     }
 
                     if (migratedCount > 0) {
-                        console.log(`[TaskSpawner] Migrated ${migratedCount} archived tasks to lazy loading format`);
+                        logger.info('Migrated archived tasks to lazy loading format', { count: migratedCount });
                         // Save immediately to persist the migration (removes outputHistory from JSON)
                         this.saveTasks();
                     }
                 }
             }
         } catch (error) {
-            console.error('[TaskSpawner] Failed to load persisted tasks:', error);
+            logger.error('Failed to load persisted tasks', { error: error instanceof Error ? error.message : String(error) });
         }
     }
 
@@ -1634,7 +1634,7 @@ export class TaskSpawner extends EventEmitter {
                         }
                     }
                 } catch (e) {
-                    console.error(`[TaskSpawner] Failed to save history for task ${task.id}:`, e);
+                    logger.error('Failed to save history for task', { taskId: task.id, error: e instanceof Error ? e.message : String(e) });
                 }
 
                 // All live tasks are interrupted by a server restart (their PTY is killed).
@@ -1721,9 +1721,9 @@ export class TaskSpawner extends EventEmitter {
             const newStats = statSync(this.persistencePath);
             this.fileModTimeOnLoad = newStats.mtimeMs;
 
-            console.log(`[TaskSpawner] Saved ${tasksToSave.length} tasks, ${archivedTasksToSave.length} archived (metadata only)`);
+            logger.debug('Saved tasks', { active: tasksToSave.length, archived: archivedTasksToSave.length });
         } catch (error) {
-            console.error('[TaskSpawner] Failed to save tasks:', error);
+            logger.error('Failed to save tasks', { error: error instanceof Error ? error.message : String(error) });
         }
     }
 
@@ -1920,8 +1920,8 @@ export class TaskSpawner extends EventEmitter {
         const READY_FALLBACK_MS = 15000;
         task.readyFallbackTimer = setTimeout(() => {
             if (!task.initialPromptSent && task.pendingPrompt) {
-                console.log(`[TaskSpawner] FALLBACK: Ready signal not detected after ${READY_FALLBACK_MS}ms for task ${task.id}, sending prompt anyway`);
-                console.log(`[TaskSpawner] FALLBACK: Recent output: ${JSON.stringify(this.getRecentOutput(task, 512))}`);
+                logger.warn('FALLBACK: Ready signal not detected, sending prompt anyway', { taskId: task.id, waitMs: READY_FALLBACK_MS });
+                logger.debug('FALLBACK: Recent output sample', { taskId: task.id, output: this.getRecentOutput(task, 512).slice(0, 200) });
                 task.initialPromptSent = true;
                 const prompt = task.pendingPrompt;
                 task.pendingPrompt = null;
@@ -1939,7 +1939,7 @@ export class TaskSpawner extends EventEmitter {
      */
     private getTaskEnvironment(): { [key: string]: string } {
         const taskEnv = { ...process.env } as { [key: string]: string };
-        console.log(`[TaskSpawner] Task environment PATH: ${taskEnv['PATH']?.substring(0, 200)}`);
+        logger.debug('Task environment PATH', { path: taskEnv['PATH']?.substring(0, 200) });
 
         // Remove CLAUDECODE env var to prevent "nested session" detection in Claude Code CLI
         delete taskEnv['CLAUDECODE'];
@@ -1947,13 +1947,13 @@ export class TaskSpawner extends EventEmitter {
         if (!this.configStore) return taskEnv;
 
         const apiMode = this.configStore.getApiMode();
-        console.log(`[TaskSpawner] API mode: ${apiMode}, backend: ${this.backendType}`);
+        logger.debug('API mode', { apiMode, backend: this.backendType });
 
         if (apiMode === 'custom-anthropic') {
             const apiKey = this.configStore.getCustomAnthropicApiKey();
             if (apiKey) {
                 taskEnv['ANTHROPIC_API_KEY'] = apiKey;
-                console.log(`[TaskSpawner] Using custom Anthropic API key`);
+                logger.debug('Using custom Anthropic API key');
             }
         } else if (apiMode === 'sap-ai-core') {
             // For SAP AI Core, route requests through the local proxy
@@ -1961,14 +1961,14 @@ export class TaskSpawner extends EventEmitter {
             taskEnv['ANTHROPIC_BASE_URL'] = proxyUrl;
             // Set a placeholder API key (required by SDK but not used by proxy)
             taskEnv['ANTHROPIC_API_KEY'] = 'sap-ai-core-proxy';
-            console.log(`[TaskSpawner] Using SAP AI Core proxy at ${proxyUrl}`);
+            logger.debug('Using SAP AI Core proxy', { proxyUrl });
         } else if (apiMode === 'hyperspace-proxy') {
             // For Hyperspace proxy, route through local proxy
             const proxyUrl = 'http://localhost:4001/anthropic';
             taskEnv['ANTHROPIC_BASE_URL'] = proxyUrl;
             // Set a placeholder API key (required by SDK but not used by proxy)
             taskEnv['ANTHROPIC_API_KEY'] = 'hyperspace-proxy';
-            console.log(`[TaskSpawner] Using Hyperspace proxy at ${proxyUrl}`);
+            logger.debug('Using Hyperspace proxy', { proxyUrl });
         }
         // 'default' mode: don't set any env vars, let the backend use its own settings
 
@@ -2018,7 +2018,7 @@ export class TaskSpawner extends EventEmitter {
         // Numbered selection menu (like "Exit plan mode?" dialog)
         // Looks for pattern like: "❯ 1. Yes" or "  2. No" indicating a numbered choice menu
         if (str.match(/❯\s*\d+\.\s+\w/) && str.match(/\s+\d+\.\s+\w/)) {
-            console.log(`[TaskSpawner] Numbered selection menu detected`);
+            logger.debug('Numbered selection menu detected');
             return 'question';
         }
 
@@ -2103,7 +2103,7 @@ export class TaskSpawner extends EventEmitter {
 
             for (const pattern of questionPatterns) {
                 if (pattern.test(cleanSection)) {
-                    console.log(`[TaskSpawner] Question detected in last section: "${cleanSection.slice(0, 100)}..."`);
+                    logger.debug('Question detected in last section', { preview: cleanSection.slice(0, 100) });
                     return 'question';
                 }
             }
@@ -2112,12 +2112,12 @@ export class TaskSpawner extends EventEmitter {
             // This catches cases like "Is this what you wanted?"
             const trimmedSection = cleanSection.trim();
             if (trimmedSection.endsWith('?') && trimmedSection.length > 10) {
-                console.log(`[TaskSpawner] Question detected (ends with ?): "${trimmedSection.slice(-80)}"`);
+                logger.debug('Question detected (ends with ?)', { preview: trimmedSection.slice(-80) });
                 return 'question';
             }
 
             // Debug: log when we have a question mark but didn't detect a question
-            console.log(`[TaskSpawner] Has '?' but no question pattern matched. Section: "${trimmedSection.slice(0, 150)}"`);
+            logger.debug('Has ? but no question pattern matched', { preview: trimmedSection.slice(0, 150) });
         }
 
         return null;
@@ -2185,10 +2185,10 @@ export class TaskSpawner extends EventEmitter {
     private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 5): void {
         // Guard: abort if PTY has exited — writing to a dead native handle causes segfaults
         if (task.state === 'exited' || !this.tasks.has(task.id)) {
-            console.log(`[TaskSpawner] Aborting prompt write: task ${task.id} is no longer alive`);
+            logger.debug('Aborting prompt write: task no longer alive', { taskId: task.id });
             return;
         }
-        console.log(`[TaskSpawner] Writing prompt to PTY: "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}" (${prompt.length} chars, retries left: ${maxRetries})`);
+        logger.debug('Writing prompt to PTY', { preview: prompt.substring(0, 100), length: prompt.length, retriesLeft: maxRetries });
 
         // For small messages (≤200 chars), type character by character
         // This gives the TUI time to process and makes Enter more reliable
@@ -2228,7 +2228,7 @@ export class TaskSpawner extends EventEmitter {
             // Give more time for longer prompts to be written before sending Enter.
             // Scale: base 500ms + 50ms per 100 chars, capped at 2500ms (aligned with writeToTask).
             const delayMs = Math.min(500 + Math.floor(prompt.length / 100) * 50, 2500);
-            console.log(`[TaskSpawner] Waiting ${delayMs}ms before sending Enter for ${prompt.length} char prompt`);
+            logger.debug('Waiting before sending Enter', { delayMs, promptLength: prompt.length });
 
             setTimeout(() => {
                 if (task.state === 'exited' || !this.tasks.has(task.id)) return;
@@ -2275,18 +2275,18 @@ export class TaskSpawner extends EventEmitter {
 
         // Guard: abort if PTY has exited — writing to a dead native handle causes segfaults
         if (task.state === 'exited' || !this.tasks.has(task.id)) {
-            console.log(`[TaskSpawner] Aborting Enter: task ${task.id} is no longer alive`);
+            logger.debug('Aborting Enter: task no longer alive', { taskId: task.id });
             return;
         }
 
         if (retriesLeft <= 0) {
-            console.log(`[TaskSpawner] Max retries reached for ${context} on task ${task.id}, giving up`);
+            logger.warn('Max retries reached, giving up', { context, taskId: task.id });
             // Just return, do not send burst to avoid PTY crashes
             return;
         }
 
         task.promptSubmitAttempts = (task.promptSubmitAttempts || 0) + 1;
-        console.log(`[TaskSpawner] Sending Enter for ${context} (attempt ${task.promptSubmitAttempts}) to task ${task.id}`);
+        logger.debug('Sending Enter', { context, attempt: task.promptSubmitAttempts, taskId: task.id });
 
         // For follow-up input, transition to busy state before sending Enter
         if (!isInitialPrompt && (task.state === 'idle' || task.state === 'waiting_input')) {
@@ -2311,18 +2311,18 @@ export class TaskSpawner extends EventEmitter {
 
             // Check if Claude started processing (pattern-based or output-growth-based)
             if (outputGrew || this.hasProcessingIndicators(task)) {
-                console.log(`[TaskSpawner] Claude processing detected for ${context} after attempt ${task.promptSubmitAttempts} (outputGrew=${outputGrew}, outputDelta=${currentOutputLength - outputLengthBeforeEnter})`);
+                logger.debug('Claude processing detected', { context, attempt: task.promptSubmitAttempts, outputDelta: currentOutputLength - outputLengthBeforeEnter });
                 if (isInitialPrompt && task.state === 'starting' && !task.hasStartedProcessing) {
                     task.hasStartedProcessing = true;
                     task.state = 'busy';
-                    console.log(`[TaskSpawner] Task ${task.id} transitioned: starting → busy`);
+                    logger.debug('Task transitioned: starting → busy', { taskId: task.id });
                     this.emit('taskStateChanged', this.toPublicTask(task));
                 }
                 return;
             }
 
             // Not started yet - schedule retry with longer delay
-            console.log(`[TaskSpawner] No processing indicators found for ${context} (outputDelta=${currentOutputLength - outputLengthBeforeEnter}), will retry Enter in 500ms`);
+            logger.debug('No processing indicators, retrying Enter', { context, outputDelta: currentOutputLength - outputLengthBeforeEnter });
             setTimeout(() => this.sendEnterWithRetry(task, retriesLeft - 1, { ...options, outputLengthAtSend: outputLengthBeforeEnter }), 500);
         }, 800);
     }
@@ -2498,7 +2498,7 @@ export class TaskSpawner extends EventEmitter {
         initialRows?: number,
         modelOverride?: string
     ): Promise<Task> {
-        console.log(`[TaskSpawner] createTaskWithClaudeCode called with workspaceId: "${workspaceId}"`);
+        logger.debug('createTaskWithClaudeCode called', { workspaceId });
         const id = `task-${Date.now()}-${randomBytes(5).toString('hex')}`;
 
         const customArgs = process.env['CC_CLAUDE_ARGS']
@@ -2728,7 +2728,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     }
 
     private setupProcessHandlers(task: InternalTask): void {
-        console.log(`[TaskSpawner] setupProcessHandlers: Setting up onData for task ${task.id}, pid=${task.process.pid}`);
+        logger.debug('Setting up process handlers', { taskId: task.id, pid: task.process.pid });
 
         task.process.onData((rawData: string) => {
             // Filter out auth conflict warning (appears when ANTHROPIC_API_KEY + claude.ai token coexist)
@@ -2736,7 +2736,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             if (!data) return;
 
             if (process.env.DEBUG_PTY === 'true') { // Force verbose for debug
-                console.log(`[TaskSpawner] PTY Output from ${task.id} (PID ${task.process.pid}): ${JSON.stringify(data.substring(0, 50))}`);
+                logger.debug('PTY output', { taskId: task.id, pid: task.process.pid, preview: data.substring(0, 50) });
             }
 
             const buffer = Buffer.from(data, 'utf8');
@@ -2760,7 +2760,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             if (!task.sessionId) {
                 const sessionId = this.extractSessionId(cleanData);
                 if (sessionId) {
-                    console.log(`[TaskSpawner] Found session ID: ${sessionId}`);
+                    logger.debug('Found session ID', { sessionId });
                     task.sessionId = sessionId;
                 }
             }
@@ -2770,7 +2770,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             // the race condition where the ready signal is split across PTY data chunks
             if (!task.initialPromptSent && task.pendingPrompt &&
                 (this.isReadyForInitialInput(cleanData) || this.isReadyForInitialInput(this.getRecentOutput(task, 4096)))) {
-                console.log(`[TaskSpawner] Claude ready, sending prompt (detected in ${this.isReadyForInitialInput(cleanData) ? 'current chunk' : 'accumulated output'})`);
+                logger.debug('Claude ready, sending prompt');
                 task.initialPromptSent = true;
                 const prompt = task.pendingPrompt;
                 task.pendingPrompt = null;
@@ -2795,14 +2795,14 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             } else {
                 // Only log once per inactive period to avoid log spam
                 if (!task.inactiveOutputLogged) {
-                    console.log(`[TaskSpawner] Output received for ${task.id} but isActive=false, dropping output (subsequent drops will be silent)`);
+                    logger.debug('Output received but task inactive, dropping', { taskId: task.id });
                     task.inactiveOutputLogged = true;
                 }
             }
         });
 
         task.process.onExit(({ exitCode }) => {
-            console.log(`[TaskSpawner] Task ${task.id} exited with code ${exitCode}`);
+            logger.info('Task exited', { taskId: task.id, exitCode });
 
             // Clean up ready fallback timer to prevent writing to dead PTY
             if (task.readyFallbackTimer) {
@@ -2818,7 +2818,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
             // Only emit events if task still exists in map (not being destroyed)
             if (!this.tasks.has(task.id)) {
-                console.log(`[TaskSpawner] Task ${task.id} already removed, skipping state change`);
+                logger.debug('Task already removed, skipping state change', { taskId: task.id });
                 return;
             }
             task.state = 'exited';
@@ -2885,10 +2885,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             const gitState = await captureGitStateAfter(task.workspaceId, task.gitStateBefore);
             task.gitState = gitState;
             this.scheduleSave();
-            console.log(`[TaskSpawner] Git state after task: ${gitState.filesModified.length} files modified`);
+            logger.debug('Git state after task', { filesModified: gitState.filesModified.length });
             this.emit('taskStateChanged', this.toPublicTask(task));
         } catch (error) {
-            console.error(`[TaskSpawner] Failed to capture git state:`, error);
+            logger.error('Failed to capture git state', { error: error instanceof Error ? error.message : String(error) });
         }
     }
 
@@ -2930,7 +2930,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             return { success: false, error: 'Cannot revert: uncommitted changes existed before task', filesReverted: [] };
         }
 
-        console.log(`[TaskSpawner] Reverting task ${taskId}`);
+        logger.info('Reverting task', { taskId });
         const result = await revertTaskChanges(workspaceId, gitState, cleanUntracked);
 
         if (result.success) {
@@ -2984,7 +2984,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         if (task) {
             // If user edited, block agent renames
             if (source === 'agent' && task.displayNameEditedByUser) {
-                console.log(`[TaskSpawner] Agent rename blocked for task ${taskId} — title was edited by user`);
+                logger.debug('Agent rename blocked (user-edited title)', { taskId });
                 return false;
             }
             task.displayName = trimmed || undefined; // Clear if empty
@@ -2993,7 +2993,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 task.displayNameEditedByUser = trimmed ? true : false; // Clearing resets the flag
             }
             this.scheduleSave();
-            console.log(`[TaskSpawner] Renamed task ${taskId} to "${trimmed}" (source: ${source})`);
+            logger.info('Renamed task', { taskId, displayName: trimmed, source });
             this.emit('taskStateChanged', this.toPublicTask(task));
             return true;
         }
@@ -3002,7 +3002,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         const persisted = this.disconnectedTasks.get(taskId);
         if (persisted) {
             if (source === 'agent' && persisted.displayNameEditedByUser) {
-                console.log(`[TaskSpawner] Agent rename blocked for disconnected task ${taskId} — title was edited by user`);
+                logger.debug('Agent rename blocked (disconnected, user-edited title)', { taskId });
                 return false;
             }
             persisted.displayName = trimmed || undefined;
@@ -3010,7 +3010,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 persisted.displayNameEditedByUser = trimmed ? true : false;
             }
             this.scheduleSave();
-            console.log(`[TaskSpawner] Renamed disconnected task ${taskId} to "${trimmed}" (source: ${source})`);
+            logger.info('Renamed disconnected task', { taskId, displayName: trimmed, source });
             return true;
         }
 
@@ -3018,7 +3018,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         const archived = this.archivedTasks.get(taskId);
         if (archived) {
             if (source === 'agent' && archived.displayNameEditedByUser) {
-                console.log(`[TaskSpawner] Agent rename blocked for archived task ${taskId} — title was edited by user`);
+                logger.debug('Agent rename blocked (archived, user-edited title)', { taskId });
                 return false;
             }
             archived.displayName = trimmed || undefined;
@@ -3026,11 +3026,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 archived.displayNameEditedByUser = trimmed ? true : false;
             }
             this.scheduleSave();
-            console.log(`[TaskSpawner] Renamed archived task ${taskId} to "${trimmed}" (source: ${source})`);
+            logger.info('Renamed archived task', { taskId, displayName: trimmed, source });
             return true;
         }
 
-        console.log(`[TaskSpawner] Cannot rename: task ${taskId} not found`);
+        logger.warn('Cannot rename: task not found', { taskId });
         return false;
     }
 
@@ -3057,7 +3057,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         }
         if (changed) {
             this.scheduleSave();
-            console.log(`[TaskSpawner] Reordered ${taskOrders.length} tasks`);
+            logger.debug('Reordered tasks', { count: taskOrders.length });
         }
         return changed;
     }
@@ -3113,7 +3113,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                         task.previousHistory = undefined;
                         // Also clear lazyHistoryBase64 if it exists (legacy)
                         task.lazyHistoryBase64 = undefined;
-                        console.log(`[TaskSpawner] Freed memory for inactive task ${task.id} (last active ${Math.round(timeSinceLastActivity / 1000)}s ago)`);
+                        logger.debug('Freed memory for inactive task', { taskId: task.id, idleSecs: Math.round(timeSinceLastActivity / 1000) });
                     }
                 }
             }, 30000); // 30 second delay - long enough for active task switching
@@ -3126,11 +3126,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             }
         }
 
-        console.log(`[TaskSpawner] setTaskActive called: taskId=${taskId}, active=${active}, inTasks=${this.tasks.has(taskId)}, inDisconnected=${this.disconnectedTasks.has(taskId)}`);
+        logger.debug('setTaskActive called', { taskId, active, inTasks: this.tasks.has(taskId), inDisconnected: this.disconnectedTasks.has(taskId) });
         if (active && this.disconnectedTasks.has(taskId)) {
             // Don't auto-reconnect on click - just show the stored history.
             // The task will be reconnected when the user actually sends input (via writeToTask).
-            console.log(`[TaskSpawner] Showing history for disconnected task ${taskId} (no auto-reconnect)`);
+            logger.debug('Showing history for disconnected task', { taskId });
 
             // Try loading history from disk file first (primary storage), then fall back to in-memory
             let historyRestored = false;
@@ -3145,7 +3145,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                     this.emit('taskRestore', taskId, history);
                     historyRestored = true;
                 } catch (e) {
-                    console.error(`[TaskSpawner] Failed to read history file for ${taskId}:`, e);
+                    logger.error('Failed to read history file', { taskId, error: e instanceof Error ? e.message : String(e) });
                 }
             } else {
                 // Fallback: check in-memory outputHistory (older tasks or migration edge cases)
@@ -3159,17 +3159,17 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
             // Always emit taskRestore so the frontend clears loading state (prevents blank screen)
             if (!historyRestored) {
-                console.warn(`[TaskSpawner] No history found for disconnected task ${taskId}, sending empty restore`);
+                logger.warn('No history found for disconnected task, sending empty restore', { taskId });
                 this.emit('taskRestore', taskId, '');
             }
             return;
         }
 
         const task = this.tasks.get(taskId);
-        console.log(`[TaskSpawner] setTaskActive: taskId=${taskId}, active=${active}, taskFound=${!!task}, currentIsActive=${task?.isActive}, ptyPid=${task?.process?.pid}`);
+        logger.debug('setTaskActive result', { taskId, active, taskFound: !!task, currentIsActive: task?.isActive, ptyPid: task?.process?.pid });
         if (task) {
             task.isActive = active;
-            console.log(`[TaskSpawner] Set task.isActive to ${active} for ${taskId}`);
+            logger.debug('Set task isActive', { taskId, active });
 
             if (active) {
                 // Notify backend if using OpenCode
@@ -3190,7 +3190,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         } else if (active) {
             // Task not found in active or disconnected maps - still notify frontend
             // so it can clear the loading spinner (prevents blank screen)
-            console.warn(`[TaskSpawner] Task ${taskId} not found in tasks or disconnectedTasks, sending empty restore`);
+            logger.warn('Task not found, sending empty restore', { taskId });
             this.emit('taskRestore', taskId, '');
         }
     }
@@ -3260,11 +3260,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                             // Changing logic below is better.
                             // Actually, let's just encode it to base64 here so the rest of the function works as is
                             base64Content = buffer.toString('base64');
-                            console.log(`[TaskSpawner] Loaded tail of RAW history: ${fileSize} bytes -> ${MAX_HISTORY_TO_SEND} bytes`);
+                            logger.debug('Loaded tail of RAW history', { fileSize, maxSent: MAX_HISTORY_TO_SEND });
                         } else {
                             const rawContent = readFileSync(historyPath, 'utf8');
                             base64Content = Buffer.from(rawContent, 'utf8').toString('base64');
-                            console.log(`[TaskSpawner] Loaded complete RAW history: ${fileSize} bytes`);
+                            logger.debug('Loaded complete RAW history', { fileSize });
                         }
                     } else {
                         // Base64 file (standard path)
@@ -3278,11 +3278,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                             readSync(fd, buffer, 0, maxBase64Size, offset);
                             closeSync(fd);
                             base64Content = buffer.toString('utf-8');
-                            console.log(`[TaskSpawner] Loaded tail of Base64 history from file for ${task.id}: ${fileSize} bytes (file) -> ${maxBase64Size} bytes (loaded)`);
+                            logger.debug('Loaded tail of Base64 history', { taskId: task.id, fileSize, loaded: maxBase64Size });
                         } else {
                             // File is small enough, read it all
                             base64Content = readFileSync(historyPath, 'utf-8');
-                            console.log(`[TaskSpawner] Loaded complete Base64 history from file for ${task.id}: ${fileSize} bytes`);
+                            logger.debug('Loaded complete Base64 history', { taskId: task.id, fileSize });
                         }
                     }
 
@@ -3297,7 +3297,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                         task.previousHistory = decoded;
                     }
                 } catch (e) {
-                    console.error(`[TaskSpawner] Failed to load history file for ${task.id}:`, e);
+                    logger.error('Failed to load history file', { taskId: task.id, error: e instanceof Error ? e.message : String(e) });
                 }
             }
         }
@@ -3313,16 +3313,16 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                         truncationMessage,
                         fullHistory.slice(fullHistory.length - MAX_HISTORY_TO_SEND)
                     ]);
-                    console.log(`[TaskSpawner] Lazy loaded and truncated history from ${fullHistory.length} to ${task.previousHistory.length} bytes`);
+                    logger.debug('Lazy loaded and truncated history', { taskId: task.id, from: fullHistory.length, to: task.previousHistory.length });
                 } else {
                     task.previousHistory = fullHistory;
-                    console.log(`[TaskSpawner] Lazy loaded ${task.previousHistory.length} bytes of history`);
+                    logger.debug('Lazy loaded history', { taskId: task.id, bytes: task.previousHistory.length });
                 }
                 // Clear the base64 string to free memory
                 task.lazyHistoryBase64 = undefined;
 
             } catch (e) {
-                console.error(`[TaskSpawner] Failed to lazy load history:`, e);
+                logger.error('Failed to lazy load history', { error: e instanceof Error ? e.message : String(e) });
                 task.lazyHistoryBase64 = undefined;
             }
         }
@@ -3444,8 +3444,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // If task not found in active tasks, check if it's disconnected and needs reconnecting
         if (!task) {
             if (this.disconnectedTasks.has(taskId)) {
-                console.log(`[TaskSpawner] Task ${taskId} is disconnected, auto-reconnecting before write`);
-                console.log(`[TaskSpawner] Input length: ${data.length}, Data preview: ${JSON.stringify(data.substring(0, 50))}`);
+                logger.debug('Task disconnected, auto-reconnecting before write', { taskId });
+                logger.debug('Input data', { length: data.length, preview: data.substring(0, 50) });
                 const reconnectedTask = this.reconnectTask(taskId);
                 if (reconnectedTask) {
                     task = this.tasks.get(taskId);
@@ -3460,7 +3460,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                             if (changedTask.id === taskId && changedTask.state === 'idle' && !delivered) {
                                 delivered = true;
                                 this.removeListener('taskStateChanged', onStateChanged);
-                                console.log(`[TaskSpawner] Task ${taskId} reached idle after reconnect, delivering pending write`);
+                                logger.debug('Task reached idle after reconnect, delivering pending write', { taskId });
                                 this.writeToTask(taskId, data);
                             }
                         };
@@ -3470,16 +3470,16 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                             if (!delivered) {
                                 delivered = true;
                                 this.removeListener('taskStateChanged', onStateChanged);
-                                console.log(`[TaskSpawner] Fallback: delivering pending write after 15s for task ${taskId}`);
+                                logger.debug('Fallback: delivering pending write after timeout', { taskId });
                                 this.writeToTask(taskId, data);
                             }
                         }, 15000);
                         return;
                     }
                 }
-                console.log(`[TaskSpawner] Failed to reconnect task ${taskId} for write`);
+                logger.warn('Failed to reconnect task for write', { taskId });
             } else {
-                console.log(`[TaskSpawner] Cannot write to task ${taskId}: task not found`);
+                logger.warn('Cannot write to task: task not found', { taskId });
             }
             return;
         }
@@ -3487,14 +3487,14 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
         if (taskBackend === 'opencode' && this.backend) {
-            console.log(`[TaskSpawner] Writing to OpenCode backend for task ${taskId}`);
+            logger.debug('Writing to OpenCode backend', { taskId });
             this.backend.sendInput(taskId, data);
             return;
         }
 
         // Only log non-trivial writes (messages, not individual keystrokes) to avoid I/O overhead
         if (data.length > 1) {
-            console.log(`[TaskSpawner] Writing to PTY for task ${taskId} (${data.length} chars)`);
+            logger.debug('Writing to PTY', { taskId, length: data.length });
         }
 
         // Claude Code PTY-based input handling
@@ -3511,7 +3511,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             // Large pastes (36+ lines) can take >200ms to process before Enter is accepted.
             // Base: 500ms, +50ms per 100 chars, capped at 2500ms.
             const enterDelayMs = Math.min(500 + Math.floor(messageContent.length / 100) * 50, 2500);
-            console.log(`[TaskSpawner] Writing message to task ${taskId} (${messageContent.length} chars), sending Enter in ${enterDelayMs}ms`);
+            logger.debug('Writing message to task', { taskId, length: messageContent.length, enterDelayMs });
             // Wrap in bracketed paste so the TUI handles it as one atomic paste,
             // preventing front-truncation on large/multi-line messages.
             const safeMsg = messageContent.replace(/\x1b\[201~/g, '');
@@ -3522,7 +3522,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             setTimeout(() => this.sendEnterWithRetry(task, 5, { isInitialPrompt: false, enterKey }), enterDelayMs);
         } else if (task.state === 'exited') {
             // Task's PTY has exited — reconnect it (with --resume) and deliver the write
-            console.log(`[TaskSpawner] Task ${taskId} is exited, auto-reconnecting before write`);
+            logger.debug('Task exited, auto-reconnecting before write', { taskId });
             const reconnected = this.reconnectTask(taskId);
             if (reconnected) {
                 const newTask = this.tasks.get(taskId);
@@ -3535,7 +3535,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                         if (changedTask.id === taskId && changedTask.state === 'idle' && !delivered) {
                             delivered = true;
                             this.removeListener('taskStateChanged', onStateChanged);
-                            console.log(`[TaskSpawner] Task ${taskId} reached idle after exited-reconnect, delivering pending write`);
+                            logger.debug('Task reached idle after exited-reconnect, delivering pending write', { taskId });
                             this.writeToTask(taskId, data);
                         }
                     };
@@ -3544,7 +3544,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                         if (!delivered) {
                             delivered = true;
                             this.removeListener('taskStateChanged', onStateChanged);
-                            console.log(`[TaskSpawner] Fallback: delivering pending write after 15s for exited-reconnect ${taskId}`);
+                            logger.debug('Fallback: delivering pending write after exited-reconnect timeout', { taskId });
                             this.writeToTask(taskId, data);
                         }
                     }, 15000);
@@ -3612,7 +3612,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             return this.backend.interruptTask(taskId);
         }
 
-        console.log(`[TaskSpawner] Interrupting task ${taskId}`);
+        logger.info('Interrupting task', { taskId });
         task.process.write('\x1b');
         return true;
     }
@@ -3800,9 +3800,9 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                     mkdirSync(historyDir, { recursive: true });
                 }
                 atomicWriteFileSync(this.getArchivedHistoryPath(taskId), historyBase64);
-                console.log(`[TaskSpawner] Saved archived task history to disk: ${historySize} bytes`);
+                logger.debug('Saved archived task history to disk', { historySize });
             } catch (e) {
-                console.error(`[TaskSpawner] Failed to save archived history:`, e);
+                logger.error('Failed to save archived history', { error: e instanceof Error ? e.message : String(e) });
             }
 
             // Store only metadata in memory
@@ -3854,7 +3854,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                     }
                     atomicWriteFileSync(this.getArchivedHistoryPath(taskId), disconnected.outputHistory);
                     const historySize = Math.floor(disconnected.outputHistory.length * 0.75);
-                    console.log(`[TaskSpawner] Saved disconnected task history to disk: ${historySize} bytes`);
+                    logger.debug('Saved disconnected task history to disk', { historySize });
                 } catch (e) {
                     console.error(`[TaskSpawner] Failed to save archived history:`, e);
                 }
@@ -3884,7 +3884,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             // Save immediately — destructive operations must not be lost to debounce
             this.saveTasks();
             this.emit('taskDestroyed', taskId);
-            console.log(`[TaskSpawner] Archived ${wasLive ? 'live' : 'disconnected'} task ${taskId}`);
+            logger.info('Archived task', { taskId, wasLive });
         }
     }
 
@@ -3911,7 +3911,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     restoreArchivedTask(taskId: string): Task | null {
         const archived = this.archivedTasks.get(taskId);
         if (!archived) {
-            console.log(`[TaskSpawner] Cannot restore: archived task ${taskId} not found`);
+            logger.warn('Cannot restore: archived task not found', { taskId });
             return null;
         }
 
@@ -3921,9 +3921,9 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         if (existsSync(historyPath)) {
             try {
                 outputHistory = readFileSync(historyPath, 'utf-8');
-                console.log(`[TaskSpawner] Loaded archived history from disk: ${archived.historySize || 0} bytes`);
+                logger.debug('Loaded archived history from disk', { historySize: archived.historySize || 0 });
             } catch (e) {
-                console.error(`[TaskSpawner] Failed to load archived history:`, e);
+                logger.error('Failed to load archived history', { error: e instanceof Error ? e.message : String(e) });
             }
         }
 
@@ -3951,13 +3951,13 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             try {
                 unlinkSync(historyPath);
             } catch (e) {
-                console.error(`[TaskSpawner] Failed to delete archived history file:`, e);
+                logger.warn('Failed to delete archived history file', { error: e instanceof Error ? e.message : String(e) });
             }
         }
 
         this.scheduleSave();
 
-        console.log(`[TaskSpawner] Restored archived task ${taskId} to disconnected state`);
+        logger.info('Restored archived task to disconnected state', { taskId });
 
         // Return the task in disconnected format
         return {
@@ -3985,12 +3985,12 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             return null;
         }
 
-        console.log(`[TaskSpawner] Continuing archived task ${taskId}`);
+        logger.info('Continuing archived task', { taskId });
 
         // Now reconnect the task
         const reconnectedTask = this.reconnectTask(taskId);
         if (!reconnectedTask) {
-            console.log(`[TaskSpawner] Failed to reconnect archived task ${taskId}`);
+            logger.warn('Failed to reconnect archived task', { taskId });
             // If reconnection fails, it stays in disconnected state
             return restoredTask;
         }
@@ -4010,14 +4010,14 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             if (existsSync(historyPath)) {
                 try {
                     unlinkSync(historyPath);
-                    console.log(`[TaskSpawner] Deleted archived history file for ${taskId}`);
+                    logger.debug('Deleted archived history file', { taskId });
                 } catch (e) {
                     console.error(`[TaskSpawner] Failed to delete archived history file:`, e);
                 }
             }
 
             this.scheduleSave();
-            console.log(`[TaskSpawner] Permanently deleted archived task ${taskId}`);
+            logger.info('Permanently deleted archived task', { taskId });
             return true;
         }
         return false;
@@ -4054,12 +4054,12 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         if (this.tasks.has(taskId)) {
             const existing = this.tasks.get(taskId)!;
             if (existing.state !== 'exited') {
-                console.log(`[TaskSpawner] Task ${taskId} is already live (state=${existing.state}), skipping reconnect`);
+                logger.debug('Task already live, skipping reconnect', { taskId, state: existing.state });
                 return this.toPublicTask(existing);
             }
             // Task's PTY exited but task is still in the live map — move it to
             // disconnectedTasks so it can be properly reconnected with --resume
-            console.log(`[TaskSpawner] Task ${taskId} is exited, moving to disconnected for reconnect`);
+            logger.debug('Task exited, moving to disconnected for reconnect', { taskId });
             const persisted: PersistedTask = {
                 id: existing.id,
                 prompt: existing.prompt,
@@ -4083,7 +4083,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
         const persisted = this.disconnectedTasks.get(taskId);
         if (!persisted) {
-            console.log(`[TaskSpawner] Cannot reconnect: task ${taskId} not found`);
+            logger.warn('Cannot reconnect: task not found', { taskId });
             return null;
         }
 
@@ -4091,8 +4091,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // Use persisted backendType, fallback to 'claude-code' for backwards compatibility
         const taskBackendType = persisted.backendType || 'claude-code';
 
-        console.log(`[TaskSpawner] Reconnecting task ${taskId} using ${taskBackendType} backend`);
-        console.log(`[TaskSpawner] Persisted session ID: ${persisted.sessionId}`);
+        logger.info('Reconnecting task', { taskId, backend: taskBackendType });
+        logger.debug('Persisted session ID', { taskId, sessionId: persisted.sessionId });
 
 
         // Get environment with API mode settings
@@ -4106,8 +4106,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             const claudeDir = this.getClaudeProjectsDir(persisted.workspaceId);
             const sessionFilePath = join(claudeDir, `${sessionIdToUse}.jsonl`);
             if (!existsSync(sessionFilePath)) {
-                console.log(`[TaskSpawner] Session file not found for ${taskId}: ${sessionFilePath}`);
-                console.log(`[TaskSpawner] Will start fresh session instead of resuming`);
+                logger.debug('Session file not found, starting fresh', { taskId, sessionFilePath });
                 sessionIdToUse = null;
                 // Clear the invalid session ID from persisted data
                 persisted.sessionId = null;
@@ -4122,9 +4121,9 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
             if (sessionIdToUse) {
                 opencodeArgs.push('--session', sessionIdToUse);
-                console.log(`[TaskSpawner] Reconnecting OpenCode task ${taskId} with session ${sessionIdToUse}`);
+                logger.debug('Reconnecting OpenCode task with session', { taskId, sessionId: sessionIdToUse });
             } else {
-                console.log(`[TaskSpawner] Reconnecting OpenCode task ${taskId} (fresh start)`);
+                logger.debug('Reconnecting OpenCode task (fresh start)', { taskId });
             }
 
             const pendingSizeOC = this.pendingResizes.get(taskId);
@@ -4162,7 +4161,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 const switchArgs = buildClaudeCodeSwitchArgs(switches);
                 if (switchArgs.length > 0) {
                     claudeArgs.push(...switchArgs);
-                    console.log(`[TaskSpawner] Applied CLI switches for reconnect`, { switchArgs });
+                    logger.debug('Applied CLI switches for reconnect', { switchArgs });
                 }
             }
 
@@ -4173,14 +4172,14 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 const mcpConfigFile = join(tmpdir(), `claudia-mcp-${taskId}-reconnect.json`);
                 atomicWriteFileSync(mcpConfigFile, mcpConfigJson);
                 claudeArgs.push('--mcp-config', mcpConfigFile);
-                console.log(`[TaskSpawner] Added ${mcpResult.enabledMcpServers.length} MCP server(s) for reconnection via ${mcpConfigFile}`);
+                logger.debug('Added MCP servers for reconnection', { count: mcpResult.enabledMcpServers.length, configFile: mcpConfigFile });
             }
 
             if (sessionIdToUse) {
                 claudeArgs.push('--resume', sessionIdToUse);
-                console.log(`[TaskSpawner] Reconnecting Claude Code task ${taskId} with session ${sessionIdToUse}`);
+                logger.info('Reconnecting Claude Code task with session', { taskId, sessionId: sessionIdToUse });
             } else {
-                console.log(`[TaskSpawner] Reconnecting Claude Code task ${taskId} (fresh start)`);
+                logger.info('Reconnecting Claude Code task (fresh start)', { taskId });
             }
 
             // Use pending resize dimensions if the frontend already sent them while the
@@ -4199,8 +4198,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             });
         }
 
-        console.log(`[TaskSpawner] Process spawned for task ${taskId}, PID: ${ptyProcess.pid}`);
-        console.log(`[TaskSpawner] PTY Details: cols=${ptyProcess.cols}, rows=${ptyProcess.rows}`);
+        logger.info('Process spawned', { taskId, pid: ptyProcess.pid });
+        logger.debug('PTY details', { taskId, cols: ptyProcess.cols, rows: ptyProcess.rows });
 
 
         const now = new Date();
@@ -4230,20 +4229,20 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                     readSync(fd, buf, 0, MAX_RECONNECT_HISTORY, offset);
                     closeSync(fd);
                     previousHistory = buf;
-                    console.log(`[TaskSpawner] Large history file (${stat.size} bytes), loaded tail ${MAX_RECONNECT_HISTORY} bytes for ${taskId}`);
+                    logger.debug('Large history, loaded tail', { taskId, fileSize: stat.size, loaded: MAX_RECONNECT_HISTORY });
                 }
-                console.log(`[TaskSpawner] Preserved ${previousHistory.length} bytes of history for ${taskId} on reconnect`);
+                logger.debug('Preserved history on reconnect', { taskId, bytes: previousHistory.length });
             }
         } catch (e) {
-            console.error(`[TaskSpawner] Failed to load history file for ${taskId} on reconnect:`, e);
+            logger.error('Failed to load history file on reconnect', { taskId, error: e instanceof Error ? e.message : String(e) });
         }
         // Fallback: check in-memory persisted outputHistory
         if (!previousHistory && persisted.outputHistory) {
             try {
                 previousHistory = Buffer.from(persisted.outputHistory, 'base64');
-                console.log(`[TaskSpawner] Preserved ${previousHistory.length} bytes of in-memory history for ${taskId}`);
+                logger.debug('Preserved in-memory history', { taskId, bytes: previousHistory.length });
             } catch (e) {
-                console.error(`[TaskSpawner] Failed to decode in-memory history for ${taskId}:`, e);
+                logger.error('Failed to decode in-memory history', { taskId, error: e instanceof Error ? e.message : String(e) });
             }
         }
 
@@ -4297,11 +4296,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // "Resuming session X" message to appear multiple times and old history to be shown.
         this.disconnectedTasks.delete(taskId);
 
-        console.log(`[TaskSpawner] reconnectTask: Setting up process handlers for ${task.id}, ptyPid=${ptyProcess.pid}`);
+        logger.debug('Setting up process handlers for reconnected task', { taskId: task.id, pid: ptyProcess.pid });
         this.setupProcessHandlers(task);
         this.tasks.set(task.id, task);
         this.taskBackends.set(task.id, taskBackendType);
-        console.log(`[TaskSpawner] reconnectTask: Task ${task.id} added to tasks map (backend: ${taskBackendType})`);
+        logger.debug('Reconnected task added to tasks map', { taskId: task.id, backend: taskBackendType });
 
         // Apply pending resize if the frontend sent one while the task was disconnected.
         // Without this, the new PTY starts at default 80x24 while the frontend terminal
@@ -4310,7 +4309,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         if (pendingResize) {
             try {
                 ptyProcess.resize(pendingResize.cols, pendingResize.rows);
-                console.log(`[TaskSpawner] Applied pending resize for ${taskId}: ${pendingResize.cols}x${pendingResize.rows}`);
+                logger.debug('Applied pending resize', { taskId, cols: pendingResize.cols, rows: pendingResize.rows });
             } catch (e) {
                 // PTY might not be ready yet; ignore
             }
@@ -4392,13 +4391,13 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             return false;
         }
 
-        console.log(`[TaskSpawner] Disconnecting task ${taskId} (simulating restart)`);
+        logger.info('Disconnecting task (simulating restart)', { taskId });
 
         // Kill the process
         try {
             task.process.kill();
         } catch (e) {
-            console.error(`[TaskSpawner] Failed to kill process for ${taskId}:`, e);
+            logger.warn('Failed to kill process for task', { taskId, error: e instanceof Error ? e.message : String(e) });
         }
 
         // Create persisted task entry - preserve all metadata from the active task
@@ -4434,7 +4433,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
      * Clear all tasks (active, disconnected, archived) and delete their data
      */
     clearAllTasks(): void {
-        console.log('[TaskSpawner] Clearing ALL tasks');
+        logger.warn('Clearing ALL tasks');
 
         // 1. Kill all active tasks
         for (const task of this.tasks.values()) {
@@ -4454,7 +4453,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 unlinkSync(this.persistencePath);
             }
         } catch (e) {
-            console.error('[TaskSpawner] Failed to delete tasks.json', e);
+            logger.error('Failed to delete tasks.json', { error: e instanceof Error ? e.message : String(e) });
         }
 
         // 4. Delete all history files in task-histories
@@ -4467,7 +4466,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 }
             }
         } catch (e) {
-            console.error('[TaskSpawner] Failed to clear history directory', e);
+            logger.error('Failed to clear history directory', { error: e instanceof Error ? e.message : String(e) });
         }
 
         this.emit('tasksUpdated');
