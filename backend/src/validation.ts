@@ -92,6 +92,12 @@ export interface ConfigUpdatePayload {
             high?: string;
         };
     };
+    jiraEnabled?: boolean;
+    jira?: {
+        baseUrl?: string;
+        email?: string;
+        apiToken?: string;
+    };
 }
 
 /**
@@ -199,7 +205,8 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
         'skipPermissions',
         'autoFocusOnInput',
         'supervisorEnabled',
-        'claudiaMcpServerEnabled'
+        'claudiaMcpServerEnabled',
+        'jiraEnabled'
     ];
 
     for (const field of booleanFields) {
@@ -482,6 +489,48 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
                     result.modelTiering.tiers[key] = value;
                 }
             }
+        }
+    }
+
+    // Validate jira (optional object)
+    if (payload.jira !== undefined) {
+        if (typeof payload.jira !== 'object' || payload.jira === null) {
+            return { valid: false, error: 'jira must be an object' };
+        }
+        const config = payload.jira as Record<string, unknown>;
+        result.jira = {};
+
+        if (config.baseUrl !== undefined) {
+            if (typeof config.baseUrl !== 'string') {
+                return { valid: false, error: 'jira.baseUrl must be a string' };
+            }
+            const baseUrl = config.baseUrl.trim();
+            // Only allow Atlassian Cloud hosts over https — blocks file://, http://,
+            // and arbitrary internal hosts (SSRF hardening at the config boundary).
+            if (baseUrl.length > 0 && !/^https:\/\/[a-z0-9-]+\.atlassian\.net\/?$/i.test(baseUrl)) {
+                return { valid: false, error: 'jira.baseUrl must be an https://<site>.atlassian.net URL' };
+            }
+            result.jira.baseUrl = baseUrl.replace(/\/$/, '');
+        }
+
+        if (config.email !== undefined) {
+            if (typeof config.email !== 'string') {
+                return { valid: false, error: 'jira.email must be a string' };
+            }
+            if (config.email.length > 320) {
+                return { valid: false, error: 'jira.email too long (max 320 chars)' };
+            }
+            result.jira.email = config.email.trim();
+        }
+
+        if (config.apiToken !== undefined) {
+            if (typeof config.apiToken !== 'string') {
+                return { valid: false, error: 'jira.apiToken must be a string' };
+            }
+            if (config.apiToken.length > 1024) {
+                return { valid: false, error: 'jira.apiToken too long (max 1024 chars)' };
+            }
+            result.jira.apiToken = config.apiToken;
         }
     }
 
