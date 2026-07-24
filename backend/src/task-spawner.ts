@@ -19,6 +19,17 @@ import { randomBytes } from 'crypto';
 
 const logger = createLogger('[TaskSpawner]');
 
+// On Windows, node-pty defaults to ConPTY. Some enterprise EDR software (e.g.
+// CrowdStrike Falcon) hooks ConPTY's console I/O and can stall stdin delivery to
+// the child process while it is mid-turn — the symptom is that input typed/pasted
+// into a busy Claude session is never consumed until the turn ends. Setting
+// CLAUDIA_USE_WINPTY=1 forces node-pty to use the winpty backend instead, whose
+// stdin path EDR may not intercept the same way. No effect off Windows.
+const USE_WINPTY = process.platform === 'win32' && process.env.CLAUDIA_USE_WINPTY === '1';
+if (USE_WINPTY) {
+    logger.info('CLAUDIA_USE_WINPTY=1 set — spawning PTYs with winpty (useConpty:false) instead of ConPTY');
+}
+
 /**
  * Map legacy permission mode values to actual Claude Code CLI values.
  * Claude CLI --permission-mode accepts: acceptEdits, bypassPermissions, default, dontAsk, plan
@@ -531,7 +542,7 @@ export class TaskSpawner extends EventEmitter {
                     if (resolved) {
                         resolvedCommand = resolved.command;
                         resolvedArgs = resolved.args;
-                        logger.info(`Optimized MCP server "${server.name}": npx → direct node`, { command: resolvedCommand, args: resolvedArgs });
+                        logger.debug(`Optimized MCP server "${server.name}": npx → direct node`, { command: resolvedCommand, args: resolvedArgs });
                     }
                 }
                 const config: Record<string, unknown> = {
@@ -573,7 +584,7 @@ export class TaskSpawner extends EventEmitter {
             }
             mcpConfig['claudia'] = claudiaConfig;
             enabledMcpServers.push({ name: 'claudia', enabled: true });
-            logger.info('Injected Claudia MCP server into MCP config', { path: mcpServerPath, workspaceId: workspaceId || '(global)' });
+            logger.debug('Injected Claudia MCP server into MCP config', { path: mcpServerPath, workspaceId: workspaceId || '(global)' });
         }
 
         return { mcpConfig, enabledMcpServers };
@@ -688,7 +699,12 @@ export class TaskSpawner extends EventEmitter {
     private writeSettingsLocalJson(workspaceId: string, skipPermissions: boolean | undefined, serverNames: string[]): void {
         const settingsContent = {
             permissions: {
-                allow: skipPermissions ? ['*'] : ['mcp__*'],
+                // Claude Code (>=2.1.x) rejects a bare "*" in allow rules and shows a
+                // recurring "Settings Warning" on every launch. When skipPermissions
+                // (bypass mode) is on, the allow list is moot anyway — bypass already
+                // permits every tool — so an empty list is behavior-neutral and quiet.
+                // Otherwise widen only MCP tools, which is a valid allow pattern.
+                allow: skipPermissions ? [] : ['mcp__*'],
                 deny: []
             },
             enableAllProjectMcpServers: true,
@@ -2676,6 +2692,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             rows: initialRows || 40,  // Use provided rows or default 40 (increased from 24)
             cwd: workspaceId,
             env: taskEnv,
+            ...(USE_WINPTY ? { useConpty: false } : {}),
         });
 
         const now = new Date();
@@ -3129,7 +3146,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             }
         }
 
-        console.log(`[TaskSpawner] setTaskActive called: taskId=${taskId}, active=${active}, inTasks=${this.tasks.has(taskId)}, inDisconnected=${this.disconnectedTasks.has(taskId)}`);
+        logger.debug(`setTaskActive called: taskId=${taskId}, active=${active}, inTasks=${this.tasks.has(taskId)}, inDisconnected=${this.disconnectedTasks.has(taskId)}`);
         if (active && this.disconnectedTasks.has(taskId)) {
             // Don't auto-reconnect on click - just show the stored history.
             // The task will be reconnected when the user actually sends input (via writeToTask).
@@ -3169,10 +3186,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         }
 
         const task = this.tasks.get(taskId);
-        console.log(`[TaskSpawner] setTaskActive: taskId=${taskId}, active=${active}, taskFound=${!!task}, currentIsActive=${task?.isActive}, ptyPid=${task?.process?.pid}`);
+        logger.debug(`setTaskActive: taskId=${taskId}, active=${active}, taskFound=${!!task}, currentIsActive=${task?.isActive}, ptyPid=${task?.process?.pid}`);
         if (task) {
             task.isActive = active;
-            console.log(`[TaskSpawner] Set task.isActive to ${active} for ${taskId}`);
+            logger.debug(`Set task.isActive to ${active} for ${taskId}`);
 
             if (active) {
                 // Notify backend if using OpenCode
@@ -3492,7 +3509,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
         if (taskBackend === 'opencode' && this.backend) {
-            console.log(`[TaskSpawner] Writing to OpenCode backend for task ${taskId}`);
+            logger.debug(`Writing to OpenCode backend for task ${taskId}`);
             this.backend.sendInput(taskId, data);
             return;
         }
@@ -3506,7 +3523,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // Only log non-trivial writes (messages, not individual keystrokes or protocol
         // responses) to avoid I/O overhead and log spam.
         if (data.length > 1 && !isTerminalResponse) {
-            console.log(`[TaskSpawner] Writing to PTY for task ${taskId} (${data.length} chars) source=${source}`);
+            logger.debug(`Writing to PTY for task ${taskId} (${data.length} chars) source=${source}`);
         }
 
         // Claude Code PTY-based input handling
@@ -3563,16 +3580,18 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 }
             }
         } else {
-            // Single keypress or task is busy — write directly.
-            // For multi-char messages, wrap in bracketed paste so they aren't
-            // truncated by the TUI (same fix as the idle/initial paths).
-            if (hasMessageContent) {
-                const msg = data.slice(0, -1);
-                const safeMsg = msg.replace(/\x1b\[201~/g, '');
-                task.process.write(`\x1b[200~${safeMsg}\x1b[201~${data.slice(-1)}`);
-            } else {
-                task.process.write(data);
-            }
+            // Single keypress or task is busy — write raw, exactly as received.
+            //
+            // Do NOT wrap busy-task input in bracketed paste (ESC[200~ … ESC[201~).
+            // #69 added that wrapping here to stop front-truncation of large pastes,
+            // but it regressed the common case: while Claude is mid-work its TUI is
+            // rapidly re-rendering, and a bracketed-paste sequence arriving in that
+            // window gets mishandled, so the queued message is silently dropped.
+            // Raw passthrough lets the TUI queue the input exactly as if it were
+            // typed locally (which is why the plain `claude` CLI never had this bug —
+            // nothing wraps its stdin). The idle/initial paths above keep the
+            // bracketed-paste treatment, where it is correct and needed.
+            task.process.write(data);
         }
     }
 
@@ -4217,6 +4236,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 rows: spawnRows,
                 cwd: persisted.workspaceId,
                 env: taskEnv,
+                ...(USE_WINPTY ? { useConpty: false } : {}),
             });
         }
 
