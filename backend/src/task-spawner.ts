@@ -1516,6 +1516,30 @@ export class TaskSpawner extends EventEmitter {
                     if (process.env.DEBUG_TASKS) {
                         console.log(`[TaskSpawner] Loading task ${persisted.id}`);
                     }
+
+                    // Load-time session recovery. This is the common loss path on
+                    // Windows: a tsx-watch restart (triggered by ANY backend file
+                    // edit) hard-kills the server via TerminateProcess, which skips
+                    // all exit/disconnect handlers — so a task whose sessionId hadn't
+                    // yet been captured is persisted with sessionId: null. On the next
+                    // load we try to resolve it from disk by finding the most-recent
+                    // unclaimed .jsonl in the task's workspace project folder, so
+                    // "resume" reattaches to the real session instead of starting
+                    // fresh and appearing to lose all history.
+                    if (!persisted.sessionId) {
+                        const recovered = this.resolveLatestSessionId(persisted.workspaceId);
+                        if (recovered) {
+                            logger.info('Recovered sessionId on load for task with null session', {
+                                taskId: persisted.id, sessionId: recovered, workspaceId: persisted.workspaceId,
+                            });
+                            persisted.sessionId = recovered;
+                        }
+                    }
+                    // Claim the sessionId so sibling tasks don't also adopt it.
+                    if (persisted.sessionId) {
+                        this.sessionToTaskId.set(persisted.sessionId, persisted.id);
+                    }
+
                     this.disconnectedTasks.set(persisted.id, persisted);
 
                     // Restore the taskBackends map from persisted backendType
@@ -1770,6 +1794,71 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Locate the on-disk Claude Code session file for a given session id.
+     *
+     * Claude names session files <sessionId>.jsonl inside a per-workspace project
+     * folder. Normally that folder is deterministic from the workspace path, but a
+     * session can end up under a *different* folder — e.g. the workspace was moved,
+     * a worktree was recreated at a new path, or Claude wrote it under a sibling
+     * project dir. So we check the expected folder first, then fall back to a scan
+     * of ~/.claude/projects for the same <sessionId>.jsonl before concluding it is
+     * truly gone. Returns the full path, or null if not found anywhere.
+     */
+    private findSessionFile(workspacePath: string, sessionId: string): string | null {
+        const expected = join(this.getClaudeProjectsDir(workspacePath), `${sessionId}.jsonl`);
+        if (existsSync(expected)) return expected;
+
+        // Fallback: scan every project folder for <sessionId>.jsonl.
+        try {
+            const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+            const projectsRoot = join(homeDir, '.claude', 'projects');
+            if (!existsSync(projectsRoot)) return null;
+            for (const folder of readdirSync(projectsRoot)) {
+                const candidate = join(projectsRoot, folder, `${sessionId}.jsonl`);
+                if (existsSync(candidate)) {
+                    logger.info('Resolved session file via projects-dir fallback scan', { sessionId, folder });
+                    return candidate;
+                }
+            }
+        } catch (err) {
+            logger.warn('Session file fallback scan failed', { error: err instanceof Error ? err.message : String(err) });
+        }
+        return null;
+    }
+
+    /**
+     * Last-chance session resolution for a task that has no captured sessionId.
+     *
+     * When a task's process exits/disconnects before the interval watcher caught
+     * its .jsonl (slow first flush, restart mid-capture, etc.), the sessionId would
+     * be persisted as null and the history lost on next resume. This scans the
+     * task's workspace project folder and returns the most-recently-modified
+     * session file's id that isn't already owned by another task — the best
+     * available guess for "the session this task just used". Returns null if the
+     * folder has no unclaimed session files.
+     */
+    private resolveLatestSessionId(workspaceId: string): string | null {
+        try {
+            const dir = this.getClaudeProjectsDir(workspaceId);
+            if (!existsSync(dir)) return null;
+            const candidates = readdirSync(dir)
+                .filter(f => f.endsWith('.jsonl'))
+                .map(f => {
+                    const id = f.replace('.jsonl', '');
+                    let mtime = 0;
+                    try { mtime = statSync(join(dir, f)).mtimeMs; } catch { /* skip */ }
+                    return { id, mtime };
+                })
+                // Don't steal a session already attributed to another task.
+                .filter(c => !this.sessionToTaskId.has(c.id))
+                .sort((a, b) => b.mtime - a.mtime);
+            return candidates.length > 0 ? candidates[0].id : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
      * Starts monitoring for session file creation
      * Watches the Claude projects directory for new .jsonl files
      * @param taskId - The task ID to capture session for
@@ -1809,8 +1898,17 @@ export class TaskSpawner extends EventEmitter {
                         const sessionId = file.replace('.jsonl', '');
                         const task = this.tasks.get(taskId);
 
-                        if (task && !task.sessionId) {
-                            logger.info(`Captured session for task`, { taskId, sessionId });
+                        // Capture the new session id when the task has none, OR when
+                        // its current id is stale (points at a .jsonl that no longer
+                        // exists — e.g. we skipped --resume because the file was gone
+                        // and Claude started a brand-new session). Without the stale
+                        // case, a task that lost its file would stay pinned to the dead
+                        // id and never adopt the new session.
+                        const currentStale = !!task?.sessionId &&
+                            !this.findSessionFile(workspaceId, task.sessionId);
+                        if (task && (!task.sessionId || currentStale)) {
+                            logger.info(`Captured session for task`, { taskId, sessionId, replacedStale: currentStale });
+                            if (task.sessionId) this.sessionToTaskId.delete(task.sessionId);
                             task.sessionId = sessionId;
                             this.sessionToTaskId.set(sessionId, taskId);
                             // Save immediately (not debounced) - session IDs are critical state
@@ -1826,9 +1924,14 @@ export class TaskSpawner extends EventEmitter {
 
                 existingFiles = new Set(currentFiles);
 
+                // Capture window: Claude Code can take well over 30s to first flush
+                // its session .jsonl on a slow/long turn. A premature timeout meant
+                // the sessionId was never captured and the task's history became
+                // unrecoverable on the next resume. 10 minutes covers realistic
+                // first-write latency; the interval is cheap (a single readdir/500ms).
                 const pending = this.pendingSessionCapture.get(taskId);
-                if (pending && Date.now() - pending.startTime > 30000) {
-                    logger.warn(`Session capture timeout`, { taskId });
+                if (pending && Date.now() - pending.startTime > 600000) {
+                    logger.warn(`Session capture timeout (10m)`, { taskId });
                     this.clearSessionCapture(taskId);
                 }
             } catch (_e) {
@@ -4141,18 +4244,26 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 
         let ptyProcess: IPty;
 
-        // Check if session file exists before trying to resume
+        // Check if the session file exists before trying to resume. Use the
+        // fallback resolver (handles moved workspaces / relocated project folders).
+        //
+        // IMPORTANT: if the file cannot be found we skip --resume for THIS launch
+        // but we do NOT null out persisted.sessionId. Nulling it was destructive —
+        // a single transient miss (worktree briefly unmounted, FS hiccup, file not
+        // yet flushed) permanently discarded the session, making later recovery
+        // impossible even after the file reappeared. Keeping the id lets a future
+        // reconnect succeed once the file is available again.
         let sessionIdToUse = persisted.sessionId;
         if (sessionIdToUse) {
-            const claudeDir = this.getClaudeProjectsDir(persisted.workspaceId);
-            const sessionFilePath = join(claudeDir, `${sessionIdToUse}.jsonl`);
-            if (!existsSync(sessionFilePath)) {
-                console.log(`[TaskSpawner] Session file not found for ${taskId}: ${sessionFilePath}`);
-                console.log(`[TaskSpawner] Will start fresh session instead of resuming`);
-                sessionIdToUse = null;
-                // Clear the invalid session ID from persisted data
-                persisted.sessionId = null;
-                this.scheduleSave();
+            const sessionFilePath = this.findSessionFile(persisted.workspaceId, sessionIdToUse);
+            if (!sessionFilePath) {
+                logger.warn('Session file not found; starting fresh this launch but preserving sessionId for future recovery', {
+                    taskId,
+                    sessionId: sessionIdToUse,
+                    workspaceId: persisted.workspaceId,
+                });
+                sessionIdToUse = null; // skip --resume for this launch only
+                // NOTE: persisted.sessionId is intentionally left intact.
             }
         }
 
@@ -4327,9 +4438,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             isActive: false,
             initialPromptSent: !needsDelivery,  // False if we have a prompt/message to deliver on ready
             pendingPrompt: deliverOnReady,  // Continuation or the user's first message
-            // Use sessionIdToUse (not persisted.sessionId) — if the session file was missing,
-            // sessionIdToUse was cleared to null so the PTY handler can capture the new session ID.
-            sessionId: sessionIdToUse,
+            // Preserve the original persisted.sessionId even when we skip --resume
+            // this launch (file temporarily missing). This keeps recovery possible if
+            // the file reappears. If Claude instead starts a brand-new session, the
+            // session-capture handler overwrites this with the new id on first output.
+            sessionId: persisted.sessionId,
             lastOutputLength: 0,  // Initialize for state polling
             totalOutputSize: 0,  // Incremental output size tracking
             savedBufferCount: 0,  // Incremental history saves
@@ -4454,6 +4567,18 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         }
 
         console.log(`[TaskSpawner] Disconnecting task ${taskId} (simulating restart)`);
+
+        // Last-chance session capture: if the interval watcher never caught this
+        // task's session file, try to resolve it from disk before we persist. A
+        // null sessionId here means the history is lost on the next resume.
+        if (!task.sessionId) {
+            const recovered = this.resolveLatestSessionId(task.workspaceId);
+            if (recovered) {
+                logger.info('Recovered sessionId at disconnect via latest-file scan', { taskId, sessionId: recovered });
+                task.sessionId = recovered;
+                this.sessionToTaskId.set(recovered, taskId);
+            }
+        }
 
         // Kill the process
         try {
