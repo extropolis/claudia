@@ -20,6 +20,7 @@ import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorP
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
+import { selectWorkspacesToRefresh } from './pr-refresh.js';
 import { WorktreeManager } from './worktree-manager.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
@@ -801,27 +802,44 @@ export async function createApp(basePath?: string) {
         if (!(await isGhAvailable())) return;
         prRefreshPassInFlight = true;
         try {
-        const tasks = taskSpawner.getAllTasks();
-        // Workspaces with at least one active task → refresh every interval.
-        const activeWorkspaceIds = new Set(
-            tasks.filter(t => t.state === 'busy' || t.state === 'starting' || t.state === 'waiting_input')
-                 .map(t => t.workspaceId)
-        );
-        // Workspaces with any task we haven't looked up yet → one-time lazy fetch.
-        const lazyWorkspaceIds = new Set(
-            tasks.map(t => t.workspaceId).filter(id => !prInfoSeen.has(id))
-        );
-        const toRefresh = new Set<string>([...activeWorkspaceIds, ...lazyWorkspaceIds]);
-        for (const id of toRefresh) {
-            await refreshPrInfoFor(id, true);  // force=true: periodic re-checks CI even if branch same
-        }
+            // Selection lives in pr-refresh.ts (pure + unit-tested). Critically it
+            // includes workspaces whose PR is still non-terminal even when their
+            // tasks have gone idle — a task pushes, opens a PR and goes idle
+            // exactly while CI runs, and the old activity-only rule froze those
+            // badges at their push-time state forever.
+            const toRefresh = selectWorkspacesToRefresh(
+                taskSpawner.getAllTasks(),
+                workspaceStore.getWorkspaces(),
+                prInfoSeen
+            );
+            if (toRefresh.length === 0) return;
+            logger.debug('PR info refresh pass', { count: toRefresh.length });
+
+            // Bounded concurrency: each refresh is a networked `gh` call with a
+            // 15s timeout. Awaiting them one at a time let a single slow repo
+            // stall the entire pass (and the reentrancy guard then skipped the
+            // next tick), which showed up as badges lagging far behind CI.
+            const PR_REFRESH_CONCURRENCY = 4;
+            let cursor = 0;
+            await Promise.all(
+                Array.from({ length: Math.min(PR_REFRESH_CONCURRENCY, toRefresh.length) }, async () => {
+                    while (cursor < toRefresh.length) {
+                        const id = toRefresh[cursor++];
+                        // force: re-check CI even when the branch is unchanged.
+                        await refreshPrInfoFor(id, true);
+                    }
+                })
+            );
         } finally {
             prRefreshPassInFlight = false;
         }
     }
 
     // Poll on an interval (90s) — only touches active/unseen workspaces, not all.
-    const PR_INFO_INTERVAL_MS = 90_000;
+    // 45s: the selection is now bounded to workspaces with non-terminal PRs
+    // (terminal merged/closed ones are skipped), so a shorter interval costs
+    // fewer `gh` calls in steady state than the old 90s pass did.
+    const PR_INFO_INTERVAL_MS = 45_000;
     const prInfoInterval = setInterval(() => { void refreshActiveWorkspacePrInfo(); }, PR_INFO_INTERVAL_MS);
     // Kick off an initial pass shortly after startup.
     setTimeout(() => { void refreshActiveWorkspacePrInfo(); }, 5_000);
@@ -2133,9 +2151,17 @@ export async function createApp(basePath?: string) {
 
                         logger.info('Resetting workspace', { workspaceId });
 
-                        // Step 1: Archive all tasks for this workspace
+                        // Step 1: Archive all tasks for this workspace AND its worktrees.
+                        // Fleet children live in .claudia-worktrees/* workspaces whose
+                        // workspaceId differs from the root — an exact-match filter
+                        // silently skipped them (the majority of tasks).
+                        const familyIds = new Set<string>([workspaceId]);
+                        const worktreeChildren = workspaceStore.getWorkspaces()
+                            .filter(w => w.worktreeParentId === workspaceId);
+                        for (const w of worktreeChildren) familyIds.add(w.id);
+
                         const allTasks = taskSpawner.getAllTasks();
-                        const workspaceTasks = allTasks.filter(t => t.workspaceId === workspaceId);
+                        const workspaceTasks = allTasks.filter(t => familyIds.has(t.workspaceId));
                         let archivedCount = 0;
                         for (const task of workspaceTasks) {
                             try {
@@ -2144,6 +2170,27 @@ export async function createApp(basePath?: string) {
                                 logger.info('Archived task during workspace reset', { taskId: task.id });
                             } catch (e) {
                                 logger.error('Failed to archive task during reset', { taskId: task.id, error: e });
+                            }
+                        }
+
+                        // Step 1b: Remove the worktrees themselves (tasks in them were
+                        // just archived, which kills their processes). Previously reset
+                        // never touched worktrees at all.
+                        let worktreesRemoved = 0;
+                        let worktreesFailed = 0;
+                        for (const w of worktreeChildren) {
+                            // Safety: never remove the primary workspace itself
+                            if (resolve(w.id) === resolve(workspaceId)) continue;
+                            try {
+                                const manager = new WorktreeManager();
+                                await manager.removeWorktree({ repoPath: workspaceId, worktreePath: w.id, force: true });
+                                workspaceStore.deleteWorkspace(w.id);
+                                broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: w.id } });
+                                worktreesRemoved++;
+                                logger.info('Removed worktree during workspace reset', { worktreePath: w.id });
+                            } catch (e) {
+                                worktreesFailed++;
+                                logger.error('Failed to remove worktree during reset', { worktreePath: w.id, error: e });
                             }
                         }
 
@@ -2194,6 +2241,8 @@ export async function createApp(basePath?: string) {
                                 workspaceId,
                                 archivedCount,
                                 totalTasks: workspaceTasks.length,
+                                worktreesRemoved,
+                                worktreesFailed,
                                 branchCheckout: branchResult.success,
                                 checkedOutBranch,
                                 branchError: branchResult.error || null,

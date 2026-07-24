@@ -507,6 +507,8 @@ export function useWebSocket() {
                             workspaceId: string;
                             archivedCount: number;
                             totalTasks: number;
+                            worktreesRemoved?: number;
+                            worktreesFailed?: number;
                             branchCheckout: boolean;
                             checkedOutBranch: string | null;
                             branchError: string | null;
@@ -516,6 +518,12 @@ export function useWebSocket() {
 
                         // Build a user-friendly notification
                         let message_text = `Reset complete: ${payload.archivedCount} task(s) archived.`;
+                        if (payload.worktreesRemoved) {
+                            message_text += ` ${payload.worktreesRemoved} worktree(s) removed.`;
+                        }
+                        if (payload.worktreesFailed) {
+                            message_text += ` ${payload.worktreesFailed} worktree(s) failed to remove — check logs.`;
+                        }
                         if (payload.isGitRepo) {
                             if (payload.branchCheckout && payload.checkedOutBranch) {
                                 message_text += ` Switched to branch "${payload.checkedOutBranch}".`;
