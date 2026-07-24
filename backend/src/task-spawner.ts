@@ -15,7 +15,7 @@ import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 
 const logger = createLogger('[TaskSpawner]');
 
@@ -2622,11 +2622,22 @@ export class TaskSpawner extends EventEmitter {
         console.log(`[TaskSpawner] createTaskWithClaudeCode called with workspaceId: "${workspaceId}"`);
         const id = `task-${Date.now()}-${randomBytes(5).toString('hex')}`;
 
+        // Pre-assign the Claude Code session id instead of watching the filesystem
+        // to discover it. Claude Code (>=2.x) accepts `--session-id <uuid>` and will
+        // use exactly that id for the conversation's .jsonl. This eliminates the
+        // capture race that lost history: previously Claudia spawned Claude with no
+        // id and polled ~/.claude/projects for a new file — but Claude flushes that
+        // file lazily (sometimes only at clean exit), so a restart/disconnect before
+        // the flush left sessionId null and the session unrecoverable. Now we know
+        // the id at spawn time and persist it immediately.
+        const preassignedSessionId = randomUUID();
+
         const customArgs = process.env['CC_CLAUDE_ARGS']
             ? process.env['CC_CLAUDE_ARGS'].split(' ')
             : [];
 
         const claudeArgs = [...customArgs];
+        claudeArgs.push('--session-id', preassignedSessionId);
 
         if (this.configStore?.getSkipPermissions()) {
             claudeArgs.push('--dangerously-skip-permissions');
@@ -2812,7 +2823,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             isActive: false,
             initialPromptSent: false,
             pendingPrompt: prompt,
-            sessionId: null,
+            // Known up-front because we passed it via --session-id (no capture race).
+            sessionId: preassignedSessionId,
             gitStateBefore: undefined, // Will be set asynchronously below
             systemPrompt: systemPrompt?.trim() || undefined,
             lastOutputLength: 0,  // Initialize for state polling
@@ -2838,8 +2850,15 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         this.setupProcessHandlers(task);
         this.tasks.set(id, task);
         this.taskBackends.set(id, 'claude-code');
-        this.scheduleSave();
+        // Register + persist the pre-assigned session id immediately (not debounced).
+        // This is the critical state that must survive a Windows tsx-watch restart,
+        // which hard-kills the process and skips exit handlers.
+        this.sessionToTaskId.set(preassignedSessionId, id);
+        this.saveTasks();
         this.emit('taskCreated', this.toPublicTask(task));
+        // Fallback only: with --session-id the id is already known, so the capture
+        // handler (guarded on !task.sessionId) is effectively a no-op. Kept for
+        // resilience if a Claude build ever ignores --session-id.
         this.startSessionCapture(id, workspaceId);
 
         // Fallback: if the ready signal is never detected (e.g., Claude Code changed its
