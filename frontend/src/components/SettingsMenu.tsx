@@ -123,6 +123,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     const [useLearnings, setUseLearnings] = useState(false);
     const [claudiaMcpServerEnabled, setClaudiaMcpServerEnabled] = useState(false);
     const [defaultBaseDirectory, setDefaultBaseDirectory] = useState('');
+    const [worktreeRetentionDays, setWorktreeRetentionDays] = useState(30);
 
     // CLI Switches state
     const [cliSwitches, setCliSwitches] = useState({
@@ -330,6 +331,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 setUseLearnings(config.useLearnings || false);
                 setClaudiaMcpServerEnabled(config.claudiaMcpServerEnabled || false);
                 setDefaultBaseDirectory(config.defaultBaseDirectory || '');
+                setWorktreeRetentionDays(typeof config.worktreeRetentionDays === 'number' ? config.worktreeRetentionDays : 30);
 
                 // Load SAP AI Core config
                 if (config.sapAiCore) {
@@ -697,6 +699,21 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             }
         } catch (error) {
             console.error('Failed to save default base directory:', error);
+        }
+    };
+
+    const saveWorktreeRetentionDays = async (value: number) => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ worktreeRetentionDays: value })
+            });
+            if (response.ok) {
+                setWorktreeRetentionDays(value);
+            }
+        } catch (error) {
+            console.error('Failed to save worktree retention days:', error);
         }
     };
 
@@ -1511,6 +1528,24 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                     placeholder="/path/to/projects"
                                     className="text-input"
                                     style={{ width: '100%', marginTop: '0.5em' }}
+                                />
+                            </div>
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Archived Worktree Retention (days)</span>
+                                    <span className="permission-description">
+                                        Archived tasks and their worktree folders are deleted after this many days. 0 = never. Worktrees with running tasks are never touched.
+                                    </span>
+                                </div>
+                                <input
+                                    type="number"
+                                    min={0}
+                                    max={3650}
+                                    value={worktreeRetentionDays}
+                                    onChange={(e) => setWorktreeRetentionDays(Math.max(0, parseInt(e.target.value || '0', 10)))}
+                                    onBlur={(e) => saveWorktreeRetentionDays(Math.max(0, parseInt(e.target.value || '0', 10)))}
+                                    className="text-input"
+                                    style={{ width: '6em', marginTop: '0.5em' }}
                                 />
                             </div>
                         </div>

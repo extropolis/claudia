@@ -22,6 +22,7 @@ import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
 import { selectWorkspacesToRefresh } from './pr-refresh.js';
 import { WorktreeManager } from './worktree-manager.js';
+import { classifyWorktree, removeWorktreeWithUnlockRetry } from './worktree-reaper.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
@@ -917,6 +918,66 @@ export async function createApp(basePath?: string) {
     const WORKTREE_SCAN_INTERVAL_MS = 60_000;
     const worktreeScanInterval = setInterval(() => { void discoverWorktrees(); }, WORKTREE_SCAN_INTERVAL_MS);
     setTimeout(() => { void discoverWorktrees(); }, 6_000);
+
+    // ===== Archived-worktree retention sweep =====
+    // Removes worktrees whose owning tasks are archived (after retentionDays)
+    // or that no task owns at all (orphans, immediate). Never touches a
+    // worktree referenced by a live/disconnected task. See worktree-reaper.ts
+    // and the 2026-07-18 retention design spec.
+    let worktreeSweepInFlight = false;
+    async function sweepArchivedWorktrees(): Promise<void> {
+        if (worktreeSweepInFlight) return;
+        worktreeSweepInFlight = true;
+        try {
+            const retentionDays = configStore.getWorktreeRetentionDays();
+            const records = workspaceStore.getWorkspaces()
+                .filter(w => w.worktreeParentId) as Array<{ id: string; worktreeParentId: string }>;
+            if (records.length === 0) return;
+
+            const activeTasks = taskSpawner.getAllTasks();       // live + disconnected
+            const archivedTasks = taskSpawner.getArchivedTasks();
+            const now = Date.now();
+            let removed = 0, skipped = 0, failed = 0;
+
+            for (const rec of records) {
+                const decision = classifyWorktree(
+                    { id: rec.id, worktreeParentId: rec.worktreeParentId },
+                    activeTasks.map(t => ({ id: t.id, workspaceId: t.workspaceId, lastActivity: t.lastActivity })),
+                    archivedTasks.map(t => ({ id: t.id, workspaceId: t.workspaceId, lastActivity: t.lastActivity })),
+                    now, retentionDays,
+                );
+                if (decision.action === 'skip') {
+                    skipped++;
+                    logger.info('Worktree sweep: skip', { worktree: rec.id, reason: decision.reason });
+                    continue;
+                }
+                try {
+                    await removeWorktreeWithUnlockRetry(rec.worktreeParentId, rec.id);
+                    workspaceStore.deleteWorkspace(rec.id);
+                    broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: rec.id } });
+                    for (const taskId of decision.archivedTaskIds) {
+                        if (taskSpawner.deleteArchivedTask(taskId)) {
+                            broadcast({ type: 'task:archived:deleted' as WSMessageType, payload: { taskId } });
+                        }
+                    }
+                    removed++;
+                    logger.info('Worktree sweep: removed', { worktree: rec.id, reason: decision.reason, archivedTasksDeleted: decision.archivedTaskIds.length });
+                } catch (e) {
+                    failed++;
+                    logger.error('Worktree sweep: removal FAILED', { worktree: rec.id, error: e instanceof Error ? e.message : String(e) });
+                }
+            }
+            if (removed > 0 || failed > 0) {
+                queueTasksUpdated();
+                logger.info('Worktree sweep complete', { removed, skipped, failed, retentionDays });
+            }
+        } finally {
+            worktreeSweepInFlight = false;
+        }
+    }
+    const WORKTREE_SWEEP_INTERVAL_MS = 60 * 60 * 1000; // hourly; reads config each run
+    const worktreeSweepInterval = setInterval(() => { void sweepArchivedWorktrees(); }, WORKTREE_SWEEP_INTERVAL_MS);
+    setTimeout(() => { void sweepArchivedWorktrees(); }, 30_000); // initial pass after startup settles
 
     // Debounced discovery trigger — multiple tasks going idle in quick succession
     // only fire one scan instead of one per task.
@@ -6472,6 +6533,7 @@ Guidelines:
         clearInterval(heartbeatInterval);
         clearInterval(prInfoInterval);
         clearInterval(worktreeScanInterval);
+        clearInterval(worktreeSweepInterval);
 
         // Notify all connected clients that the server is reloading
         broadcast({ type: 'server:reloading' as WSMessageType, payload: {} });

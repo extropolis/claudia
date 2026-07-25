@@ -36,6 +36,7 @@ interface MCPServerConfig {
  */
 export interface ConfigUpdatePayload {
     rules?: string;
+    worktreeRetentionDays?: number;
     mcpServers?: MCPServerConfig[];
     skipPermissions?: boolean;
     autoFocusOnInput?: boolean;
@@ -113,6 +114,15 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
             return { valid: false, error: 'rules must be a string' };
         }
         result.rules = payload.rules;
+    }
+
+    // Validate worktreeRetentionDays (optional non-negative integer; 0 = sweep disabled)
+    if (payload.worktreeRetentionDays !== undefined) {
+        const d = payload.worktreeRetentionDays;
+        if (typeof d !== 'number' || !Number.isInteger(d) || d < 0 || d > 3650) {
+            return { valid: false, error: 'worktreeRetentionDays must be an integer between 0 and 3650' };
+        }
+        result.worktreeRetentionDays = d;
     }
 
     // Validate mcpServers (optional array of MCP server configs)

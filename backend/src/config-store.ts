@@ -119,6 +119,7 @@ export interface AppConfig {
     tokenCostEnabled?: boolean;  // Enable cost calculation display (default: false)
     defaultBaseDirectory?: string;  // Default base directory for new workspaces (optional)
     modelTiering?: ModelTieringConfig;  // Complexity-based model selection for MCP-spawned tasks
+    worktreeRetentionDays?: number;  // Days before archived tasks' worktrees are swept (0 = never)
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
@@ -203,7 +204,8 @@ const DEFAULT_CONFIG: AppConfig = {
     claudiaMcpServerEnabled: true,  // Enabled by default
     tokenTrackingEnabled: true,  // Token usage tracking enabled by default
     defaultBaseDirectory: undefined,  // No default base directory set
-    modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } }
+    modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } },
+    worktreeRetentionDays: 30,  // Per the archived-worktree retention spec
 };
 
 export class ConfigStore {
@@ -302,6 +304,9 @@ export class ConfigStore {
         if (updates.skipPermissions !== undefined) {
             this.config.skipPermissions = updates.skipPermissions;
         }
+        if (updates.worktreeRetentionDays !== undefined) {
+            this.config.worktreeRetentionDays = updates.worktreeRetentionDays;
+        }
         if (updates.rules !== undefined) {
             this.config.rules = updates.rules;
         }
@@ -395,6 +400,12 @@ export class ConfigStore {
 
     getSkipPermissions(): boolean {
         return this.config.skipPermissions;
+    }
+
+    /** Days before archived tasks' worktrees are swept; 0 disables the sweep. */
+    getWorktreeRetentionDays(): number {
+        const v = this.config.worktreeRetentionDays;
+        return typeof v === 'number' && v >= 0 ? v : 30;
     }
 
     getRules(): string {
