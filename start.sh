@@ -9,11 +9,24 @@
 set -e
 
 WATCH=0
+FORCE=0
 for arg in "$@"; do
     case "$arg" in
         --watch|-w) WATCH=1 ;;
+        --force|-f) FORCE=1 ;;
     esac
 done
+
+# Recursively kill a process and all its descendants (vite spawns esbuild
+# grandchildren that `pkill -P` alone would miss). ONLY safe for the frontend:
+# the backend's children are live Claude Code sessions — never tree-kill it.
+kill_tree() {
+    local pid=$1
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill_tree "$child"
+    done
+    kill "$pid" 2>/dev/null
+}
 
 # ============================================
 # PORT CONFIGURATION - Single source of truth
@@ -89,21 +102,69 @@ for helper in node_modules/node-pty/prebuilds/*/spawn-helper; do
     [ -f "$helper" ] && chmod +x "$helper"
 done
 
-# Check if ports are available
+# Check if ports are available — LISTENERS only. A plain `lsof -ti:port`
+# also matches client sockets (e.g. a browser's CLOSED/TIME_WAIT connection
+# to a dead backend), which produced false "port in use" failures.
 echo "🔍 Checking ports..."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ports_busy=0
 for port in $BACKEND_PORT $FRONTEND_PORT $OPENCODE_PORT; do
-    if lsof -ti:$port >/dev/null 2>&1; then
-        echo "❌ Port $port is already in use:"
-        lsof -i:$port
+    listener_pids=$(lsof -tiTCP:$port -sTCP:LISTEN 2>/dev/null)
+    [ -z "$listener_pids" ] && continue
+
+    for pid in $listener_pids; do
+        cmd=$(ps -p "$pid" -o command= 2>/dev/null)
+        # SAFETY: only ever offer to kill a process that provably belongs to
+        # THIS claudia checkout (command line contains this repo's path).
+        # Anything else — Claude Code sessions, other projects, unknown
+        # processes — is reported and never touched.
+        case "$cmd" in
+            *"$SCRIPT_DIR"*)
+                echo "⚠️  Port $port is held by a stale claudia process (PID $pid):"
+                echo "    ${cmd:0:120}"
+                do_kill=0
+                if [ "$FORCE" -eq 1 ]; then
+                    do_kill=1
+                elif [ -t 0 ]; then
+                    printf "    Kill it to free port %s? [y/N] " "$port"
+                    read -r answer
+                    [ "$answer" = "y" ] || [ "$answer" = "Y" ] && do_kill=1
+                fi
+                if [ "$do_kill" -eq 1 ]; then
+                    if [ "$port" = "$BACKEND_PORT" ]; then
+                        # Backend: plain SIGTERM only — graceful shutdown saves
+                        # task state; its children are live Claude Code sessions
+                        # and must NOT be tree-killed out from under it.
+                        kill "$pid" 2>/dev/null
+                        # Wait up to 10s for graceful exit
+                        for _ in $(seq 1 20); do
+                            kill -0 "$pid" 2>/dev/null || break
+                            sleep 0.5
+                        done
+                    else
+                        # Frontend/opencode: tree-kill (vite's esbuild children)
+                        kill_tree "$pid"
+                        sleep 1
+                    fi
+                fi
+                ;;
+            *)
+                echo "❌ Port $port is in use by a NON-claudia process (PID $pid) — refusing to touch it:"
+                echo "    ${cmd:0:120}"
+                ;;
+        esac
+    done
+
+    # Re-check after any kills
+    if [ -n "$(lsof -tiTCP:$port -sTCP:LISTEN 2>/dev/null)" ]; then
         ports_busy=1
     fi
 done
 
 if [ $ports_busy -eq 1 ]; then
     echo ""
-    echo "Please free the ports above and try again."
-    echo "You can kill processes on a port with: kill \$(lsof -ti:<port>)"
+    echo "Please free the ports above and try again (or re-run with --force"
+    echo "to auto-kill stale claudia processes)."
     exit 1
 fi
 
@@ -133,17 +194,8 @@ export NODE_OPTIONS="--max-old-space-size=8192"
 if [ "$WATCH" -eq 1 ]; then BACKEND_SCRIPT="dev"; else BACKEND_SCRIPT="dev:no-watch"; fi
 echo "Backend mode: $BACKEND_SCRIPT"
 
-# Recursively kill a process and all its descendants (vite spawns esbuild
-# grandchildren that `pkill -P` alone would miss).
-kill_tree() {
-    local pid=$1
-    for child in $(pgrep -P "$pid" 2>/dev/null); do
-        kill_tree "$child"
-    done
-    kill "$pid" 2>/dev/null
-}
-
 # Frontend as a background child; kill its whole tree on exit.
+# (kill_tree is defined near the top of the script.)
 npm run dev -w frontend &
 FRONTEND_PID=$!
 trap "rm -f '$LOCK_FILE'; kill_tree $FRONTEND_PID" EXIT INT TERM
