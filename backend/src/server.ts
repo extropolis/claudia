@@ -917,7 +917,7 @@ export async function createApp(basePath?: string) {
     // Periodic sweep + initial pass shortly after startup.
     const WORKTREE_SCAN_INTERVAL_MS = 60_000;
     const worktreeScanInterval = setInterval(() => { void discoverWorktrees(); }, WORKTREE_SCAN_INTERVAL_MS);
-    setTimeout(() => { void discoverWorktrees(); }, 6_000);
+    const worktreeScanKickoff = setTimeout(() => { void discoverWorktrees(); }, 6_000);
 
     // ===== Archived-worktree retention sweep =====
     // Removes worktrees whose owning tasks are archived (after retentionDays)
@@ -977,7 +977,7 @@ export async function createApp(basePath?: string) {
     }
     const WORKTREE_SWEEP_INTERVAL_MS = 60 * 60 * 1000; // hourly; reads config each run
     const worktreeSweepInterval = setInterval(() => { void sweepArchivedWorktrees(); }, WORKTREE_SWEEP_INTERVAL_MS);
-    setTimeout(() => { void sweepArchivedWorktrees(); }, 30_000); // initial pass after startup settles
+    const worktreeSweepKickoff = setTimeout(() => { void sweepArchivedWorktrees(); }, 30_000); // initial pass after startup settles
 
     // Debounced discovery trigger — multiple tasks going idle in quick succession
     // only fire one scan instead of one per task.
@@ -6558,5 +6558,27 @@ Guidelines:
     // Note: SIGINT/SIGTERM handlers are set up in index.ts to avoid duplicate handlers
     // The gracefulShutdown function is exported for use by the restart endpoint
 
-    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, tunnelManager };
+    /**
+     * Test-only shutdown: everything gracefulShutdown does EXCEPT
+     * process.exit — clears all background timers, destroys the spawner,
+     * closes sockets and the HTTP server. Lets integration tests boot a
+     * real server via createApp(tmpDir) and tear it down cleanly.
+     */
+    async function shutdownForTests(): Promise<void> {
+        clearInterval(heartbeatInterval);
+        clearInterval(prInfoInterval);
+        clearInterval(worktreeScanInterval);
+        clearInterval(worktreeSweepInterval);
+        clearTimeout(worktreeScanKickoff);
+        clearTimeout(worktreeSweepKickoff);
+        try { await tunnelManager.stop(); } catch { /* not active in tests */ }
+        taskSpawner.destroy();
+        for (const client of clients) {
+            try { client.close(1001, 'test shutdown'); } catch { /* ignore */ }
+        }
+        await new Promise<void>((resolve) => { wss.close(() => resolve()); });
+        await new Promise<void>((resolve) => { server.close(() => resolve()); });
+    }
+
+    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, shutdownForTests, tunnelManager };
 }

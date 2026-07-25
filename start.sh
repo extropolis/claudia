@@ -31,13 +31,14 @@ kill_tree() {
 # ============================================
 # PORT CONFIGURATION - Single source of truth
 # ============================================
-BACKEND_PORT=4001
-FRONTEND_PORT=5173
-OPENCODE_PORT=4097
+# CLAUDIA_TEST_* overrides exist ONLY for scripts/test-start-port-check.sh
+BACKEND_PORT="${CLAUDIA_TEST_BACKEND_PORT:-4001}"
+FRONTEND_PORT="${CLAUDIA_TEST_FRONTEND_PORT:-5173}"
+OPENCODE_PORT="${CLAUDIA_TEST_OPENCODE_PORT:-4097}"
 # ============================================
 
 # Lock file to prevent duplicate starts
-LOCK_FILE="/tmp/claudia-server.lock"
+LOCK_FILE="${CLAUDIA_LOCK_FILE:-/tmp/claudia-server.lock}"
 
 if [ -f "$LOCK_FILE" ]; then
     LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
@@ -54,14 +55,17 @@ fi
 echo $$ > "$LOCK_FILE"
 
 # Clean up lock file on exit
-trap "rm -f '$LOCK_FILE'" EXIT INT TERM
+trap 'rm -f "$LOCK_FILE"' EXIT INT TERM
 
 # Ensure OpenCode CLI is in PATH
 export PATH=$HOME/.opencode/bin:$PATH
 
 # Load environment variables if .env exists
 if [ -f .env ]; then
-    set -a; source .env; set +a
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
 fi
 
 # ============================================
@@ -112,7 +116,7 @@ for port in $BACKEND_PORT $FRONTEND_PORT $OPENCODE_PORT; do
     # `|| true`: the script runs under `set -e`, and lsof exits 1 when a port
     # has no listener — without the guard, a FREE port silently killed the
     # whole script right after "Checking ports...".
-    listener_pids=$(lsof -tiTCP:$port -sTCP:LISTEN 2>/dev/null || true)
+    listener_pids=$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
     if [ -z "$listener_pids" ]; then
         continue
     fi
@@ -163,7 +167,7 @@ for port in $BACKEND_PORT $FRONTEND_PORT $OPENCODE_PORT; do
     done
 
     # Re-check after any kills
-    if [ -n "$(lsof -tiTCP:$port -sTCP:LISTEN 2>/dev/null)" ]; then
+    if [ -n "$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null)" ]; then
         ports_busy=1
     fi
 done
@@ -176,6 +180,12 @@ if [ $ports_busy -eq 1 ]; then
 fi
 
 echo "✅ Ports are free"
+
+# Test hook: CI runs the port-check logic in isolation (see
+# scripts/test-start-port-check.sh) without starting any servers.
+if [ "${CLAUDIA_PORT_CHECK_ONLY:-0}" = "1" ]; then
+    exit 0
+fi
 echo ""
 echo "🔮 Starting Claudia..."
 echo "   Backend: http://localhost:$BACKEND_PORT"
@@ -205,7 +215,7 @@ echo "Backend mode: $BACKEND_SCRIPT"
 # (kill_tree is defined near the top of the script.)
 npm run dev -w frontend &
 FRONTEND_PID=$!
-trap "rm -f '$LOCK_FILE'; kill_tree $FRONTEND_PID" EXIT INT TERM
+trap 'rm -f "$LOCK_FILE"; kill_tree "$FRONTEND_PID"' EXIT INT TERM
 
 RESTART_EXIT_CODE=75
 while true; do
