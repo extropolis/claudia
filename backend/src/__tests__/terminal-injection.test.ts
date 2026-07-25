@@ -13,7 +13,6 @@
  * fix (5031 injected responses → 0), now a permanent gate.
  */
 import { describe, it, expect } from 'vitest';
-// @ts-expect-error CJS default-export interop
 import xtermPkg from '@xterm/headless';
 import { stripTerminalQueries, incompleteEscapeSuffixStart } from '@claudia/shared';
 
