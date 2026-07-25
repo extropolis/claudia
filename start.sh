@@ -25,7 +25,7 @@ kill_tree() {
     for child in $(pgrep -P "$pid" 2>/dev/null); do
         kill_tree "$child"
     done
-    kill "$pid" 2>/dev/null
+    kill "$pid" 2>/dev/null || true
 }
 
 # ============================================
@@ -109,11 +109,16 @@ echo "🔍 Checking ports..."
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ports_busy=0
 for port in $BACKEND_PORT $FRONTEND_PORT $OPENCODE_PORT; do
-    listener_pids=$(lsof -tiTCP:$port -sTCP:LISTEN 2>/dev/null)
-    [ -z "$listener_pids" ] && continue
+    # `|| true`: the script runs under `set -e`, and lsof exits 1 when a port
+    # has no listener — without the guard, a FREE port silently killed the
+    # whole script right after "Checking ports...".
+    listener_pids=$(lsof -tiTCP:$port -sTCP:LISTEN 2>/dev/null || true)
+    if [ -z "$listener_pids" ]; then
+        continue
+    fi
 
     for pid in $listener_pids; do
-        cmd=$(ps -p "$pid" -o command= 2>/dev/null)
+        cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
         # SAFETY: only ever offer to kill a process that provably belongs to
         # THIS claudia checkout (command line contains this repo's path).
         # Anything else — Claude Code sessions, other projects, unknown
@@ -127,15 +132,17 @@ for port in $BACKEND_PORT $FRONTEND_PORT $OPENCODE_PORT; do
                     do_kill=1
                 elif [ -t 0 ]; then
                     printf "    Kill it to free port %s? [y/N] " "$port"
-                    read -r answer
-                    [ "$answer" = "y" ] || [ "$answer" = "Y" ] && do_kill=1
+                    read -r answer || true
+                    if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
+                        do_kill=1
+                    fi
                 fi
                 if [ "$do_kill" -eq 1 ]; then
                     if [ "$port" = "$BACKEND_PORT" ]; then
                         # Backend: plain SIGTERM only — graceful shutdown saves
                         # task state; its children are live Claude Code sessions
                         # and must NOT be tree-killed out from under it.
-                        kill "$pid" 2>/dev/null
+                        kill "$pid" 2>/dev/null || true
                         # Wait up to 10s for graceful exit
                         for _ in $(seq 1 20); do
                             kill -0 "$pid" 2>/dev/null || break
