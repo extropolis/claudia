@@ -135,4 +135,38 @@ describe('SharedMcpManager (no external process)', () => {
         const m = new SharedMcpManager(4599);
         expect(m.getStatus().url).toBe('http://localhost:4599/mcp');
     });
+
+    it('refuses to adopt a non-Playwright MCP server on the port', async () => {
+        // Regression: probe() originally accepted any valid MCP initialize
+        // response, so an unrelated server squatting the port got adopted and
+        // every task silently received the wrong toolset.
+        const http = await import('http');
+        const port = 4712;
+        const srv = http.createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(
+                JSON.stringify({
+                    jsonrpc: '2.0',
+                    id: 1,
+                    result: {
+                        protocolVersion: '2024-11-05',
+                        capabilities: {},
+                        serverInfo: { name: 'TotallyNotPlaywright', version: '9' },
+                    },
+                }),
+            );
+        });
+        await new Promise<void>(r => srv.listen(port, 'localhost', () => r()));
+
+        try {
+            const m = new SharedMcpManager(port);
+            // Must not adopt. It also can't bind the occupied port, so the
+            // correct outcome is a clean false → callers fall back to stdio.
+            expect(await m.ensureStarted()).toBe(false);
+            expect(m.getStatus().adopted).toBe(false);
+            m.stop();
+        } finally {
+            await new Promise<void>(r => srv.close(() => r()));
+        }
+    }, 60_000);
 });

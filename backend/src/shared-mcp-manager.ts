@@ -24,7 +24,7 @@
  */
 
 import { spawn } from 'child_process';
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync, openSync, closeSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -78,6 +78,10 @@ export class SharedMcpManager {
         return join(__dirname, '..', `.shared-playwright-mcp-${this.port}.pid`);
     }
 
+    private get logFile(): string {
+        return join(__dirname, '..', `.shared-playwright-mcp-${this.port}.log`);
+    }
+
     getStatus(): SharedMcpStatus {
         return {
             running: this.pid !== undefined,
@@ -127,7 +131,16 @@ export class SharedMcpManager {
             });
             if (!res.ok) return false;
             const text = await res.text();
-            return text.includes('"result"') && text.includes('serverInfo');
+            if (!text.includes('"result"')) return false;
+
+            // Verify it's actually Playwright. Any MCP server could be holding
+            // this port; adopting one would hand every task the wrong toolset,
+            // and the failure would look like Playwright tools silently
+            // vanishing rather than a port conflict.
+            //
+            // The body is SSE-framed ("event: message\ndata: {...}"), so match
+            // the serverInfo name textually rather than JSON.parse-ing.
+            return /"serverInfo"\s*:\s*\{[^}]*"name"\s*:\s*"Playwright"/.test(text);
         } catch {
             return false;
         }
@@ -176,15 +189,36 @@ export class SharedMcpManager {
             return false;
         }
 
-        // Detached + unref'd so the server survives backend restarts. stdio is
-        // ignored rather than piped: an unread pipe fills its buffer and would
-        // eventually block the server mid-request.
+        // Detached + unref'd so the server survives backend restarts.
+        //
+        // stdout/stderr go to a log file, not 'ignore': when the server fails
+        // to start, the only symptom is a readiness timeout, and with no output
+        // captured there is nothing to debug from. A file (rather than a pipe)
+        // avoids the unread-pipe buffer filling up and blocking the server
+        // mid-request once it is running.
+        let stdio: 'ignore' | ['ignore', number, number] = 'ignore';
+        let logFd: number | undefined;
+        try {
+            logFd = openSync(this.logFile, 'a');
+            stdio = ['ignore', logFd, logFd];
+        } catch (err) {
+            logger.warn('Could not open shared MCP log file; output will be discarded', {
+                path: this.logFile,
+                error: err,
+            });
+        }
+
         const child = spawn(
             process.execPath,
             [cliPath, '--port', String(this.port), '--host', BIND_HOST],
-            { detached: true, stdio: 'ignore' },
+            { detached: true, stdio },
         );
         child.unref();
+        // The child holds its own dup of the fd; ours would otherwise leak on
+        // every respawn.
+        if (logFd !== undefined) {
+            try { closeSync(logFd); } catch { /* already closed */ }
+        }
 
         if (child.pid === undefined) {
             logger.error('Failed to spawn shared Playwright MCP server (no pid)');
@@ -193,21 +227,48 @@ export class SharedMcpManager {
         this.pid = child.pid;
         this.adopted = false;
 
+        // NOTE: the pid file is written only after we confirm this child both
+        // came up and survived. Writing it eagerly would let a race loser
+        // clobber the winner's pid, leaving the file pointing at a dead
+        // process that stop() would later "kill" — by then possibly a
+        // recycled, unrelated pid.
+        const ready = await this.waitUntilReady(child.pid);
+        if (!ready) {
+            logger.error('Shared Playwright MCP server did not become ready; falling back to stdio', {
+                port: this.port,
+                timeoutMs: READY_TIMEOUT_MS,
+                logFile: this.logFile,
+            });
+            // Kill only the process we spawned. Deliberately NOT stop(), which
+            // is a terminal teardown — a transient startup failure must not
+            // permanently disable health-check recovery.
+            this.killSpawned();
+            return false;
+        }
+
+        // Two backends can race to spawn (this codebase has a history of nested
+        // instances). The loser's child dies on EADDRINUSE while the port goes
+        // healthy anyway, so readiness alone doesn't prove OUR child is the one
+        // serving. Recording a dead pid would make stop() later kill an
+        // unrelated process that inherited the number.
+        if (!this.isAlive(child.pid)) {
+            const owner = this.readPidFile();
+            logger.info('Lost spawn race for shared MCP port; adopting the winner', {
+                port: this.port,
+                ourDeadPid: child.pid,
+                ownerPid: owner,
+            });
+            this.pid = owner !== child.pid ? owner : undefined;
+            this.adopted = true;
+            this.startHealthChecks();
+            return true;
+        }
+
         try {
             writeFileSync(this.pidFile, String(child.pid), 'utf-8');
         } catch (err) {
             // Non-fatal: we lose cross-restart pid reporting, not the server.
             logger.warn('Could not write shared MCP pid file', { error: err });
-        }
-
-        const ready = await this.waitUntilReady();
-        if (!ready) {
-            logger.error('Shared Playwright MCP server did not become ready; falling back to stdio', {
-                port: this.port,
-                timeoutMs: READY_TIMEOUT_MS,
-            });
-            this.stop();
-            return false;
         }
 
         logger.info('Started shared Playwright MCP server', {
@@ -219,10 +280,49 @@ export class SharedMcpManager {
         return true;
     }
 
-    private async waitUntilReady(): Promise<boolean> {
+    private isAlive(pid: number | undefined): boolean {
+        if (pid === undefined) return false;
+        try {
+            process.kill(pid, 0);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /** Kill only a process this instance spawned, without terminal teardown. */
+    private killSpawned(): void {
+        if (this.pid !== undefined) {
+            try {
+                process.kill(this.pid, 'SIGTERM');
+            } catch {
+                // Already gone.
+            }
+            this.pid = undefined;
+        }
+    }
+
+    /**
+     * Poll until the server answers, the child dies, or we time out.
+     *
+     * Watching the child matters for startup latency: if the port is already
+     * taken (EADDRINUSE) the child exits within milliseconds, and without this
+     * check we'd block the backend for the full 30s timeout before falling
+     * back to stdio. Callers distinguish "died but port healthy" (lost a spawn
+     * race — adopt) from "died and port dead" (genuine failure).
+     */
+    private async waitUntilReady(childPid?: number): Promise<boolean> {
         const deadline = Date.now() + READY_TIMEOUT_MS;
         while (Date.now() < deadline) {
             if (await this.probe()) return true;
+            if (childPid !== undefined && !this.isAlive(childPid)) {
+                logger.warn('Shared MCP child exited before becoming ready', {
+                    port: this.port,
+                    pid: childPid,
+                    logFile: this.logFile,
+                });
+                return false;
+            }
             await new Promise(r => setTimeout(r, READY_POLL_INTERVAL_MS));
         }
         return false;
