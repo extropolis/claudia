@@ -17,6 +17,15 @@ import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
 import { randomBytes } from 'crypto';
 import { SharedMcpManager } from './shared-mcp-manager.js';
+import {
+    selectTasksToDisconnect,
+    measureRssByPid,
+    budgetBytesFromPct,
+    formatMB,
+    DEFAULT_BUDGET_PCT,
+    DEFAULT_MIN_LIVE,
+    GuardCandidate,
+} from './memory-guard.js';
 
 /**
  * Identify a Playwright MCP entry so it can be routed to the shared HTTP
@@ -302,6 +311,12 @@ export class TaskSpawner extends EventEmitter {
     private readonly idleReapMs: number;
     /** How often the reaper runs. Configurable via IDLE_TASK_REAP_INTERVAL_MS. */
     private readonly idleReapIntervalMs: number;
+    /** Percent of system RAM live agents may use before shedding. 0 disables. */
+    private readonly memoryBudgetPct: number;
+    /** Floor on live agents; the guard never sheds below this. */
+    private readonly memoryMinLiveTasks: number;
+    private readonly memoryGuardIntervalMs: number;
+    private memoryGuardInterval: NodeJS.Timeout | null = null;
 
     // On-disk history file cap.
     // The in-memory outputHistory is trimmed to 2MB (see MAX_HISTORY_SIZE in
@@ -366,6 +381,22 @@ export class TaskSpawner extends EventEmitter {
             ? envReapInterval
             : 10 * 60 * 1000;
 
+        // Memory guard config. Sheds the coldest idle agents once live tasks
+        // exceed a share of system RAM, so a busy workspace degrades into
+        // fewer live agents rather than into swap. 0 disables.
+        const envBudgetPct = parseFloat(process.env.CLAUDIA_MEMORY_BUDGET_PCT || '');
+        this.memoryBudgetPct = !isNaN(envBudgetPct) && envBudgetPct >= 0
+            ? envBudgetPct
+            : DEFAULT_BUDGET_PCT;
+        const envMinLive = parseInt(process.env.CLAUDIA_MIN_LIVE_TASKS || '', 10);
+        this.memoryMinLiveTasks = !isNaN(envMinLive) && envMinLive >= 0
+            ? envMinLive
+            : DEFAULT_MIN_LIVE;
+        const envGuardInterval = parseInt(process.env.CLAUDIA_MEMORY_GUARD_INTERVAL_MS || '', 10);
+        this.memoryGuardIntervalMs = !isNaN(envGuardInterval) && envGuardInterval >= 10_000
+            ? envGuardInterval
+            : 60_000;
+
         // History file cap config. Default: rotate at 10MB, keep last 5MB tail.
         // Files on disk are kept large to preserve full scrollback history.
         // Memory loading on reconnect is capped separately (MAX_RECONNECT_HISTORY
@@ -399,6 +430,7 @@ export class TaskSpawner extends EventEmitter {
             this.startStatePolling();
             // Start idle-task reaper (claude-code only — OpenCode has its own lifecycle)
             this.startIdleTaskReaper();
+            this.startMemoryGuard();
         }
 
         if (autoReconnect && this.disconnectedTasks.size > 0) {
@@ -783,6 +815,10 @@ export class TaskSpawner extends EventEmitter {
             clearInterval(this.idleReaperInterval);
             this.idleReaperInterval = null;
         }
+        if (this.backendType === 'claude-code' && this.memoryGuardInterval) {
+            clearInterval(this.memoryGuardInterval);
+            this.memoryGuardInterval = null;
+        }
 
         // Update the config store if we have one
         if (this.configStore) {
@@ -796,6 +832,7 @@ export class TaskSpawner extends EventEmitter {
         if (this.backendType === 'claude-code') {
             this.startStatePolling();
             this.startIdleTaskReaper();
+            this.startMemoryGuard();
         }
     }
 
@@ -1062,6 +1099,95 @@ export class TaskSpawner extends EventEmitter {
             intervalMs: this.idleReapIntervalMs,
             idleThresholdMs: this.idleReapMs,
         });
+    }
+
+    /**
+     * Start the memory guard. Runs `enforceMemoryBudget` on an interval.
+     *
+     * This complements the idle reaper rather than duplicating it: the reaper
+     * sheds on AGE (idle >24h) regardless of pressure, while the guard sheds on
+     * PRESSURE regardless of age. Twenty agents idle for an hour never trip the
+     * reaper but will happily exhaust RAM.
+     */
+    private startMemoryGuard(): void {
+        if (this.memoryGuardInterval) return;
+        if (this.memoryBudgetPct <= 0) {
+            logger.info('Memory guard disabled (CLAUDIA_MEMORY_BUDGET_PCT=0)');
+            return;
+        }
+        this.memoryGuardInterval = setInterval(() => {
+            try {
+                this.enforceMemoryBudget();
+            } catch (e) {
+                logger.error('Memory guard threw', { error: (e as Error).message });
+            }
+        }, this.memoryGuardIntervalMs);
+        this.memoryGuardInterval.unref?.();
+        logger.info('Memory guard started', {
+            budgetPct: this.memoryBudgetPct,
+            budgetMB: formatMB(budgetBytesFromPct(this.memoryBudgetPct)),
+            minLiveTasks: this.memoryMinLiveTasks,
+            intervalMs: this.memoryGuardIntervalMs,
+        });
+    }
+
+    /**
+     * Disconnect the coldest idle agents when live tasks exceed the memory
+     * budget. Disconnected tasks keep their sessionId and resume on click, so
+     * this sheds memory without losing work.
+     */
+    private enforceMemoryBudget(): void {
+        const candidates: GuardCandidate[] = [];
+        for (const task of this.tasks.values()) {
+            const pid = task.process?.pid;
+            if (pid === undefined) continue;
+            candidates.push({
+                id: task.id,
+                state: task.state,
+                lastActivity: task.lastActivity,
+                pid,
+            });
+        }
+        if (candidates.length === 0) return;
+
+        const rssByPid = measureRssByPid(candidates.map(c => c.pid!));
+        const budgetBytes = budgetBytesFromPct(this.memoryBudgetPct);
+        const { toDisconnect, usedBytes, projectedBytes } = selectTasksToDisconnect({
+            tasks: candidates,
+            rssByPid,
+            budgetBytes,
+            minLive: this.memoryMinLiveTasks,
+        });
+
+        if (toDisconnect.length === 0) return;
+
+        logger.info('Memory budget exceeded; disconnecting coldest idle agents', {
+            liveTasks: candidates.length,
+            usedMB: formatMB(usedBytes),
+            budgetMB: formatMB(budgetBytes),
+            projectedMB: formatMB(projectedBytes),
+            disconnecting: toDisconnect.length,
+        });
+
+        for (const id of toDisconnect) {
+            try {
+                this.disconnectTask(id);
+                // Same as the idle reaper: clear the continuation flags so the
+                // task isn't auto-reconnected on next startup. Without this the
+                // backend treats the dead PTY as a sleep-death and resurrects
+                // it, which turns shedding into a respawn storm.
+                const persisted = this.disconnectedTasks.get(id);
+                if (persisted) {
+                    persisted.shouldContinue = false;
+                    persisted.wasInterrupted = false;
+                }
+            } catch (e) {
+                logger.warn('Failed to disconnect task for memory budget', {
+                    taskId: id,
+                    error: (e as Error).message,
+                });
+            }
+        }
     }
 
     /**
@@ -4441,6 +4567,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         if (this.idleReaperInterval) {
             clearInterval(this.idleReaperInterval);
             this.idleReaperInterval = null;
+        }
+        if (this.memoryGuardInterval) {
+            clearInterval(this.memoryGuardInterval);
+            this.memoryGuardInterval = null;
         }
 
         // Clean up all session capture intervals to prevent memory leaks
