@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# pid file for the shared Playwright MCP server (see shared-mcp-manager.ts)
+backend/.shared-playwright-mcp-*.pid
+
 # Build outputs
 dist/
 dist-electron/

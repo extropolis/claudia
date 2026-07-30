@@ -16,6 +16,17 @@ import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
 import { randomBytes } from 'crypto';
+import { SharedMcpManager } from './shared-mcp-manager.js';
+
+/**
+ * Identify a Playwright MCP entry so it can be routed to the shared HTTP
+ * server. Matches on the package in argv rather than the server name alone,
+ * since users can rename servers in their config.
+ */
+function isPlaywrightMcpServer(server: { name: string; args?: string[] }): boolean {
+    if (server.args?.some(a => a.includes('@playwright/mcp'))) return true;
+    return server.name === 'playwright';
+}
 
 const logger = createLogger('[TaskSpawner]');
 
@@ -258,6 +269,13 @@ export class TaskSpawner extends EventEmitter {
     /** Counter of persisted saves, for diagnostics. */
     private saveCounter: number = 0;
     private configStore: ConfigStore | null = null;
+    /**
+     * Set when the shared Playwright MCP server is up. While running, tasks get
+     * an HTTP URL instead of their own stdio subprocess; when absent or
+     * unhealthy, buildMcpConfig falls back to per-task stdio so browser tooling
+     * keeps working.
+     */
+    private sharedMcpManager: SharedMcpManager | null = null;
     private pendingSessionCapture: Map<string, { taskId: string; workspaceId: string; startTime: number }> = new Map();
     /** Map of task IDs to their session capture interval timers */
     private sessionCaptureIntervals: Map<string, NodeJS.Timeout> = new Map();
@@ -498,6 +516,14 @@ export class TaskSpawner extends EventEmitter {
      * Build the MCP config object from the current config store settings.
      * Returns null if no enabled MCP servers are found.
      */
+    /**
+     * Attach the shared MCP manager. Pass null to disable sharing, which makes
+     * buildMcpConfig fall back to per-task stdio servers.
+     */
+    setSharedMcpManager(manager: SharedMcpManager | null): void {
+        this.sharedMcpManager = manager;
+    }
+
     private buildMcpConfig(workspaceId?: string, taskId?: string): { mcpConfig: Record<string, Record<string, unknown>>; enabledMcpServers: { name: string }[] } | null {
         const mcpServers = this.configStore?.getMCPServers() || [];
         const enabledMcpServers = mcpServers.filter(s => s.enabled);
@@ -520,6 +546,20 @@ export class TaskSpawner extends EventEmitter {
                 if (server.autoApprove && server.autoApprove.length > 0) config.autoApprove = server.autoApprove;
                 if (server.description) config.description = server.description;
                 if (server.headers) config.headers = server.headers;
+                mcpConfig[server.name] = config;
+            } else if (this.sharedMcpManager?.getStatus().running && isPlaywrightMcpServer(server)) {
+                // Route Playwright through the single shared HTTP server instead of
+                // giving this task its own subprocess. Stdio is 1:1, so N tasks used
+                // to mean N Playwright servers — the dominant memory cost on a busy
+                // machine. One shared server multiplexes sessions (each client gets
+                // its own mcp-session-id and browser context).
+                const config: Record<string, unknown> = {
+                    type: 'http',
+                    url: this.sharedMcpManager.getStatus().url
+                };
+                if (server.timeout !== undefined) config.timeout = server.timeout;
+                if (server.autoApprove && server.autoApprove.length > 0) config.autoApprove = server.autoApprove;
+                if (server.description) config.description = server.description;
                 mcpConfig[server.name] = config;
             } else {
                 // Optimize npx commands: resolve to direct node invocation when possible.
