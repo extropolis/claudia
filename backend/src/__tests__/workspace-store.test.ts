@@ -828,4 +828,53 @@ describe('WorkspaceStore', () => {
             expect(Array.isArray(defaultStore.getWorkspaces())).toBe(true);
         });
     });
+
+    describe('addWorktreeWorkspace parent-walk cycle guard', () => {
+        // Seed the on-disk config directly (there is no public setter for
+        // worktreeParentId) so we can construct corrupted, cyclic parent chains.
+        function seedConfig(workspaces: any[]): void {
+            const envelope = {
+                schemaVersion: 1,
+                data: {
+                    workspaces,
+                    activeWorkspaceId: workspaces[0]?.id ?? null,
+                    recentWorkspaces: [],
+                },
+            };
+            writeFileSync(join(testBaseDir, 'workspace-config.json'), JSON.stringify(envelope));
+        }
+
+        it('terminates on a two-node worktreeParentId cycle instead of hanging', async () => {
+            // workspace1 <-> workspace2 point at each other as worktree parents.
+            seedConfig([
+                { id: testWorkspace1, name: 'workspace1', createdAt: new Date().toISOString(), worktreeParentId: testWorkspace2 },
+                { id: testWorkspace2, name: 'workspace2', createdAt: new Date().toISOString(), worktreeParentId: testWorkspace1 },
+            ]);
+            const cyclicStore = new WorkspaceStore(testBaseDir);
+
+            const newTree = join(testBaseDir, 'newtree');
+            mkdirSync(newTree, { recursive: true });
+
+            // Without the guard the parent-walk loops forever and this hangs (test
+            // times out). With it, the call resolves and returns a workspace.
+            const result = await cyclicStore.addWorktreeWorkspace(newTree, testWorkspace1, 'feature/x');
+            expect(result.id).toBe(newTree);
+            // Walk stopped at a real node in the cycle rather than spinning.
+            expect([testWorkspace1, testWorkspace2]).toContain(result.worktreeParentId);
+        });
+
+        it('terminates on a self-referential worktreeParentId', async () => {
+            seedConfig([
+                { id: testWorkspace1, name: 'workspace1', createdAt: new Date().toISOString(), worktreeParentId: testWorkspace1 },
+            ]);
+            const cyclicStore = new WorkspaceStore(testBaseDir);
+
+            const newTree = join(testBaseDir, 'newtree-self');
+            mkdirSync(newTree, { recursive: true });
+
+            const result = await cyclicStore.addWorktreeWorkspace(newTree, testWorkspace1, 'feature/y');
+            expect(result.id).toBe(newTree);
+            expect(result.worktreeParentId).toBe(testWorkspace1);
+        });
+    });
 });

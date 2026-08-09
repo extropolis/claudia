@@ -46,7 +46,6 @@ interface TaskStore {
     expandedWorkspaces: Set<string>;
     expandedWorkspacesInitialized: boolean;  // True once persisted state is loaded or first workspaces set
     collapsedWorktreeGroups: Set<string>;  // Worktree group section ids the user has collapsed
-    taskListHeight: number | null;  // User-set height (px) of the resizable task list; null = default
     showProjectPicker: boolean;
     workspaceColumns: number; // 0 = auto, 1-4 = fixed column count
     workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
@@ -148,8 +147,10 @@ interface TaskStore {
     reorderWorkspaces: (fromIndex: number, toIndex: number) => void;
     toggleWorkspaceExpanded: (workspaceId: string) => void;
     toggleWorktreeGroupCollapsed: (groupId: string) => void;
-    setTaskListHeight: (height: number | null) => void;
     setShowProjectPicker: (show: boolean) => void;
+    /** Per-workspace task-list height (px) from the user's manual resize; persisted */
+    workspaceTaskListHeights: Record<string, number>;
+    setWorkspaceTaskListHeight: (workspaceId: string, height: number) => void;
 
     // Task reordering
     reorderTasks: (workspaceId: string, fromIndex: number, toIndex: number) => void;
@@ -231,8 +232,8 @@ interface PersistedState {
     showArchivedTasks: boolean;
     expandedWorkspaces: string[];  // Stored as array, converted to Set
     expandedWorkspacesInitialized: boolean;  // Track if user has interacted with workspaces
+    workspaceTaskListHeights?: Record<string, number>;  // Per-workspace manual task-list heights (px)
     collapsedWorktreeGroups: string[];  // Stored as array, converted to Set
-    taskListHeight: number | null;  // User-set resizable task-list height
     workspaceColumns: number; // 0 = auto, 1-4 = fixed
     workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
     taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
@@ -281,8 +282,8 @@ export const useTaskStore = create<TaskStore>()(
             workspaces: [],
             expandedWorkspaces: new Set<string>(),
             expandedWorkspacesInitialized: false,
+            workspaceTaskListHeights: {},
             collapsedWorktreeGroups: new Set<string>(),
-            taskListHeight: null,
             showProjectPicker: false,
             workspaceColumns: 0, // 0 = auto
             workspaceSortBy: 'date-created', // Default to date created
@@ -604,6 +605,11 @@ export const useTaskStore = create<TaskStore>()(
                 set({ workspaces: newWorkspaces });
             },
 
+            setWorkspaceTaskListHeight: (workspaceId, height) => {
+                const { workspaceTaskListHeights } = get();
+                set({ workspaceTaskListHeights: { ...workspaceTaskListHeights, [workspaceId]: height } });
+            },
+
             toggleWorkspaceExpanded: (workspaceId) => {
                 const { expandedWorkspaces } = get();
                 const newExpanded = new Set(expandedWorkspaces);
@@ -625,7 +631,6 @@ export const useTaskStore = create<TaskStore>()(
                 set({ collapsedWorktreeGroups: newCollapsed });
             },
 
-            setTaskListHeight: (height) => set({ taskListHeight: height }),
 
             setShowProjectPicker: (show) => set({ showProjectPicker: show }),
 
@@ -853,8 +858,8 @@ export const useTaskStore = create<TaskStore>()(
                 showArchivedTasks: state.showArchivedTasks,
                 expandedWorkspaces: Array.from(state.expandedWorkspaces),
                 expandedWorkspacesInitialized: state.expandedWorkspacesInitialized,
+                workspaceTaskListHeights: state.workspaceTaskListHeights,
                 collapsedWorktreeGroups: Array.from(state.collapsedWorktreeGroups),
-                taskListHeight: state.taskListHeight,
                 workspaceColumns: state.workspaceColumns,
                 workspaceSortBy: state.workspaceSortBy,
                 taskSortBy: state.taskSortBy,
@@ -909,10 +914,10 @@ export const useTaskStore = create<TaskStore>()(
                     // Use persisted initialized flag, or mark as initialized if we have any persisted expanded state
                     expandedWorkspacesInitialized: persisted.expandedWorkspacesInitialized ??
                         (persisted.expandedWorkspaces !== undefined),
+                    workspaceTaskListHeights: persisted.workspaceTaskListHeights ?? currentState.workspaceTaskListHeights,
                     collapsedWorktreeGroups: persisted.collapsedWorktreeGroups
                         ? new Set(persisted.collapsedWorktreeGroups)
                         : currentState.collapsedWorktreeGroups,
-                    taskListHeight: persisted.taskListHeight ?? currentState.taskListHeight,
                     workspaceColumns: persisted.workspaceColumns ?? currentState.workspaceColumns,
                     workspaceSortBy: persisted.workspaceSortBy ?? currentState.workspaceSortBy,
                     taskSortBy: persisted.taskSortBy ?? currentState.taskSortBy,
