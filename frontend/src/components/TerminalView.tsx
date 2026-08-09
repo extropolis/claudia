@@ -7,6 +7,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { Task, Workspace, stripTerminalQueries } from '@claudia/shared';
 import { Copy, Check, Play, BookOpen, ArrowDown } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
+import { CheckpointTimeline } from './CheckpointTimeline';
 import { TaskTokenStats } from './TaskTokenStats';
 import { useEffectiveTheme } from '../hooks/useTheme';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
@@ -830,6 +831,9 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             </div>
             <TaskInputBar task={task} wsRef={wsRef} />
             <TaskTokenStats taskId={task.id} />
+            {workspace && (
+                <CheckpointTimeline taskId={task.id} workspaceId={workspace.id} wsRef={wsRef} />
+            )}
 
         </div>
     );

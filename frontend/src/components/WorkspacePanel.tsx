@@ -617,7 +617,10 @@ interface WorktreeGroupSectionProps {
 }
 
 function WorktreeGroupSection({ group, selectedTaskId, lastSelectedTaskId, waitingInputTaskIds, unreadTaskIds, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, onOpenScheduledTasks, onRemoveWorktree }: WorktreeGroupSectionProps) {
-    const [collapsed, setCollapsed] = useState(false);
+    // Collapsed state is persisted in the store (keyed by group id) so it survives
+    // reconnect/reload instead of snapping back to expanded.
+    const collapsed = useTaskStore((s) => s.collapsedWorktreeGroups.has(group.workspace.id));
+    const toggleWorktreeGroupCollapsed = useTaskStore((s) => s.toggleWorktreeGroupCollapsed);
     const [removing, setRemoving] = useState(false);
 
     const hasActive = group.tasks.some(t => t.state === 'busy' || t.state === 'starting' || t.state === 'waiting_input');
@@ -638,7 +641,7 @@ function WorktreeGroupSection({ group, selectedTaskId, lastSelectedTaskId, waiti
 
     return (
         <div className={`worktree-group${collapsed ? ' collapsed' : ''}`}>
-            <div className="worktree-group-header" onClick={() => setCollapsed(c => !c)}>
+            <div className="worktree-group-header" onClick={() => toggleWorktreeGroupCollapsed(group.workspace.id)}>
                 {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
                 <GitBranch size={12} />
                 <span className="worktree-group-branch" title={group.workspace.worktreeBranch || group.branch}>{group.branch}</span>
