@@ -243,6 +243,11 @@ export type WSMessageType =
     | 'checkpoint:error'
     // Token usage
     | 'task:tokenUsage'
+    // Jira integration
+    | 'jira:focusTicket'
+    | 'jira:writeRequest'
+    | 'jira:writeApproved'
+    | 'jira:writeRejected'
     // Server status
     | 'server:reloading'
     | 'server:reconnecting'

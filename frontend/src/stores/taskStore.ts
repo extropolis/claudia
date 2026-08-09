@@ -96,6 +96,15 @@ interface TaskStore {
     pendingDeleteRequest: { taskId: string; requestId: string; taskName: string } | null;
     setPendingDeleteRequest: (request: { taskId: string; requestId: string; taskName: string } | null) => void;
 
+    // A Jira ticket key a session asked to open on the Jira tab (via jira:focusTicket).
+    pendingJiraFocus: string | null;
+    setJiraFocus: (key: string | null) => void;
+    clearJiraFocus: () => void;
+
+    // Pending Jira write confirmation (from MCP agent). Shown as a modal.
+    pendingJiraWrite: { requestId: string; action: 'comment' | 'transition'; key: string; body?: string; transitionId?: string; summary?: string } | null;
+    setPendingJiraWrite: (req: { requestId: string; action: 'comment' | 'transition'; key: string; body?: string; transitionId?: string; summary?: string } | null) => void;
+
     // Settings
     autoFocusOnInput: boolean;
     supervisorEnabled: boolean;
@@ -324,6 +333,13 @@ export const useTaskStore = create<TaskStore>()(
             // Pending delete confirmation
             pendingDeleteRequest: null,
             setPendingDeleteRequest: (request) => set({ pendingDeleteRequest: request }),
+
+            pendingJiraFocus: null,
+            setJiraFocus: (key) => set({ pendingJiraFocus: key }),
+            clearJiraFocus: () => set({ pendingJiraFocus: null }),
+
+            pendingJiraWrite: null,
+            setPendingJiraWrite: (req) => set({ pendingJiraWrite: req }),
 
             // Settings initial state
             autoFocusOnInput: false,
