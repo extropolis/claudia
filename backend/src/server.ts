@@ -19,7 +19,7 @@ import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, Checkpoint, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { CheckpointStore } from './checkpoint-store.js';
-import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
+import { validateConfigUpdate, validateWorkspacePath, isPathInside } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
 import { WorktreeManager } from './worktree-manager.js';
 import { LearningsStore } from './learnings-store.js';
@@ -4142,7 +4142,7 @@ export async function createApp(basePath?: string) {
         // Security: ensure the resolved path is within the workspace
         const resolvedTarget = resolve(targetDir);
         const resolvedWorkspace = resolve(workspacePath);
-        if (!resolvedTarget.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedTarget)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -4247,7 +4247,7 @@ export async function createApp(basePath?: string) {
         const resolvedDest = resolve(workspace, destinationPath);
 
         // Security: ensure paths are within workspace
-        if (!resolvedSource.startsWith(resolvedWorkspace) || !resolvedDest.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedSource) || !isPathInside(resolvedWorkspace, resolvedDest)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -4287,7 +4287,7 @@ export async function createApp(basePath?: string) {
         const resolvedDest = resolve(workspace, destinationPath);
 
         // Security: ensure paths are within workspace
-        if (!resolvedSource.startsWith(resolvedWorkspace) || !resolvedDest.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedSource) || !isPathInside(resolvedWorkspace, resolvedDest)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -4319,7 +4319,7 @@ export async function createApp(basePath?: string) {
         const resolvedDest = resolve(workspace, destinationPath);
 
         // Security: ensure paths are within workspace
-        if (!resolvedSource.startsWith(resolvedWorkspace) || !resolvedDest.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedSource) || !isPathInside(resolvedWorkspace, resolvedDest)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -4358,7 +4358,7 @@ export async function createApp(basePath?: string) {
         const resolvedPath = resolve(workspace, path);
 
         // Security: ensure path is within workspace
-        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedPath)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -4397,7 +4397,7 @@ export async function createApp(basePath?: string) {
         const resolvedPath = resolve(workspace, path);
 
         // Security: ensure path is within workspace
-        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedPath)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -5424,7 +5424,7 @@ export async function createApp(basePath?: string) {
         // Security: ensure the resolved path is within the workspace
         const resolvedPath = resolve(fullPath);
         const resolvedWorkspace = resolve(workspacePath);
-        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedPath)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -5488,7 +5488,7 @@ export async function createApp(basePath?: string) {
         // Security: ensure the resolved path is within the workspace
         const resolvedPath = resolve(fullPath);
         const resolvedWorkspace = resolve(workspacePath);
-        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedPath)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 

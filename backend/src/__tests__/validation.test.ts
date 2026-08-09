@@ -3,6 +3,7 @@ import { mkdirSync, rmdirSync, existsSync, writeFileSync, unlinkSync } from 'fs'
 import { join } from 'path';
 import { tmpdir, homedir } from 'os';
 import {
+    isPathInside,
     validateConfigUpdate,
     validateWorkspacePath,
     sanitizePrompt,
@@ -721,5 +722,33 @@ describe('validateConfigUpdate — Jira', () => {
             email: 'me@acme.com',
             apiToken: 'secret',
         });
+    });
+});
+
+describe('isPathInside (workspace containment)', () => {
+    it('accepts the workspace root itself and paths beneath it', () => {
+        expect(isPathInside('/home/u/repo', '/home/u/repo')).toBe(true);
+        expect(isPathInside('/home/u/repo', '/home/u/repo/src/index.ts')).toBe(true);
+        expect(isPathInside('/home/u/repo/', '/home/u/repo/a')).toBe(true);
+    });
+
+    it('rejects a SIBLING whose name shares the workspace name as a prefix', () => {
+        // The bug this function exists to kill: every file-op route used a bare
+        // `child.startsWith(parent)`, so `/home/u/repo-secrets/creds.txt` — a
+        // completely separate directory — passed the "containment" check and
+        // became readable, overwritable and deletable via `?file=../repo-secrets/...`.
+        expect(isPathInside('/home/u/repo', '/home/u/repo-secrets/creds.txt')).toBe(false);
+        expect(isPathInside('/home/u/repo', '/home/u/repo2')).toBe(false);
+        expect(isPathInside('/home/u/repo', '/home/u/repository')).toBe(false);
+    });
+
+    it('rejects parents, unrelated paths, and .. traversal out of the workspace', () => {
+        expect(isPathInside('/home/u/repo', '/home/u')).toBe(false);
+        expect(isPathInside('/home/u/repo', '/etc/passwd')).toBe(false);
+        expect(isPathInside('/home/u/repo', '/home/u/repo/../../etc/passwd')).toBe(false);
+    });
+
+    it('normalizes before comparing, so .. that stays inside is still inside', () => {
+        expect(isPathInside('/home/u/repo', '/home/u/repo/src/../lib/a.ts')).toBe(true);
     });
 });
