@@ -127,6 +127,7 @@ export interface AppConfig {
     defaultBaseDirectory?: string;  // Default base directory for new workspaces (optional)
     modelTiering?: ModelTieringConfig;  // Complexity-based model selection for MCP-spawned tasks
     worktreeRetentionDays?: number;  // Days before archived tasks' worktrees are swept (0 = never)
+    todoEnabled?: boolean;  // Enable per-task TODO list feature (default: false)
     jiraEnabled: boolean;  // Master toggle for the Jira integration (default false)
     jira?: JiraConfig;  // Jira Cloud connection (only set once the user configures it)
 }
@@ -655,6 +656,15 @@ export class ConfigStore {
 
     setDefaultBaseDirectory(directory: string | undefined): void {
         this.config.defaultBaseDirectory = directory;
+        this.saveConfig();
+    }
+
+    getTodoEnabled(): boolean {
+        return this.config.todoEnabled ?? false;
+    }
+
+    setTodoEnabled(enabled: boolean): void {
+        this.config.todoEnabled = enabled;
         this.saveConfig();
     }
 }

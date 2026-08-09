@@ -18,6 +18,7 @@ import { getConversationHistory, getWorkspaceSessions } from './conversation-par
 import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, Checkpoint, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
+import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
@@ -49,6 +50,7 @@ const __dirname = dirname(__filename);
 const VALID_WS_MESSAGE_TYPES = new Set([
     'task:create',
     'task:select',
+    'task:refreshPr',
     'task:input',
     'task:resize',
     'task:destroy',
@@ -540,6 +542,9 @@ export async function createApp(basePath?: string) {
     );
     cronScheduler.start();
 
+    // TodoStore for per-task user TODOs
+    const todoStore = new TodoStore();
+
     // CheckpointStore for per-task git snapshots / restore points
     const checkpointStore = new CheckpointStore(basePath);
 
@@ -784,8 +789,8 @@ export async function createApp(basePath?: string) {
     // Resolve (repoPath, branch) for a workspace, then look up its PR.
     // If `force` is false (default), skips the expensive `gh` call when the
     // branch hasn't changed since the last check.
-    async function refreshPrInfoFor(workspaceId: string, force = false): Promise<void> {
-        if (prInfoInFlight.has(workspaceId)) return;
+    async function refreshPrInfoFor(workspaceId: string, force = false, userTriggered = false): Promise<void> {
+        if (!userTriggered && prInfoInFlight.has(workspaceId)) return;
         const ws = workspaceStore.getWorkspace(workspaceId);
         if (!ws) return;
 
@@ -829,9 +834,12 @@ export async function createApp(basePath?: string) {
         prInfoInFlight.add(workspaceId);
         prInfoSeen.add(workspaceId);
         try {
-            const repoPath = ws.id;
+            const repoPath = ws.worktreeParentId || ws.id;
+            logger.debug('refreshPrInfoFor: fetching PR', { workspaceId: workspaceId.slice(-30), branch, repoPath: repoPath.slice(-30), userTriggered });
             const prInfo = branch ? await getPrForBranch(repoPath, branch) : null;
+            logger.debug('refreshPrInfoFor: got PR', { workspaceId: workspaceId.slice(-30), state: prInfo?.state ?? 'null', number: prInfo?.number });
             if (workspaceStore.setPrInfo(workspaceId, prInfo)) {
+                logger.info('refreshPrInfoFor: PR info changed, broadcasting', { workspaceId: workspaceId.slice(-30), state: prInfo?.state });
                 const updated = workspaceStore.getWorkspace(workspaceId);
                 if (updated) broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updated } });
             }
@@ -851,47 +859,87 @@ export async function createApp(basePath?: string) {
         if (!(await isGhAvailable())) return;
         prRefreshPassInFlight = true;
         try {
+            const tasks = taskSpawner.getAllTasks();
+
             // Selection lives in pr-refresh.ts (pure + unit-tested). Critically it
             // includes workspaces whose PR is still non-terminal even when their
             // tasks have gone idle — a task pushes, opens a PR and goes idle
             // exactly while CI runs, and the old activity-only rule froze those
             // badges at their push-time state forever.
             const toRefresh = selectWorkspacesToRefresh(
-                taskSpawner.getAllTasks(),
+                tasks,
                 workspaceStore.getWorkspaces(),
                 prInfoSeen
             );
-            if (toRefresh.length === 0) return;
-            logger.debug('PR info refresh pass', { count: toRefresh.length });
+            if (toRefresh.length > 0) {
+                logger.debug('PR info refresh pass', { count: toRefresh.length });
 
-            // Bounded concurrency: each refresh is a networked `gh` call with a
-            // 15s timeout. Awaiting them one at a time let a single slow repo
-            // stall the entire pass (and the reentrancy guard then skipped the
-            // next tick), which showed up as badges lagging far behind CI.
-            const PR_REFRESH_CONCURRENCY = 4;
-            let cursor = 0;
-            await Promise.all(
-                Array.from({ length: Math.min(PR_REFRESH_CONCURRENCY, toRefresh.length) }, async () => {
-                    while (cursor < toRefresh.length) {
-                        const id = toRefresh[cursor++];
-                        // force: re-check CI even when the branch is unchanged.
-                        await refreshPrInfoFor(id, true);
-                    }
-                })
-            );
+                // Bounded concurrency: each refresh is a networked `gh` call with a
+                // 15s timeout. Awaiting them one at a time let a single slow repo
+                // stall the entire pass (and the reentrancy guard then skipped the
+                // next tick), which showed up as badges lagging far behind CI.
+                const PR_REFRESH_CONCURRENCY = 4;
+                let cursor = 0;
+                await Promise.all(
+                    Array.from({ length: Math.min(PR_REFRESH_CONCURRENCY, toRefresh.length) }, async () => {
+                        while (cursor < toRefresh.length) {
+                            const id = toRefresh[cursor++];
+                            // force: re-check CI even when the branch is unchanged.
+                            await refreshPrInfoFor(id, true);
+                        }
+                    })
+                );
+            }
+
+            // Task-level sessionWorktreePrInfo is set once on worktree discovery and
+            // never refreshed, so merged PRs and CI results never showed up on the
+            // inline worktree badge. Runs regardless of whether any workspace was
+            // selected above — the two are independent.
+            const tasksWithWorktree = tasks.filter(t => t.sessionWorktreeBranch);
+            for (const task of tasksWithWorktree) {
+                try {
+                    const ws = workspaceStore.getWorkspace(task.workspaceId);
+                    const repoPath = ws?.worktreeParentId || task.workspaceId;
+                    const prInfo = await getPrForBranch(repoPath, task.sessionWorktreeBranch!);
+                    taskSpawner.setSessionWorktree(task.id, task.sessionWorktreeBranch, prInfo);
+                } catch (err) {
+                    logger.debug('Failed to refresh sessionWorktreePrInfo', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+                }
+            }
         } finally {
             prRefreshPassInFlight = false;
         }
     }
 
-    // Poll on an interval (90s) — only touches active/unseen workspaces, not all.
-    // 45s: the selection is now bounded to workspaces with non-terminal PRs
-    // (terminal merged/closed ones are skipped), so a shorter interval costs
-    // fewer `gh` calls in steady state than the old 90s pass did.
+    // Poll on an interval. 45s rather than the older 30s: selection is now bounded
+    // to workspaces whose PR can still change (terminal merged/closed ones are
+    // skipped), and the pass additionally walks session-worktree tasks, so a
+    // shorter tick would cost more `gh` calls without fresher badges.
     const PR_INFO_INTERVAL_MS = 45_000;
     const prInfoInterval = setInterval(() => { void refreshActiveWorkspacePrInfo(); }, PR_INFO_INTERVAL_MS);
     // Kick off an initial pass shortly after startup.
     setTimeout(() => { void refreshActiveWorkspacePrInfo(); }, 5_000);
+
+    // Immediately refresh PR info for a single task (workspace + session worktree).
+    // Called on task:select and task:refreshPr (hover) — fire-and-forget, no await needed.
+    async function refreshTaskPrInfo(taskId: string): Promise<void> {
+        const task = taskSpawner.getAllTasks().find(t => t.id === taskId);
+        if (!task) return;
+        // Workspace-level prInfo — bypass in-flight guard since this is user-triggered
+        void refreshPrInfoFor(task.workspaceId, true, true);
+        // Task session worktree prInfo (branch created by Claude inside the session)
+        if (task.sessionWorktreeBranch) {
+            try {
+                const ws = workspaceStore.getWorkspace(task.workspaceId);
+                const repoPath = ws?.worktreeParentId || task.workspaceId;
+                const prInfo = await getPrForBranch(repoPath, task.sessionWorktreeBranch);
+                taskSpawner.setSessionWorktree(task.id, task.sessionWorktreeBranch, prInfo);
+            } catch (err) {
+                logger.debug('refreshTaskPrInfo: session worktree lookup failed', { taskId, error: err instanceof Error ? err.message : String(err) });
+            }
+        }
+    }
+
 
     // ===== Worktree discovery (session attribution) =====
     // A task's Claude session may create a git worktree (raw `git worktree add`)
@@ -1461,7 +1509,7 @@ export async function createApp(basePath?: string) {
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId, initialCols, initialRows, source, complexity, isolate } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string; complexity?: string; isolate?: boolean };
+                        const { prompt, workspaceId, initialCols, initialRows, source, complexity, isolate, parentTaskId } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string; complexity?: string; isolate?: boolean; parentTaskId?: string };
                         if (!prompt || !workspaceId) {
                             logger.error('task:create requires prompt and workspaceId');
                             sendWSError(ws, 'task:create requires prompt and workspaceId', message.type, 'MISSING_PARAMS');
@@ -1550,7 +1598,7 @@ export async function createApp(basePath?: string) {
 
                         // Pass initial dimensions if provided
                         try {
-                            const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows, modelOverride);
+                            const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows, modelOverride, parentTaskId);
                             // Broadcast task:created to all clients (UI sidebar update).
                             // Done here (not in the taskCreated event handler) so the source
                             // field is always correct even with concurrent creates.
@@ -1610,7 +1658,16 @@ export async function createApp(basePath?: string) {
                                 logger.error('Failed to activate task', { taskId, error: errorMessage });
                                 sendWSError(ws, `Failed to activate task: ${errorMessage}`, message.type, 'TASK_SELECT_FAILED');
                             }
+                            // Immediately refresh PR info for the selected task
+                            void refreshTaskPrInfo(taskId);
                         }
+                        break;
+                    }
+
+                    case 'task:refreshPr': {
+                        // Lightweight trigger from frontend hover — refresh PR info immediately
+                        const { taskId } = payload as { taskId?: string };
+                        if (taskId) void refreshTaskPrInfo(taskId);
                         break;
                     }
 
@@ -4231,6 +4288,103 @@ export async function createApp(basePath?: string) {
         } catch (error) {
             res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
         }
+    });
+
+    // ===== Per-task TODO endpoints =====
+
+    app.post('/api/tasks/:taskId/todos', (req, res) => {
+        const { taskId } = req.params;
+        const { title, description, status, priority, source, kind, url, externalRef, parentId, order } = req.body;
+
+        if (!title || typeof title !== 'string' || !title.trim()) {
+            return res.status(400).json({ error: 'title is required' });
+        }
+
+        try {
+            const todo = todoStore.create(taskId, title.trim(), {
+                description: description?.trim(),
+                status, priority, source, kind,
+                url: url?.trim(), externalRef: externalRef?.trim(), parentId, order,
+            });
+            broadcast({ type: 'todo:created' as WSMessageType, payload: { todo } });
+            res.json(todo);
+        } catch (error) {
+            res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+
+    app.get('/api/tasks/:taskId/todos', (req, res) => {
+        const { taskId } = req.params;
+        res.json(todoStore.listForTask(taskId));
+    });
+
+    // Progress + active/next summary for a task's work-plan.
+    app.get('/api/tasks/:taskId/todos/summary', (req, res) => {
+        const { taskId } = req.params;
+        res.json(todoStore.summaryForTask(taskId));
+    });
+
+    // Set execution order from an ordered id list.
+    app.post('/api/tasks/:taskId/todos/reorder', (req, res) => {
+        const { taskId } = req.params;
+        const { orderedIds } = req.body;
+        if (!Array.isArray(orderedIds)) {
+            return res.status(400).json({ error: 'orderedIds (string[]) is required' });
+        }
+        const todos = todoStore.reorder(taskId, orderedIds);
+        broadcast({ type: 'todos:reordered' as WSMessageType, payload: { taskId, todos } });
+        res.json(todos);
+    });
+
+    app.get('/api/todos', (_req, res) => {
+        res.json(todoStore.list());
+    });
+
+    app.patch('/api/todos/:todoId', (req, res) => {
+        const { todoId } = req.params;
+        const { title, description, completed, status, priority, order, parentId } = req.body;
+
+        const oldTodo = todoStore.get(todoId);
+        if (!oldTodo) {
+            return res.status(404).json({ error: 'TODO not found' });
+        }
+
+        const wasCompleted = oldTodo.completed;
+        let todo;
+        try {
+            todo = todoStore.update(todoId, { title, description, completed, status, priority, order, parentId });
+        } catch (error) {
+            return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+        }
+        if (!todo) {
+            return res.status(404).json({ error: 'TODO not found' });
+        }
+
+        broadcast({ type: 'todo:updated' as WSMessageType, payload: { todo } });
+
+        // Notify the task when completion flips — whether driven by `completed` or `status`.
+        if (todo.completed !== wasCompleted) {
+            const msg = todo.completed
+                ? `[TODO COMPLETED] "${todo.title}" was checked off by the user. You may proceed with any work that was blocked on this.\r`
+                : `[TODO UNCHECKED] "${todo.title}" was unchecked by the user.\r`;
+            try {
+                taskSpawner.writeToTask(todo.taskId, msg);
+            } catch (err) {
+                logger.warn('Failed to notify task of TODO change', { todoId, taskId: todo.taskId, error: err });
+            }
+        }
+
+        res.json(todo);
+    });
+
+    app.delete('/api/todos/:todoId', (req, res) => {
+        const { todoId } = req.params;
+        const todo = todoStore.delete(todoId);
+        if (!todo) {
+            return res.status(404).json({ error: 'TODO not found' });
+        }
+        broadcast({ type: 'todo:deleted' as WSMessageType, payload: { todoId, taskId: todo.taskId } });
+        res.json({ success: true });
     });
 
     app.get('/api/workspaces', (_req, res) => {
