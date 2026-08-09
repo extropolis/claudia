@@ -5562,7 +5562,8 @@ export async function createApp(basePath?: string) {
                 delete configUpdate.sapAiCore;
             }
 
-            // Cast is needed because ConfigUpdatePayload has optional fields but AppConfig requires them
+            // Cast is needed because ConfigUpdatePayload's nested objects (hyperspaceProxy,
+            // aiCoreCredentials, ...) are all-optional while AppConfig requires their fields.
             const updatedConfig = configStore.updateConfig(configUpdate as Parameters<typeof configStore.updateConfig>[0]);
 
             // If backend was changed, switch the task spawner's backend
@@ -5719,9 +5720,8 @@ export async function createApp(basePath?: string) {
         if (req.body.clearCredentials === true) {
             configStore.setJiraConfig({ baseUrl: '', email: '', apiToken: '' });
         } else if (data.jira !== undefined) {
-            // updateConfig merges partial jira fields (preserving the token when omitted);
-            // the cast is needed because the payload type has all-optional fields.
-            configStore.updateConfig({ jira: data.jira } as Parameters<typeof configStore.updateConfig>[0]);
+            // updateConfig merges partial jira fields (preserving the token when omitted).
+            configStore.updateConfig({ jira: data.jira });
         }
         const cfg = configStore.getJiraConfig();
         res.json({

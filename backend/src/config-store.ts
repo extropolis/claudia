@@ -130,6 +130,13 @@ export interface AppConfig {
     jira?: JiraConfig;  // Jira Cloud connection (only set once the user configures it)
 }
 
+/**
+ * Shape accepted by ConfigStore.updateConfig. `jira` is field-wise partial because the
+ * settings UI masks the API token and sends only the keys the user touched — updateConfig
+ * merges it rather than replacing, so the type needs to permit that.
+ */
+export type ConfigUpdate = Partial<Omit<AppConfig, 'jira'>> & { jira?: Partial<JiraConfig> };
+
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
 
 When a task finishes: give a 1-2 sentence summary of what was done with a touch of humor. If there are issues, briefly say what went wrong. Occasionally suggest a next step if it's obvious.
@@ -308,7 +315,10 @@ export class ConfigStore {
         return { ...this.config };
     }
 
-    updateConfig(updates: Partial<AppConfig>): AppConfig {
+    // `jira` is widened to a partial: the settings UI masks the API token and sends
+    // only the fields the user touched, and the merge below is written to preserve
+    // whatever it omits. Keeping that in the type avoids casts at the call sites.
+    updateConfig(updates: ConfigUpdate): AppConfig {
         if (updates.mcpServers !== undefined) {
             this.config.mcpServers = updates.mcpServers;
         }
