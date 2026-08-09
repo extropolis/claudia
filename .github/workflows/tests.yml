@@ -23,6 +23,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # Full history: the aggregate coverage gate needs a real merge-base
+          # with main to tell which source files are new in this PR.
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -101,8 +105,32 @@ jobs:
           }
           Write-Host "All PowerShell scripts are valid"
 
+      - name: Run shared unit tests (with coverage gate)
+        run: npm run test:coverage -w shared
+
       - name: Run backend unit tests (with coverage gate)
         run: npm run test:coverage -w backend
 
       - name: Run frontend unit tests (with coverage gate)
         run: npm run test:coverage -w frontend
+
+      # Repo-wide gate. The per-file thresholds above only cover modules
+      # someone remembered to list; this aggregates every package into one
+      # number that may never regress, and fails any NEW source file that
+      # lands under the new-file floor. Reuses the coverage output from the
+      # steps above (--no-run), so the suites are not run twice.
+      - name: Aggregate coverage gate (ratchet + new-file floor)
+        if: runner.os == 'Linux'
+        run: npm run coverage
+
+      - name: Upload coverage reports
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            backend/coverage/
+            frontend/coverage/
+            shared/coverage/
+          retention-days: 14
+          if-no-files-found: ignore

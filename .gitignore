@@ -76,3 +76,6 @@ vite
 
 # Playwright MCP snapshots
 .playwright-mcp/
+
+# Claudia task worktrees (created at runtime by the orchestrator)
+.claudia-worktrees/
