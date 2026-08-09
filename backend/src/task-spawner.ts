@@ -1,12 +1,13 @@
 import { spawn, IPty } from 'node-pty';
 import { EventEmitter } from 'events';
-import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, TaskTokenUsage } from '@claudia/shared';
+import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, TaskTokenUsage, stripTerminalQueries, incompleteEscapeSuffixStart } from '@claudia/shared';
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
+import { buildSettingsLocalContent } from './settings-local.js';
 import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
 import { sanitizePrompt, decodeHtmlEntities } from './validation.js';
@@ -137,6 +138,76 @@ function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } {
     return { command: 'cmd.exe', prefixArgs: ['/c', 'claude.cmd'] };
 }
 
+/** Window and cap for the context-destroying-input (/clear, /compact, /reset) throttle. */
+export const DESTRUCTIVE_INPUT_WINDOW_MS = 30_000;
+export const DESTRUCTIVE_INPUT_MAX_PER_WINDOW = 1;
+
+/** True if `data` is a context-destroying slash command (/clear, /compact, /reset). */
+export function isContextDestroyingInput(data: string): boolean {
+    const cmd = data.replace(/[\r\n]+$/, '').trim();
+    return /^\/(clear|compact|reset)\b/i.test(cmd);
+}
+
+/**
+ * Decide whether a context-destroying command should be blocked as runaway input.
+ * Pure: the caller supplies the recent-timestamp list and the current time; this
+ * prunes entries outside the window, records `now`, and reports whether the count
+ * now exceeds the per-window cap. The updated list is returned for the caller to
+ * store. Internal re-deliveries must NOT be passed through here — the external
+ * entry point already counted the command, so re-counting it would spuriously
+ * trip the guard and drop a legitimate command.
+ */
+export function evaluateDestructiveInputThrottle(
+    recentTimestamps: number[],
+    now: number,
+    windowMs: number = DESTRUCTIVE_INPUT_WINDOW_MS,
+    maxPerWindow: number = DESTRUCTIVE_INPUT_MAX_PER_WINDOW,
+): { blocked: boolean; timestamps: number[] } {
+    const recent = recentTimestamps.filter(t => now - t < windowMs);
+    const blocked = recent.length >= maxPerWindow;
+    // Only DELIVERED commands count toward the window. Recording blocked
+    // attempts re-armed the window on every retry, so a user re-typing a
+    // swallowed /clear stayed blocked indefinitely until they paused >30s.
+    if (!blocked) recent.push(now);
+    return { blocked, timestamps: recent };
+}
+
+export interface ReconnectDeliveryPlan {
+    /** What to deliver once Claude signals ready: 'continue', the user's message, or null. */
+    deliverOnReady: string | null;
+    /** Inputs to deliver, in order, after the initial delivery completes and the task is idle. */
+    followupInputs: string[];
+    /** True if there is anything to deliver (initial prompt/continuation). */
+    needsDelivery: boolean;
+}
+
+/**
+ * Decide what a reconnecting task should deliver.
+ *
+ * - Interrupted mid-turn (`shouldContinue`): resume by delivering a `'continue'`
+ *   first, then re-deliver the user's typed message (if any) once the continuation
+ *   settles back to idle — never silently drop the user's message.
+ * - Otherwise: deliver the user's typed message (if any) on ready.
+ *
+ * The trailing newline is stripped from `pendingInput` — the delivery path appends
+ * Enter itself (via sendPromptWithRetry / writeToTask).
+ */
+export function planReconnectDelivery(opts: {
+    shouldContinue: boolean;
+    pendingInput?: string;
+}): ReconnectDeliveryPlan {
+    const queuedInput = opts.pendingInput ? opts.pendingInput.replace(/[\r\n]+$/, '') : '';
+    if (opts.shouldContinue) {
+        return {
+            deliverOnReady: 'continue',
+            followupInputs: queuedInput ? [queuedInput] : [],
+            needsDelivery: true,
+        };
+    }
+    const deliverOnReady = queuedInput || null;
+    return { deliverOnReady, followupInputs: [], needsDelivery: deliverOnReady != null };
+}
+
 /**
  * Check if Claude Code CLI is installed and available
  */
@@ -228,6 +299,11 @@ interface InternalTask extends Task {
     isActive: boolean;
     initialPromptSent: boolean;
     pendingPrompt: string | null;
+    // Input queued to deliver, in order, AFTER the initial prompt/continuation is
+    // delivered and the task returns to idle. Used to (a) re-deliver a user's typed
+    // message on a mid-turn reconnect that also auto-continues, and (b) preserve
+    // ordering when a second message arrives while a reconnect is still in flight.
+    pendingFollowupInputs?: string[];
     sessionId: string | null;
     promptSubmitAttempts?: number;
     gitStateBefore?: Partial<TaskGitState>;
@@ -792,29 +868,28 @@ export class TaskSpawner extends EventEmitter {
      * every tool call — including resumed sessions.
      */
     private writeSettingsLocalJson(workspaceId: string, skipPermissions: boolean | undefined, serverNames: string[]): void {
-        // "Allow everything" must be expressed via defaultMode: 'bypassPermissions',
-        // NOT allow: ['*'] — current Claude Code rejects a wildcard tool name in
-        // allow rules ("Wildcard tool name '*' is not supported"), which spams a
-        // warning on every session and leaves the file partially skipped. The
-        // allow list only ever names concrete, valid rules (mcp__* is valid because
-        // the glob follows a literal mcp__ prefix).
-        const settingsContent = {
-            permissions: {
-                allow: ['mcp__*'],
-                deny: [],
-                ...(skipPermissions ? { defaultMode: 'bypassPermissions' } : {})
-            },
-            enableAllProjectMcpServers: true,
-            enabledMcpjsonServers: serverNames
-        };
-
         const claudeSettingsDir = `${workspaceId}/.claude`;
         const claudeSettingsFile = `${claudeSettingsDir}/settings.local.json`;
+
+        // Read the existing file (if any) so buildSettingsLocalContent can
+        // parse-modify-serialize: preserve unrelated keys and HEAL a corrupted
+        // file rather than blindly overwriting or compounding bad JSON.
+        let existingRaw: string | null = null;
+        try {
+            if (existsSync(claudeSettingsFile)) {
+                existingRaw = readFileSync(claudeSettingsFile, 'utf-8');
+            }
+        } catch (err) {
+            logger.warn('Could not read existing settings.local.json', { workspaceId, error: err });
+        }
+
+        const settingsContent = buildSettingsLocalContent({ skipPermissions, serverNames, existingRaw });
+
         try {
             if (!existsSync(claudeSettingsDir)) {
                 mkdirSync(claudeSettingsDir, { recursive: true });
             }
-            atomicWriteFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2));
+            atomicWriteFileSync(claudeSettingsFile, JSON.stringify(settingsContent, null, 2) + '\n');
         } catch (err) {
             logger.error('Failed to write settings.local.json', { workspaceId, error: err });
         }
@@ -953,6 +1028,17 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Per-task carry-over of an incomplete trailing escape sequence between
+     * incremental history appends. Without this, a query split across two save
+     * batches (batch 1 ends "\x1b[", batch 2 starts "?6n") matches neither
+     * batch's strip regex yet reassembles INTACT in the file — defeating the
+     * query stripping and re-enabling replay injection. The partial is held
+     * back and prepended to the next append. (Canonical stripping lives in
+     * @claudia/shared stripTerminalQueries so backend and frontend can't drift.)
+     */
+    private historyAppendCarry: Map<string, string> = new Map();
+
+    /**
      * Atomically write history to disk via a per-process temp file + rename.
      * Mirrors the pattern used for tasks.json so a crash mid-write can't leave
      * a truncated history file. Per-process tmp name avoids races between
@@ -960,7 +1046,7 @@ export class TaskSpawner extends EventEmitter {
      */
     private atomicWriteHistorySync(historyPath: string, data: string): void {
         const tmpPath = `${historyPath}.${process.pid}.tmp`;
-        writeFileSync(tmpPath, data);
+        writeFileSync(tmpPath, stripTerminalQueries(data));
         try {
             renameSync(tmpPath, historyPath);
         } catch (e) {
@@ -1505,6 +1591,36 @@ export class TaskSpawner extends EventEmitter {
             task.state = newState;
             task.waitingInputType = waitingInputType;
             this.emit('taskStateChanged', this.toPublicTask(task));
+
+            // The task just settled to idle and has queued follow-up input (a message
+            // re-delivered after a mid-turn 'continue' resolved, or a second message
+            // that arrived while a reconnect was still in flight). Deliver the next one
+            // in order — but only once the initial prompt/continuation itself has landed
+            // (initialPromptSent && no pendingPrompt), so we never jump the queue.
+            // Flush on waiting_input too: a continuation that ends at a
+            // permission/question prompt previously trapped the queue forever
+            // (flush required exactly 'idle'), and — since followupOutstanding
+            // queues every NEW typed message behind the stuck one — wedged all
+            // input-bar traffic for the task. The queued message IS the user's
+            // intended input; deliver it to the waiting prompt.
+            if ((newState === 'idle' || newState === 'waiting_input')
+                && task.initialPromptSent
+                && task.pendingPrompt == null
+                && task.pendingFollowupInputs
+                && task.pendingFollowupInputs.length > 0) {
+                const next = task.pendingFollowupInputs.shift()!;
+                if (task.pendingFollowupInputs.length === 0) {
+                    task.pendingFollowupInputs = undefined;
+                }
+                // Ensure a trailing Enter (the queued 'continue' follow-up is stored
+                // without one; a queued raw message already ends in \r).
+                const toSend = /[\r\n]$/.test(next) ? next : `${next}\r`;
+                console.log(`[TaskSpawner] Task ${task.id} idle — delivering queued follow-up input (${toSend.length} chars)`);
+                // Deliver outside the state-transition lock, and give the TUI a moment to
+                // settle after idle. Mark as an internal re-delivery so the destructive-
+                // input guard doesn't double-count input already accepted upstream.
+                setTimeout(() => this.writeToTask(task.id, toSend, 'internal-followup', true), 300);
+            }
         } finally {
             // Release lock
             task.stateTransitionLock = false;
@@ -1796,6 +1912,9 @@ export class TaskSpawner extends EventEmitter {
                     }
                 }
             }
+
+            // Repair any tasks whose sessionId was orphaned by a bad reconnect.
+            this.applySessionRecoveryMap();
         } catch (error) {
             console.error('[TaskSpawner] Failed to load persisted tasks:', error);
         }
@@ -1934,7 +2053,17 @@ export class TaskSpawner extends EventEmitter {
                         // semantics don't apply to incremental appends.
                         const newBuffers = task.outputHistory.slice(task.savedBufferCount);
                         if (newBuffers.length > 0) {
-                            const newData = Buffer.concat(newBuffers).toString('utf8');
+                            // Prepend any incomplete escape prefix held back from the
+                            // previous append so split queries can't reassemble on disk.
+                            let raw = (this.historyAppendCarry.get(task.id) || '') + Buffer.concat(newBuffers).toString('utf8');
+                            const cut = incompleteEscapeSuffixStart(raw);
+                            if (cut >= 0 && raw.length - cut <= 16) {
+                                this.historyAppendCarry.set(task.id, raw.slice(cut));
+                                raw = raw.slice(0, cut);
+                            } else {
+                                this.historyAppendCarry.delete(task.id);
+                            }
+                            const newData = stripTerminalQueries(raw);
                             appendFileSync(historyPath, newData);
                             task.savedBufferCount = task.outputHistory.length;
                             // Cap on-disk growth. Without this the file grew unbounded
@@ -2067,6 +2196,94 @@ export class TaskSpawner extends EventEmitter {
         const homeDir = process.env.HOME || process.env.USERPROFILE || '';
         const folderName = this.workspaceToClaudeFolder(workspacePath);
         return join(homeDir, '.claude', 'projects', folderName);
+    }
+
+    /**
+     * Find the Claude session that belongs to a task by scanning a workspace's
+     * project dir for the most recently-modified .jsonl that references the
+     * task's ID. Claude embeds the owning task ID (via the claudia MCP "context
+     * update"), so this reliably re-links a task to its real conversation when
+     * the persisted session pointer was lost. Returns null if none found.
+     */
+    private findSessionForTask(taskId: string, claudeDir: string): string | null {
+        try {
+            if (!existsSync(claudeDir)) return null;
+            // Newest-first so the common case reads 1-2 files, not the whole
+            // dir (measured dirs reach 95 files / 59MB — readFileSync of all
+            // of them on the reconnect path stalls the event loop).
+            const files = readdirSync(claudeDir)
+                .filter(f => f.endsWith('.jsonl'))
+                .map(f => {
+                    const fp = join(claudeDir, f);
+                    let mtime = 0;
+                    try { mtime = statSync(fp).mtimeMs; } catch { /* ignore */ }
+                    return { f, fp, mtime };
+                })
+                .sort((a, b) => b.mtime - a.mtime);
+
+            // A bare substring match is NOT ownership: coordinator/audit
+            // sessions embed other tasks' IDs via claudia_list_tasks tool
+            // results. Adopting the newest match once relinked a task into its
+            // coordinator's conversation. Only adopt when the match is
+            // UNAMBIGUOUS (exactly one session mentions the ID); otherwise
+            // decline and let the caller start fresh — wrong-session adoption
+            // is strictly worse than a fresh session, because it gets
+            // persisted and resumed forever.
+            const matches: string[] = [];
+            for (const { f, fp } of files) {
+                let content: string;
+                try { content = readFileSync(fp, 'utf-8'); } catch { continue; }
+                if (!content.includes(taskId)) continue;
+                matches.push(f.replace(/\.jsonl$/, ''));
+                if (matches.length > 1) break; // ambiguous — no need to scan further
+            }
+            if (matches.length === 1) return matches[0];
+            if (matches.length > 1) {
+                console.warn(`[TaskSpawner] findSessionForTask: ${taskId} matched multiple sessions (${matches.join(', ')}…) — declining ambiguous recovery`);
+            }
+            return null;
+        } catch (e) {
+            console.error('[TaskSpawner] findSessionForTask failed:', (e as Error).message);
+            return null;
+        }
+    }
+
+    /**
+     * One-time repair hook: if a `session-recovery.json` map ({ taskId: sessionId })
+     * sits next to tasks.json, correct any disconnected task whose sessionId drifted
+     * (e.g. orphaned by a reconnect that started a fresh session). Idempotent and a
+     * safe no-op when the file is absent. Runs once during loadPersistedTasks.
+     */
+    private applySessionRecoveryMap(): void {
+        try {
+            const mapPath = join(dirname(this.persistencePath), 'session-recovery.json');
+            if (!existsSync(mapPath)) return;
+            const map = JSON.parse(readFileSync(mapPath, 'utf-8')) as Record<string, string>;
+            let fixed = 0;
+            for (const [taskId, sessionId] of Object.entries(map)) {
+                const t = this.disconnectedTasks.get(taskId);
+                if (t && typeof sessionId === 'string' && t.sessionId !== sessionId) {
+                    console.log(`[TaskSpawner] session-recovery: ${taskId} ${t.sessionId} -> ${sessionId}`);
+                    t.sessionId = sessionId;
+                    fixed++;
+                }
+            }
+            if (fixed > 0) {
+                this.saveTasks();
+                console.log(`[TaskSpawner] session-recovery applied ${fixed} correction(s)`);
+            }
+            // Retire the map after one application. Leaving it in place made it a
+            // permanent override: every restart would re-pin the mapped sessionIds,
+            // clobbering any legitimately newer session a task captured since.
+            try {
+                renameSync(mapPath, `${mapPath}.applied`);
+                console.log('[TaskSpawner] session-recovery map retired to .applied');
+            } catch (e) {
+                console.warn('[TaskSpawner] failed to retire session-recovery map:', (e as Error).message);
+            }
+        } catch (e) {
+            console.error('[TaskSpawner] session-recovery failed:', (e as Error).message);
+        }
     }
 
     /**
@@ -3773,27 +3990,31 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         }
     }
 
-    writeToTask(taskId: string, data: string, source: string = 'internal'): void {
+    writeToTask(taskId: string, data: string, source: string = 'internal', isInternalRedelivery: boolean = false): void {
         // Safety guard: a runaway client looping a context-destroying slash command
-        // (/clear, /compact, /reset) can wipe a Claude session. Allow a couple of
-        // legitimate manual uses, then drop the input once it repeats rapidly to the
-        // same task within a short window — and log the source so the culprit is named.
-        const destructiveCmd = data.replace(/[\r\n]+$/, '').trim();
-        if (/^\/(clear|compact|reset)\b/i.test(destructiveCmd)) {
+        // (/clear, /compact, /reset) can wipe a Claude session. Allow one legitimate
+        // manual use, then drop the input once it repeats rapidly to the same task
+        // within a short window — and log the source so the culprit is named.
+        //
+        // Internal re-deliveries (e.g. a queued follow-up flushed once the task returns
+        // to idle) bypass the guard entirely: the external entry point that first
+        // received the command already counted it, so counting it again here would
+        // spuriously trip the guard and drop a legitimate command.
+        if (!isInternalRedelivery && isContextDestroyingInput(data)) {
+            const destructiveCmd = data.replace(/[\r\n]+$/, '').trim();
             const now = Date.now();
-            const WINDOW_MS = 30_000;
-            const recent = (this.recentDestructiveInputs.get(taskId) || []).filter(t => now - t < WINDOW_MS);
-            recent.push(now);
-            this.recentDestructiveInputs.set(taskId, recent);
-            // Allow only ONE context-destroying command per task per 30s. A real user
-            // rarely re-clears within seconds; an injected/looping source does. This caps
-            // the damage to one wipe per window while we identify/close the source.
-            if (recent.length > 1) {
-                console.warn(`[TaskSpawner] BLOCKED '${destructiveCmd}' to task ${taskId} — ${recent.length}x in 30s from source=${source} (runaway client — close that client!)`);
-                logger.warn('Blocked repeated context-destroying input', { taskId, command: destructiveCmd, countIn30s: recent.length, source });
+            const { blocked, timestamps } = evaluateDestructiveInputThrottle(
+                this.recentDestructiveInputs.get(taskId) || [],
+                now,
+            );
+            this.recentDestructiveInputs.set(taskId, timestamps);
+            const windowSec = DESTRUCTIVE_INPUT_WINDOW_MS / 1000;
+            if (blocked) {
+                console.warn(`[TaskSpawner] BLOCKED '${destructiveCmd}' to task ${taskId} — ${timestamps.length}x in ${windowSec}s from source=${source} (runaway client — close that client!)`);
+                logger.warn('Blocked repeated context-destroying input', { taskId, command: destructiveCmd, countInWindow: timestamps.length, windowSec, source });
                 return;
             }
-            console.log(`[TaskSpawner] '${destructiveCmd}' -> task ${taskId} from source=${source} (${recent.length}/2 allowed in 10s window)`);
+            console.log(`[TaskSpawner] '${destructiveCmd}' -> task ${taskId} from source=${source} (${timestamps.length}/${DESTRUCTIVE_INPUT_MAX_PER_WINDOW} allowed in ${windowSec}s window)`);
         }
 
         let task = this.tasks.get(taskId);
@@ -3846,6 +4067,27 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         const endsWithEnter = data.endsWith('\r') || data.endsWith('\n');
         const hasMessageContent = data.length > 1 && endsWithEnter;
 
+        // A reconnect (or fresh start) is still delivering its initial prompt /
+        // continuation (queued as pendingPrompt, sent when the TUI signals ready).
+        // If a second message arrives in that window, DON'T write it raw — that would
+        // race ahead of the not-yet-delivered prompt and arrive out of order (or be
+        // dropped by the not-yet-ready TUI). Queue it so it is delivered in order once
+        // the pending prompt lands and the task returns to idle.
+        //
+        // Also queue when a follow-up is already outstanding (pendingFollowupInputs
+        // non-empty): the initial prompt may have been sent (initialPromptSent=true)
+        // and the task gone busy, but an earlier-typed message is still waiting to
+        // flush on the next idle. Writing this one raw now would let it land ahead of
+        // that earlier message — an ordering inversion. Queue it to preserve FIFO.
+        const followupOutstanding = (task.pendingFollowupInputs?.length ?? 0) > 0;
+        if (hasMessageContent && !isInternalRedelivery &&
+            ((!task.initialPromptSent && task.pendingPrompt != null) || followupOutstanding)) {
+            task.pendingFollowupInputs = task.pendingFollowupInputs || [];
+            task.pendingFollowupInputs.push(data);
+            console.log(`[TaskSpawner] Task ${taskId} still delivering earlier input — queued follow-up message (${data.length} chars) behind it (queue depth ${task.pendingFollowupInputs.length})`);
+            return;
+        }
+
         if (hasMessageContent && (task.state === 'idle' || task.state === 'waiting_input')) {
             // Split message from Enter key - write message first, then retry Enter
             const messageContent = data.slice(0, -1);
@@ -3865,34 +4107,21 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             // Use consolidated retry mechanism with follow-up input options (5 retries for reliability)
             setTimeout(() => this.sendEnterWithRetry(task, 5, { isInitialPrompt: false, enterKey }), enterDelayMs);
         } else if (task.state === 'exited') {
-            // Task's PTY has exited — reconnect it (with --resume) and deliver the write
+            // Task's PTY has exited — reconnect it (with --resume) and hand the write to
+            // reconnectTask so it is delivered through the SAME ready-detection path used
+            // for disconnected tasks (queued as pendingPrompt, sent once the resumed TUI
+            // signals ready). The previous approach attached a post-hoc 'idle' listener
+            // AFTER reconnectTask ran and then recursively called writeToTask, which:
+            //   (a) raced the 'idle' transition reconnectTask may already have emitted —
+            //       causing a possible 15s stall until the fallback fired; and
+            //   (b) re-entered the context-destroying-input guard, so a legitimate
+            //       /clear (already counted on this external call) was blocked as a
+            //       "2nd hit in 30s" and never reached the PTY.
+            // Routing through reconnectTask's pendingPrompt eliminates both.
             console.log(`[TaskSpawner] Task ${taskId} is exited, auto-reconnecting before write`);
-            const reconnected = this.reconnectTask(taskId);
-            if (reconnected) {
-                const newTask = this.tasks.get(taskId);
-                if (newTask) {
-                    newTask.isActive = true;
-                    this.emit('tasksUpdated');
-                    // Wait for idle state before delivering write (same pattern as disconnected reconnect)
-                    let delivered = false;
-                    const onStateChanged = (changedTask: Task) => {
-                        if (changedTask.id === taskId && changedTask.state === 'idle' && !delivered) {
-                            delivered = true;
-                            this.removeListener('taskStateChanged', onStateChanged);
-                            console.log(`[TaskSpawner] Task ${taskId} reached idle after exited-reconnect, delivering pending write`);
-                            this.writeToTask(taskId, data);
-                        }
-                    };
-                    this.on('taskStateChanged', onStateChanged);
-                    setTimeout(() => {
-                        if (!delivered) {
-                            delivered = true;
-                            this.removeListener('taskStateChanged', onStateChanged);
-                            console.log(`[TaskSpawner] Fallback: delivering pending write after 15s for exited-reconnect ${taskId}`);
-                            this.writeToTask(taskId, data);
-                        }
-                    }, 15000);
-                }
+            const reconnectedTask = this.reconnectTask(taskId, data);
+            if (!reconnectedTask) {
+                console.log(`[TaskSpawner] Failed to reconnect exited task ${taskId} for write`);
             }
         } else {
             // Single keypress or task is busy — write directly.
@@ -4467,12 +4696,27 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             const claudeDir = this.getClaudeProjectsDir(persisted.workspaceId);
             const sessionFilePath = join(claudeDir, `${sessionIdToUse}.jsonl`);
             if (!existsSync(sessionFilePath)) {
-                console.log(`[TaskSpawner] Session file not found for ${taskId}: ${sessionFilePath}`);
-                console.log(`[TaskSpawner] Will start fresh session instead of resuming`);
-                sessionIdToUse = null;
-                // Clear the invalid session ID from persisted data
-                persisted.sessionId = null;
-                this.scheduleSave();
+                // The persisted session file is gone. Starting fresh here would make the
+                // PTY capture a brand-new empty session ID and permanently orphan the
+                // task's real conversation (this is exactly how a chaotic multi-task
+                // restart lost sessions). Before giving up, try to recover the real
+                // session: scan this workspace's Claude project dir for the most recent
+                // session that references this task's ID (Claude embeds the owning task
+                // ID via the claudia MCP context) and resume that instead.
+                const recovered = this.findSessionForTask(taskId, claudeDir);
+                if (recovered) {
+                    console.log(`[TaskSpawner] Session file missing for ${taskId}; recovered real session ${recovered}`);
+                    sessionIdToUse = recovered;
+                    persisted.sessionId = recovered;
+                    this.scheduleSave();
+                } else {
+                    console.log(`[TaskSpawner] Session file not found for ${taskId}: ${sessionFilePath}`);
+                    console.log(`[TaskSpawner] Will start fresh session instead of resuming`);
+                    sessionIdToUse = null;
+                    // Clear the invalid session ID from persisted data
+                    persisted.sessionId = null;
+                    this.scheduleSave();
+                }
             }
         }
 
@@ -4622,13 +4866,17 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // A message the user typed into a disconnected task (pendingInput) is delivered
         // the same way as a new task's initial prompt: queued as pendingPrompt and sent
         // by the ready-detection in setupProcessHandlers (with the fallback timer below)
-        // once the resumed Claude TUI actually signals it can accept input. Strip a
-        // trailing newline — sendPromptWithRetry appends Enter itself via sendEnterWithRetry.
-        const queuedInput = pendingInput ? pendingInput.replace(/[\r\n]+$/, '') : '';
-        // What to deliver once Claude is ready: a continuation (interrupted mid-turn),
-        // the user's first message, or nothing (a plain background reconnect).
-        const deliverOnReady = shouldContinue ? 'continue' : (queuedInput || null);
-        const needsDelivery = deliverOnReady != null;
+        // once the resumed Claude TUI actually signals it can accept input.
+        //
+        // planReconnectDelivery decides WHAT to deliver: an interrupted mid-turn task
+        // (shouldContinue) resumes with a 'continue' first and then re-delivers the
+        // user's typed message (if any) as a follow-up once the continuation returns to
+        // idle — so the user's message is never silently dropped. Otherwise the user's
+        // message is delivered on ready.
+        const { deliverOnReady, followupInputs, needsDelivery } = planReconnectDelivery({
+            shouldContinue: !!shouldContinue,
+            pendingInput,
+        });
 
         const task: InternalTask = {
             id: persisted.id,
@@ -4647,6 +4895,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             isActive: false,
             initialPromptSent: !needsDelivery,  // False if we have a prompt/message to deliver on ready
             pendingPrompt: deliverOnReady,  // Continuation or the user's first message
+            pendingFollowupInputs: followupInputs.length > 0 ? [...followupInputs] : undefined,  // User's message, delivered after a 'continue' resolves
             // Use sessionIdToUse (not persisted.sessionId) — if the session file was missing,
             // sessionIdToUse was cleared to null so the PTY handler can capture the new session ID.
             sessionId: sessionIdToUse,

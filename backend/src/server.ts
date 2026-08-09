@@ -427,11 +427,27 @@ export async function createApp(basePath?: string) {
                     logger.info('Tunnel visitor at root with missing/stale token, redirecting', { host });
                     return res.redirect(`/?token=${status.token}`);
                 }
+                // #77: mint an httpOnly cookie so the SPA's same-origin /api
+                // fetches are authenticated without frontend changes. Secure +
+                // SameSite=Strict — tunnel origins are always https.
+                res.setHeader('Set-Cookie',
+                    `claudia_tunnel_token=${encodeURIComponent(requestToken)}; Path=/; HttpOnly; Secure; SameSite=Strict`);
             }
         }
 
-        // Let API routes pass through
+        // #77: API routes over the tunnel REQUIRE a valid token (query param,
+        // header, or the cookie minted at '/'). Previously /api/* passed through
+        // unauthenticated — a network-exposed task-spawn/file-access surface.
         if (req.path.startsWith('/api/')) {
+            const cookieHeader = req.headers.cookie || '';
+            const cookieMatch = /(?:^|;\s*)claudia_tunnel_token=([^;]+)/.exec(cookieHeader);
+            const candidate = (req.query.token as string | undefined)
+                || (req.headers['x-claudia-token'] as string | undefined)
+                || (cookieMatch ? decodeURIComponent(cookieMatch[1]) : undefined);
+            if (!candidate || !tunnelManager.validateToken(candidate)) {
+                logger.warn('Tunnel API request rejected: missing/invalid token', { host, path: req.path });
+                return res.status(401).json({ error: 'Unauthorized: valid tunnel token required' });
+            }
             return next();
         }
 
@@ -2665,6 +2681,12 @@ export async function createApp(basePath?: string) {
                             sendWSError(ws, 'worktree:list requires workspaceId', message.type, 'MISSING_PARAMS');
                             break;
                         }
+                        // #100: WS worktree handlers must validate paths like the REST side does
+                        const listValidation = validateWorkspacePath(workspaceId);
+                        if (!listValidation.valid) {
+                            sendWSError(ws, listValidation.error || 'Invalid workspace path', message.type, 'INVALID_WORKSPACE');
+                            break;
+                        }
                         try {
                             const manager = new WorktreeManager();
                             const worktrees = await manager.listWorktrees(workspaceId);
@@ -2690,6 +2712,12 @@ export async function createApp(basePath?: string) {
                             sendWSError(ws, 'worktree:create requires workspaceId and branch', message.type, 'MISSING_PARAMS');
                             break;
                         }
+                        // #100: validate path before any git/filesystem operation
+                        const createValidation = validateWorkspacePath(workspaceId);
+                        if (!createValidation.valid) {
+                            sendWSError(ws, createValidation.error || 'Invalid workspace path', message.type, 'INVALID_WORKSPACE');
+                            break;
+                        }
                         try {
                             const manager = new WorktreeManager();
                             const result = await manager.createWorktree({ repoPath: workspaceId, branch, baseBranch, createBranch });
@@ -2711,6 +2739,19 @@ export async function createApp(basePath?: string) {
                         };
                         if (!workspaceId || !worktreePath) {
                             sendWSError(ws, 'worktree:remove requires workspaceId and worktreePath', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        // #100: validate BOTH paths before any destructive operation
+                        const removeWsValidation = validateWorkspacePath(workspaceId);
+                        const removeWtValidation = validateWorkspacePath(worktreePath);
+                        if (!removeWsValidation.valid || !removeWtValidation.valid) {
+                            sendWSError(ws, removeWsValidation.error || removeWtValidation.error || 'Invalid path', message.type, 'INVALID_WORKSPACE');
+                            break;
+                        }
+                        // #102: primary-workspace guard (present in REST DELETE, was missing here) —
+                        // never allow removing the parent workspace itself as if it were a worktree
+                        if (resolve(worktreePath) === resolve(workspaceId)) {
+                            sendWSError(ws, 'Refusing to remove: worktreePath is the primary workspace', message.type, 'INVALID_WORKTREE');
                             break;
                         }
                         // Safety: check for active tasks
@@ -2744,6 +2785,12 @@ export async function createApp(basePath?: string) {
                         const { workspaceId } = payload as { workspaceId?: string };
                         if (!workspaceId) {
                             sendWSError(ws, 'worktree:prune requires workspaceId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        // #100: validate path before git operations
+                        const pruneValidation = validateWorkspacePath(workspaceId);
+                        if (!pruneValidation.valid) {
+                            sendWSError(ws, pruneValidation.error || 'Invalid workspace path', message.type, 'INVALID_WORKSPACE');
                             break;
                         }
                         try {
