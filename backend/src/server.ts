@@ -3827,7 +3827,7 @@ export async function createApp(basePath?: string) {
     };
     // Run cleanup on startup and every hour
     cleanupOldUploads();
-    setInterval(cleanupOldUploads, 60 * 60 * 1000);
+    const uploadCleanupInterval = setInterval(cleanupOldUploads, 60 * 60 * 1000);
 
     // One-time migration: clean up old uploads from previous {basePath}/uploads/ location
     const oldUploadsDir = join(basePath || process.cwd(), 'uploads');
@@ -6933,5 +6933,36 @@ Guidelines:
     // Note: SIGINT/SIGTERM handlers are set up in index.ts to avoid duplicate handlers
     // The gracefulShutdown function is exported for use by the restart endpoint
 
-    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, tunnelManager };
+    /**
+     * Teardown for integration tests. gracefulShutdown() cannot be used there:
+     * it ends in process.exit(), which would take the test runner with it.
+     *
+     * This releases everything createApp() holds open — timers, PTYs, sockets —
+     * so a suite can boot many servers in one process without leaking handles
+     * or leaving vitest hanging on an idle event loop.
+     */
+    async function shutdownForTests(): Promise<void> {
+        clearInterval(heartbeatInterval);
+        clearInterval(prInfoInterval);
+        clearInterval(worktreeScanInterval);
+        clearInterval(uploadCleanupInterval);
+
+        try { await tunnelManager.stop(); } catch { /* best effort */ }
+
+        // Kills child PTYs and clears the spawner's own intervals.
+        taskSpawner.destroy();
+
+        for (const client of clients) {
+            try { client.terminate(); } catch { /* already gone */ }
+        }
+        clients.clear();
+
+        await new Promise<void>(resolve => wss.close(() => resolve()));
+        await new Promise<void>(resolve => {
+            if (!server.listening) return resolve();
+            server.close(() => resolve());
+        });
+    }
+
+    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, shutdownForTests, tunnelManager };
 }

@@ -14,13 +14,29 @@
  * for the wrong reason.
  */
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, copyFileSync, chmodSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, delimiter } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { createApp } from '../../server.js';
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures');
+
+/**
+ * The fake CLI fixtures are bash scripts relying on a shebang, so they cannot
+ * be executed as `claude` on Windows. CI runs the backend suite on a
+ * ubuntu + windows matrix, so any suite that needs the fake CLI must skip on
+ * Windows rather than fail there.
+ *
+ * Guard those suites with `describe.skipIf(!SUPPORTS_FAKE_CLI)` and keep
+ * everything that does NOT need a spawned CLI in a plain `describe`, so the
+ * Windows leg still exercises it.
+ *
+ * Exported as a plain boolean on purpose: exporting a pre-bound
+ * `describe.skip` makes tsc infer a type naming vitest internals it cannot
+ * reference, which fails the BUILD with TS4023 (tsconfig compiles __tests__).
+ */
+export const SUPPORTS_FAKE_CLI = process.platform !== 'win32';
 
 export interface HarnessWorkspaceSeed {
     id: string;
@@ -163,7 +179,9 @@ export async function startHarness(opts: HarnessOptions = {}): Promise<Harness> 
         const dest = join(bin, 'claude');
         copyFileSync(join(FIXTURES, 'fake-claude.sh'), dest);
         chmodSync(dest, 0o755);
-        setEnv('PATH', `${bin}:${process.env.PATH}`);
+        // `delimiter`, not a hard-coded ':' — Windows uses ';'. (The fixture
+        // still cannot run there; see SUPPORTS_FAKE_CLI.)
+        setEnv('PATH', `${bin}${delimiter}${process.env.PATH}`);
         setEnv('CLAUDIA_FAKE_DIR', fakeDir);
     }
 
