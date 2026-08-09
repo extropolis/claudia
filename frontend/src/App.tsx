@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { WorkspacePanel } from './components/WorkspacePanel';
+import { ConfirmModal } from './components/ConfirmModal';
 import { TerminalView } from './components/TerminalView';
 import { SupervisorChat } from './components/SupervisorChat';
 import { ProjectPicker } from './components/ProjectPicker';
@@ -74,10 +75,12 @@ function App() {
         clearRecentWorkspace,
         rejectDeleteRequest,
         refreshTaskPr,
+        approveJiraWrite,
+        rejectJiraWrite,
         wsRef
     } = useWebSocket();
 
-    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats, errorNotification, clearErrorNotification, unreadTaskIds } = useTaskStore();
+    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats, errorNotification, clearErrorNotification, unreadTaskIds, pendingJiraWrite, setPendingJiraWrite } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
     const selectedWorkspace = selectedTask ? workspaces.find(w => w.id === selectedTask.workspaceId) : undefined;
 
@@ -849,6 +852,28 @@ function App() {
                         <X size={16} />
                     </button>
                 </div>
+            )}
+
+            {/* Jira write confirmation (from an MCP agent) */}
+            {pendingJiraWrite && (
+                <ConfirmModal
+                    title={pendingJiraWrite.action === 'comment' ? 'Post Jira Comment' : 'Transition Jira Ticket'}
+                    confirmLabel={pendingJiraWrite.action === 'comment' ? 'Post Comment' : 'Apply'}
+                    cancelLabel="Cancel"
+                    onConfirm={() => {
+                        approveJiraWrite(pendingJiraWrite.requestId);
+                        setPendingJiraWrite(null);
+                    }}
+                    onCancel={() => {
+                        rejectJiraWrite(pendingJiraWrite.requestId);
+                        setPendingJiraWrite(null);
+                    }}
+                >
+                    <p>An agent wants to {pendingJiraWrite.action === 'comment' ? 'post a comment on' : 'transition'} <strong>{pendingJiraWrite.key}</strong>:</p>
+                    {pendingJiraWrite.summary && (
+                        <div className="confirm-note" style={{ whiteSpace: 'pre-wrap' }}>{pendingJiraWrite.summary}</div>
+                    )}
+                </ConfirmModal>
             )}
 
         </div>

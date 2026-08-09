@@ -258,6 +258,24 @@ export function useWebSocket() {
                         useTaskStore.getState().addPendingDeleteRequest(payload);
                         break;
                     }
+                    case 'jira:focusTicket': {
+                        const payload = message.payload as { key: string; summary?: string; url?: string };
+                        console.log(`[WebSocket] Jira focus ticket: ${payload.key}`);
+                        useTaskStore.getState().setJiraFocus(payload.key);
+                        break;
+                    }
+                    case 'jira:writeRequest': {
+                        const payload = message.payload as { requestId: string; action: 'comment' | 'transition'; key: string; body?: string; transitionId?: string; summary?: string };
+                        console.log(`[WebSocket] Jira write request: ${payload.action} on ${payload.key}`);
+                        useTaskStore.getState().setPendingJiraWrite(payload);
+                        break;
+                    }
+                    case 'jira:writeApproved':
+                    case 'jira:writeRejected': {
+                        // Resolution arrived (from this or another client) — dismiss the modal.
+                        useTaskStore.getState().setPendingJiraWrite(null);
+                        break;
+                    }
                     case 'workspace:created': {
                         const payload = message.payload as { workspace: Workspace };
                         addWorkspace(payload.workspace);
@@ -727,6 +745,13 @@ export function useWebSocket() {
         sendMessage('task:refreshPr', { taskId });
     }, [sendMessage]);
 
+    const approveJiraWrite = useCallback((requestId: string) => {
+        sendMessage('jira:writeApproved', { requestId });
+    }, [sendMessage]);
+
+    const rejectJiraWrite = useCallback((requestId: string) => {
+        sendMessage('jira:writeRejected', { requestId });
+    }, [sendMessage]);
 
     const revertTask = useCallback((taskId: string, cleanUntracked: boolean = false) => {
         sendMessage('task:revert', { taskId, cleanUntracked });
@@ -903,6 +928,8 @@ export function useWebSocket() {
         pauseScheduledTask,
         rejectDeleteRequest,
         refreshTaskPr,
+        approveJiraWrite,
+        rejectJiraWrite,
         wsRef
     };
 }
