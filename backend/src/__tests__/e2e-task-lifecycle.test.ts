@@ -8,16 +8,25 @@
  *
  * The fake CLI (fixtures/fake-claude.sh) speaks just enough of the contract:
  * ready banner, session-file creation, stdin logging, marker output.
+ *
+ * POSIX-only. The fake is a `#!/bin/bash` script placed on PATH, but Windows
+ * cannot exec it and `resolveClaudeSpawn()` deliberately resolves the CLI via
+ * APPDATA rather than PATH there — so the whole premise of this harness does
+ * not hold on win32. The reconnect/argv contract it covers is platform-neutral
+ * and stays verified by the Linux leg of CI.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync, copyFileSync, chmodSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, delimiter } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import WebSocket from 'ws';
 import { createApp } from '../server.js';
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
+
+/** See the file header: the bash fake-CLI harness cannot run on Windows. */
+const SKIP_ON_WINDOWS = process.platform === 'win32';
 
 let base: string;
 let workspace: string;
@@ -54,6 +63,7 @@ function wsSend(type: string, payload: Record<string, unknown>): Promise<void> {
 }
 
 beforeAll(async () => {
+    if (SKIP_ON_WINDOWS) return;
     base = mkdtempSync(join(homedir(), '.claudia-e2e-test-'));
     workspace = join(base, 'ws');
     fakeDir = join(base, 'fake');
@@ -67,7 +77,7 @@ beforeAll(async () => {
     chmodSync(join(bin, 'claude'), 0o755);
 
     savedEnv = { PATH: process.env.PATH, HOME: process.env.HOME, CLAUDIA_FAKE_DIR: process.env.CLAUDIA_FAKE_DIR, CLAUDIA_FAKE_SID: process.env.CLAUDIA_FAKE_SID, STATE_POLLING_MS: process.env.STATE_POLLING_MS };
-    process.env.PATH = `${bin}:${process.env.PATH}`;
+    process.env.PATH = `${bin}${delimiter}${process.env.PATH}`;
     process.env.HOME = base;                    // session files under our temp HOME
     process.env.CLAUDIA_FAKE_DIR = fakeDir;     // fake logs argv/stdin here
     process.env.CLAUDIA_FAKE_SID = SID;
@@ -86,14 +96,19 @@ beforeAll(async () => {
 }, 30000);
 
 afterAll(async () => {
+    if (SKIP_ON_WINDOWS) return;
     if (shutdown) await shutdown();
     for (const [k, v] of Object.entries(savedEnv)) {
         if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }
-    rmSync(base, { recursive: true, force: true });
+    try {
+        rmSync(base, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    } catch {
+        // Ignore cleanup errors
+    }
 }, 20000);
 
-describe('full task lifecycle against a real server + fake CLI', () => {
+describe.skipIf(SKIP_ON_WINDOWS)('full task lifecycle against a real server + fake CLI', () => {
     let taskId: string;
 
     it('creates a task: fake claude spawns and the prompt is delivered to its stdin', async () => {
@@ -132,7 +147,7 @@ describe('full task lifecycle against a real server + fake CLI', () => {
     }, 20000);
 });
 
-describe('reconnect end-to-end: --resume and --system-prompt at the process boundary', () => {
+describe.skipIf(SKIP_ON_WINDOWS)('reconnect end-to-end: --resume and --system-prompt at the process boundary', () => {
     it('reconnecting a disconnected task respawns claude with --resume <sid> and the persisted system prompt', async () => {
         // Seed a disconnected task whose session file exists (created by the fake earlier)
         const taskId2 = 'task-e2e-reconnect-1';

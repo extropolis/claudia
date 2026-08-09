@@ -97,7 +97,14 @@ beforeAll(async () => {
 
 afterAll(async () => {
     if (shutdown) await shutdown();
-    rmSync(base, { recursive: true, force: true });
+    try {
+        // maxRetries/retryDelay: on Windows the just-closed git worktree handles
+        // linger briefly and rmdir fails with EBUSY. Same tolerant-cleanup shape
+        // the other stores' tests use.
+        rmSync(base, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    } catch {
+        // Ignore cleanup errors
+    }
 }, 20000);
 
 describe('workspace:reset (regression: family archiving + worktree removal)', () => {
