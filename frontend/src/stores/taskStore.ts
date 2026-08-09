@@ -45,6 +45,7 @@ interface TaskStore {
     workspaces: Workspace[];
     expandedWorkspaces: Set<string>;
     expandedWorkspacesInitialized: boolean;  // True once persisted state is loaded or first workspaces set
+    collapsedWorktreeGroups: Set<string>;  // Worktree group section ids the user has collapsed
     showProjectPicker: boolean;
     workspaceColumns: number; // 0 = auto, 1-4 = fixed column count
     workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
@@ -95,6 +96,15 @@ interface TaskStore {
     pendingDeleteRequest: { taskId: string; requestId: string; taskName: string } | null;
     setPendingDeleteRequest: (request: { taskId: string; requestId: string; taskName: string } | null) => void;
 
+    // A Jira ticket key a session asked to open on the Jira tab (via jira:focusTicket).
+    pendingJiraFocus: string | null;
+    setJiraFocus: (key: string | null) => void;
+    clearJiraFocus: () => void;
+
+    // Pending Jira write confirmation (from MCP agent). Shown as a modal.
+    pendingJiraWrite: { requestId: string; action: 'comment' | 'transition'; key: string; body?: string; transitionId?: string; summary?: string } | null;
+    setPendingJiraWrite: (req: { requestId: string; action: 'comment' | 'transition'; key: string; body?: string; transitionId?: string; summary?: string } | null) => void;
+
     // Settings
     autoFocusOnInput: boolean;
     supervisorEnabled: boolean;
@@ -136,6 +146,7 @@ interface TaskStore {
     removeWorkspace: (workspaceId: string) => void;
     reorderWorkspaces: (fromIndex: number, toIndex: number) => void;
     toggleWorkspaceExpanded: (workspaceId: string) => void;
+    toggleWorktreeGroupCollapsed: (groupId: string) => void;
     setShowProjectPicker: (show: boolean) => void;
     /** Per-workspace task-list height (px) from the user's manual resize; persisted */
     workspaceTaskListHeights: Record<string, number>;
@@ -222,6 +233,7 @@ interface PersistedState {
     expandedWorkspaces: string[];  // Stored as array, converted to Set
     expandedWorkspacesInitialized: boolean;  // Track if user has interacted with workspaces
     workspaceTaskListHeights?: Record<string, number>;  // Per-workspace manual task-list heights (px)
+    collapsedWorktreeGroups: string[];  // Stored as array, converted to Set
     workspaceColumns: number; // 0 = auto, 1-4 = fixed
     workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
     taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
@@ -271,6 +283,7 @@ export const useTaskStore = create<TaskStore>()(
             expandedWorkspaces: new Set<string>(),
             expandedWorkspacesInitialized: false,
             workspaceTaskListHeights: {},
+            collapsedWorktreeGroups: new Set<string>(),
             showProjectPicker: false,
             workspaceColumns: 0, // 0 = auto
             workspaceSortBy: 'date-created', // Default to date created
@@ -320,6 +333,13 @@ export const useTaskStore = create<TaskStore>()(
             // Pending delete confirmation
             pendingDeleteRequest: null,
             setPendingDeleteRequest: (request) => set({ pendingDeleteRequest: request }),
+
+            pendingJiraFocus: null,
+            setJiraFocus: (key) => set({ pendingJiraFocus: key }),
+            clearJiraFocus: () => set({ pendingJiraFocus: null }),
+
+            pendingJiraWrite: null,
+            setPendingJiraWrite: (req) => set({ pendingJiraWrite: req }),
 
             // Settings initial state
             autoFocusOnInput: false,
@@ -520,15 +540,16 @@ export const useTaskStore = create<TaskStore>()(
                         }
                     });
                 } else if (!expandedWorkspacesInitialized) {
-                    // True first run (no persisted UI state): expand all by default
-                    console.log('[TaskStore] First-ever load - expanding all workspaces');
+                    // Genuine first run — no persisted expand/collapse state exists yet,
+                    // so default to all-expanded.
+                    console.log('[TaskStore] First run (no persisted state) - expanding all workspaces');
                     uniqueWorkspaces.forEach(w => newExpanded.add(w.id));
                 } else {
-                    // Page reload / app reopen with persisted state: respect the
-                    // user's saved expand/collapse choices. Previously this branch
-                    // expanded ALL workspaces, clobbering persisted collapsed state
-                    // every time the tab reloaded (e.g. after PC sleep).
-                    console.log('[TaskStore] Fresh load with persisted state - keeping saved expand/collapse');
+                    // Page refresh / reconnect: `workspaces` is transient (not persisted) so
+                    // it starts empty, but `expandedWorkspaces` was rehydrated from
+                    // localStorage. Respect the user's persisted collapsed state instead of
+                    // re-expanding everything (which was wiping minimized workspaces on every reset).
+                    console.log('[TaskStore] Reload with persisted state - preserving collapsed workspaces');
                 }
                 // Remove any workspaces that no longer exist
                 const workspaceIds = new Set(uniqueWorkspaces.map(w => w.id));
@@ -599,6 +620,17 @@ export const useTaskStore = create<TaskStore>()(
                 }
                 set({ expandedWorkspaces: newExpanded });
             },
+
+            toggleWorktreeGroupCollapsed: (groupId) => {
+                const newCollapsed = new Set(get().collapsedWorktreeGroups);
+                if (newCollapsed.has(groupId)) {
+                    newCollapsed.delete(groupId);
+                } else {
+                    newCollapsed.add(groupId);
+                }
+                set({ collapsedWorktreeGroups: newCollapsed });
+            },
+
 
             setShowProjectPicker: (show) => set({ showProjectPicker: show }),
 
@@ -827,6 +859,7 @@ export const useTaskStore = create<TaskStore>()(
                 expandedWorkspaces: Array.from(state.expandedWorkspaces),
                 expandedWorkspacesInitialized: state.expandedWorkspacesInitialized,
                 workspaceTaskListHeights: state.workspaceTaskListHeights,
+                collapsedWorktreeGroups: Array.from(state.collapsedWorktreeGroups),
                 workspaceColumns: state.workspaceColumns,
                 workspaceSortBy: state.workspaceSortBy,
                 taskSortBy: state.taskSortBy,
@@ -882,6 +915,9 @@ export const useTaskStore = create<TaskStore>()(
                     expandedWorkspacesInitialized: persisted.expandedWorkspacesInitialized ??
                         (persisted.expandedWorkspaces !== undefined),
                     workspaceTaskListHeights: persisted.workspaceTaskListHeights ?? currentState.workspaceTaskListHeights,
+                    collapsedWorktreeGroups: persisted.collapsedWorktreeGroups
+                        ? new Set(persisted.collapsedWorktreeGroups)
+                        : currentState.collapsedWorktreeGroups,
                     workspaceColumns: persisted.workspaceColumns ?? currentState.workspaceColumns,
                     workspaceSortBy: persisted.workspaceSortBy ?? currentState.workspaceSortBy,
                     taskSortBy: persisted.taskSortBy ?? currentState.taskSortBy,

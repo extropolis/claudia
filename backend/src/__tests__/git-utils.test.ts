@@ -729,11 +729,15 @@ describe('git-utils', () => {
             expect(result).toBeNull();
         });
 
+        // Needs more headroom than the 10s default: getPrForBranch gives `gh` a 15s
+        // timeout of its own, and on Windows CI an unauthenticated `gh` regularly
+        // sits there long enough to hit it. A test budget under the implementation's
+        // own timeout can only ever flake.
         it('should return null when gh fails / there is no PR', async () => {
             // No GitHub remote (and likely no/unauth gh in CI) -> the catch or
             // empty-array branch returns null. Never throws.
             const result = await getPrForBranch(testDir, 'main');
             expect(result).toBeNull();
-        });
+        }, 20000);
     });
 });
