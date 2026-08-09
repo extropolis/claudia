@@ -91,7 +91,8 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         rules: false,
         supervisor: false,
         learnings: false,
-        claudiaMcp: false
+        claudiaMcp: false,
+        jira: false
     });
 
     const [notificationTestStatus, setNotificationTestStatus] = useState<'idle' | 'sent' | 'failed'>('idle');
@@ -208,6 +209,18 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     // Custom API key test state
     const [customApiKeyTestStatus, setCustomApiKeyTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [customApiKeyTestMessage, setCustomApiKeyTestMessage] = useState('');
+
+    // Jira integration state. The token is never returned by the backend once
+    // saved; hasToken reflects whether one is stored. jiraToken holds only a
+    // freshly-typed value the user hasn't saved yet.
+    const [jiraEnabled, setJiraEnabled] = useState(false);
+    const [jiraBaseUrl, setJiraBaseUrl] = useState('');
+    const [jiraEmail, setJiraEmail] = useState('');
+    const [jiraToken, setJiraToken] = useState('');
+    const [jiraHasToken, setJiraHasToken] = useState(false);
+    const [jiraTestStatus, setJiraTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+    const [jiraTestMessage, setJiraTestMessage] = useState('');
+    const [jiraSaveStatus, setJiraSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
 
     // SAP AI Core test state
     const [sapAiCoreTestStatus, setSapAiCoreTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -383,6 +396,19 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                     setPlugins(pluginsData.plugins);
                 }
             }
+
+            // Jira config comes from a dedicated endpoint — the token is never
+            // included in /api/config (only hasToken here).
+            try {
+                const jiraRes = await fetch(`${getApiBaseUrl()}/api/jira/config`);
+                if (jiraRes.ok) {
+                    const j = await jiraRes.json();
+                    setJiraEnabled(!!j.jiraEnabled);
+                    setJiraBaseUrl(j.baseUrl || '');
+                    setJiraEmail(j.email || '');
+                    setJiraHasToken(!!j.hasToken);
+                }
+            } catch { /* jira config best-effort */ }
         } catch (error) {
             console.error('Failed to fetch config:', error);
         }
@@ -867,6 +893,88 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         apiModeTimerRef.current = setTimeout(() => {
             saveApiMode(apiMode, key);
         }, 1000);
+    };
+
+    // ===== Jira integration handlers =====
+
+    // Save Jira config. Only sends the token if the user typed a new one (empty
+    // token is omitted so the stored one is preserved by the backend merge).
+    const saveJiraConfig = async (opts?: { enabled?: boolean }) => {
+        setJiraSaveStatus('saving');
+        try {
+            const jira: Record<string, string> = { baseUrl: jiraBaseUrl.trim(), email: jiraEmail.trim() };
+            if (jiraToken.trim().length > 0) jira.apiToken = jiraToken.trim();
+            const res = await fetch(`${getApiBaseUrl()}/api/jira/config`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ jiraEnabled: opts?.enabled ?? jiraEnabled, jira }),
+            });
+            if (res.ok) {
+                const j = await res.json();
+                setJiraEnabled(!!j.jiraEnabled);
+                setJiraBaseUrl(j.baseUrl || '');
+                setJiraEmail(j.email || '');
+                setJiraHasToken(!!j.hasToken);
+                setJiraToken(''); // clear the transient input; token is now stored
+                setJiraSaveStatus('saved');
+                setTimeout(() => setJiraSaveStatus('idle'), 1500);
+            } else {
+                const err = await res.json().catch(() => ({ error: 'Save failed' }));
+                setJiraTestStatus('error');
+                setJiraTestMessage(err.error || 'Failed to save Jira config');
+                setJiraSaveStatus('idle');
+            }
+        } catch (e) {
+            setJiraTestStatus('error');
+            setJiraTestMessage(e instanceof Error ? e.message : 'Failed to save Jira config');
+            setJiraSaveStatus('idle');
+        }
+    };
+
+    const handleJiraEnabledToggle = async () => {
+        const next = !jiraEnabled;
+        setJiraEnabled(next);
+        await saveJiraConfig({ enabled: next });
+    };
+
+    const testJiraConnection = async () => {
+        // Persist first so the backend tests against the latest credentials.
+        await saveJiraConfig();
+        setJiraTestStatus('testing');
+        setJiraTestMessage('');
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/jira/test`);
+            const data = await res.json().catch(() => ({}));
+            if (res.ok && data.ok) {
+                setJiraTestStatus('success');
+                setJiraTestMessage(`Connected as ${data.displayName}`);
+            } else {
+                setJiraTestStatus('error');
+                setJiraTestMessage(data.error || 'Connection failed');
+            }
+        } catch (e) {
+            setJiraTestStatus('error');
+            setJiraTestMessage(e instanceof Error ? e.message : 'Connection failed');
+        }
+    };
+
+    const disconnectJira = async () => {
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/jira/config`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ jiraEnabled: false, clearCredentials: true }),
+            });
+            if (res.ok) {
+                setJiraEnabled(false);
+                setJiraBaseUrl('');
+                setJiraEmail('');
+                setJiraToken('');
+                setJiraHasToken(false);
+                setJiraTestStatus('idle');
+                setJiraTestMessage('');
+            }
+        } catch { /* best-effort */ }
     };
 
     const testCustomApiKey = async () => {
@@ -2178,6 +2286,98 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                             </label>
                                         </div>
                                     ))}
+                                </div>
+                            )}
+                        </div>
+                    </CollapsiblePanel>
+
+                    <CollapsiblePanel
+                        title="Jira Integration"
+                        icon={<FileText size={18} />}
+                        isExpanded={expandedPanels.jira}
+                        onToggle={() => togglePanel('jira')}
+                    >
+                        <div className="api-config-content">
+                            <p className="api-config-description">
+                                Connect Claudia to Jira Cloud so Claude sessions can fetch tickets,
+                                download attachments, and (with your approval) comment and transition
+                                issues. Requires the corporate VPN. Localhost-only — credentials never
+                                leave your machine.
+                            </p>
+
+                            <label className="settings-toggle-row" style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '8px 0' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={jiraEnabled}
+                                    onChange={handleJiraEnabledToggle}
+                                />
+                                <span>Enable Jira integration</span>
+                            </label>
+
+                            {jiraEnabled && (
+                                <div className="api-mode-fields">
+                                    <div className="aicore-field">
+                                        <label>Site URL</label>
+                                        <input
+                                            type="text"
+                                            value={jiraBaseUrl}
+                                            onChange={(e) => { setJiraBaseUrl(e.target.value); setJiraTestStatus('idle'); }}
+                                            placeholder="https://your-domain.atlassian.net"
+                                            className="aicore-input"
+                                        />
+                                    </div>
+                                    <div className="aicore-field">
+                                        <label>Account Email</label>
+                                        <input
+                                            type="text"
+                                            value={jiraEmail}
+                                            onChange={(e) => { setJiraEmail(e.target.value); setJiraTestStatus('idle'); }}
+                                            placeholder="you@company.com"
+                                            className="aicore-input"
+                                        />
+                                    </div>
+                                    <div className="aicore-field">
+                                        <label>API Token {jiraHasToken && <span style={{ opacity: 0.6 }}>(saved — leave blank to keep)</span>}</label>
+                                        <input
+                                            type="password"
+                                            value={jiraToken}
+                                            onChange={(e) => { setJiraToken(e.target.value); setJiraTestStatus('idle'); }}
+                                            placeholder={jiraHasToken ? '••••••••••••' : 'Paste your Atlassian API token'}
+                                            className="aicore-input"
+                                        />
+                                        <span style={{ fontSize: 12, opacity: 0.6 }}>
+                                            Create one at id.atlassian.com → Security → API tokens (use a classic token).
+                                        </span>
+                                    </div>
+
+                                    {jiraTestStatus !== 'idle' && (
+                                        <div className={`aicore-test-result ${jiraTestStatus === 'testing' ? 'testing' : jiraTestStatus}`}>
+                                            {jiraTestStatus === 'testing' && <Loader2 size={16} className="spinning" />}
+                                            {jiraTestStatus === 'success' && <CheckCircle size={16} />}
+                                            {jiraTestStatus === 'error' && <AlertCircle size={16} />}
+                                            <span>{jiraTestMessage}</span>
+                                        </div>
+                                    )}
+
+                                    <div className="aicore-buttons" style={{ display: 'flex', gap: 8 }}>
+                                        <button
+                                            className="aicore-test-btn"
+                                            onClick={testJiraConnection}
+                                            disabled={jiraTestStatus === 'testing' || (!jiraBaseUrl || !jiraEmail || (!jiraToken && !jiraHasToken))}
+                                        >
+                                            {jiraTestStatus === 'testing' ? 'Testing...' : 'Save & Test Connection'}
+                                        </button>
+                                        {(jiraHasToken || jiraBaseUrl) && (
+                                            <button
+                                                className="aicore-test-btn"
+                                                onClick={disconnectJira}
+                                                style={{ opacity: 0.8 }}
+                                            >
+                                                Disconnect
+                                            </button>
+                                        )}
+                                        {jiraSaveStatus === 'saved' && <span style={{ alignSelf: 'center', fontSize: 12, opacity: 0.7 }}>Saved</span>}
+                                    </div>
                                 </div>
                             )}
                         </div>

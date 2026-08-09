@@ -28,6 +28,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { writeFileSync } from 'fs';
+import { join, resolve, basename } from 'path';
 
 // Backend URL - defaults to localhost:4001, can be overridden via env
 const BACKEND_URL = process.env.CLAUDIA_BACKEND_URL || 'http://localhost:4001';
@@ -1173,6 +1175,238 @@ server.tool(
             };
         } catch (error) {
             log.error(`Failed to ${paused ? 'pause' : 'resume'} scheduled task:`, error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Jira integration tools
+// ============================================================================
+// These proxy to the backend's /api/jira/* endpoints, which enforce the enabled
+// flag, localhost-only access, and the SSRF guard. Tools surface a clear message
+// when the integration is disabled instead of failing opaquely.
+
+/** Helper: GET a Jira endpoint, returning parsed JSON or throwing a readable error. */
+async function jiraGet(path: string): Promise<any> {
+    const res = await backendFetch(path);
+    if (res.status === 403) {
+        throw new Error('Jira integration is disabled or not configured. Enable it in Claudia Settings and add an API token.');
+    }
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(data.error || `Jira request failed (HTTP ${res.status})`);
+    }
+    return res.json();
+}
+
+server.tool(
+    'jira_get_ticket',
+    'Fetch a Jira ticket by key (e.g. "PROJ-123") or full browse URL. Returns summary, status, assignee, description, comments, and attachment metadata. Read-only.',
+    {
+        key: z.string().describe('Jira issue key (e.g. "PROJ-123") or a full /browse/ URL'),
+    },
+    async ({ key }) => {
+        try {
+            const issue = await jiraGet(`/api/jira/issue/${encodeURIComponent(key)}`);
+            return { content: [{ type: 'text', text: JSON.stringify(issue, null, 2) }] };
+        } catch (error) {
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+server.tool(
+    'jira_search',
+    'Search Jira issues with a JQL query (e.g. "assignee = currentUser() AND statusCategory != Done"). Returns matching issues (key, summary, status, assignee). Read-only.',
+    {
+        jql: z.string().describe('A JQL query string'),
+        maxResults: z.number().optional().describe('Max results to return (1-100, default 25)'),
+    },
+    async ({ jql, maxResults }) => {
+        try {
+            const params = new URLSearchParams({ jql });
+            if (maxResults) params.set('maxResults', String(maxResults));
+            const result = await jiraGet(`/api/jira/search?${params.toString()}`);
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        } catch (error) {
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+server.tool(
+    'jira_list_attachments',
+    'List the attachments on a Jira ticket (id, filename, size, type). Use jira_download_attachment to fetch one into the workspace.',
+    {
+        key: z.string().describe('Jira issue key (e.g. "PROJ-123") or a full /browse/ URL'),
+    },
+    async ({ key }) => {
+        try {
+            const data = await jiraGet(`/api/jira/issue/${encodeURIComponent(key)}/attachments`);
+            return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+        } catch (error) {
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+server.tool(
+    'jira_download_attachment',
+    'Download a Jira attachment by its numeric id into the current workspace. Returns the saved file path. Get attachment ids from jira_list_attachments.',
+    {
+        attachmentId: z.string().describe('Numeric attachment id (from jira_list_attachments)'),
+        filename: z.string().optional().describe('Optional filename to save as (defaults to the attachment name). Path components are stripped.'),
+    },
+    async ({ attachmentId, filename }) => {
+        if (!WORKSPACE_ID) {
+            return { content: [{ type: 'text', text: 'Error: No workspace configured (CLAUDIA_WORKSPACE_ID not set).' }] };
+        }
+        try {
+            const res = await backendFetch(`/api/jira/attachment/${encodeURIComponent(attachmentId)}`);
+            if (res.status === 403) {
+                return { content: [{ type: 'text', text: 'Error: Jira integration is disabled or not configured.' }] };
+            }
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+                return { content: [{ type: 'text', text: `Error: ${data.error || `HTTP ${res.status}`}` }] };
+            }
+
+            // Derive the filename: prefer the caller's, else Content-Disposition, else the id.
+            let name = filename;
+            if (!name) {
+                const cd = res.headers.get('content-disposition') || '';
+                const m = cd.match(/filename="?([^"]+)"?/);
+                name = m ? m[1] : `attachment-${attachmentId}`;
+            }
+            // Path-traversal guard: strip any directory components, then verify the
+            // resolved path stays inside the workspace.
+            const safeName = basename(name).replace(/[/\\]/g, '_');
+            const destPath = join(WORKSPACE_ID, safeName);
+            const resolvedDest = resolve(destPath);
+            const resolvedWorkspace = resolve(WORKSPACE_ID);
+            if (!resolvedDest.startsWith(resolvedWorkspace)) {
+                return { content: [{ type: 'text', text: 'Error: Refusing to write outside the workspace.' }] };
+            }
+
+            const buf = Buffer.from(await res.arrayBuffer());
+            writeFileSync(resolvedDest, buf);
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({ success: true, path: resolvedDest, bytes: buf.length }, null, 2),
+                }],
+            };
+        } catch (error) {
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+server.tool(
+    'jira_open_ticket',
+    'Open a Jira ticket on the Claudia Jira tab so the user can see it. Validates the ticket exists, then surfaces it in the UI. Use this when the user asks you to pull up or show a ticket.',
+    {
+        key: z.string().describe('Jira issue key (e.g. "PROJ-123") or a full /browse/ URL'),
+    },
+    async ({ key }) => {
+        try {
+            const res = await backendFetch('/api/jira/focus', {
+                method: 'POST',
+                body: JSON.stringify({ key, workspaceId: WORKSPACE_ID || null }),
+            });
+            if (res.status === 403) {
+                return { content: [{ type: 'text', text: 'Error: Jira integration is disabled or not configured.' }] };
+            }
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+                return { content: [{ type: 'text', text: `Error: ${data.error || `HTTP ${res.status}`}` }] };
+            }
+            const data = await res.json();
+            return { content: [{ type: 'text', text: JSON.stringify({ success: true, ...data }, null, 2) }] };
+        } catch (error) {
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// Helper: run a confirmation-gated Jira write. Sends jira:writeRequest and waits
+// for the user's jira:writeApproved (with success/error) or jira:writeRejected.
+async function requestJiraWrite(op: {
+    action: 'comment' | 'transition';
+    key: string;
+    body?: string;
+    transitionId?: string;
+    summary: string;
+}): Promise<{ ok: boolean; message: string }> {
+    const { randomBytes } = await import('crypto');
+    const requestId = `jira-${Date.now()}-${randomBytes(4).toString('hex')}`;
+    try {
+        const result = await sendWSMessageWithMultiResponse<{ ok: boolean; message: string }>(
+            'jira:writeRequest',
+            { requestId, ...op },
+            (msg) => {
+                if (msg.type === 'jira:writeApproved' && msg.payload?.requestId === requestId) {
+                    if (msg.payload.success) return { ok: true, message: `Done: ${op.action} on ${op.key}.` };
+                    return { ok: false, message: `Jira write failed: ${msg.payload.error || 'unknown error'}` };
+                }
+                if (msg.type === 'jira:writeRejected' && msg.payload?.requestId === requestId) {
+                    return { ok: false, message: 'User rejected the Jira write.' };
+                }
+                return null;
+            },
+            120000,
+        );
+        return result;
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('timed out')) return { ok: false, message: 'User did not respond within 2 minutes.' };
+        return { ok: false, message: msg };
+    }
+}
+
+server.tool(
+    'jira_add_comment',
+    'Add a comment to a Jira ticket. Requires user confirmation — a dialog is shown in Claudia and the comment is only posted if the user approves. Use for posting updates back to a ticket.',
+    {
+        key: z.string().describe('Jira issue key (e.g. "PROJ-123") or a full /browse/ URL'),
+        comment: z.string().describe('The comment text to post (plain text)'),
+    },
+    async ({ key, comment }) => {
+        const preview = comment.length > 140 ? comment.slice(0, 140) + '…' : comment;
+        const r = await requestJiraWrite({ action: 'comment', key, body: comment, summary: preview });
+        return { content: [{ type: 'text', text: JSON.stringify({ success: r.ok, message: r.message }, null, 2) }] };
+    }
+);
+
+server.tool(
+    'jira_transition_ticket',
+    'Transition a Jira ticket to a new status (e.g. move to "In Progress" or "Done"). Requires user confirmation. First call jira_get_transitions to find the valid transition id for the ticket\'s current state.',
+    {
+        key: z.string().describe('Jira issue key (e.g. "PROJ-123") or a full /browse/ URL'),
+        transitionId: z.string().describe('The numeric transition id (from jira_get_transitions)'),
+        transitionName: z.string().optional().describe('Optional human-readable name for the confirmation dialog'),
+    },
+    async ({ key, transitionId, transitionName }) => {
+        const r = await requestJiraWrite({
+            action: 'transition', key, transitionId,
+            summary: transitionName ? `Move to "${transitionName}"` : `Apply transition ${transitionId}`,
+        });
+        return { content: [{ type: 'text', text: JSON.stringify({ success: r.ok, message: r.message }, null, 2) }] };
+    }
+);
+
+server.tool(
+    'jira_get_transitions',
+    'List the workflow transitions available for a Jira ticket in its current state (id + name). Use the id with jira_transition_ticket. Read-only.',
+    {
+        key: z.string().describe('Jira issue key (e.g. "PROJ-123") or a full /browse/ URL'),
+    },
+    async ({ key }) => {
+        try {
+            const data = await jiraGet(`/api/jira/issue/${encodeURIComponent(key)}/transitions`);
+            return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+        } catch (error) {
             return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
         }
     }
