@@ -2096,9 +2096,13 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
     // A ticket key a Claude session asked to open (via jira:focusTicket WS).
     const pendingJiraFocus = useTaskStore(s => s.pendingJiraFocus);
     const clearJiraFocus = useTaskStore(s => s.clearJiraFocus);
+    const isConnected = useTaskStore(s => s.isConnected);
 
     // Poll Jira availability so the tab appears/disappears with the setting.
+    // Gated on the socket like every other fetch in this panel: while the
+    // backend is unreachable this only produced a failing request every 15s.
     useEffect(() => {
+        if (!isConnected) return;
         let cancelled = false;
         const check = async () => {
             try {
@@ -2112,7 +2116,7 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
         check();
         const interval = setInterval(check, 15000);
         return () => { cancelled = true; clearInterval(interval); };
-    }, []);
+    }, [isConnected]);
 
     // When a session focuses a ticket, surface the Jira tab and expand the panel.
     useEffect(() => {

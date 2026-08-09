@@ -74,6 +74,14 @@ export function useWebSocket() {
     const taskStatesRef = useRef<Map<string, string>>(new Map());
     /** Flag to skip sound on initial load */
     const initializedRef = useRef<boolean>(false);
+    /**
+     * Set during cleanup, before we close the socket. The close event arrives
+     * asynchronously — after cleanup has already cleared the pending reconnect
+     * timer — so without this flag onclose schedules a *fresh* reconnect and
+     * the hook resurrects a WebSocket (and keeps reconnecting forever) after
+     * the component is gone.
+     */
+    const isUnmountedRef = useRef<boolean>(false);
 
     const {
         setConnected,
@@ -102,6 +110,19 @@ export function useWebSocket() {
         const currentState = wsRef.current?.readyState;
         console.log(`[WebSocket] connect() called - current state: ${currentState}, isTunnel: ${isTunnelAccess()}`);
 
+        if (isUnmountedRef.current) {
+            console.log('[WebSocket] Skipping connect - hook is unmounted');
+            return;
+        }
+
+        // Any pending reconnect is now superseded by this attempt. Without this
+        // an `online` event (or a second close) leaves orphaned timers that
+        // fire later and stack up extra connect() calls.
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = undefined;
+        }
+
         if (wsRef.current?.readyState === WebSocket.OPEN ||
             wsRef.current?.readyState === WebSocket.CONNECTING) {
             console.log('[WebSocket] Skipping connect - already OPEN or CONNECTING');
@@ -119,6 +140,11 @@ export function useWebSocket() {
                 return;
             }
             console.log('[WebSocket] ✓ Tunnel warmup SUCCESS - proceeding with WebSocket...');
+            // We awaited — the hook may have unmounted in the meantime.
+            if (isUnmountedRef.current) {
+                console.log('[WebSocket] Aborting connect after warmup - hook is unmounted');
+                return;
+            }
         }
 
         console.log('[WebSocket] Creating WebSocket connection to:', WS_URL);
@@ -136,7 +162,22 @@ export function useWebSocket() {
         ws.onclose = (event) => {
             console.log(`[WebSocket] ❌ DISCONNECTED - code: ${event.code}, reason: ${event.reason || 'none'}, wasClean: ${event.wasClean}`);
             if (_activeWs === ws) _activeWs = null;
+            // A superseded socket closing late must not speak for the current
+            // one: reporting "disconnected" here flashes the offline banner
+            // while a newer socket is perfectly healthy, and the reconnect it
+            // would schedule belongs to a connection nobody is using.
+            if (wsRef.current !== ws) {
+                console.log('[WebSocket] Ignoring close from a superseded socket');
+                return;
+            }
             setConnected(false);
+            // Client-initiated teardown (unmount): never reconnect. Server-side
+            // closes DO reconnect even when clean — `tsx watch` restarts close
+            // the socket normally and the UI has to come back on its own.
+            if (isUnmountedRef.current) {
+                console.log('[WebSocket] Not reconnecting - hook is unmounted');
+                return;
+            }
             // Exponential backoff: delay = min(base * 2^attempts, max)
             const delay = Math.min(
                 RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts.current),
@@ -618,6 +659,7 @@ export function useWebSocket() {
 
     useEffect(() => {
         console.log('[WebSocket] 🚀 useEffect mounting - initiating first connection');
+        isUnmountedRef.current = false;
         connect();
 
         // Listen for online/offline events
@@ -653,8 +695,13 @@ export function useWebSocket() {
 
         return () => {
             console.log('[WebSocket] 🧹 Cleanup - closing connection');
+            // Must be set BEFORE close() — the close event is delivered
+            // asynchronously and onclose would otherwise schedule a reconnect
+            // that outlives the component.
+            isUnmountedRef.current = true;
             if (reconnectTimeoutRef.current) {
                 clearTimeout(reconnectTimeoutRef.current);
+                reconnectTimeoutRef.current = undefined;
             }
             window.removeEventListener('online', handleOnline);
             window.removeEventListener('offline', handleOffline);
