@@ -157,7 +157,23 @@ The behavior is inverted from what any remote client needs: low-stakes questions
 
 Two structural problems: ground truth is a **regex over rendered terminal text** (English-only, brittle across CLI updates), and there is **no audit trail** — the auto-accept path writes and `continue`s, recording nothing.
 
-### 7.2 Approval latency exceeds the hook timeout
+### 7.2 Multi-client viewing is now the default, and is unmodeled
+
+One always-on backend means a laptop, a desktop, and a phone can all watch the same task. Today that is an accident; under this plan it is the normal case.
+
+The code assumes a single viewer. `task:resize` is applied unconditionally — `if (taskId && cols && rows) taskSpawner.resizeTask(...)` — so the last client to send a width wins, and there is no viewer count anywhere in `server.ts` or `task-spawner.ts`.
+
+`CLAUDE.md` already documents the consequences as known hazards: terminal resize *"buffers PTY output for 250ms to prevent width-mismatch corruption"*, and resize events under three columns are suppressed *"to prevent feedback loops"*. Both mitigations are tuned for one client. Three clients with different window widths will fight over the PTY continuously, and the existing damping makes the thrash slower rather than absent.
+
+Needs an explicit model: who owns a task's terminal dimensions, what the other viewers see, and whether non-owning clients render read-only. Deciding this late means discovering it as "the terminal is garbled on my phone" with no obvious cause.
+
+### 7.3 Unattended auto-approval
+
+`skipPermissions: true` plus an always-on, internet-reachable machine is a different proposition from the same flag on a laptop the user is sitting in front of. §7.1 fixes the audit trail; it does not decide the policy.
+
+The plan's position: **server deployments default to `skipPermissions: false`.** Approvals route to a human through the inbox rather than being answered by a regex. A user who wants the current behavior sets it deliberately, having seen the decision log that #190 adds.
+
+### 7.4 Approval latency exceeds the hook timeout
 
 #139 specifies a ~55-second long-poll before falling back to the terminal dialog. A human answering from a phone routinely exceeds this. Needs a renewable poll plus an explicit receipt — `pending → delivered → host_applied | stale | rejected` — so "tapped Approve" is never confused with "the agent acted" (@Snailflyer on #44).
 
@@ -219,9 +235,23 @@ Per `CLAUDE.md`, test-CLI coverage before manual testing:
 - A `docker compose` fixture that boots the image with a seeded volume, so deployment is testable in CI rather than only on a real server
 - Backend-generated protocol fixtures consumed by client test suites
 
+**Where the existing suite will not help.** Repo coverage is 28% overall (backend 35% lines, frontend 7.6%), and the two least-covered large modules are `server.ts` and `task-spawner.ts` — exactly what P0 changes. `browse-folder` lives in `server.ts` and #209 rewrites it. A green suite after those changes is weak evidence, so they should be written with tests alongside rather than after. The WS and HTTP harnesses added in #184/#185 boot the real server on an ephemeral port with isolated state, so the cost of doing this is low.
+
 ---
 
-## 11. Open questions
+## 11. Operations
+
+The volume is the product. Everything that matters — repositories with uncommitted work, `~/.claude` credentials and transcripts, task state — lives on it, and the architecture's whole premise is that it outlives the machine.
+
+**Backup.** Nothing in this plan protects that volume, which is the largest unaddressed risk in it. On a home server, a filesystem with snapshots (ZFS or btrfs) is worth setting up before there is data to lose. On a Sprite the durable root filesystem survives sleep and restart, but survives neither an account problem nor a mistaken `destroy`. A documented restore path matters more than the backup mechanism: an untested backup is a belief, not a capability.
+
+**Migration from an existing install.** Every current user has state in `backend/`. Because the data directory defaults to the legacy location when unset (§5.1), moving is: stop Claudia, copy the files to the new volume, set `CLAUDIA_DATA_DIR`, start. This should be a documented procedure rather than folklore — it is the first thing every existing user does, including us.
+
+**Upgrades and rollback.** Container images make upgrade a pull and restart, and rollback a matter of pinning the previous tag — but only if the data is forward *and* backward compatible. The stores already version their payloads through `loadVersioned`/`saveVersioned`, so the constraint is real and checkable: a schema bump that an older image cannot read makes rollback a data-loss event. Any migration that is not backward compatible needs to be called out in its release.
+
+**Resource pressure — already answered.** A home server running many agents was a live failure mode: ~60 concurrent agents on a 24 GB machine drove load average to 205 at 0.9% idle. `memory-guard.ts` (#180) sheds the least-recently-used agents before the host pages, disconnecting rather than killing, so tasks keep their session and resume on click. This plan inherits that and needs nothing further; the tuning may want revisiting once the host is a server rather than a laptop.
+
+## 12. Open questions
 
 1. **Agent credentials on operated Sprites — the one unresolved risk.** We operate the Fly account (§4.2), so a user's Claude Code runs on infrastructure we own and bill for. Anthropic's Consumer Terms §3 prohibit accessing the Services *"through automated or non-human means"* except via an API Key, and since March 2026 subscription OAuth is enforced server-side as first-party only. Whether a user logging into *their own* isolated VM through our product counts as first-party use is genuinely unclear — it resembles a rented VPS, but it is sold as a managed service. **This needs an answer from Anthropic, not an inference from public terms.** The architecture works either way; only the billing story changes: subscription auth if permitted, otherwise bring-your-own API key at $150–250/month.
 2. Does the free tier stay unauthenticated on localhost, or is auth always on?
@@ -231,14 +261,14 @@ Per `CLAUDE.md`, test-CLI coverage before manual testing:
 
 ---
 
-## 12. Issue map
+## 13. Issue map
 
 Tracked under milestone **Portable Backend & Native Clients**, epic **#186**.
 
 | Phase | Issues |
 | --- | --- |
-| P0 Service | #208 container image · #188 portable data dir · #209 workspace creation · #210 credential bootstrap · #126/#127/#128 auth · #189 trusted proxy · #178 Tailscale · #190 approval audit |
-| P1 Desktop | #204 attach mode |
+| P0 Service | #208 container image · #188 portable data dir · #209 workspace creation · #210 credential bootstrap · #126/#127/#128 auth · #189 trusted proxy · #178 Tailscale · #190 approval audit · #223 backup/migration/rollback |
+| P1 Desktop | #204 attach mode · #222 multi-client viewer model |
 | P2 Protocol + Sprite | #187 protocol · #136 event stream · #133 parser · #141 SPA on stream · #211 Sprite + control plane · #205 security posture · #192 billing |
 | P3 iOS | #195 Swift package · #196 v1 surfaces · #149 composer · #10 sign & notarize |
 | P4 Manager | #198 ManagerService · #199 Manager session · #165 · #167 · #166 · #160 · #46 |
