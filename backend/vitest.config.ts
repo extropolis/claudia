@@ -1,6 +1,15 @@
 import { defineConfig } from 'vitest/config';
+import { fileURLToPath } from 'url';
+
+// Resolve @claudia/shared to its SOURCE, not shared/dist. Without this the
+// suite tests whatever was last built — a stale dist means green tests over
+// old code.
+const SHARED_SRC = fileURLToPath(new URL('../shared/src/index.ts', import.meta.url));
 
 export default defineConfig({
+    resolve: {
+        alias: { '@claudia/shared': SHARED_SRC },
+    },
     test: {
         globals: true,
         environment: 'node',
@@ -9,8 +18,11 @@ export default defineConfig({
         coverage: {
             provider: 'v8',
             reporter: ['text', 'json', 'html'],
-            // Count every src file, incl. never-imported ones (see frontend
-            // config note — absent files inflate the headline number).
+            // HONESTY: without `all`, a file that no test ever imports is
+            // simply ABSENT from the report rather than counted as 0%. The
+            // headline percentage then describes only the files that happen to
+            // be tested, which is how a suite covering a fraction of the
+            // codebase can advertise a high number. Count every source file.
             all: true,
             include: ['src/**/*.ts'],
             exclude: [
