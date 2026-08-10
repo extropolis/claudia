@@ -14,23 +14,20 @@
  *    deterministic, offline coverage. The network half is deliberately left
  *    alone — see the skip list at the bottom.
  *
- * The `gh`-backed half is POSIX-only: fixtures/fake-gh.sh is a bash script
- * placed on PATH as `gh`, which Windows cannot exec — the routes then fail the
- * shell-out and answer 500 instead of 200. Those four describes are skipped on
- * win32 and stay covered by the Linux leg. The guard describes below them need
- * no `gh` at all, so they keep running on every platform.
+ * POSIX-only. fixtures/fake-gh.sh is a bash script placed on PATH as `gh`,
+ * which Windows cannot exec — the routes then fail the shell-out and answer
+ * 500 instead of 200. Every suite here is guarded by SUPPORTS_FAKE_CLI, the
+ * same flag the fake-claude suites use, so the whole file skips on win32 and
+ * stays covered by the Linux leg rather than failing misleadingly.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, copyFileSync, chmodSync, existsSync, readFileSync } from 'fs';
 import { join, dirname, delimiter } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
-import { startHarness, makeGitRepo, git, makeTaskRecord, type Harness } from './helpers/server-harness.js';
+import { startHarness, makeGitRepo, git, makeTaskRecord, type Harness, SUPPORTS_FAKE_CLI } from './helpers/server-harness.js';
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
-
-/** The fake `gh` is a bash script on PATH; Windows cannot exec it. */
-const NEEDS_FAKE_GH = process.platform !== 'win32';
 
 let h: Harness;
 let ghBin: string;      // dir prepended to PATH, holds the fake `gh`
@@ -98,7 +95,7 @@ afterAll(async () => {
 
 const q = encodeURIComponent;
 
-describe.skipIf(!NEEDS_FAKE_GH)('GET /api/workspaces/ci-status', () => {
+describe.skipIf(!SUPPORTS_FAKE_CLI)('GET /api/workspaces/ci-status', () => {
     it('400s on a missing workspace param and 404s on a path that does not exist', async () => {
         expect((await h.req('/api/workspaces/ci-status')).status).toBe(400);
         const missing = await h.req(`/api/workspaces/ci-status?workspace=${q(join(h.base, 'nope'))}`);
@@ -167,7 +164,7 @@ describe.skipIf(!NEEDS_FAKE_GH)('GET /api/workspaces/ci-status', () => {
     }, 20000);
 });
 
-describe.skipIf(!NEEDS_FAKE_GH)('GET/POST/PATCH /api/workspaces/github-issues', () => {
+describe.skipIf(!SUPPORTS_FAKE_CLI)('GET/POST/PATCH /api/workspaces/github-issues', () => {
     it('enforces the error contract before touching gh', async () => {
         expect((await h.req('/api/workspaces/github-issues')).status).toBe(400);
         expect((await h.req(`/api/workspaces/github-issues?workspace=${q(join(h.base, 'nope'))}`)).status).toBe(404);
@@ -221,7 +218,7 @@ describe.skipIf(!NEEDS_FAKE_GH)('GET/POST/PATCH /api/workspaces/github-issues', 
     }, 20000);
 });
 
-describe.skipIf(!NEEDS_FAKE_GH)('/api/github/notifications', () => {
+describe.skipIf(!SUPPORTS_FAKE_CLI)('/api/github/notifications', () => {
     it('400s without a valid workspace on both the list and the mark-read routes', async () => {
         expect((await h.req('/api/github/notifications')).status).toBe(400);
         expect((await h.req(`/api/github/notifications?workspace=${q(join(h.base, 'nope'))}`)).status).toBe(404);
@@ -253,7 +250,7 @@ describe.skipIf(!NEEDS_FAKE_GH)('/api/github/notifications', () => {
     }, 20000);
 });
 
-describe.skipIf(!NEEDS_FAKE_GH)('PATCH /api/workspaces/pr-description', () => {
+describe.skipIf(!SUPPORTS_FAKE_CLI)('PATCH /api/workspaces/pr-description', () => {
     it('requires workspace and a string body', async () => {
         expect((await h.send('PATCH', '/api/workspaces/pr-description', { body: 'x' })).status).toBe(400);
         expect((await h.send('PATCH', '/api/workspaces/pr-description', { workspace: repo })).status).toBe(400);
@@ -270,7 +267,7 @@ describe.skipIf(!NEEDS_FAKE_GH)('PATCH /api/workspaces/pr-description', () => {
     }, 20000);
 });
 
-describe('network-route guards (all return before any socket is opened)', () => {
+describe.skipIf(!SUPPORTS_FAKE_CLI)('network-route guards (all return before any socket is opened)', () => {
     it('POST /api/tts refuses when ELEVENLABS_API_KEY is unset', async () => {
         const r = await h.send<any>('POST', '/api/tts', { text: 'hello' });
         // BUG (reported, not fixed here): a missing *server* config is a 500,
@@ -325,7 +322,7 @@ describe('network-route guards (all return before any socket is opened)', () => 
     });
 });
 
-describe('voice-agent config + tunnel status (local, no network)', () => {
+describe.skipIf(!SUPPORTS_FAKE_CLI)('voice-agent config + tunnel status (local, no network)', () => {
     it('round-trips the voice agent system prompt', async () => {
         const before = await h.req<any>('/api/voice-agent/system-prompt');
         expect(before.status).toBe(200);
@@ -359,7 +356,7 @@ describe('voice-agent config + tunnel status (local, no network)', () => {
     });
 });
 
-describe('learn routes: 4xx guards (the LLM half is out of scope)', () => {
+describe.skipIf(!SUPPORTS_FAKE_CLI)('learn routes: 4xx guards (the LLM half is out of scope)', () => {
     it('404s for an unknown task and for a task with no session', async () => {
         expect((await h.send('POST', '/api/tasks/does-not-exist/learn', {})).status).toBe(404);
         const noSession = await h.send<any>('POST', `/api/tasks/${TASK_ID}/learn`, {});
