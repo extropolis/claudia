@@ -18,10 +18,13 @@ import { getConversationHistory, getWorkspaceSessions } from './conversation-par
 import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, Checkpoint, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
+import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
 import { validateConfigUpdate, validateWorkspacePath, isPathInside } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
+import { selectWorkspacesToRefresh } from './pr-refresh.js';
 import { WorktreeManager } from './worktree-manager.js';
+import { classifyWorktree, removeWorktreeWithUnlockRetry } from './worktree-reaper.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
@@ -47,6 +50,7 @@ const __dirname = dirname(__filename);
 const VALID_WS_MESSAGE_TYPES = new Set([
     'task:create',
     'task:select',
+    'task:refreshPr',
     'task:input',
     'task:resize',
     'task:destroy',
@@ -538,6 +542,9 @@ export async function createApp(basePath?: string) {
     );
     cronScheduler.start();
 
+    // TodoStore for per-task user TODOs
+    const todoStore = new TodoStore();
+
     // CheckpointStore for per-task git snapshots / restore points
     const checkpointStore = new CheckpointStore(basePath);
 
@@ -782,8 +789,8 @@ export async function createApp(basePath?: string) {
     // Resolve (repoPath, branch) for a workspace, then look up its PR.
     // If `force` is false (default), skips the expensive `gh` call when the
     // branch hasn't changed since the last check.
-    async function refreshPrInfoFor(workspaceId: string, force = false): Promise<void> {
-        if (prInfoInFlight.has(workspaceId)) return;
+    async function refreshPrInfoFor(workspaceId: string, force = false, userTriggered = false): Promise<void> {
+        if (!userTriggered && prInfoInFlight.has(workspaceId)) return;
         const ws = workspaceStore.getWorkspace(workspaceId);
         if (!ws) return;
 
@@ -827,9 +834,12 @@ export async function createApp(basePath?: string) {
         prInfoInFlight.add(workspaceId);
         prInfoSeen.add(workspaceId);
         try {
-            const repoPath = ws.id;
+            const repoPath = ws.worktreeParentId || ws.id;
+            logger.debug('refreshPrInfoFor: fetching PR', { workspaceId: workspaceId.slice(-30), branch, repoPath: repoPath.slice(-30), userTriggered });
             const prInfo = branch ? await getPrForBranch(repoPath, branch) : null;
+            logger.debug('refreshPrInfoFor: got PR', { workspaceId: workspaceId.slice(-30), state: prInfo?.state ?? 'null', number: prInfo?.number });
             if (workspaceStore.setPrInfo(workspaceId, prInfo)) {
+                logger.info('refreshPrInfoFor: PR info changed, broadcasting', { workspaceId: workspaceId.slice(-30), state: prInfo?.state });
                 const updated = workspaceStore.getWorkspace(workspaceId);
                 if (updated) broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updated } });
             }
@@ -849,30 +859,87 @@ export async function createApp(basePath?: string) {
         if (!(await isGhAvailable())) return;
         prRefreshPassInFlight = true;
         try {
-        const tasks = taskSpawner.getAllTasks();
-        // Workspaces with at least one active task → refresh every interval.
-        const activeWorkspaceIds = new Set(
-            tasks.filter(t => t.state === 'busy' || t.state === 'starting' || t.state === 'waiting_input')
-                 .map(t => t.workspaceId)
-        );
-        // Workspaces with any task we haven't looked up yet → one-time lazy fetch.
-        const lazyWorkspaceIds = new Set(
-            tasks.map(t => t.workspaceId).filter(id => !prInfoSeen.has(id))
-        );
-        const toRefresh = new Set<string>([...activeWorkspaceIds, ...lazyWorkspaceIds]);
-        for (const id of toRefresh) {
-            await refreshPrInfoFor(id, true);  // force=true: periodic re-checks CI even if branch same
-        }
+            const tasks = taskSpawner.getAllTasks();
+
+            // Selection lives in pr-refresh.ts (pure + unit-tested). Critically it
+            // includes workspaces whose PR is still non-terminal even when their
+            // tasks have gone idle — a task pushes, opens a PR and goes idle
+            // exactly while CI runs, and the old activity-only rule froze those
+            // badges at their push-time state forever.
+            const toRefresh = selectWorkspacesToRefresh(
+                tasks,
+                workspaceStore.getWorkspaces(),
+                prInfoSeen
+            );
+            if (toRefresh.length > 0) {
+                logger.debug('PR info refresh pass', { count: toRefresh.length });
+
+                // Bounded concurrency: each refresh is a networked `gh` call with a
+                // 15s timeout. Awaiting them one at a time let a single slow repo
+                // stall the entire pass (and the reentrancy guard then skipped the
+                // next tick), which showed up as badges lagging far behind CI.
+                const PR_REFRESH_CONCURRENCY = 4;
+                let cursor = 0;
+                await Promise.all(
+                    Array.from({ length: Math.min(PR_REFRESH_CONCURRENCY, toRefresh.length) }, async () => {
+                        while (cursor < toRefresh.length) {
+                            const id = toRefresh[cursor++];
+                            // force: re-check CI even when the branch is unchanged.
+                            await refreshPrInfoFor(id, true);
+                        }
+                    })
+                );
+            }
+
+            // Task-level sessionWorktreePrInfo is set once on worktree discovery and
+            // never refreshed, so merged PRs and CI results never showed up on the
+            // inline worktree badge. Runs regardless of whether any workspace was
+            // selected above — the two are independent.
+            const tasksWithWorktree = tasks.filter(t => t.sessionWorktreeBranch);
+            for (const task of tasksWithWorktree) {
+                try {
+                    const ws = workspaceStore.getWorkspace(task.workspaceId);
+                    const repoPath = ws?.worktreeParentId || task.workspaceId;
+                    const prInfo = await getPrForBranch(repoPath, task.sessionWorktreeBranch!);
+                    taskSpawner.setSessionWorktree(task.id, task.sessionWorktreeBranch, prInfo);
+                } catch (err) {
+                    logger.debug('Failed to refresh sessionWorktreePrInfo', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+                }
+            }
         } finally {
             prRefreshPassInFlight = false;
         }
     }
 
-    // Poll on an interval (90s) — only touches active/unseen workspaces, not all.
-    const PR_INFO_INTERVAL_MS = 90_000;
+    // Poll on an interval. 45s rather than the older 30s: selection is now bounded
+    // to workspaces whose PR can still change (terminal merged/closed ones are
+    // skipped), and the pass additionally walks session-worktree tasks, so a
+    // shorter tick would cost more `gh` calls without fresher badges.
+    const PR_INFO_INTERVAL_MS = 45_000;
     const prInfoInterval = setInterval(() => { void refreshActiveWorkspacePrInfo(); }, PR_INFO_INTERVAL_MS);
     // Kick off an initial pass shortly after startup.
     setTimeout(() => { void refreshActiveWorkspacePrInfo(); }, 5_000);
+
+    // Immediately refresh PR info for a single task (workspace + session worktree).
+    // Called on task:select and task:refreshPr (hover) — fire-and-forget, no await needed.
+    async function refreshTaskPrInfo(taskId: string): Promise<void> {
+        const task = taskSpawner.getAllTasks().find(t => t.id === taskId);
+        if (!task) return;
+        // Workspace-level prInfo — bypass in-flight guard since this is user-triggered
+        void refreshPrInfoFor(task.workspaceId, true, true);
+        // Task session worktree prInfo (branch created by Claude inside the session)
+        if (task.sessionWorktreeBranch) {
+            try {
+                const ws = workspaceStore.getWorkspace(task.workspaceId);
+                const repoPath = ws?.worktreeParentId || task.workspaceId;
+                const prInfo = await getPrForBranch(repoPath, task.sessionWorktreeBranch);
+                taskSpawner.setSessionWorktree(task.id, task.sessionWorktreeBranch, prInfo);
+            } catch (err) {
+                logger.debug('refreshTaskPrInfo: session worktree lookup failed', { taskId, error: err instanceof Error ? err.message : String(err) });
+            }
+        }
+    }
+
 
     // ===== Worktree discovery (session attribution) =====
     // A task's Claude session may create a git worktree (raw `git worktree add`)
@@ -946,7 +1013,67 @@ export async function createApp(basePath?: string) {
     // Periodic sweep + initial pass shortly after startup.
     const WORKTREE_SCAN_INTERVAL_MS = 60_000;
     const worktreeScanInterval = setInterval(() => { void discoverWorktrees(); }, WORKTREE_SCAN_INTERVAL_MS);
-    setTimeout(() => { void discoverWorktrees(); }, 6_000);
+    const worktreeScanKickoff = setTimeout(() => { void discoverWorktrees(); }, 6_000);
+
+    // ===== Archived-worktree retention sweep =====
+    // Removes worktrees whose owning tasks are archived (after retentionDays)
+    // or that no task owns at all (orphans, immediate). Never touches a
+    // worktree referenced by a live/disconnected task. See worktree-reaper.ts
+    // and the 2026-07-18 retention design spec.
+    let worktreeSweepInFlight = false;
+    async function sweepArchivedWorktrees(): Promise<void> {
+        if (worktreeSweepInFlight) return;
+        worktreeSweepInFlight = true;
+        try {
+            const retentionDays = configStore.getWorktreeRetentionDays();
+            const records = workspaceStore.getWorkspaces()
+                .filter(w => w.worktreeParentId) as Array<{ id: string; worktreeParentId: string }>;
+            if (records.length === 0) return;
+
+            const activeTasks = taskSpawner.getAllTasks();       // live + disconnected
+            const archivedTasks = taskSpawner.getArchivedTasks();
+            const now = Date.now();
+            let removed = 0, skipped = 0, failed = 0;
+
+            for (const rec of records) {
+                const decision = classifyWorktree(
+                    { id: rec.id, worktreeParentId: rec.worktreeParentId },
+                    activeTasks.map(t => ({ id: t.id, workspaceId: t.workspaceId, lastActivity: t.lastActivity })),
+                    archivedTasks.map(t => ({ id: t.id, workspaceId: t.workspaceId, lastActivity: t.lastActivity })),
+                    now, retentionDays,
+                );
+                if (decision.action === 'skip') {
+                    skipped++;
+                    logger.info('Worktree sweep: skip', { worktree: rec.id, reason: decision.reason });
+                    continue;
+                }
+                try {
+                    await removeWorktreeWithUnlockRetry(rec.worktreeParentId, rec.id);
+                    workspaceStore.deleteWorkspace(rec.id);
+                    broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: rec.id } });
+                    for (const taskId of decision.archivedTaskIds) {
+                        if (taskSpawner.deleteArchivedTask(taskId)) {
+                            broadcast({ type: 'task:archived:deleted' as WSMessageType, payload: { taskId } });
+                        }
+                    }
+                    removed++;
+                    logger.info('Worktree sweep: removed', { worktree: rec.id, reason: decision.reason, archivedTasksDeleted: decision.archivedTaskIds.length });
+                } catch (e) {
+                    failed++;
+                    logger.error('Worktree sweep: removal FAILED', { worktree: rec.id, error: e instanceof Error ? e.message : String(e) });
+                }
+            }
+            if (removed > 0 || failed > 0) {
+                queueTasksUpdated();
+                logger.info('Worktree sweep complete', { removed, skipped, failed, retentionDays });
+            }
+        } finally {
+            worktreeSweepInFlight = false;
+        }
+    }
+    const WORKTREE_SWEEP_INTERVAL_MS = 60 * 60 * 1000; // hourly; reads config each run
+    const worktreeSweepInterval = setInterval(() => { void sweepArchivedWorktrees(); }, WORKTREE_SWEEP_INTERVAL_MS);
+    const worktreeSweepKickoff = setTimeout(() => { void sweepArchivedWorktrees(); }, 30_000); // initial pass after startup settles
 
     // Debounced discovery trigger — multiple tasks going idle in quick succession
     // only fire one scan instead of one per task.
@@ -1382,7 +1509,7 @@ export async function createApp(basePath?: string) {
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
-                        const { prompt, workspaceId, initialCols, initialRows, source, complexity, isolate } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string; complexity?: string; isolate?: boolean };
+                        const { prompt, workspaceId, initialCols, initialRows, source, complexity, isolate, parentTaskId } = payload as { prompt?: string; workspaceId?: string; initialCols?: number; initialRows?: number; source?: string; complexity?: string; isolate?: boolean; parentTaskId?: string };
                         if (!prompt || !workspaceId) {
                             logger.error('task:create requires prompt and workspaceId');
                             sendWSError(ws, 'task:create requires prompt and workspaceId', message.type, 'MISSING_PARAMS');
@@ -1471,7 +1598,7 @@ export async function createApp(basePath?: string) {
 
                         // Pass initial dimensions if provided
                         try {
-                            const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows, modelOverride);
+                            const newTask = await taskSpawner.createTask(prompt, validatedPath, systemPrompt, initialCols, initialRows, modelOverride, parentTaskId);
                             // Broadcast task:created to all clients (UI sidebar update).
                             // Done here (not in the taskCreated event handler) so the source
                             // field is always correct even with concurrent creates.
@@ -1531,7 +1658,16 @@ export async function createApp(basePath?: string) {
                                 logger.error('Failed to activate task', { taskId, error: errorMessage });
                                 sendWSError(ws, `Failed to activate task: ${errorMessage}`, message.type, 'TASK_SELECT_FAILED');
                             }
+                            // Immediately refresh PR info for the selected task
+                            void refreshTaskPrInfo(taskId);
                         }
+                        break;
+                    }
+
+                    case 'task:refreshPr': {
+                        // Lightweight trigger from frontend hover — refresh PR info immediately
+                        const { taskId } = payload as { taskId?: string };
+                        if (taskId) void refreshTaskPrInfo(taskId);
                         break;
                     }
 
@@ -2276,9 +2412,17 @@ export async function createApp(basePath?: string) {
 
                         logger.info('Resetting workspace', { workspaceId });
 
-                        // Step 1: Archive all tasks for this workspace
+                        // Step 1: Archive all tasks for this workspace AND its worktrees.
+                        // Fleet children live in .claudia-worktrees/* workspaces whose
+                        // workspaceId differs from the root — an exact-match filter
+                        // silently skipped them (the majority of tasks).
+                        const familyIds = new Set<string>([workspaceId]);
+                        const worktreeChildren = workspaceStore.getWorkspaces()
+                            .filter(w => w.worktreeParentId === workspaceId);
+                        for (const w of worktreeChildren) familyIds.add(w.id);
+
                         const allTasks = taskSpawner.getAllTasks();
-                        const workspaceTasks = allTasks.filter(t => t.workspaceId === workspaceId);
+                        const workspaceTasks = allTasks.filter(t => familyIds.has(t.workspaceId));
                         let archivedCount = 0;
                         for (const task of workspaceTasks) {
                             try {
@@ -2287,6 +2431,27 @@ export async function createApp(basePath?: string) {
                                 logger.info('Archived task during workspace reset', { taskId: task.id });
                             } catch (e) {
                                 logger.error('Failed to archive task during reset', { taskId: task.id, error: e });
+                            }
+                        }
+
+                        // Step 1b: Remove the worktrees themselves (tasks in them were
+                        // just archived, which kills their processes). Previously reset
+                        // never touched worktrees at all.
+                        let worktreesRemoved = 0;
+                        let worktreesFailed = 0;
+                        for (const w of worktreeChildren) {
+                            // Safety: never remove the primary workspace itself
+                            if (resolve(w.id) === resolve(workspaceId)) continue;
+                            try {
+                                const manager = new WorktreeManager();
+                                await manager.removeWorktree({ repoPath: workspaceId, worktreePath: w.id, force: true });
+                                workspaceStore.deleteWorkspace(w.id);
+                                broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: w.id } });
+                                worktreesRemoved++;
+                                logger.info('Removed worktree during workspace reset', { worktreePath: w.id });
+                            } catch (e) {
+                                worktreesFailed++;
+                                logger.error('Failed to remove worktree during reset', { worktreePath: w.id, error: e });
                             }
                         }
 
@@ -2337,6 +2502,8 @@ export async function createApp(basePath?: string) {
                                 workspaceId,
                                 archivedCount,
                                 totalTasks: workspaceTasks.length,
+                                worktreesRemoved,
+                                worktreesFailed,
                                 branchCheckout: branchResult.success,
                                 checkedOutBranch,
                                 branchError: branchResult.error || null,
@@ -4121,6 +4288,103 @@ export async function createApp(basePath?: string) {
         } catch (error) {
             res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
         }
+    });
+
+    // ===== Per-task TODO endpoints =====
+
+    app.post('/api/tasks/:taskId/todos', (req, res) => {
+        const { taskId } = req.params;
+        const { title, description, status, priority, source, kind, url, externalRef, parentId, order } = req.body;
+
+        if (!title || typeof title !== 'string' || !title.trim()) {
+            return res.status(400).json({ error: 'title is required' });
+        }
+
+        try {
+            const todo = todoStore.create(taskId, title.trim(), {
+                description: description?.trim(),
+                status, priority, source, kind,
+                url: url?.trim(), externalRef: externalRef?.trim(), parentId, order,
+            });
+            broadcast({ type: 'todo:created' as WSMessageType, payload: { todo } });
+            res.json(todo);
+        } catch (error) {
+            res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+
+    app.get('/api/tasks/:taskId/todos', (req, res) => {
+        const { taskId } = req.params;
+        res.json(todoStore.listForTask(taskId));
+    });
+
+    // Progress + active/next summary for a task's work-plan.
+    app.get('/api/tasks/:taskId/todos/summary', (req, res) => {
+        const { taskId } = req.params;
+        res.json(todoStore.summaryForTask(taskId));
+    });
+
+    // Set execution order from an ordered id list.
+    app.post('/api/tasks/:taskId/todos/reorder', (req, res) => {
+        const { taskId } = req.params;
+        const { orderedIds } = req.body;
+        if (!Array.isArray(orderedIds)) {
+            return res.status(400).json({ error: 'orderedIds (string[]) is required' });
+        }
+        const todos = todoStore.reorder(taskId, orderedIds);
+        broadcast({ type: 'todos:reordered' as WSMessageType, payload: { taskId, todos } });
+        res.json(todos);
+    });
+
+    app.get('/api/todos', (_req, res) => {
+        res.json(todoStore.list());
+    });
+
+    app.patch('/api/todos/:todoId', (req, res) => {
+        const { todoId } = req.params;
+        const { title, description, completed, status, priority, order, parentId } = req.body;
+
+        const oldTodo = todoStore.get(todoId);
+        if (!oldTodo) {
+            return res.status(404).json({ error: 'TODO not found' });
+        }
+
+        const wasCompleted = oldTodo.completed;
+        let todo;
+        try {
+            todo = todoStore.update(todoId, { title, description, completed, status, priority, order, parentId });
+        } catch (error) {
+            return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+        }
+        if (!todo) {
+            return res.status(404).json({ error: 'TODO not found' });
+        }
+
+        broadcast({ type: 'todo:updated' as WSMessageType, payload: { todo } });
+
+        // Notify the task when completion flips — whether driven by `completed` or `status`.
+        if (todo.completed !== wasCompleted) {
+            const msg = todo.completed
+                ? `[TODO COMPLETED] "${todo.title}" was checked off by the user. You may proceed with any work that was blocked on this.\r`
+                : `[TODO UNCHECKED] "${todo.title}" was unchecked by the user.\r`;
+            try {
+                taskSpawner.writeToTask(todo.taskId, msg);
+            } catch (err) {
+                logger.warn('Failed to notify task of TODO change', { todoId, taskId: todo.taskId, error: err });
+            }
+        }
+
+        res.json(todo);
+    });
+
+    app.delete('/api/todos/:todoId', (req, res) => {
+        const { todoId } = req.params;
+        const todo = todoStore.delete(todoId);
+        if (!todo) {
+            return res.status(404).json({ error: 'TODO not found' });
+        }
+        broadcast({ type: 'todo:deleted' as WSMessageType, payload: { todoId, taskId: todo.taskId } });
+        res.json({ success: true });
     });
 
     app.get('/api/workspaces', (_req, res) => {
@@ -6909,6 +7173,7 @@ Guidelines:
         clearInterval(heartbeatInterval);
         clearInterval(prInfoInterval);
         clearInterval(worktreeScanInterval);
+        clearInterval(worktreeSweepInterval);
 
         // Notify all connected clients that the server is reloading
         broadcast({ type: 'server:reloading' as WSMessageType, payload: {} });
@@ -6945,13 +7210,21 @@ Guidelines:
         clearInterval(heartbeatInterval);
         clearInterval(prInfoInterval);
         clearInterval(worktreeScanInterval);
+        // Union of both teardown paths: each branch cleared only the timers it
+        // had introduced, so either one alone leaks the other's handles and
+        // vitest hangs on a non-idle event loop.
         clearInterval(uploadCleanupInterval);
+        clearInterval(worktreeSweepInterval);
+        clearTimeout(worktreeScanKickoff);
+        clearTimeout(worktreeSweepKickoff);
 
         try { await tunnelManager.stop(); } catch { /* best effort */ }
 
         // Kills child PTYs and clears the spawner's own intervals.
         taskSpawner.destroy();
 
+        // terminate() rather than close(): teardown must not wait on a close
+        // handshake from a socket whose peer is already gone.
         for (const client of clients) {
             try { client.terminate(); } catch { /* already gone */ }
         }
@@ -6959,6 +7232,8 @@ Guidelines:
 
         await new Promise<void>(resolve => wss.close(() => resolve()));
         await new Promise<void>(resolve => {
+            // close() on a server that never listened invokes its callback with
+            // an error; skipping it keeps teardown deterministic.
             if (!server.listening) return resolve();
             server.close(() => resolve());
         });
