@@ -52,6 +52,14 @@ const qs = (o: Record<string, string>) =>
 /** `git worktree list` output from the repo itself — the ground truth for worktree assertions. */
 const worktreeListRaw = (repo: string) => git(repo, 'worktree', 'list', '--porcelain');
 
+/**
+ * `git worktree list --porcelain` prints POSIX separators even on Windows,
+ * while join()/the HTTP routes hand back native ones. Comparing the two
+ * directly passes on Linux and fails on Windows for a purely cosmetic reason,
+ * so normalize both sides before asserting.
+ */
+const asGitPath = (p: string) => p.replace(/\\/g, '/');
+
 beforeAll(async () => {
     // realpath so paths we assert on match what git reports back (symlinked $HOME).
     root = realpathSync(mkdtempSync(join(homedir(), '.claudia-git-routes-test-')));
@@ -295,7 +303,7 @@ describe('worktree lifecycle (POST/GET/DELETE /api/worktrees)', () => {
         expect(existsSync(wtPath)).toBe(true);
         expect(existsSync(join(wtPath, 'README.md'))).toBe(true);
         // Ground truth: git itself knows about the new worktree.
-        expect(worktreeListRaw(wtRepo)).toContain(`worktree ${wtPath}`);
+        expect(asGitPath(worktreeListRaw(wtRepo))).toContain(`worktree ${asGitPath(wtPath)}`);
         // It was registered as a child workspace of the repo.
         expect(created.body.workspace).toMatchObject({
             id: wtPath,
@@ -327,7 +335,7 @@ describe('worktree lifecycle (POST/GET/DELETE /api/worktrees)', () => {
         expect(removed.body).toEqual({ success: true });
 
         await waitFor(() => existsSync(wtPath), gone => gone === false);
-        expect(worktreeListRaw(wtRepo)).not.toContain(`worktree ${wtPath}`);
+        expect(asGitPath(worktreeListRaw(wtRepo))).not.toContain(`worktree ${asGitPath(wtPath)}`);
 
         const afterDelete = await h.req<{ worktrees: WtInfo[] }>(`/api/worktrees?${qs({ workspace: wtRepo })}`);
         expect(afterDelete.body.worktrees).toHaveLength(1);
@@ -462,9 +470,9 @@ describe('POST /api/worktrees/prune', () => {
         const pruned = await h.send<{ pruned: string[] }>('POST', `/api/worktrees/prune?${qs({ workspace: pruneRepo })}`);
         expect(pruned.status).toBe(200);
         expect(Array.isArray(pruned.body.pruned)).toBe(true);
-        expect(pruned.body.pruned).toContain(wtPath);
+        expect(pruned.body.pruned.map(asGitPath)).toContain(asGitPath(wtPath));
         // git's own bookkeeping agrees the entry is gone.
-        expect(worktreeListRaw(pruneRepo)).not.toContain(`worktree ${wtPath}`);
+        expect(asGitPath(worktreeListRaw(pruneRepo))).not.toContain(`worktree ${asGitPath(wtPath)}`);
     }, 30000);
 
     it('400s (not 500s) without workspace and 404s for a missing path', async () => {
