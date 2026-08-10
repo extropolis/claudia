@@ -96,7 +96,14 @@ beforeAll(async () => {
 
 afterAll(async () => {
     await h?.stop();
-    if (root) rmSync(root, { recursive: true, force: true });
+    try {
+        // This suite creates real git worktrees, so it is the most exposed to
+        // Windows holding handles open past shutdown — rmdir throws EBUSY and
+        // fails teardown rather than any assertion.
+        if (root) rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    } catch {
+        // Ignore cleanup errors
+    }
 });
 
 // ───────────────────────────────────────────────────────────────────────────
