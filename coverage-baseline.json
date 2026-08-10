@@ -1,23 +1,23 @@
 {
     "generatedBy": "scripts/coverage.mjs",
     "total": {
-        "lines": 17.85,
-        "statements": 17.59,
-        "branches": 23.65,
-        "functions": 19.26
+        "lines": 28.25,
+        "statements": 27.78,
+        "branches": 26.86,
+        "functions": 21.76
     },
     "packages": {
         "backend": {
-            "lines": 21.21,
-            "statements": 21.21,
-            "branches": 84.84,
-            "functions": 65.64
+            "lines": 35.06,
+            "statements": 35.06,
+            "branches": 72.79,
+            "functions": 61.03
         },
         "frontend": {
-            "lines": 7.68,
-            "statements": 7.49,
-            "branches": 5.28,
-            "functions": 7.38
+            "lines": 7.56,
+            "statements": 7.35,
+            "branches": 5.19,
+            "functions": 7.17
         },
         "shared": {
             "lines": 73.08,

@@ -47,7 +47,10 @@ $null = Register-EngineEvent PowerShell.Exiting -Action {
 Write-Host "Checking ports..."
 $ports_busy = $false
 foreach ($port in @($BACKEND_PORT, $FRONTEND_PORT, $OPENCODE_PORT)) {
-    $activeConnections = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
+    # -State Listen only: without it, client sockets (e.g. a browser's stale
+    # connection to a dead backend) produce false "port in use" failures —
+    # same fix as start.sh's LISTEN-only lsof check.
+    $activeConnections = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
         Where-Object { $_.OwningProcess -ne 0 }
     if ($activeConnections) {
         Write-Host "Port $port is already in use (PID: $($activeConnections[0].OwningProcess))"
