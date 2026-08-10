@@ -28,8 +28,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { writeFileSync } from 'fs';
+import { writeFileSync, realpathSync } from 'fs';
 import { join, resolve, basename } from 'path';
+import { fileURLToPath } from 'url';
 import { isPathInside } from './validation.js';
 
 // Backend URL - defaults to localhost:4001, can be overridden via env
@@ -209,6 +210,25 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
             ws.send(JSON.stringify({ type, payload }));
         });
 
+        // The WS connection receives BROADCASTS for every task in the server, not
+        // just the one this call targeted. Matching on message type alone let an
+        // unrelated task's state change satisfy our wait — so claudia_send_input
+        // could report "input delivered" for a task id that does not even exist,
+        // whenever any other task happened to change state within the window.
+        // That is the normal case in a fleet. Every matcher below that keys off a
+        // broadcast must therefore confirm the broadcast is about OUR task.
+        const targetTaskId = typeof payload.taskId === 'string' ? payload.taskId : undefined;
+        const isAboutTarget = (msg: { payload?: any }): boolean => {
+            if (!targetTaskId) return true;
+            const p = msg.payload;
+            if (!p) return false;
+            if (typeof p.taskId === 'string') return p.taskId === targetTaskId;
+            if (p.task?.id) return p.task.id === targetTaskId;
+            // Bulk update (tasks:updated) — satisfied only if our task is in it.
+            if (Array.isArray(p.tasks)) return p.tasks.some((t: any) => t?.id === targetTaskId);
+            return false;
+        };
+
         ws.on('message', (data: Buffer) => {
             try {
                 const msg = JSON.parse(data.toString());
@@ -223,35 +243,35 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
                 }
 
                 // For task:input, wait for task:stateChanged (busy means input was accepted)
-                if (type === 'task:input' && msg.type === 'task:stateChanged') {
+                if (type === 'task:input' && msg.type === 'task:stateChanged' && isAboutTarget(msg)) {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
                 }
 
                 // For task:archive, wait for task:destroyed (archiving emits taskDestroyed internally)
-                if (type === 'task:archive' && msg.type === 'task:destroyed') {
+                if (type === 'task:archive' && msg.type === 'task:destroyed' && isAboutTarget(msg)) {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
                 }
 
                 // For task:interrupt, wait for state change
-                if (type === 'task:interrupt' && msg.type === 'task:stateChanged') {
+                if (type === 'task:interrupt' && msg.type === 'task:stateChanged' && isAboutTarget(msg)) {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
                 }
 
                 // For task:rename, wait for task:stateChanged (active tasks) or tasks:updated (disconnected/archived)
-                if (type === 'task:rename' && (msg.type === 'task:stateChanged' || msg.type === 'tasks:updated')) {
+                if (type === 'task:rename' && (msg.type === 'task:stateChanged' || msg.type === 'tasks:updated') && isAboutTarget(msg)) {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
                 }
 
                 // For task:stop, wait for task:stopped response
-                if (type === 'task:stop' && msg.type === 'task:stopped') {
+                if (type === 'task:stop' && msg.type === 'task:stopped' && isAboutTarget(msg)) {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
@@ -265,7 +285,7 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
                 }
 
                 // For task:destroy, wait for task:destroyed broadcast
-                if (type === 'task:destroy' && msg.type === 'task:destroyed') {
+                if (type === 'task:destroy' && msg.type === 'task:destroyed' && isAboutTarget(msg)) {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
@@ -1737,7 +1757,35 @@ async function main() {
     log.info('Claudia MCP Server running on stdio');
 }
 
-main().catch((error) => {
-    log.error('Fatal error:', error);
-    process.exit(1);
-});
+/**
+ * Only auto-start when this module IS the process entrypoint (how task-spawner
+ * launches it: `node tsx/cli.mjs .../claudia-mcp-server.ts`). Importing the
+ * module — as the tests do, to drive `server` over an in-memory transport —
+ * must not grab stdio or dial the backend. Production behavior is unchanged:
+ * as an entrypoint the argv check passes and main() runs exactly as before.
+ */
+function isEntrypoint(): boolean {
+    const entry = process.argv[1];
+    if (!entry) return false;
+    try {
+        // realpathSync on BOTH sides: tsx sets argv[1] to this file's path, but
+        // the two spellings can differ through symlinks (on macOS /tmp vs
+        // /private/tmp is the classic case). A plain resolve() compare would
+        // silently report "not the entrypoint" and the server would never start.
+        const canonical = (p: string) => { try { return realpathSync(p); } catch { return resolve(p); } };
+        return canonical(entry) === canonical(fileURLToPath(import.meta.url));
+    } catch {
+        return false;
+    }
+}
+
+if (isEntrypoint()) {
+    main().catch((error) => {
+        log.error('Fatal error:', error);
+        process.exit(1);
+    });
+}
+
+// Test seam: lets the suite connect a real MCP Client over an in-memory
+// transport and exercise tool listing/dispatch through the real protocol.
+export { server, formatDuration, resolveWorktreeRoot, getWorkspaceScope, getStopScope };
