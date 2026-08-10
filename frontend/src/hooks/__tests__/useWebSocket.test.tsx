@@ -181,7 +181,7 @@ function resetStore() {
             scheduledTasks: new Map(),
             unreadTaskIds: new Set(),
             activityLog: [],
-            pendingDeleteRequest: null,
+            pendingDeleteRequests: [],
             autoFocusOnInput: false,
             browserNotificationsEnabled: false,
             notifyOnCompletion: true,
@@ -719,7 +719,8 @@ describe('useWebSocket — inbound dispatch', () => {
             ws.simulateMessage('task:deleteRequest', request);
         });
 
-        expect(useTaskStore.getState().pendingDeleteRequest).toEqual(request);
+        // Requests queue up now (batch delete) rather than occupying a single slot.
+        expect(useTaskStore.getState().pendingDeleteRequests).toEqual([request]);
     });
 
     it('workspace:created / workspace:deleted add and remove a workspace', () => {

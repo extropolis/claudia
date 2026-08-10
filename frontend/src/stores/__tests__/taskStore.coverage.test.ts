@@ -92,7 +92,7 @@ function resetStore() {
             activityLog: [],
             selectedTaskId: null,
             errorNotification: null,
-            pendingDeleteRequest: null,
+            pendingDeleteRequests: [],
         },
         true, // replace — guarantees no field survives from a previous test
     );
@@ -879,17 +879,33 @@ describe('draft inputs', () => {
     });
 });
 
-describe('pending delete request', () => {
-    it('sets and clears the MCP delete confirmation', () => {
-        useTaskStore.getState().setPendingDeleteRequest({
-            taskId: 't1',
-            requestId: 'req-1',
-            taskName: 'Build API',
-        });
-        expect(useTaskStore.getState().pendingDeleteRequest?.requestId).toBe('req-1');
+describe('pending delete requests', () => {
+    // The single-slot `pendingDeleteRequest` / `setPendingDeleteRequest` pair was
+    // replaced by a queue (batch delete) — add/remove many, confirm in one dialog.
+    it('queues MCP delete confirmations and removes them by request id', () => {
+        const store = () => useTaskStore.getState();
 
-        useTaskStore.getState().setPendingDeleteRequest(null);
-        expect(useTaskStore.getState().pendingDeleteRequest).toBeNull();
+        store().addPendingDeleteRequest({ taskId: 't1', requestId: 'req-1', taskName: 'Build API' });
+        store().addPendingDeleteRequest({ taskId: 't2', requestId: 'req-2', taskName: 'Write tests' });
+
+        expect(store().pendingDeleteRequests.map(r => r.requestId)).toEqual(['req-1', 'req-2']);
+
+        store().removePendingDeleteRequests(['req-1']);
+        expect(store().pendingDeleteRequests).toEqual([
+            { taskId: 't2', requestId: 'req-2', taskName: 'Write tests' },
+        ]);
+
+        store().removePendingDeleteRequests(['req-2']);
+        expect(store().pendingDeleteRequests).toEqual([]);
+    });
+
+    it('ignores a duplicate request id instead of queueing it twice', () => {
+        const request = { taskId: 't1', requestId: 'req-1', taskName: 'Build API' };
+
+        useTaskStore.getState().addPendingDeleteRequest(request);
+        useTaskStore.getState().addPendingDeleteRequest({ ...request, taskName: 'renamed' });
+
+        expect(useTaskStore.getState().pendingDeleteRequests).toEqual([request]);
     });
 });
 

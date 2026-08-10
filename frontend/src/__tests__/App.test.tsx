@@ -185,10 +185,19 @@ vi.mock('../components/TaskCompletionVoiceManager', () => ({ TaskCompletionVoice
 vi.mock('../components/TaskProgressVoiceManager', () => ({ TaskProgressVoiceManager: () => null }));
 
 import App from '../App';
+import { NotificationProvider } from '../components/NotificationContainer';
 
 // ---------------------------------------------------------------------------
 // Fixtures + helpers
 // ---------------------------------------------------------------------------
+
+// App calls useNotification(), which throws outside a NotificationProvider.
+// main.tsx mounts <App /> inside the provider, so every render here has to do
+// the same. The provider is real (not stubbed) — it is a thin context holder
+// and renders nothing unless a notification is actually pushed.
+function renderApp() {
+    return render(<App />, { wrapper: NotificationProvider });
+}
 
 function makeTask(over: Partial<Task> = {}): Task {
     return {
@@ -282,7 +291,7 @@ afterEach(() => {
 
 describe('App — layout routing', () => {
     it('shows the empty state when no task is selected', () => {
-        render(<App />);
+        renderApp();
 
         expect(screen.getByRole('heading', { name: 'Select a task to view its terminal' })).toBeInTheDocument();
         expect(screen.queryByTestId('terminal-view')).not.toBeInTheDocument();
@@ -296,7 +305,7 @@ describe('App — layout routing', () => {
             selectedTaskId: 'task-1',
         });
 
-        render(<App />);
+        renderApp();
 
         expect(screen.getByTestId('terminal-view')).toHaveTextContent('Terminal for task-1');
         expect(screen.queryByRole('heading', { name: 'Select a task to view its terminal' })).not.toBeInTheDocument();
@@ -309,19 +318,19 @@ describe('App — layout routing', () => {
             selectedTaskId: 'task-1',
         });
 
-        render(<App />);
+        renderApp();
 
         expect(screen.getByTestId('file-explorer')).toHaveTextContent('Alpha Project|/ws/alpha');
     });
 
     it('renders the app version from the build-time constant', () => {
-        render(<App />);
+        renderApp();
         expect(screen.getByText('v9.9.9-test')).toBeInTheDocument();
     });
 
     it('collapses and re-expands the sidebar, persisting the choice', async () => {
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await user.click(screen.getByRole('button', { name: 'stub-collapse' }));
 
@@ -337,13 +346,13 @@ describe('App — layout routing', () => {
 
     it('starts collapsed when localStorage says so', () => {
         localStorage.setItem('claudia-sidebar-collapsed', 'true');
-        render(<App />);
+        renderApp();
         expect(screen.queryByTestId('workspace-panel')).not.toBeInTheDocument();
     });
 
     it('restores a persisted sidebar width and keeps writing it back', () => {
         localStorage.setItem('claudia-sidebar-width', '512');
-        render(<App />);
+        renderApp();
         expect(localStorage.getItem('claudia-sidebar-width')).toBe('512');
     });
 });
@@ -357,7 +366,7 @@ describe('App — mobile layout', () => {
         });
         vi.useFakeTimers();
 
-        render(<App />);
+        renderApp();
 
         // Screen 1 — the list, no terminal, no file explorer.
         expect(screen.getByTestId('workspace-panel')).toBeInTheDocument();
@@ -377,7 +386,7 @@ describe('App — mobile layout', () => {
 
     it('hides the desktop-only header buttons on mobile', () => {
         setViewportWidth(500);
-        render(<App />);
+        renderApp();
 
         expect(screen.queryByRole('button', { name: 'Voice Agent' })).not.toBeInTheDocument();
         expect(screen.queryByTitle(/Mobile Tunnel/)).not.toBeInTheDocument();
@@ -402,7 +411,7 @@ describe('App — task selection wiring', () => {
         window.addEventListener('taskInput:focus', onFocus);
 
         try {
-            render(<App />);
+            renderApp();
             fireEvent.click(screen.getByRole('button', { name: 'stub-select-task' }));
 
             expect(useTaskStore.getState().selectedTaskId).toBe('task-1');
@@ -427,7 +436,7 @@ describe('App — embedded shell', () => {
             selectedTaskId: 'task-1',
         });
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await user.click(screen.getByRole('button', { name: 'stub-open-shell' }));
 
@@ -453,7 +462,7 @@ describe('App — embedded shell', () => {
 describe('App — connection banners', () => {
     it('shows the offline overlay and suppresses the reconnect banner', () => {
         resetStore({ isOffline: true, isConnected: false, isServerReloading: true });
-        render(<App />);
+        renderApp();
 
         expect(screen.getByText('No internet connection')).toBeInTheDocument();
         expect(screen.queryByText('Backend is restarting...')).not.toBeInTheDocument();
@@ -462,18 +471,18 @@ describe('App — connection banners', () => {
 
     it('shows "Backend is restarting..." while the server reloads', () => {
         resetStore({ isServerReloading: true });
-        render(<App />);
+        renderApp();
         expect(screen.getByText('Backend is restarting...')).toBeInTheDocument();
     });
 
     it('shows "Reconnecting to backend..." when merely disconnected', () => {
         resetStore({ isConnected: false });
-        render(<App />);
+        renderApp();
         expect(screen.getByText('Reconnecting to backend...')).toBeInTheDocument();
     });
 
     it('shows no banner at all when connected and online', () => {
-        render(<App />);
+        renderApp();
         expect(screen.queryByText('Backend is restarting...')).not.toBeInTheDocument();
         expect(screen.queryByText('Reconnecting to backend...')).not.toBeInTheDocument();
         expect(screen.queryByText('No internet connection')).not.toBeInTheDocument();
@@ -488,7 +497,7 @@ describe('App — terminal remounting', () => {
             selectedTaskId: 'task-1',
             isServerReloading: true,
         });
-        render(<App />);
+        renderApp();
         expect(H.terminalMounts).toEqual(['task-1']);
 
         act(() => { useTaskStore.setState({ isServerReloading: false }); });
@@ -503,7 +512,7 @@ describe('App — terminal remounting', () => {
             selectedTaskId: 'task-1',
             isConnected: false,
         });
-        render(<App />);
+        renderApp();
         expect(H.terminalMounts).toEqual(['task-1']);
 
         // First ever connect — no remount.
@@ -520,7 +529,7 @@ describe('App — terminal remounting', () => {
 describe('App — error notification banner', () => {
     it('renders the message and clears it on dismiss', async () => {
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         act(() => {
             useTaskStore.setState({
@@ -537,7 +546,7 @@ describe('App — error notification banner', () => {
 
     it('auto-dismisses after 15 seconds', () => {
         vi.useFakeTimers();
-        render(<App />);
+        renderApp();
 
         act(() => {
             useTaskStore.setState({
@@ -557,7 +566,7 @@ describe('App — error notification banner', () => {
 describe('App — modal wiring', () => {
     it('opens settings with no preset panel and closes it', async () => {
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         expect(screen.queryByTestId('settings-menu')).not.toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: 'Settings' }));
@@ -569,7 +578,7 @@ describe('App — modal wiring', () => {
 
     it('force-opens settings on the AI Core panel when credentials are missing', async () => {
         resetStore({ aiCoreConfigured: false });
-        render(<App />);
+        renderApp();
 
         await waitFor(() => expect(screen.getByTestId('settings-menu')).toHaveTextContent('panel:aicore'));
     });
@@ -580,14 +589,14 @@ describe('App — modal wiring', () => {
             tasks: new Map([['task-1', makeTask()]]),
             workspaces: [makeWorkspace()],
         });
-        render(<App />);
+        renderApp();
 
         expect(screen.queryByTestId('settings-menu')).not.toBeInTheDocument();
     });
 
     it('opens and closes the usage dashboard', async () => {
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await user.click(screen.getByRole('button', { name: 'Token Usage' }));
         expect(screen.getByTestId('usage-dashboard')).toBeInTheDocument();
@@ -602,7 +611,7 @@ describe('App — modal wiring', () => {
             workspaces: [makeWorkspace()],
         });
         vi.useFakeTimers();
-        render(<App />);
+        renderApp();
 
         fireEvent.click(screen.getByTitle(/IDLE TASKS/));
         expect(screen.getByTestId('activity-panel')).toBeInTheDocument();
@@ -616,7 +625,7 @@ describe('App — modal wiring', () => {
 
 describe('App — chat panel', () => {
     it('is not offered at all when the supervisor is disabled', () => {
-        render(<App />);
+        renderApp();
         expect(screen.queryByTitle(/Chat/)).not.toBeInTheDocument();
     });
 
@@ -628,7 +637,7 @@ describe('App — chat panel', () => {
             ],
         });
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await user.click(screen.getByTitle('Open Chat'));
         expect(screen.getByTestId('supervisor-chat')).toHaveTextContent('messages:1');
@@ -640,7 +649,7 @@ describe('App — chat panel', () => {
     it('force-closes an open chat panel when the supervisor gets disabled', async () => {
         resetStore({ supervisorEnabled: true });
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await user.click(screen.getByTitle('Open Chat'));
         expect(screen.getByTestId('supervisor-chat')).toBeInTheDocument();
@@ -664,7 +673,7 @@ describe('App — task counters', () => {
             workspaces: [makeWorkspace()],
             unreadTaskIds: new Set(['a', 'c']),
         });
-        render(<App />);
+        renderApp();
 
         const activityButton = screen.getByTitle(/BUSY TASKS/);
         // 2 busy / 1 idle, plus the unread badge for the two unread task ids.
@@ -674,7 +683,7 @@ describe('App — task counters', () => {
     });
 
     it('labels the activity button "No running tasks" when there are none', () => {
-        render(<App />);
+        renderApp();
         expect(screen.getByTitle('No running tasks')).toBeInTheDocument();
     });
 });
@@ -683,7 +692,7 @@ describe('App — header actions', () => {
     it('POSTs a restart request', async () => {
         const fetchMock = stubFetch();
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await user.click(screen.getByRole('button', { name: 'Restart Server' }));
 
@@ -697,7 +706,7 @@ describe('App — header actions', () => {
     it('opens the voice agent with the tunnel token', async () => {
         stubFetch({ '/api/tunnel/status': { active: true, token: 'tok-123' } });
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await user.click(screen.getByRole('button', { name: 'Voice Agent' }));
 
@@ -709,7 +718,7 @@ describe('App — header actions', () => {
     it('falls back to a generated local token when the tunnel has none', async () => {
         stubFetch({ '/api/tunnel/status': { active: false } });
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await user.click(screen.getByRole('button', { name: 'Voice Agent' }));
 
@@ -720,7 +729,7 @@ describe('App — header actions', () => {
 
     it('toggles the notification mute state', async () => {
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await user.click(screen.getByRole('button', { name: 'Mute Notifications' }));
         expect(screen.getByRole('button', { name: 'Unmute Notifications' })).toBeInTheDocument();
@@ -732,7 +741,7 @@ describe('App — header actions', () => {
 
     it('registers a usage-tracking user id with the backend on mount', async () => {
         const fetchMock = stubFetch();
-        render(<App />);
+        renderApp();
 
         await waitFor(() => {
             const call = fetchMock.mock.calls.find(c => String(c[0]).includes('/api/user-id'));
@@ -742,7 +751,7 @@ describe('App — header actions', () => {
     });
 
     it('shows system stats only when the store enables them', () => {
-        render(<App />);
+        renderApp();
         expect(screen.queryByTestId('system-stats')).not.toBeInTheDocument();
 
         act(() => { useTaskStore.setState({ showSystemStats: true }); });
@@ -753,7 +762,7 @@ describe('App — header actions', () => {
 describe('App — tunnel', () => {
     it('reflects the tunnel status fetched on mount', async () => {
         stubFetch({ '/api/tunnel/status': { active: true } });
-        render(<App />);
+        renderApp();
 
         await waitFor(() => {
             expect(screen.getByTitle('View Mobile Tunnel')).toBeInTheDocument();
@@ -761,7 +770,7 @@ describe('App — tunnel', () => {
     });
 
     it('reacts to the claudia:tunnelStatus DOM event', async () => {
-        render(<App />);
+        renderApp();
         await waitFor(() => expect(screen.getByTitle('Start Mobile Tunnel')).toBeInTheDocument());
 
         act(() => {
@@ -779,7 +788,7 @@ describe('App — tunnel', () => {
 
     it('surfaces a tunnelStatus error through the mobile modal', async () => {
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         act(() => {
             window.dispatchEvent(new CustomEvent('claudia:tunnelStatus', {
@@ -794,7 +803,7 @@ describe('App — tunnel', () => {
     it('starts the tunnel from the modal and marks it active', async () => {
         stubFetch({ '/api/tunnel/start': { url: 'https://x.ngrok.app' } });
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await user.click(screen.getByTitle('Start Mobile Tunnel'));
         await user.click(screen.getByRole('button', { name: 'stub-start-tunnel' }));
@@ -808,7 +817,7 @@ describe('App — tunnel', () => {
     it('surfaces a start failure returned by the backend', async () => {
         stubFetch({ '/api/tunnel/start': { error: 'ngrok not installed' } });
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await user.click(screen.getByTitle('Start Mobile Tunnel'));
         await user.click(screen.getByRole('button', { name: 'stub-start-tunnel' }));
@@ -822,7 +831,7 @@ describe('App — tunnel', () => {
     it('stops the tunnel and keeps the modal open', async () => {
         const fetchMock = stubFetch({ '/api/tunnel/status': { active: true } });
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await waitFor(() => expect(screen.getByTitle('View Mobile Tunnel')).toBeInTheDocument());
         await user.click(screen.getByTitle('View Mobile Tunnel'));
@@ -836,7 +845,7 @@ describe('App — tunnel', () => {
 
     it('closes the mobile modal', async () => {
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await user.click(screen.getByTitle('Start Mobile Tunnel'));
         expect(screen.getByTestId('mobile-access-modal')).toBeInTheDocument();
@@ -849,7 +858,7 @@ describe('App — tunnel', () => {
 describe('App — project picker wiring', () => {
     it('creates the workspace and closes the picker when a path is chosen', () => {
         useTaskStore.setState({ showProjectPicker: true });
-        render(<App />);
+        renderApp();
 
         const onSelect = H.lastProps.ProjectPicker.onSelect as (p: string) => void;
         act(() => { onSelect('/ws/chosen'); });
@@ -862,7 +871,7 @@ describe('App — project picker wiring', () => {
 describe('App — websocket action wiring', () => {
     it('passes the websocket actions down to the workspace panel', async () => {
         const user = userEvent.setup();
-        render(<App />);
+        renderApp();
 
         await user.click(screen.getByRole('button', { name: 'stub-create-workspace' }));
         expect(H.actions.createWorkspace).toHaveBeenCalledWith('/ws/new');
@@ -876,7 +885,7 @@ describe('App — websocket action wiring', () => {
 
 describe('App — sidebar resizing', () => {
     it('tracks a drag on the resize handle and persists the new width', () => {
-        const { container } = render(<App />);
+        const { container } = renderApp();
 
         const handle = container.querySelector('.resize-handle') as HTMLElement;
         expect(handle).toBeTruthy();

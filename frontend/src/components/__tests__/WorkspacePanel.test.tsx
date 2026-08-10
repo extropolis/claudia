@@ -9,7 +9,7 @@
  * Queried by role / label / text / title only; never by CSS class.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { act, render, screen, within, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, within, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Task, Workspace } from '@claudia/shared';
 import { WorkspacePanel } from '../WorkspacePanel';
@@ -262,11 +262,60 @@ describe('WorkspacePanel', () => {
 
         // Only the parent gets a workspace kebab menu — the worktree is inline.
         expect(screen.getAllByTitle('Workspace settings')).toHaveLength(1);
-        // The worktree's branch heading and both its tasks are rendered.
-        expect(screen.getByText('feature/login')).toBeInTheDocument();
+        // The worktree's tasks are rendered inline under the parent, alongside
+        // the parent's own task.
         expect(screen.getByText('worktree task one')).toBeInTheDocument();
         expect(screen.getByText('worktree task two')).toBeInTheDocument();
         expect(screen.getByText('main task')).toBeInTheDocument();
+    });
+
+    /**
+     * Characterisation test for a live defect.
+     *
+     * The branch is no longer a standalone heading row — each worktree task
+     * carries a GitBranch badge titled `Worktree: <branch>`. The `worktree-single`
+     * render path builds that badge from `workspace.worktreeBranch || group.branch`
+     * (WorkspacePanel.tsx:2036, 2065), but the `worktree-multi` path builds it from
+     * `task.sessionWorktreeBranch` alone (WorkspacePanel.tsx:2092, 2114).
+     *
+     * `sessionWorktreeBranch` is a *runtime-detected* annotation — the backend only
+     * sets it when a session moves itself onto a branch (task-spawner.setSessionWorktree)
+     * — and is unrelated to the static workspace the task lives in. So a worktree
+     * workspace holding two or more tasks renders those tasks with NO worktree badge
+     * and NO PR badge, while the very same workspace holding one task renders both.
+     *
+     * Fix: worktree-multi should use the same
+     * `{ branch: group.workspace.worktreeBranch || group.branch, prInfo: group.workspace.prInfo }`
+     * fallback the single path already uses. Delete this test and assert the badge
+     * appears for both tasks once it is fixed.
+     */
+    it('drops the worktree badge when a worktree holds more than one task (known defect)', () => {
+        const parent = makeWorkspace('/repos/alpha');
+        const worktree = makeWorkspace('/repos/alpha-wt', {
+            worktreeParentId: '/repos/alpha',
+            worktreeBranch: 'feature/login',
+            displayName: 'feature/login',
+        });
+
+        // One task in the worktree → badge is rendered from the workspace branch.
+        const single = renderWorkspacePanel({
+            workspaces: [parent, worktree],
+            tasks: [makeTask('t-wt1', '/repos/alpha-wt', { prompt: 'worktree task one' })],
+        });
+        expect(screen.getAllByTitle('Worktree: feature/login')).toHaveLength(1);
+        single.unmount();
+
+        // Two tasks in the same worktree → the badge disappears entirely.
+        renderWorkspacePanel({
+            workspaces: [parent, worktree],
+            tasks: [
+                makeTask('t-wt1', '/repos/alpha-wt', { prompt: 'worktree task one' }),
+                makeTask('t-wt2', '/repos/alpha-wt', { prompt: 'worktree task two' }),
+            ],
+        });
+        expect(screen.getByText('worktree task one')).toBeInTheDocument();
+        expect(screen.getByText('worktree task two')).toBeInTheDocument();
+        expect(screen.queryAllByTitle('Worktree: feature/login')).toHaveLength(0);
     });
 
     /**
@@ -787,27 +836,56 @@ describe('WorkspacePanel', () => {
 
     // ── agent-requested deletion ────────────────────────────────────────────
 
-    it('archives on confirming an agent delete request and rejects on cancel', () => {
+    /**
+     * The single-request "Delete / Keep" prompt became a batch dialog: every
+     * pending request gets a checkbox, arrives pre-checked, and confirming
+     * archives the checked ones while *rejecting* the unchecked ones.
+     */
+    it('archives checked agent delete requests and rejects the unchecked ones', () => {
         const { props } = renderWorkspacePanel({
             store: {
-                pendingDeleteRequest: { taskId: 't1', requestId: 'req-1', taskName: 'Doomed task' },
+                pendingDeleteRequests: [
+                    { taskId: 't1', requestId: 'req-1', taskName: 'Doomed task' },
+                    { taskId: 't2', requestId: 'req-2', taskName: 'Spared task' },
+                ],
             },
         });
 
-        expect(screen.getByText('Doomed task')).toBeInTheDocument();
+        expect(screen.getByText('Delete 2 Tasks')).toBeInTheDocument();
 
-        fireEvent.click(screen.getByText('Keep'));
-        expect(props.onRejectDeleteRequest).toHaveBeenCalledWith('t1', 'req-1');
-        expect(useTaskStore.getState().pendingDeleteRequest).toBeNull();
+        // Newly arrived requests are pre-checked.
+        const doomed = screen.getByLabelText('Doomed task') as HTMLInputElement;
+        const spared = screen.getByLabelText('Spared task') as HTMLInputElement;
+        expect(doomed.checked).toBe(true);
+        expect(spared.checked).toBe(true);
 
-        act(() => {
-            useTaskStore.setState({
-                pendingDeleteRequest: { taskId: 't2', requestId: 'req-2', taskName: 'Other task' },
-            });
+        // Unchecking one keeps that task; the confirm label tracks the count.
+        fireEvent.click(spared);
+        fireEvent.click(screen.getByRole('button', { name: 'Delete 1' }));
+
+        expect(props.onArchiveTask).toHaveBeenCalledWith('t1');
+        expect(props.onArchiveTask).not.toHaveBeenCalledWith('t2');
+        expect(props.onRejectDeleteRequest).toHaveBeenCalledWith('t2', 'req-2');
+        expect(props.onRejectDeleteRequest).not.toHaveBeenCalledWith('t1', 'req-1');
+        expect(useTaskStore.getState().pendingDeleteRequests).toEqual([]);
+    });
+
+    it('rejects every pending delete request when the dialog is cancelled', () => {
+        const { props } = renderWorkspacePanel({
+            store: {
+                pendingDeleteRequests: [
+                    { taskId: 't1', requestId: 'req-1', taskName: 'Doomed task' },
+                ],
+            },
         });
-        fireEvent.click(screen.getByText('Delete'));
-        expect(props.onArchiveTask).toHaveBeenCalledWith('t2');
-        expect(useTaskStore.getState().pendingDeleteRequest).toBeNull();
+
+        expect(screen.getByText('Delete Task')).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+        expect(props.onRejectDeleteRequest).toHaveBeenCalledWith('t1', 'req-1');
+        expect(props.onArchiveTask).not.toHaveBeenCalled();
+        expect(useTaskStore.getState().pendingDeleteRequests).toEqual([]);
     });
 
     // ── header controls ─────────────────────────────────────────────────────
