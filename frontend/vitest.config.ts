@@ -11,6 +11,12 @@ export default defineConfig({
         coverage: {
             provider: 'v8',
             reporter: ['text', 'json', 'html'],
+            // HONESTY: without `all`, files never imported by any test are
+            // simply absent from the report — the suite showed "85%" while
+            // WorkspacePanel/TerminalView/useWebSocket (5000+ lines) were
+            // invisible. Count everything under src/.
+            all: true,
+            include: ['src/**/*.{ts,tsx}'],
             exclude: [
                 'node_modules/',
                 'dist/',

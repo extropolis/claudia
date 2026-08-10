@@ -196,6 +196,7 @@ export class WorkspaceStore {
             console.warn(`[WorkspaceStore] Cyclic worktreeParentId detected while resolving root for ${resolvedPath}; stopping walk at ${parentId}`);
         }
 
+
         const parentWorkspace = this.getWorkspace(parentId);
         const parentDisplayName = parentWorkspace?.displayName ?? parentWorkspace?.name ?? basename(parentId);
         const shortBranch = branch.replace(/^refs\/heads\//, '');

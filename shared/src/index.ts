@@ -50,6 +50,7 @@ export interface Task {
     // annotate the task row with a worktree badge. Undefined = no worktree detected.
     sessionWorktreeBranch?: string;
     sessionWorktreePrInfo?: WorkspacePrInfo | null; // PR for that branch (if any)
+    parentTaskId?: string;  // Task that spawned this one via claudia_create_task (MCP)
 }
 
 export interface WorkspaceReference {
@@ -172,6 +173,32 @@ export interface ScheduledTask {
     fireCount: number;             // How many times it has fired
 }
 
+// TODO taxonomy — a live, ordered work-plan managed by the task's Claude session.
+export type TodoStatus = 'pending' | 'active' | 'completed';
+export type TodoPriority = 'high' | 'normal' | 'low';
+export type TodoSource = 'user' | 'claude' | 'github';
+export type TodoKind = 'manual' | 'action' | 'github-issue' | 'github-pr';
+
+// Per-task TODO items. Claude seeds and continuously manages the list; the user
+// can complete/reorder too. New fields are optional for back-compat with v1 rows.
+export interface TodoItem {
+    id: string;
+    taskId: string;
+    title: string;
+    description?: string;
+    completed: boolean;             // kept in sync with status === 'completed'
+    status?: TodoStatus;            // pending | active (working now) | completed
+    priority?: TodoPriority;        // high | normal | low
+    order?: number;                 // execution sequence (lower = earlier)
+    source?: TodoSource;            // who created it
+    kind?: TodoKind;                // manual | action | github-issue | github-pr
+    url?: string;                   // external link (GitHub issue/PR) — opened externally
+    externalRef?: string;           // e.g. "amd/gaia#1859"
+    parentId?: string;              // one-level subtask hierarchy (parents have no parentId)
+    createdAt: string;
+    completedAt?: string;
+}
+
 // WebSocket message types
 export type WSMessageType =
     // Task lifecycle
@@ -234,6 +261,11 @@ export type WSMessageType =
     | 'cron:fired'
     | 'cron:ran'
     | 'cron:updated'
+    // Per-task TODOs
+    | 'todo:created'
+    | 'todo:updated'
+    | 'todo:deleted'
+    | 'todos:reordered'
     // Checkpoints / Timeline
     | 'checkpoint:created'
     | 'checkpoint:list'

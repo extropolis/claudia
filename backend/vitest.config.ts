@@ -9,6 +9,10 @@ export default defineConfig({
         coverage: {
             provider: 'v8',
             reporter: ['text', 'json', 'html'],
+            // Count every src file, incl. never-imported ones (see frontend
+            // config note — absent files inflate the headline number).
+            all: true,
+            include: ['src/**/*.ts'],
             exclude: [
                 'node_modules/',
                 'dist/',
