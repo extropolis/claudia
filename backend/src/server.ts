@@ -20,7 +20,7 @@ import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorP
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
-import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
+import { validateConfigUpdate, validateWorkspacePath, isPathInside } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
 import { selectWorkspacesToRefresh } from './pr-refresh.js';
 import { WorktreeManager } from './worktree-manager.js';
@@ -3994,7 +3994,7 @@ export async function createApp(basePath?: string) {
     };
     // Run cleanup on startup and every hour
     cleanupOldUploads();
-    setInterval(cleanupOldUploads, 60 * 60 * 1000);
+    const uploadCleanupInterval = setInterval(cleanupOldUploads, 60 * 60 * 1000);
 
     // One-time migration: clean up old uploads from previous {basePath}/uploads/ location
     const oldUploadsDir = join(basePath || process.cwd(), 'uploads');
@@ -4406,7 +4406,7 @@ export async function createApp(basePath?: string) {
         // Security: ensure the resolved path is within the workspace
         const resolvedTarget = resolve(targetDir);
         const resolvedWorkspace = resolve(workspacePath);
-        if (!resolvedTarget.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedTarget)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -4511,7 +4511,7 @@ export async function createApp(basePath?: string) {
         const resolvedDest = resolve(workspace, destinationPath);
 
         // Security: ensure paths are within workspace
-        if (!resolvedSource.startsWith(resolvedWorkspace) || !resolvedDest.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedSource) || !isPathInside(resolvedWorkspace, resolvedDest)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -4551,7 +4551,7 @@ export async function createApp(basePath?: string) {
         const resolvedDest = resolve(workspace, destinationPath);
 
         // Security: ensure paths are within workspace
-        if (!resolvedSource.startsWith(resolvedWorkspace) || !resolvedDest.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedSource) || !isPathInside(resolvedWorkspace, resolvedDest)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -4583,7 +4583,7 @@ export async function createApp(basePath?: string) {
         const resolvedDest = resolve(workspace, destinationPath);
 
         // Security: ensure paths are within workspace
-        if (!resolvedSource.startsWith(resolvedWorkspace) || !resolvedDest.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedSource) || !isPathInside(resolvedWorkspace, resolvedDest)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -4622,7 +4622,7 @@ export async function createApp(basePath?: string) {
         const resolvedPath = resolve(workspace, path);
 
         // Security: ensure path is within workspace
-        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedPath)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -4661,7 +4661,7 @@ export async function createApp(basePath?: string) {
         const resolvedPath = resolve(workspace, path);
 
         // Security: ensure path is within workspace
-        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedPath)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -5688,7 +5688,7 @@ export async function createApp(basePath?: string) {
         // Security: ensure the resolved path is within the workspace
         const resolvedPath = resolve(fullPath);
         const resolvedWorkspace = resolve(workspacePath);
-        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedPath)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -5752,7 +5752,7 @@ export async function createApp(basePath?: string) {
         // Security: ensure the resolved path is within the workspace
         const resolvedPath = resolve(fullPath);
         const resolvedWorkspace = resolve(workspacePath);
-        if (!resolvedPath.startsWith(resolvedWorkspace)) {
+        if (!isPathInside(resolvedWorkspace, resolvedPath)) {
             return res.status(403).json({ error: 'Path traversal not allowed' });
         }
 
@@ -7199,25 +7199,44 @@ Guidelines:
     // The gracefulShutdown function is exported for use by the restart endpoint
 
     /**
-     * Test-only shutdown: everything gracefulShutdown does EXCEPT
-     * process.exit — clears all background timers, destroys the spawner,
-     * closes sockets and the HTTP server. Lets integration tests boot a
-     * real server via createApp(tmpDir) and tear it down cleanly.
+     * Teardown for integration tests. gracefulShutdown() cannot be used there:
+     * it ends in process.exit(), which would take the test runner with it.
+     *
+     * This releases everything createApp() holds open — timers, PTYs, sockets —
+     * so a suite can boot many servers in one process without leaking handles
+     * or leaving vitest hanging on an idle event loop.
      */
     async function shutdownForTests(): Promise<void> {
         clearInterval(heartbeatInterval);
         clearInterval(prInfoInterval);
         clearInterval(worktreeScanInterval);
+        // Union of both teardown paths: each branch cleared only the timers it
+        // had introduced, so either one alone leaks the other's handles and
+        // vitest hangs on a non-idle event loop.
+        clearInterval(uploadCleanupInterval);
         clearInterval(worktreeSweepInterval);
         clearTimeout(worktreeScanKickoff);
         clearTimeout(worktreeSweepKickoff);
-        try { await tunnelManager.stop(); } catch { /* not active in tests */ }
+
+        try { await tunnelManager.stop(); } catch { /* best effort */ }
+
+        // Kills child PTYs and clears the spawner's own intervals.
         taskSpawner.destroy();
+
+        // terminate() rather than close(): teardown must not wait on a close
+        // handshake from a socket whose peer is already gone.
         for (const client of clients) {
-            try { client.close(1001, 'test shutdown'); } catch { /* ignore */ }
+            try { client.terminate(); } catch { /* already gone */ }
         }
-        await new Promise<void>((resolve) => { wss.close(() => resolve()); });
-        await new Promise<void>((resolve) => { server.close(() => resolve()); });
+        clients.clear();
+
+        await new Promise<void>(resolve => wss.close(() => resolve()));
+        await new Promise<void>(resolve => {
+            // close() on a server that never listened invokes its callback with
+            // an error; skipping it keeps teardown deterministic.
+            if (!server.listening) return resolve();
+            server.close(() => resolve());
+        });
     }
 
     return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, shutdownForTests, tunnelManager };
