@@ -673,7 +673,7 @@ describe('one-shot vs recurring', () => {
         expect(rig.scheduler.get(s.id)?.fireCount).toBe(2);
     });
 
-    it('a one-shot queued behind a busy task still deletes itself immediately', () => {
+    it('BUG: a one-shot due while its task is busy is silently lost', () => {
         const rig = makeRig('busy');
         const s = rig.scheduler.create('task-1', 'ws-1', '* * * * *', 'once', false);
         tickAt(rig.scheduler, new Date(2026, 0, 1, 10, 35, 0));
@@ -896,7 +896,7 @@ describe('persistence and restart', () => {
     // schedule keeps the nextFireAt it was persisted with, so after a restart
     // that spans the scheduled time the stored value points into the past
     // until the schedule next actually fires. Nothing recomputes it on load.
-    it('leaves a stale nextFireAt in place after a restart that spanned it', () => {
+    it('BUG: leaves a stale nextFireAt in place after a restart that spanned it', () => {
         const first = makeRig('idle');
         const s = first.scheduler.create('task-1', 'ws-1', '*/5 * * * *', 'p');
         const staleNextFire = s.nextFireAt;
