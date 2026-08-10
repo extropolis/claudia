@@ -155,3 +155,47 @@
 .confirm-modal-btn--default:active {
     transform: scale(0.97);
 }
+
+/* Batch delete task list */
+.delete-request-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 10px 0 4px;
+    max-height: 240px;
+    overflow-y: auto;
+}
+
+.delete-request-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color, #30363d);
+    cursor: pointer;
+    transition: background 0.12s;
+    font-size: 13px;
+    color: var(--text-primary, #e6edf3);
+    user-select: none;
+}
+
+.delete-request-item:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.delete-request-item input[type="checkbox"] {
+    flex-shrink: 0;
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent-red, #f85149);
+    cursor: pointer;
+}
+
+.delete-request-item span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
