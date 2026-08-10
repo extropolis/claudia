@@ -36,6 +36,14 @@ export default defineConfig({
                 'src/token-parser.ts': { lines: 90 },
                 'src/task-state-detection.ts': { lines: 90 },
                 'src/config-store.ts': { lines: 85 },
+                // Fully dependency-injected suites — no PTY, no bash fixture —
+                // so they run identically on the Windows CI leg and can be
+                // gated. The PTY-driven backends (backends/claude-code-backend
+                // .ts, backends/opencode-backend.ts) deliberately are NOT gated:
+                // their suites skip on Windows, so a per-file floor would fail
+                // the Windows leg even though the code is well covered.
+                'src/tunnel-manager.ts': { lines: 85 },
+                'src/backends/index.ts': { lines: 90 },
             },
         },
         testTimeout: 10000,
