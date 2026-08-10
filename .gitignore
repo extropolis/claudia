@@ -67,6 +67,7 @@ backend/scheduled-tasks.json
 backend/config.json
 backend/workspace-config.json
 backend/chat-history.json
+backend/todos.json
 backend/archived-histories/
 backend/task-histories/
 backend/data/conversations.json
@@ -76,3 +77,6 @@ vite
 
 # Playwright MCP snapshots
 .playwright-mcp/
+
+# Claudia task worktrees (created at runtime by the orchestrator)
+.claudia-worktrees/

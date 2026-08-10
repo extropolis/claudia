@@ -23,6 +23,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # Full history: the aggregate coverage gate needs a real merge-base
+          # with main to tell which source files are new in this PR.
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -51,31 +55,19 @@ jobs:
           echo "Syntax checking bash scripts..."
           bash -n start.sh
           bash -n install.sh
-          echo "Running shellcheck..."
-          shellcheck start.sh install.sh || true
+          echo "Running shellcheck (BLOCKING)..."
+          shellcheck start.sh install.sh scripts/test-start-port-check.sh
           echo "Testing install.sh prerequisite checks..."
           # Run install.sh but expect it to fail at npm install -g (prereq checks should pass)
           bash -c 'source <(sed "/npm install -g/d" install.sh)' || true
-          echo "Testing start.sh dependency checks..."
-          # Extract and run just the dependency check function from start.sh
-          bash -c '
-            check_deps() {
-              local missing=0
-              if ! command -v node &>/dev/null; then
-                echo "Node.js is not installed."
-                missing=1
-              fi
-              if ! command -v npm &>/dev/null; then
-                echo "npm is not installed."
-                missing=1
-              fi
-              if [ $missing -eq 1 ]; then
-                exit 1
-              fi
-              echo "Dependency checks passed"
-            }
-            check_deps
-          '
+
+      - name: start.sh port-check behavior tests (Linux)
+        if: runner.os == 'Linux'
+        # Runs the REAL start.sh in check-only mode against sandboxed ports:
+        # set -e survival on free ports, LISTEN-only matching, foreign-process
+        # refusal, --force stale-claudia cleanup. Exercises check_deps in-place
+        # (replaces the old drifted copy-paste of that function).
+        run: ./scripts/test-start-port-check.sh
 
       - name: Validate PowerShell scripts (Windows)
         if: runner.os == 'Windows'
@@ -101,8 +93,32 @@ jobs:
           }
           Write-Host "All PowerShell scripts are valid"
 
+      - name: Run shared unit tests (with coverage gate)
+        run: npm run test:coverage -w shared
+
       - name: Run backend unit tests (with coverage gate)
         run: npm run test:coverage -w backend
 
       - name: Run frontend unit tests (with coverage gate)
         run: npm run test:coverage -w frontend
+
+      # Repo-wide gate. The per-file thresholds above only cover modules
+      # someone remembered to list; this aggregates every package into one
+      # number that may never regress, and fails any NEW source file that
+      # lands under the new-file floor. Reuses the coverage output from the
+      # steps above (--no-run), so the suites are not run twice.
+      - name: Aggregate coverage gate (ratchet + new-file floor)
+        if: runner.os == 'Linux'
+        run: npm run coverage
+
+      - name: Upload coverage reports
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            backend/coverage/
+            frontend/coverage/
+            shared/coverage/
+          retention-days: 14
+          if-no-files-found: ignore
