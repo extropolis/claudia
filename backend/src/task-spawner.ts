@@ -4781,6 +4781,15 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                 console.log(`[TaskSpawner] Added ${mcpResult.enabledMcpServers.length} MCP server(s) for reconnection via ${mcpConfigFile}`);
             }
 
+            // Re-apply the persisted system prompt. This was silently DROPPED on
+            // every reconnect (tsx-watch restart, sleep/wake, lazy restore) —
+            // killing workspace prompts and any per-task guard (e.g. read-only)
+            // exactly when the task resumed. Mirrors the create path.
+            if (persisted.systemPrompt && persisted.systemPrompt.trim()) {
+                claudeArgs.push('--system-prompt', persisted.systemPrompt.trim());
+                console.log(`[TaskSpawner] Re-applied persisted system prompt on reconnect for ${taskId}`);
+            }
+
             if (sessionIdToUse) {
                 claudeArgs.push('--resume', sessionIdToUse);
                 console.log(`[TaskSpawner] Reconnecting Claude Code task ${taskId} with session ${sessionIdToUse}`);

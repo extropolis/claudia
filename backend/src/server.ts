@@ -22,7 +22,9 @@ import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
+import { selectWorkspacesToRefresh } from './pr-refresh.js';
 import { WorktreeManager } from './worktree-manager.js';
+import { classifyWorktree, removeWorktreeWithUnlockRetry } from './worktree-reaper.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
@@ -859,23 +861,40 @@ export async function createApp(basePath?: string) {
         try {
             const tasks = taskSpawner.getAllTasks();
 
-            // Refresh workspace-level prInfo for:
-            // - Active tasks (busy/starting/waiting_input): need timely CI status
-            // - Recently idle tasks: PR may have just been merged after task completed
-            // - Lazy first-fetch for any workspace we've never looked up
-            const activeStates = new Set(['busy', 'starting', 'waiting_input', 'idle', 'interrupted']);
-            const workspaceIds = new Set(
-                tasks
-                    .filter(t => activeStates.has(t.state) || !prInfoSeen.has(t.workspaceId))
-                    .map(t => t.workspaceId)
+            // Selection lives in pr-refresh.ts (pure + unit-tested). Critically it
+            // includes workspaces whose PR is still non-terminal even when their
+            // tasks have gone idle — a task pushes, opens a PR and goes idle
+            // exactly while CI runs, and the old activity-only rule froze those
+            // badges at their push-time state forever.
+            const toRefresh = selectWorkspacesToRefresh(
+                tasks,
+                workspaceStore.getWorkspaces(),
+                prInfoSeen
             );
-            for (const id of workspaceIds) {
-                await refreshPrInfoFor(id, true);  // force=true: re-check CI even if branch unchanged
+            if (toRefresh.length > 0) {
+                logger.debug('PR info refresh pass', { count: toRefresh.length });
+
+                // Bounded concurrency: each refresh is a networked `gh` call with a
+                // 15s timeout. Awaiting them one at a time let a single slow repo
+                // stall the entire pass (and the reentrancy guard then skipped the
+                // next tick), which showed up as badges lagging far behind CI.
+                const PR_REFRESH_CONCURRENCY = 4;
+                let cursor = 0;
+                await Promise.all(
+                    Array.from({ length: Math.min(PR_REFRESH_CONCURRENCY, toRefresh.length) }, async () => {
+                        while (cursor < toRefresh.length) {
+                            const id = toRefresh[cursor++];
+                            // force: re-check CI even when the branch is unchanged.
+                            await refreshPrInfoFor(id, true);
+                        }
+                    })
+                );
             }
 
-            // Also refresh task-level sessionWorktreePrInfo for tasks that have a
-            // session worktree branch. This is set once on discovery but never updated,
-            // so merged PRs and CI results never appear unless we re-fetch here.
+            // Task-level sessionWorktreePrInfo is set once on worktree discovery and
+            // never refreshed, so merged PRs and CI results never showed up on the
+            // inline worktree badge. Runs regardless of whether any workspace was
+            // selected above — the two are independent.
             const tasksWithWorktree = tasks.filter(t => t.sessionWorktreeBranch);
             for (const task of tasksWithWorktree) {
                 try {
@@ -892,8 +911,11 @@ export async function createApp(basePath?: string) {
         }
     }
 
-    // Poll on an interval (30s) — covers all tasks with active states or a session worktree branch.
-    const PR_INFO_INTERVAL_MS = 30_000;
+    // Poll on an interval. 45s rather than the older 30s: selection is now bounded
+    // to workspaces whose PR can still change (terminal merged/closed ones are
+    // skipped), and the pass additionally walks session-worktree tasks, so a
+    // shorter tick would cost more `gh` calls without fresher badges.
+    const PR_INFO_INTERVAL_MS = 45_000;
     const prInfoInterval = setInterval(() => { void refreshActiveWorkspacePrInfo(); }, PR_INFO_INTERVAL_MS);
     // Kick off an initial pass shortly after startup.
     setTimeout(() => { void refreshActiveWorkspacePrInfo(); }, 5_000);
@@ -991,7 +1013,67 @@ export async function createApp(basePath?: string) {
     // Periodic sweep + initial pass shortly after startup.
     const WORKTREE_SCAN_INTERVAL_MS = 60_000;
     const worktreeScanInterval = setInterval(() => { void discoverWorktrees(); }, WORKTREE_SCAN_INTERVAL_MS);
-    setTimeout(() => { void discoverWorktrees(); }, 6_000);
+    const worktreeScanKickoff = setTimeout(() => { void discoverWorktrees(); }, 6_000);
+
+    // ===== Archived-worktree retention sweep =====
+    // Removes worktrees whose owning tasks are archived (after retentionDays)
+    // or that no task owns at all (orphans, immediate). Never touches a
+    // worktree referenced by a live/disconnected task. See worktree-reaper.ts
+    // and the 2026-07-18 retention design spec.
+    let worktreeSweepInFlight = false;
+    async function sweepArchivedWorktrees(): Promise<void> {
+        if (worktreeSweepInFlight) return;
+        worktreeSweepInFlight = true;
+        try {
+            const retentionDays = configStore.getWorktreeRetentionDays();
+            const records = workspaceStore.getWorkspaces()
+                .filter(w => w.worktreeParentId) as Array<{ id: string; worktreeParentId: string }>;
+            if (records.length === 0) return;
+
+            const activeTasks = taskSpawner.getAllTasks();       // live + disconnected
+            const archivedTasks = taskSpawner.getArchivedTasks();
+            const now = Date.now();
+            let removed = 0, skipped = 0, failed = 0;
+
+            for (const rec of records) {
+                const decision = classifyWorktree(
+                    { id: rec.id, worktreeParentId: rec.worktreeParentId },
+                    activeTasks.map(t => ({ id: t.id, workspaceId: t.workspaceId, lastActivity: t.lastActivity })),
+                    archivedTasks.map(t => ({ id: t.id, workspaceId: t.workspaceId, lastActivity: t.lastActivity })),
+                    now, retentionDays,
+                );
+                if (decision.action === 'skip') {
+                    skipped++;
+                    logger.info('Worktree sweep: skip', { worktree: rec.id, reason: decision.reason });
+                    continue;
+                }
+                try {
+                    await removeWorktreeWithUnlockRetry(rec.worktreeParentId, rec.id);
+                    workspaceStore.deleteWorkspace(rec.id);
+                    broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: rec.id } });
+                    for (const taskId of decision.archivedTaskIds) {
+                        if (taskSpawner.deleteArchivedTask(taskId)) {
+                            broadcast({ type: 'task:archived:deleted' as WSMessageType, payload: { taskId } });
+                        }
+                    }
+                    removed++;
+                    logger.info('Worktree sweep: removed', { worktree: rec.id, reason: decision.reason, archivedTasksDeleted: decision.archivedTaskIds.length });
+                } catch (e) {
+                    failed++;
+                    logger.error('Worktree sweep: removal FAILED', { worktree: rec.id, error: e instanceof Error ? e.message : String(e) });
+                }
+            }
+            if (removed > 0 || failed > 0) {
+                queueTasksUpdated();
+                logger.info('Worktree sweep complete', { removed, skipped, failed, retentionDays });
+            }
+        } finally {
+            worktreeSweepInFlight = false;
+        }
+    }
+    const WORKTREE_SWEEP_INTERVAL_MS = 60 * 60 * 1000; // hourly; reads config each run
+    const worktreeSweepInterval = setInterval(() => { void sweepArchivedWorktrees(); }, WORKTREE_SWEEP_INTERVAL_MS);
+    const worktreeSweepKickoff = setTimeout(() => { void sweepArchivedWorktrees(); }, 30_000); // initial pass after startup settles
 
     // Debounced discovery trigger — multiple tasks going idle in quick succession
     // only fire one scan instead of one per task.
@@ -2330,9 +2412,17 @@ export async function createApp(basePath?: string) {
 
                         logger.info('Resetting workspace', { workspaceId });
 
-                        // Step 1: Archive all tasks for this workspace
+                        // Step 1: Archive all tasks for this workspace AND its worktrees.
+                        // Fleet children live in .claudia-worktrees/* workspaces whose
+                        // workspaceId differs from the root — an exact-match filter
+                        // silently skipped them (the majority of tasks).
+                        const familyIds = new Set<string>([workspaceId]);
+                        const worktreeChildren = workspaceStore.getWorkspaces()
+                            .filter(w => w.worktreeParentId === workspaceId);
+                        for (const w of worktreeChildren) familyIds.add(w.id);
+
                         const allTasks = taskSpawner.getAllTasks();
-                        const workspaceTasks = allTasks.filter(t => t.workspaceId === workspaceId);
+                        const workspaceTasks = allTasks.filter(t => familyIds.has(t.workspaceId));
                         let archivedCount = 0;
                         for (const task of workspaceTasks) {
                             try {
@@ -2341,6 +2431,27 @@ export async function createApp(basePath?: string) {
                                 logger.info('Archived task during workspace reset', { taskId: task.id });
                             } catch (e) {
                                 logger.error('Failed to archive task during reset', { taskId: task.id, error: e });
+                            }
+                        }
+
+                        // Step 1b: Remove the worktrees themselves (tasks in them were
+                        // just archived, which kills their processes). Previously reset
+                        // never touched worktrees at all.
+                        let worktreesRemoved = 0;
+                        let worktreesFailed = 0;
+                        for (const w of worktreeChildren) {
+                            // Safety: never remove the primary workspace itself
+                            if (resolve(w.id) === resolve(workspaceId)) continue;
+                            try {
+                                const manager = new WorktreeManager();
+                                await manager.removeWorktree({ repoPath: workspaceId, worktreePath: w.id, force: true });
+                                workspaceStore.deleteWorkspace(w.id);
+                                broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: w.id } });
+                                worktreesRemoved++;
+                                logger.info('Removed worktree during workspace reset', { worktreePath: w.id });
+                            } catch (e) {
+                                worktreesFailed++;
+                                logger.error('Failed to remove worktree during reset', { worktreePath: w.id, error: e });
                             }
                         }
 
@@ -2391,6 +2502,8 @@ export async function createApp(basePath?: string) {
                                 workspaceId,
                                 archivedCount,
                                 totalTasks: workspaceTasks.length,
+                                worktreesRemoved,
+                                worktreesFailed,
                                 branchCheckout: branchResult.success,
                                 checkedOutBranch,
                                 branchError: branchResult.error || null,
@@ -7060,6 +7173,7 @@ Guidelines:
         clearInterval(heartbeatInterval);
         clearInterval(prInfoInterval);
         clearInterval(worktreeScanInterval);
+        clearInterval(worktreeSweepInterval);
 
         // Notify all connected clients that the server is reloading
         broadcast({ type: 'server:reloading' as WSMessageType, payload: {} });
@@ -7084,5 +7198,27 @@ Guidelines:
     // Note: SIGINT/SIGTERM handlers are set up in index.ts to avoid duplicate handlers
     // The gracefulShutdown function is exported for use by the restart endpoint
 
-    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, tunnelManager };
+    /**
+     * Test-only shutdown: everything gracefulShutdown does EXCEPT
+     * process.exit — clears all background timers, destroys the spawner,
+     * closes sockets and the HTTP server. Lets integration tests boot a
+     * real server via createApp(tmpDir) and tear it down cleanly.
+     */
+    async function shutdownForTests(): Promise<void> {
+        clearInterval(heartbeatInterval);
+        clearInterval(prInfoInterval);
+        clearInterval(worktreeScanInterval);
+        clearInterval(worktreeSweepInterval);
+        clearTimeout(worktreeScanKickoff);
+        clearTimeout(worktreeSweepKickoff);
+        try { await tunnelManager.stop(); } catch { /* not active in tests */ }
+        taskSpawner.destroy();
+        for (const client of clients) {
+            try { client.close(1001, 'test shutdown'); } catch { /* ignore */ }
+        }
+        await new Promise<void>((resolve) => { wss.close(() => resolve()); });
+        await new Promise<void>((resolve) => { server.close(() => resolve()); });
+    }
+
+    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, shutdownForTests, tunnelManager };
 }

@@ -49,6 +49,12 @@ const MODEL_TIERING_ENABLED = process.env.CLAUDIA_MODEL_TIERING_ENABLED === '1';
 const TODO_ENABLED = process.env.CLAUDIA_TODO_ENABLED === '1';
 
 /**
+ * Shared wording for cross-worktree task collaboration. Kept in one place so the
+ * scope semantics can't drift between the tool descriptions that reference them.
+ */
+const SIBLING_TASKS = 'sibling tasks (tasks running in other git worktrees of the same workspace)';
+
+/**
  * Format a duration in milliseconds to a human-readable string
  */
 function formatDuration(ms: number): string {
@@ -357,7 +363,7 @@ const server = new McpServer({
 // ============================================================================
 server.tool(
     'claudia_list_tasks',
-    `List all tasks in the current workspace (including disconnected/interrupted ones). Shows task ID, state, prompt, and whether it is waiting for input. Disconnected tasks can be resumed via claudia_continue_task.${WORKSPACE_ID ? ` Scoped to workspace: ${WORKSPACE_ID}` : ''}`,
+    `List all tasks in this workspace, including ${SIBLING_TASKS} and disconnected/interrupted ones. Shows task ID, state, prompt, and whether it is waiting for input. Use this to discover siblings to collaborate with: read one with claudia_get_task_output, then coordinate via claudia_send_input or claudia_continue_task. Disconnected tasks can be resumed via claudia_continue_task.${WORKSPACE_ID ? ` This session runs in ${WORKSPACE_ID}; the listing spans that workspace's whole worktree tree, not just this directory.` : ''}`,
     {},
     async () => {
         try {
@@ -495,7 +501,7 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_get_task_output',
-    'Fetch recent terminal output from a task. Use this to see what a sibling task has been doing, check its progress, or read its results. Returns the most recent output (up to 16KB by default).',
+    `Fetch recent terminal output from a task, including ${SIBLING_TASKS}. Use this to see what a sibling has been doing, check its progress, or read its results before coordinating with it. Returns the most recent output (up to 16KB by default).`,
     {
         taskId: z.string().describe('The task ID to get output from'),
         maxBytes: z.number().optional().describe('Maximum bytes of output to return (default: 16384, max: 32768)'),
@@ -694,7 +700,7 @@ if (MODEL_TIERING_ENABLED) {
 // ============================================================================
 server.tool(
     'claudia_send_input',
-    'Send input to a task that is waiting for input (e.g., answering a question, granting permission, or providing text). Check task status first to see if the task is in waiting_input state.',
+    `Send input or a message to another task, including ${SIBLING_TASKS}. Two uses: (1) answer a task in waiting_input state (a question or permission prompt); (2) message a sibling task to coordinate with it. IMPORTANT: only send to a task in waiting_input or idle state — check claudia_get_task_status first. Sending to a busy task types keystrokes into its running session and can corrupt its in-flight work. Discover sibling IDs with claudia_list_tasks.`,
     {
         taskId: z.string().describe('The task ID to send input to'),
         input: z.string().describe('The input text to send to the task'),
@@ -735,7 +741,7 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_continue_task',
-    'Send a follow-up prompt to an idle, exited, disconnected, or interrupted Claude Code task, resuming its session with a new instruction. Disconnected/interrupted tasks will be automatically reconnected before the prompt is delivered. The task will start processing the new prompt.',
+    `Send a follow-up prompt to an idle, exited, disconnected, or interrupted Claude Code task, resuming its session with a new instruction. Disconnected/interrupted tasks will be automatically reconnected before the prompt is delivered. The task will start processing the new prompt. Also use this to hand work to ${SIBLING_TASKS} — e.g. ask one to rebase onto main, review your branch, or report status. The same state rule applies: the target must be idle, exited, disconnected, or interrupted (not busy); discover sibling IDs with claudia_list_tasks.`,
     {
         taskId: z.string().describe('The task ID to continue'),
         prompt: z.string().describe('The follow-up prompt/instructions to send to the task'),

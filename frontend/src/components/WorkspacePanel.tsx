@@ -1279,16 +1279,26 @@ function WorkspaceSection({
             onDragOver={(e) => e.preventDefault()}
             onDragEnter={() => onDragEnter(index)}
         >
-            <div className="workspace-header">
-                <div
-                    className="workspace-drag-handle"
-                    draggable
-                    onDragStart={(e) => {
-                        e.dataTransfer.effectAllowed = 'move';
-                        onDragStart(index);
-                    }}
-                    onDragEnd={onDragEnd}
-                >
+            <div
+                className="workspace-header"
+                // The WHOLE header is the drag surface — previously only the
+                // 14px grip icon was draggable, so grabbing the workspace name
+                // (the natural gesture) did nothing and reordering appeared
+                // broken. Interactive children (buttons, inputs, menus) opt
+                // out via the guard in onDragStart.
+                draggable={!isEditingWorkspaceName}
+                onDragStart={(e) => {
+                    const el = e.target as HTMLElement;
+                    if (isEditingWorkspaceName || el.closest('button, input, select, textarea, .workspace-dropdown')) {
+                        e.preventDefault();
+                        return;
+                    }
+                    e.dataTransfer.effectAllowed = 'move';
+                    onDragStart(index);
+                }}
+                onDragEnd={onDragEnd}
+            >
+                <div className="workspace-drag-handle">
                     <GripVertical size={14} />
                 </div>
                 <div className="workspace-header-left" onClick={() => !isEditingWorkspaceName && onToggleExpand()}>
