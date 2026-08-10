@@ -237,11 +237,15 @@ Tracked under milestone **Portable Backend & Native Clients**, epic **#186**.
 
 | Phase | Issues |
 | --- | --- |
-| P0 Service | container image · #188 portable data dir · workspace creation rework · credential bootstrap · #126/#127/#128 auth · #178 Tailscale |
+| P0 Service | #208 container image · #188 portable data dir · #209 workspace creation · #210 credential bootstrap · #126/#127/#128 auth · #189 trusted proxy · #178 Tailscale · #190 approval audit |
 | P1 Desktop | #204 attach mode |
-| P2 Protocol + Sprite | #187 protocol · #136 event stream · #133 parser · #141 SPA on stream · Sprite deploy |
-| P3 iOS | #195 Swift package · #196 v1 surfaces · #149 composer |
+| P2 Protocol + Sprite | #187 protocol · #136 event stream · #133 parser · #141 SPA on stream · #211 Sprite + control plane · #205 security posture · #192 billing |
+| P3 iOS | #195 Swift package · #196 v1 surfaces · #149 composer · #10 sign & notarize |
 | P4 Manager | #198 ManagerService · #199 Manager session · #165 · #167 · #166 · #160 · #46 |
-| P5 Mobile v2 | #200 Manager UI · #193 APNs · #194 receipts · #197 offline UX · #201 voice · #44 desktop inbox · #202 retire `/mobile` |
+| P5 Mobile v2 | #200 Manager UI · #193 APNs · #194 receipts · #139/#140 approval plumbing · #197 offline UX · #201 voice · #44 desktop inbox · #202 retire `/mobile` |
 
-Closed as superseded: #77 (fixed), #142/#143/#144/#145 (→#195), #147 (→#196), #148 (→#200), #191/#192 (architecture change).
+Closed as superseded: #77 (fixed), #142/#143/#144/#145 (→#195), #147 (→#196), #148 (→#200), #191 rendezvous relay (architecture change).
+
+Rescoped rather than closed: #192 (billing now serves the Sprite control plane, not a relay), #205 (per-user Sprite isolation, not relay hardening), #193 (a standalone push service, not part of Connect).
+
+Moved out of this milestone: #146 native macOS shell and #131 Bonjour — the first because Electron plus #204 covers desktop, the second because a service with a stable address has nothing to discover.
