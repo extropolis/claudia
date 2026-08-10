@@ -246,6 +246,11 @@ export function useWebSocket() {
                                     useTaskStore.getState().setTokenCostEnabled(config.tokenCostEnabled);
                                 }
 
+                                // Sync TODO enabled setting
+                                if (config.todoEnabled !== undefined) {
+                                    useTaskStore.getState().setTodoEnabled(config.todoEnabled);
+                                }
+
                                 // Sync Deepgram API key from backend (for mobile/tunnel clients)
                                 if (config.deepgramApiKey && !useTaskStore.getState().deepgramApiKey) {
                                     useTaskStore.setState({ deepgramApiKey: config.deepgramApiKey });
@@ -291,7 +296,7 @@ export function useWebSocket() {
                     case 'task:deleteRequest': {
                         const payload = message.payload as { taskId: string; requestId: string; taskName: string };
                         console.log(`[WebSocket] Delete request from agent: ${payload.taskId}`);
-                        useTaskStore.getState().setPendingDeleteRequest(payload);
+                        useTaskStore.getState().addPendingDeleteRequest(payload);
                         break;
                     }
                     case 'jira:focusTicket': {
@@ -566,6 +571,8 @@ export function useWebSocket() {
                             workspaceId: string;
                             archivedCount: number;
                             totalTasks: number;
+                            worktreesRemoved?: number;
+                            worktreesFailed?: number;
                             branchCheckout: boolean;
                             checkedOutBranch: string | null;
                             branchError: string | null;
@@ -575,6 +582,12 @@ export function useWebSocket() {
 
                         // Build a user-friendly notification
                         let message_text = `Reset complete: ${payload.archivedCount} task(s) archived.`;
+                        if (payload.worktreesRemoved) {
+                            message_text += ` ${payload.worktreesRemoved} worktree(s) removed.`;
+                        }
+                        if (payload.worktreesFailed) {
+                            message_text += ` ${payload.worktreesFailed} worktree(s) failed to remove — check logs.`;
+                        }
                         if (payload.isGitRepo) {
                             if (payload.branchCheckout && payload.checkedOutBranch) {
                                 message_text += ` Switched to branch "${payload.checkedOutBranch}".`;
@@ -615,6 +628,37 @@ export function useWebSocket() {
                     case 'cron:fired': {
                         const payload = message.payload as { scheduledTaskId: string; taskId: string; prompt: string };
                         console.log(`[WebSocket] Scheduled task fired: ${payload.scheduledTaskId} → task ${payload.taskId}`);
+                        break;
+                    }
+                    // Per-task TODO messages (always handle store updates; toast is conditional in App.tsx)
+                    case 'todo:created': {
+                        const payload = message.payload as { todo: any };
+                        if (payload.todo) {
+                            useTaskStore.getState().addTodo(payload.todo);
+                            window.dispatchEvent(new CustomEvent('claudia:todoCreated', { detail: payload.todo }));
+                        }
+                        break;
+                    }
+                    case 'todo:updated': {
+                        const payload = message.payload as { todo: any };
+                        if (payload.todo) {
+                            useTaskStore.getState().updateTodo(payload.todo);
+                        }
+                        break;
+                    }
+                    case 'todo:deleted': {
+                        const payload = message.payload as { todoId: string };
+                        if (payload.todoId) {
+                            useTaskStore.getState().removeTodo(payload.todoId);
+                        }
+                        break;
+                    }
+                    case 'todos:reordered': {
+                        const payload = message.payload as { todos: any[] };
+                        if (Array.isArray(payload.todos)) {
+                            const store = useTaskStore.getState();
+                            for (const t of payload.todos) store.updateTodo(t);
+                        }
                         break;
                     }
                     case 'tunnel:status': {
@@ -750,6 +794,10 @@ export function useWebSocket() {
 
     const rejectDeleteRequest = useCallback((taskId: string, requestId: string) => {
         sendMessage('task:deleteRejected', { taskId, requestId });
+    }, [sendMessage]);
+
+    const refreshTaskPr = useCallback((taskId: string) => {
+        sendMessage('task:refreshPr', { taskId });
     }, [sendMessage]);
 
     const approveJiraWrite = useCallback((requestId: string) => {
@@ -934,6 +982,7 @@ export function useWebSocket() {
         updateScheduledTask,
         pauseScheduledTask,
         rejectDeleteRequest,
+        refreshTaskPr,
         approveJiraWrite,
         rejectJiraWrite,
         wsRef

@@ -126,6 +126,8 @@ export interface AppConfig {
     tokenCostEnabled?: boolean;  // Enable cost calculation display (default: false)
     defaultBaseDirectory?: string;  // Default base directory for new workspaces (optional)
     modelTiering?: ModelTieringConfig;  // Complexity-based model selection for MCP-spawned tasks
+    worktreeRetentionDays?: number;  // Days before archived tasks' worktrees are swept (0 = never)
+    todoEnabled?: boolean;  // Enable per-task TODO list feature (default: false)
     jiraEnabled: boolean;  // Master toggle for the Jira integration (default false)
     jira?: JiraConfig;  // Jira Cloud connection (only set once the user configures it)
 }
@@ -220,6 +222,7 @@ const DEFAULT_CONFIG: AppConfig = {
     tokenTrackingEnabled: true,  // Token usage tracking enabled by default
     defaultBaseDirectory: undefined,  // No default base directory set
     modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } },
+    worktreeRetentionDays: 30,  // Per the archived-worktree retention spec
     jiraEnabled: false,  // Jira integration off by default
     jira: undefined
 };
@@ -324,6 +327,9 @@ export class ConfigStore {
         }
         if (updates.skipPermissions !== undefined) {
             this.config.skipPermissions = updates.skipPermissions;
+        }
+        if (updates.worktreeRetentionDays !== undefined) {
+            this.config.worktreeRetentionDays = updates.worktreeRetentionDays;
         }
         if (updates.rules !== undefined) {
             this.config.rules = updates.rules;
@@ -434,6 +440,12 @@ export class ConfigStore {
 
     getSkipPermissions(): boolean {
         return this.config.skipPermissions;
+    }
+
+    /** Days before archived tasks' worktrees are swept; 0 disables the sweep. */
+    getWorktreeRetentionDays(): number {
+        const v = this.config.worktreeRetentionDays;
+        return typeof v === 'number' && v >= 0 ? v : 30;
     }
 
     getRules(): string {
@@ -644,6 +656,15 @@ export class ConfigStore {
 
     setDefaultBaseDirectory(directory: string | undefined): void {
         this.config.defaultBaseDirectory = directory;
+        this.saveConfig();
+    }
+
+    getTodoEnabled(): boolean {
+        return this.config.todoEnabled ?? false;
+    }
+
+    setTodoEnabled(enabled: boolean): void {
+        this.config.todoEnabled = enabled;
         this.saveConfig();
     }
 }

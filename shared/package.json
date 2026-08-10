@@ -1,15 +1,19 @@
 {
-  "name": "@claudia/shared",
-  "version": "0.3.0",
-  "private": true,
-  "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "scripts": {
-    "build": "tsc",
-    "dev": "tsc -w"
-  },
-  "devDependencies": {
-    "typescript": "^5.3.3"
-  }
+    "name": "@claudia/shared",
+    "version": "0.3.0",
+    "private": true,
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsc",
+        "dev": "tsc -w",
+        "test": "npx vitest run",
+        "test:coverage": "npx vitest run --coverage"
+    },
+    "devDependencies": {
+        "typescript": "^5.3.3",
+        "vitest": "^3.1.4",
+        "@vitest/coverage-v8": "^3.2.4"
+    }
 }
