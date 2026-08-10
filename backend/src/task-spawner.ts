@@ -113,7 +113,7 @@ function exe(name: string): string {
  * node-pty cannot spawn it directly. Locate the underlying JS entry-point
  * via APPDATA and run it with the current node executable — no PATH needed.
  */
-function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } {
+export function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } {
     if (!isWindows) return { command: 'claude', prefixArgs: [] };
     const appData = process.env['APPDATA'];
     if (appData) {
