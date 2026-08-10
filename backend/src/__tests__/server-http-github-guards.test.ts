@@ -13,15 +13,24 @@
  *    returns 4xx/5xx *before* it opens a socket, so those branches are real,
  *    deterministic, offline coverage. The network half is deliberately left
  *    alone — see the skip list at the bottom.
+ *
+ * The `gh`-backed half is POSIX-only: fixtures/fake-gh.sh is a bash script
+ * placed on PATH as `gh`, which Windows cannot exec — the routes then fail the
+ * shell-out and answer 500 instead of 200. Those four describes are skipped on
+ * win32 and stay covered by the Linux leg. The guard describes below them need
+ * no `gh` at all, so they keep running on every platform.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, copyFileSync, chmodSync, existsSync, readFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, delimiter } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import { startHarness, makeGitRepo, git, makeTaskRecord, type Harness } from './helpers/server-harness.js';
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
+
+/** The fake `gh` is a bash script on PATH; Windows cannot exec it. */
+const NEEDS_FAKE_GH = process.platform !== 'win32';
 
 let h: Harness;
 let ghBin: string;      // dir prepended to PATH, holds the fake `gh`
@@ -54,7 +63,7 @@ beforeAll(async () => {
         // sessionId before it ever looks the workspace up.
         tasks: [makeTaskRecord(TASK_ID, '/nonexistent-workspace')],
         env: {
-            PATH: `${ghBin}:${process.env.PATH}`,
+            PATH: `${ghBin}${delimiter}${process.env.PATH}`,
             CLAUDIA_FAKE_GH_DIR: ghLogDir,
             // Explicitly unset so the "not configured" guards are what we assert,
             // regardless of the developer's real shell env.
@@ -79,13 +88,17 @@ beforeAll(async () => {
 
 afterAll(async () => {
     await h.stop();
-    rmSync(ghBin, { recursive: true, force: true });
+    try {
+        rmSync(ghBin, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    } catch {
+        // Ignore cleanup errors
+    }
     delete process.env.CLAUDIA_FAKE_GH_FAIL;
 }, 30000);
 
 const q = encodeURIComponent;
 
-describe('GET /api/workspaces/ci-status', () => {
+describe.skipIf(!NEEDS_FAKE_GH)('GET /api/workspaces/ci-status', () => {
     it('400s on a missing workspace param and 404s on a path that does not exist', async () => {
         expect((await h.req('/api/workspaces/ci-status')).status).toBe(400);
         const missing = await h.req(`/api/workspaces/ci-status?workspace=${q(join(h.base, 'nope'))}`);
@@ -154,7 +167,7 @@ describe('GET /api/workspaces/ci-status', () => {
     }, 20000);
 });
 
-describe('GET/POST/PATCH /api/workspaces/github-issues', () => {
+describe.skipIf(!NEEDS_FAKE_GH)('GET/POST/PATCH /api/workspaces/github-issues', () => {
     it('enforces the error contract before touching gh', async () => {
         expect((await h.req('/api/workspaces/github-issues')).status).toBe(400);
         expect((await h.req(`/api/workspaces/github-issues?workspace=${q(join(h.base, 'nope'))}`)).status).toBe(404);
@@ -208,7 +221,7 @@ describe('GET/POST/PATCH /api/workspaces/github-issues', () => {
     }, 20000);
 });
 
-describe('/api/github/notifications', () => {
+describe.skipIf(!NEEDS_FAKE_GH)('/api/github/notifications', () => {
     it('400s without a valid workspace on both the list and the mark-read routes', async () => {
         expect((await h.req('/api/github/notifications')).status).toBe(400);
         expect((await h.req(`/api/github/notifications?workspace=${q(join(h.base, 'nope'))}`)).status).toBe(404);
@@ -240,7 +253,7 @@ describe('/api/github/notifications', () => {
     }, 20000);
 });
 
-describe('PATCH /api/workspaces/pr-description', () => {
+describe.skipIf(!NEEDS_FAKE_GH)('PATCH /api/workspaces/pr-description', () => {
     it('requires workspace and a string body', async () => {
         expect((await h.send('PATCH', '/api/workspaces/pr-description', { body: 'x' })).status).toBe(400);
         expect((await h.send('PATCH', '/api/workspaces/pr-description', { workspace: repo })).status).toBe(400);
