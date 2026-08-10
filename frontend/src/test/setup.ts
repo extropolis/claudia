@@ -1,3 +1,4 @@
+import { vi } from 'vitest';
 import '@testing-library/jest-dom';
 
 // Mock localStorage
@@ -76,3 +77,18 @@ class MockWebSocket {
 }
 
 global.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+// No test may reach the network.
+//
+// Without this, a background request a store fires and forgets — taskStore
+// PUTs /api/config to sync the Deepgram key, for instance — escapes to the
+// real network. In CI it fails, and its `.catch()` logs AFTER the test file
+// has finished, so vitest tears down mid-log and reports
+// "Closing rpc while onUserConsoleLog was pending", failing the whole run
+// with an error that names an innocent test file.
+//
+// Default every fetch to an immediately-resolved empty JSON 200. Tests that
+// care about a response override it with vi.spyOn(global, 'fetch') / vi.mocked.
+global.fetch = vi.fn(async () =>
+    new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } })
+) as unknown as typeof fetch;
