@@ -34,6 +34,7 @@ import { VoiceSupervisor } from './voice-supervisor.js';
 import { createLogger } from './logger.js';
 import { PluginManager, PluginContext } from './plugin-system/index.js';
 import { JiraClient, JiraError, parseIssueKey } from './jira-client.js';
+import { ensureDataDir, dataPath, describeDataDir } from './paths.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
 // - config-routes.ts: Config API routes template
@@ -368,6 +369,11 @@ function notifyTasksOfMcpChange(
 }
 
 export async function createApp(basePath?: string) {
+    // Resolve where mutable state lives before anything touches disk. `basePath`
+    // is Electron's userData; CLAUDIA_DATA_DIR covers container and home-server
+    // deployments; unset keeps the legacy in-source-tree location.
+    const dataDir = ensureDataDir(basePath);
+
     const app = express();
     const server = createServer(app);
     // Use noServer mode so we can manually route WebSocket upgrade requests.
@@ -478,8 +484,12 @@ export async function createApp(basePath?: string) {
         req.pipe(proxyReq);
     });
 
+    // Surfaced early and unconditionally: an operator deploying a container needs
+    // to see in the first lines of output whether their volume mount took effect.
+    logger.info(describeDataDir(dataDir));
+
     // Initialize configStore first to determine API mode
-    const configStore = new ConfigStore(basePath);
+    const configStore = new ConfigStore(dataDir);
 
     // Initialize Plugin System
     logger.info('Initializing plugin system...');
@@ -504,15 +514,17 @@ export async function createApp(basePath?: string) {
     pluginManager.registerRoutes(app);
 
     // Initialize remaining services
-    const persistencePath = basePath ? join(basePath, 'tasks.json') : undefined;
+    // TaskSpawner derives its history directory from dirname(persistencePath),
+    // so pointing this at the data dir relocates task-histories/ with it.
+    const persistencePath = dataDir ? dataPath(dataDir, 'tasks.json') : undefined;
     const taskSpawner = new TaskSpawner(persistencePath, true, configStore);
-    const workspaceStore = new WorkspaceStore(basePath);
+    const workspaceStore = new WorkspaceStore(dataDir);
     // SupervisorChat now handles both auto-analysis (formerly TaskSupervisor) and chat
-    const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore);
+    const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore, dataDir);
     // VoiceSupervisor for hands-free voice control
     const voiceSupervisor = new VoiceSupervisor(supervisorChat, taskSpawner);
     // LearningsStore for RAG-based learnings
-    const learningsStore = new LearningsStore(basePath, configStore);
+    const learningsStore = new LearningsStore(dataDir, configStore);
 
     // CronScheduler for scheduled/recurring prompts
     const cronScheduler = new CronScheduler(
@@ -538,7 +550,8 @@ export async function createApp(basePath?: string) {
             // so the cron fires immediately, which triggers auto-reconnect via writeToTask
             if (found.state === 'disconnected' || found.state === 'interrupted') return 'idle';
             return 'busy';
-        }
+        },
+        dataDir
     );
     cronScheduler.start();
 
@@ -3996,8 +4009,8 @@ export async function createApp(basePath?: string) {
     cleanupOldUploads();
     const uploadCleanupInterval = setInterval(cleanupOldUploads, 60 * 60 * 1000);
 
-    // One-time migration: clean up old uploads from previous {basePath}/uploads/ location
-    const oldUploadsDir = join(basePath || process.cwd(), 'uploads');
+    // One-time migration: clean up old uploads from previous {dataDir}/uploads/ location
+    const oldUploadsDir = join(dataDir || process.cwd(), 'uploads');
     if (oldUploadsDir !== uploadsDir && existsSync(oldUploadsDir)) {
         try {
             const oldFiles = readdirSync(oldUploadsDir);
