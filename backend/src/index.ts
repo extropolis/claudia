@@ -4,6 +4,7 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { createApp } from './server.js';
+import { resolveDataDir, dataPath } from './paths.js';
 import { checkClaudeCodeInstalled } from './task-spawner.js';
 import { PORTS } from '@claudia/shared';
 
@@ -96,12 +97,15 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 // when tsx watch restarts the server. The debounced save mechanism (500ms) is sufficient,
 // and gracefulShutdown() already handles saving on SIGTERM/SIGINT.
 
+// Crash logs follow the data directory: on a container they belong on the
+// mounted volume, not inside the image layer where they vanish on redeploy.
+const CRASH_LOG = dataPath(resolveDataDir(), 'crash.log');
+
 process.on('uncaughtException', (err) => {
     console.error('[Index] Uncaught Exception:', err);
     try {
         const { appendFileSync } = require('fs');
-        const { join } = require('path');
-        appendFileSync(join(__dirname, '..', 'crash.log'),
+        appendFileSync(CRASH_LOG,
             `[${new Date().toISOString()}] UNCAUGHT EXCEPTION: ${err.stack || err.message}\n`);
     } catch {}
 });
@@ -110,8 +114,7 @@ process.on('unhandledRejection', (reason, promise) => {
     console.error('[Index] Unhandled Rejection at:', promise, 'reason:', reason);
     try {
         const { appendFileSync } = require('fs');
-        const { join } = require('path');
-        appendFileSync(join(__dirname, '..', 'crash.log'),
+        appendFileSync(CRASH_LOG,
             `[${new Date().toISOString()}] UNHANDLED REJECTION: ${reason instanceof Error ? reason.stack : String(reason)}\n`);
     } catch {}
 });
@@ -119,8 +122,7 @@ process.on('unhandledRejection', (reason, promise) => {
 process.on('exit', (code) => {
     try {
         const { appendFileSync } = require('fs');
-        const { join } = require('path');
-        appendFileSync(join(__dirname, '..', 'crash.log'),
+        appendFileSync(CRASH_LOG,
             `[${new Date().toISOString()}] PROCESS EXIT code=${code}\n`);
     } catch {}
 });
