@@ -135,6 +135,74 @@ const MAX_SPAWNS_PER_WINDOW = 10; // Max Claude processes per window
 // Concurrency control for auto-analysis
 const MAX_CONCURRENT_ANALYSIS = 2; // Max concurrent Claude processes for analysis
 
+/** Result of one `claude --print` invocation. */
+export interface ClaudeRunResult {
+    code: number | null;
+    stdout: string;
+    stderr: string;
+}
+
+/**
+ * Thrown when a claude invocation exceeds its timeout.
+ * The message is unchanged from the pre-refactor inline `new Error('Claude Code timeout')`
+ * so any upstream string matching keeps working; the class only exists so
+ * getFollowUpResponse can tell "timed out" apart from "failed to spawn".
+ */
+export class ClaudeTimeoutError extends Error {
+    constructor() {
+        super('Claude Code timeout');
+        this.name = 'ClaudeTimeoutError';
+    }
+}
+
+/**
+ * Runs the claude CLI once and collects its output.
+ * Injectable so tests can exercise prompt construction / response handling
+ * without spawning a real process. Production always uses defaultClaudeRunner.
+ */
+export type ClaudeRunner = (
+    args: string[],
+    opts: { cwd: string; timeoutMs: number }
+) => Promise<ClaudeRunResult>;
+
+/**
+ * The production runner: spawn `claude`, collect stdout/stderr, enforce a timeout.
+ * Exported only so the test suite can exercise the real process boundary
+ * (argv passthrough, cwd, stdin EOF, kill-on-timeout) with a short timeout.
+ */
+export const defaultClaudeRunner: ClaudeRunner = (args, { cwd, timeoutMs }) =>
+    new Promise<ClaudeRunResult>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            claudeProcess.kill();
+            reject(new ClaudeTimeoutError());
+        }, timeoutMs);
+
+        const claudeProcess = spawn(claudeExe, args, {
+            cwd,
+            env: process.env as { [key: string]: string },
+            stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        // Close stdin immediately
+        claudeProcess.stdin?.end();
+
+        let stdout = '';
+        let stderr = '';
+
+        claudeProcess.stdout.on('data', (data) => { stdout += data.toString(); });
+        claudeProcess.stderr.on('data', (data) => { stderr += data.toString(); });
+
+        claudeProcess.on('close', (code) => {
+            clearTimeout(timeout);
+            resolve({ code, stdout, stderr });
+        });
+
+        claudeProcess.on('error', (err) => {
+            clearTimeout(timeout);
+            reject(err);
+        });
+    });
+
 // Queue item for auto-analysis
 interface AnalysisQueueItem {
     task: { id: string; prompt: string; state: string; workspaceId: string; createdAt: Date; lastActivity: Date };
@@ -152,16 +220,25 @@ export class SupervisorChat extends EventEmitter {
     private spawnTimestamps: number[] = [];  // Track spawn timestamps for rate limiting
     private analysisQueue: AnalysisQueueItem[] = [];  // Queue for pending analysis
     private activeAnalysisCount: number = 0;  // Current number of running analyses
+    private historyFile: string;
+    private runClaude: ClaudeRunner;
 
+    /**
+     * @param options.historyFile Override the chat-history path (test seam; defaults to backend/chat-history.json).
+     * @param options.runClaude   Override how the claude CLI is invoked (test seam; defaults to a real spawn).
+     */
     constructor(
         taskSpawner: TaskSpawner,
         workspaceStore: { getWorkspaces: () => { id: string; name: string }[] },
-        configStore: ConfigStore
+        configStore: ConfigStore,
+        options?: { historyFile?: string; runClaude?: ClaudeRunner }
     ) {
         super();
         this.taskSpawner = taskSpawner;
         this.workspaceStore = workspaceStore;
         this.configStore = configStore;
+        this.historyFile = options?.historyFile ?? CHAT_HISTORY_FILE;
+        this.runClaude = options?.runClaude ?? defaultClaudeRunner;
 
         // Load persisted chat history
         this.loadChatHistory();
@@ -175,8 +252,8 @@ export class SupervisorChat extends EventEmitter {
      */
     private loadChatHistory(): void {
         try {
-            if (existsSync(CHAT_HISTORY_FILE)) {
-                const data = readFileSync(CHAT_HISTORY_FILE, 'utf-8');
+            if (existsSync(this.historyFile)) {
+                const data = readFileSync(this.historyFile, 'utf-8');
                 const parsed = JSON.parse(data);
                 if (Array.isArray(parsed)) {
                     this.chatHistory = parsed;
@@ -243,7 +320,7 @@ export class SupervisorChat extends EventEmitter {
             if (this.chatHistory.length > MAX_HISTORY_MESSAGES) {
                 this.chatHistory = this.chatHistory.slice(-MAX_HISTORY_MESSAGES);
             }
-            writeFileSync(CHAT_HISTORY_FILE, JSON.stringify(this.chatHistory, null, 2));
+            writeFileSync(this.historyFile, JSON.stringify(this.chatHistory, null, 2));
             console.log(`[SupervisorChat] Saved ${this.chatHistory.length} messages to history`);
         } catch (error) {
             console.error('[SupervisorChat] Failed to save chat history:', error);
@@ -448,52 +525,17 @@ Be witty — dry humor, light sarcasm, maybe a pun. Think "funny coworker" not "
         }
         this.recordSpawn();
 
-        return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                claudeProcess.kill();
-                reject(new Error('Claude Code timeout'));
-            }, 30000);
+        const { code, stdout, stderr } = await this.runClaude(
+            ['--print', '--output-format', 'text', '-p', prompt],
+            { cwd: workspaceId, timeoutMs: 30000 }
+        );
 
-            const claudeProcess = spawn(claudeExe, [
-                '--print',
-                '--output-format', 'text',
-                '-p', prompt
-            ], {
-                cwd: workspaceId,
-                env: process.env as { [key: string]: string },
-                stdio: ['pipe', 'pipe', 'pipe']
-            });
+        if (code !== 0) {
+            console.error(`[SupervisorChat] Claude Code exited with code ${code}: ${stderr}`);
+            throw new Error(`Claude Code failed: ${stderr}`);
+        }
 
-            claudeProcess.stdin?.end();
-
-            let stdout = '';
-            let stderr = '';
-
-            claudeProcess.stdout.on('data', (data) => {
-                stdout += data.toString();
-            });
-
-            claudeProcess.stderr.on('data', (data) => {
-                stderr += data.toString();
-            });
-
-            claudeProcess.on('close', (code) => {
-                clearTimeout(timeout);
-
-                if (code !== 0) {
-                    console.error(`[SupervisorChat] Claude Code exited with code ${code}: ${stderr}`);
-                    reject(new Error(`Claude Code failed: ${stderr}`));
-                    return;
-                }
-
-                resolve(stdout.trim());
-            });
-
-            claudeProcess.on('error', (err) => {
-                clearTimeout(timeout);
-                reject(err);
-            });
-        });
+        return stdout.trim();
     }
 
     /**
@@ -936,68 +978,31 @@ IMPORTANT: Always respond with valid JSON. Do not include any text outside the J
         const systemPrompt = this.buildSystemPrompt(context, workspaceId);
         const fullPrompt = `${systemPrompt}\n\nUser message: "${userMessage}"\n\nRespond with JSON:`;
 
-        return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                claudeProcess.kill();
-                reject(new Error('Claude Code timeout'));
-            }, 90000); // 90 second timeout for tool calls
+        // Get the first workspace for cwd, or use current directory
+        const workspaces = this.workspaceStore.getWorkspaces();
+        const cwd = workspaces.length > 0 ? workspaces[0].id : process.cwd();
 
-            // Get the first workspace for cwd, or use current directory
-            const workspaces = this.workspaceStore.getWorkspaces();
-            const cwd = workspaces.length > 0 ? workspaces[0].id : process.cwd();
+        const { code, stdout, stderr } = await this.runClaude(
+            ['--print', '--output-format', 'text', '-p', fullPrompt],
+            { cwd, timeoutMs: 90000 } // 90 second timeout for tool calls
+        );
 
-            const claudeProcess = spawn(claudeExe, [
-                '--print',
-                '--output-format', 'text',
-                '-p', fullPrompt
-            ], {
-                cwd,
-                env: process.env as { [key: string]: string },
-                stdio: ['pipe', 'pipe', 'pipe']
-            });
+        if (code !== 0) {
+            console.error(`[SupervisorChat] Claude Code exited with code ${code}: ${stderr}`);
+            throw new Error(`Claude Code failed: ${stderr}`);
+        }
 
-            // Close stdin immediately
-            claudeProcess.stdin?.end();
+        const response = stdout.trim();
+        console.log(`[SupervisorChat] Got response (${response.length} chars)`);
 
-            let stdout = '';
-            let stderr = '';
-
-            claudeProcess.stdout.on('data', (data) => {
-                stdout += data.toString();
-            });
-
-            claudeProcess.stderr.on('data', (data) => {
-                stderr += data.toString();
-            });
-
-            claudeProcess.on('close', (code) => {
-                clearTimeout(timeout);
-
-                if (code !== 0) {
-                    console.error(`[SupervisorChat] Claude Code exited with code ${code}: ${stderr}`);
-                    reject(new Error(`Claude Code failed: ${stderr}`));
-                    return;
-                }
-
-                const response = stdout.trim();
-                console.log(`[SupervisorChat] Got response (${response.length} chars)`);
-
-                // Parse JSON response
-                try {
-                    const parsed = this.parseClaudeResponse(response);
-                    resolve(parsed);
-                } catch (parseError) {
-                    // If parsing fails, treat the entire response as text
-                    console.warn('[SupervisorChat] Failed to parse JSON, using raw response');
-                    resolve({ response: response });
-                }
-            });
-
-            claudeProcess.on('error', (err) => {
-                clearTimeout(timeout);
-                reject(err);
-            });
-        });
+        // Parse JSON response
+        try {
+            return this.parseClaudeResponse(response);
+        } catch {
+            // If parsing fails, treat the entire response as text
+            console.warn('[SupervisorChat] Failed to parse JSON, using raw response');
+            return { response };
+        }
     }
 
     /**
@@ -1040,56 +1045,29 @@ ${toolResults}
 Give a brief, spoken-friendly response — 1-2 sentences. No bullet lists or markdown. Be witty but useful. Suggest what to do next if it's obvious.
 Do NOT use JSON format — just plain text.`;
 
-        return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                claudeProcess.kill();
-                reject(new Error('Claude Code timeout'));
-            }, 60000);
+        const workspaces = this.workspaceStore.getWorkspaces();
+        const cwd = workspaces.length > 0 ? workspaces[0].id : process.cwd();
 
-            const workspaces = this.workspaceStore.getWorkspaces();
-            const cwd = workspaces.length > 0 ? workspaces[0].id : process.cwd();
+        let result: ClaudeRunResult;
+        try {
+            result = await this.runClaude(
+                ['--print', '--output-format', 'text', '-p', prompt],
+                { cwd, timeoutMs: 60000 }
+            );
+        } catch (err) {
+            // Pre-refactor behaviour: a timeout propagated to the caller, while a
+            // process-level spawn error fell back to returning the tool results.
+            if (err instanceof ClaudeTimeoutError) throw err;
+            return `Action completed:\n${toolResults}`;
+        }
 
-            const claudeProcess = spawn(claudeExe, [
-                '--print',
-                '--output-format', 'text',
-                '-p', prompt
-            ], {
-                cwd,
-                env: process.env as { [key: string]: string },
-                stdio: ['pipe', 'pipe', 'pipe']
-            });
+        if (result.code !== 0) {
+            console.error(`[SupervisorChat] Follow-up failed with code ${result.code}: ${result.stderr}`);
+            // Return tool results directly if follow-up fails
+            return `Action completed:\n${toolResults}`;
+        }
 
-            claudeProcess.stdin?.end();
-
-            let stdout = '';
-            let stderr = '';
-
-            claudeProcess.stdout.on('data', (data) => {
-                stdout += data.toString();
-            });
-
-            claudeProcess.stderr.on('data', (data) => {
-                stderr += data.toString();
-            });
-
-            claudeProcess.on('close', (code) => {
-                clearTimeout(timeout);
-
-                if (code !== 0) {
-                    console.error(`[SupervisorChat] Follow-up failed with code ${code}: ${stderr}`);
-                    // Return tool results directly if follow-up fails
-                    resolve(`Action completed:\n${toolResults}`);
-                    return;
-                }
-
-                resolve(stdout.trim());
-            });
-
-            claudeProcess.on('error', (err) => {
-                clearTimeout(timeout);
-                resolve(`Action completed:\n${toolResults}`);
-            });
-        });
+        return result.stdout.trim();
     }
 
     /**
