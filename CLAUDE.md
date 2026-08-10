@@ -54,11 +54,51 @@ npx tsx test-cli.ts --help
 
 Unit tests:
 ```bash
-cd backend
-npx vitest run
+npm test                  # all packages
+npm test -w backend       # one package
 ```
 
 Add CLI functionality if needed for testing. Ensure adequate logging to debug issues.
+
+### Coverage
+
+Vitest reports coverage per package, which hides the repo-wide picture. Use the
+aggregator for the real number:
+
+```bash
+npm run coverage:run      # run all suites, aggregate, gate
+npm run coverage          # aggregate existing output (fast, no re-run)
+npm run coverage:baseline # accept current numbers as the new floor
+```
+
+`npm run coverage` prints per-package and repo-wide totals, the weakest
+directories, the biggest untested files, and an **API-surface audit**: which
+HTTP routes, WebSocket message types, and MCP tools have no test referencing
+them at all. Line coverage alone cannot tell you that a whole route is
+unreachable from the suite.
+
+**Three gates run in CI, and all three must pass:**
+
+1. **Per-file thresholds** (`*/vitest.config.ts`) — floors for individual
+   modules. Raise them as coverage improves; never lower them.
+2. **Repo-wide ratchet** (`coverage-baseline.json`) — the aggregate total may
+   never drop. Improving coverage means running `npm run coverage:baseline`
+   and committing the new floor.
+3. **New-file floor** — any source file added relative to `origin/main` must
+   hit 60% line coverage. This is what the per-file allowlists structurally
+   cannot do, since nobody remembers to add a new file to them.
+
+Notes:
+- `shared/` is aliased to its **source** in the backend and frontend vitest
+  configs. Without that alias the suites import `shared/dist`, so a stale build
+  means green tests over old code.
+- An empty coverage report is treated as an error, not as 100%. A package with
+  no vitest config yet is skipped with a note instead.
+
+**Gotcha:** integration tests must create temp dirs under `homedir()`, not
+`os.tmpdir()`. On macOS `/tmp` resolves under `/var`, which
+`validateWorkspacePath` blocklists as a system path — workspace operations get
+rejected before ever reaching the code under test.
 
 ## Starting the Server (Initial Startup Only)
 

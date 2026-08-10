@@ -70,13 +70,18 @@
     "postinstall": "node -e \"const fs=require('fs'),p=require('path'),d=p.join('node_modules','node-pty','prebuilds');if(fs.existsSync(d)){fs.readdirSync(d).forEach(a=>{const h=p.join(d,a,'spawn-helper');if(fs.existsSync(h))fs.chmodSync(h,0o755)})}\"",
     "prepare": "npm run build -w shared && npm run build:backend",
     "start": "./start-electron.sh",
-    "test": "npm run test:backend && npm run test:frontend",
+    "test": "npm run test:shared && npm run test:backend && npm run test:frontend",
     "test:backend": "npm test -w backend",
     "test:frontend": "npm test -w frontend",
     "test:watch": "concurrently \"npm run test:watch -w backend\" \"npm run test:watch -w frontend\"",
     "version:sync": "node scripts/bump-version.mjs",
     "version:check": "node scripts/bump-version.mjs --check",
-    "release": "node scripts/release.mjs"
+    "release": "node scripts/release.mjs",
+    "coverage": "node scripts/coverage.mjs --no-run --surface",
+    "coverage:run": "node scripts/coverage.mjs --surface",
+    "coverage:baseline": "node scripts/coverage.mjs --no-run --update-baseline",
+    "test:shared": "npm test -w shared",
+    "test:coverage": "npm run test:coverage -w shared && npm run test:coverage -w backend && npm run test:coverage -w frontend"
   },
   "devDependencies": {
     "@playwright/test": "^1.57.0",
