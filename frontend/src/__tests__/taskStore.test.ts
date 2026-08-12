@@ -628,6 +628,37 @@ describe('taskStore', () => {
             expect(ws1Tasks[2].order).toBe(2);
         });
 
+        it('should place a newly created task at the top of an already-reordered workspace', () => {
+            // Manually reorder /ws1 — every existing task now carries an order.
+            useTaskStore.getState().reorderTasks('/ws1', 0, 2);
+
+            // A brand-new task arrives with no order field.
+            useTaskStore.getState().addTask({
+                id: 'task-new',
+                prompt: 'Brand new task',
+                state: 'idle',
+                workspaceId: '/ws1',
+                createdAt: new Date(now.getTime() + 1000),
+                lastActivity: new Date(now.getTime() + 1000),
+            });
+
+            // reorderTasks re-sorts with the store's own comparator before applying
+            // indices, so a no-op move (0 -> 0 is an early return, so use 1 -> 1's
+            // neighbour) reveals where the store thinks the new task sits.
+            // Moving index 0 to index 0 short-circuits, so move it down and back.
+            useTaskStore.getState().reorderTasks('/ws1', 0, 1);
+
+            const byOrder = Array.from(useTaskStore.getState().tasks.values())
+                .filter(t => t.workspaceId === '/ws1')
+                .sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
+
+            // The new task was at index 0 before the move, so after moving 0 -> 1
+            // it must sit second. If the comparator sank it to the bottom instead,
+            // it would end up last.
+            expect(byOrder).toHaveLength(4);
+            expect(byOrder[1].id).toBe('task-new');
+        });
+
         it('should not reorder tasks with same index', () => {
             const before = useTaskStore.getState().tasks;
             useTaskStore.getState().reorderTasks('/ws1', 1, 1);

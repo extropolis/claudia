@@ -465,7 +465,7 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
                 </button>
             </div>
             <div className="task-input-hint">
-                Enter to send, Shift+Enter for new line, Ctrl+V to paste screenshots
+                Enter to send, Shift+Enter for new line
                 {globalVoiceEnabled && isFocused && <span className="voice-hint"> | Voice active</span>}
             </div>
 

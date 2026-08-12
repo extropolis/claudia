@@ -93,9 +93,9 @@ done
 echo "🔍 Checking ports..."
 ports_busy=0
 for port in $BACKEND_PORT $FRONTEND_PORT $OPENCODE_PORT; do
-    if lsof -ti:$port >/dev/null 2>&1; then
+    if lsof -i:$port -sTCP:LISTEN >/dev/null 2>&1; then
         echo "❌ Port $port is already in use:"
-        lsof -i:$port
+        lsof -i:$port -sTCP:LISTEN
         ports_busy=1
     fi
 done

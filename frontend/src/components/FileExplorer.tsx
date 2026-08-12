@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
-    ChevronRight, ChevronDown, ChevronLeft, File, Folder, FolderOpen,
+    ChevronRight, ChevronDown, ChevronLeft, File, Folder,
     RefreshCw,
     GitBranch, CircleDot, Plus, Trash2, Pencil, FileQuestion,
     CheckCircle2, XCircle, Clock, Loader2, SkipForward, ExternalLink,
@@ -11,8 +11,9 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { getApiBaseUrl } from '../config/api-config';
 import { useTaskStore } from '../stores/taskStore';
-import { FileContentModal } from './FileContentModal';
 import { ContextMenu, ContextMenuItem } from './ContextMenu';
+import { FileTree, FileTreeItem, GitDecoration } from './FileTree';
+import { EditorPanel, EditorTab } from './EditorPanel';
 import './FileExplorer.css';
 
 // ============== SHARED HELPERS ==============
@@ -162,244 +163,22 @@ interface ContextMenuState {
     items: ContextMenuItem[];
 }
 
-// ============== FILE UTILITIES ==============
-
-function getFileColor(name: string): string {
-    const ext = name.split('.').pop()?.toLowerCase() || '';
-    const colorMap: Record<string, string> = {
-        ts: '#3178c6', tsx: '#3178c6', js: '#f7df1e', jsx: '#f7df1e',
-        json: '#6d8086', css: '#264de4', scss: '#cc6699', html: '#e34c26',
-        md: '#519aba', py: '#3572a5', rs: '#dea584', go: '#00add8',
-        java: '#b07219', rb: '#701516', php: '#4f5d95',
-        yml: '#cb171e', yaml: '#cb171e', toml: '#9c4221',
-        sh: '#89e051', bash: '#89e051', ps1: '#012456',
-        sql: '#e38c00', svg: '#ffb13b',
-        png: '#a074c4', jpg: '#a074c4', jpeg: '#a074c4', gif: '#a074c4',
-        env: '#ecd53f', lock: '#6e7681', gitignore: '#f05032',
-    };
-    return colorMap[ext] || '#8b949e';
-}
-
-function formatSize(bytes: number): string {
-    if (bytes === 0) return '0 B';
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function getFileIcon(name: string): string {
-    const ext = name.split('.').pop()?.toLowerCase() || '';
-    const iconMap: Record<string, string> = {
-        ts: 'TS', tsx: 'TX', js: 'JS', jsx: 'JX',
-        json: '{}', css: '#', scss: '#', html: '<>',
-        md: 'MD', py: 'PY', rs: 'RS', go: 'GO',
-        java: 'JA', rb: 'RB', php: 'PH',
-        yml: 'YM', yaml: 'YM', toml: 'TM',
-        sh: '$', bash: '$', ps1: 'PS',
-        sql: 'SQ', svg: 'SV',
-        png: 'IM', jpg: 'IM', jpeg: 'IM', gif: 'IM',
-        env: 'EV', lock: 'LK', gitignore: 'GI',
-    };
-    return iconMap[ext] || '';
-}
-
-// ============== FILE TREE COMPONENTS ==============
-
-function DirectoryNode({
-    item, workspacePath, depth = 0, onFileClick, selectedPaths, onContextMenu, onSelect,
-}: {
-    item: FileItem;
-    workspacePath: string;
-    depth?: number;
-    onFileClick: (path: string) => void;
-    selectedPaths: Set<string>;
-    onContextMenu: (e: React.MouseEvent, path: string, type: 'file' | 'directory') => void;
-    onSelect: (path: string, type: 'file' | 'directory', multi: boolean) => void;
-}) {
-    const [expanded, setExpanded] = useState(false);
-    const [children, setChildren] = useState<FileItem[]>([]);
-    const [loading, setLoading] = useState(false);
-    const [loaded, setLoaded] = useState(false);
-    const isSelected = selectedPaths.has(item.path);
-
-    const toggleExpand = useCallback(async (e: React.MouseEvent) => {
-        // Don't expand if user is selecting
-        if (e.ctrlKey || e.metaKey || e.shiftKey) {
-            return;
-        }
-
-        if (!expanded && !loaded) {
-            setLoading(true);
-            try {
-                const params = new URLSearchParams({ workspace: workspacePath, path: item.path });
-                const res = await fetch(`${getApiBaseUrl()}/api/workspaces/files?${params}`);
-                if (res.ok) {
-                    const data = await res.json();
-                    setChildren(data.items || []);
-                    setLoaded(true);
-                }
-            } catch (err) {
-                console.error('[FileExplorer] Failed to load directory:', err);
-            } finally {
-                setLoading(false);
-            }
-        }
-        setExpanded(!expanded);
-    }, [expanded, loaded, workspacePath, item.path]);
-
-    const handleClick = useCallback((e: React.MouseEvent) => {
-        if (e.ctrlKey || e.metaKey || e.shiftKey) {
-            e.stopPropagation();
-            onSelect(item.path, 'directory', true);
-        } else {
-            toggleExpand(e);
-        }
-    }, [item.path, onSelect, toggleExpand]);
-
-    const handleContextMenu = useCallback((e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-        onContextMenu(e, item.path, 'directory');
-    }, [item.path, onContextMenu]);
-
-    return (
-        <div className="file-tree-node">
-            <div
-                className={`file-tree-item directory ${isSelected ? 'selected' : ''}`}
-                style={{ paddingLeft: `${depth * 16 + 8}px` }}
-                onClick={handleClick}
-                onContextMenu={handleContextMenu}
-                title={item.path}
-            >
-                <span className="file-tree-chevron">
-                    {loading ? <RefreshCw size={12} className="spinning" />
-                        : expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                </span>
-                <span className="file-tree-icon directory-icon">
-                    {expanded ? <FolderOpen size={15} /> : <Folder size={15} />}
-                </span>
-                <span className="file-tree-name">{item.name}</span>
-                {item.childCount !== undefined && item.childCount > 0 && !expanded && (
-                    <span className="file-tree-badge">{item.childCount}</span>
-                )}
-            </div>
-            {expanded && (
-                <div className="file-tree-children">
-                    {children.length === 0 && loaded && (
-                        <div className="file-tree-empty" style={{ paddingLeft: `${(depth + 1) * 16 + 8}px` }}>
-                            Empty directory
-                        </div>
-                    )}
-                    {children.map((child) =>
-                        child.type === 'directory' ? (
-                            <DirectoryNode
-                                key={child.path}
-                                item={child}
-                                workspacePath={workspacePath}
-                                depth={depth + 1}
-                                onFileClick={onFileClick}
-                                selectedPaths={selectedPaths}
-                                onContextMenu={onContextMenu}
-                                onSelect={onSelect}
-                            />
-                        ) : (
-                            <FileNode
-                                key={child.path}
-                                item={child}
-                                depth={depth + 1}
-                                onFileClick={onFileClick}
-                                selectedPaths={selectedPaths}
-                                onContextMenu={onContextMenu}
-                                onSelect={onSelect}
-                            />
-                        )
-                    )}
-                </div>
-            )}
-        </div>
-    );
-}
-
-function FileNode({
-    item, depth = 0, onFileClick, selectedPaths, onContextMenu, onSelect,
-}: {
-    item: FileItem;
-    depth?: number;
-    onFileClick: (path: string) => void;
-    selectedPaths: Set<string>;
-    onContextMenu: (e: React.MouseEvent, path: string, type: 'file' | 'directory') => void;
-    onSelect: (path: string, type: 'file' | 'directory', multi: boolean) => void;
-}) {
-    const color = getFileColor(item.name);
-    const badge = getFileIcon(item.name);
-    const isSelected = selectedPaths.has(item.path);
-    const clickTimeoutRef = useRef<number | null>(null);
-
-    const handleClick = useCallback((e: React.MouseEvent) => {
-        if (e.ctrlKey || e.metaKey || e.shiftKey) {
-            // Multi-select
-            e.stopPropagation();
-            onSelect(item.path, 'file', true);
-        } else {
-            // Single click - select, double click - open
-            if (clickTimeoutRef.current !== null) {
-                // Double click detected
-                clearTimeout(clickTimeoutRef.current);
-                clickTimeoutRef.current = null;
-                onFileClick(item.path);
-            } else {
-                // Wait for potential double click
-                clickTimeoutRef.current = window.setTimeout(() => {
-                    clickTimeoutRef.current = null;
-                    onSelect(item.path, 'file', false);
-                }, 300);
-            }
-        }
-    }, [item.path, onFileClick, onSelect]);
-
-    const handleContextMenu = useCallback((e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-        onContextMenu(e, item.path, 'file');
-    }, [item.path, onContextMenu]);
-
-    useEffect(() => {
-        return () => {
-            if (clickTimeoutRef.current !== null) {
-                clearTimeout(clickTimeoutRef.current);
-            }
-        };
-    }, []);
-
-    return (
-        <div
-            className={`file-tree-item file clickable ${isSelected ? 'selected' : ''}`}
-            style={{ paddingLeft: `${depth * 16 + 8}px` }}
-            title={`${item.path}${item.size ? ` (${formatSize(item.size)})` : ''}`}
-            onClick={handleClick}
-            onContextMenu={handleContextMenu}
-        >
-            <span className="file-tree-chevron" />
-            <span className="file-tree-icon file-icon" style={{ color }}>
-                {badge ? <span className="file-type-badge" style={{ color }}>{badge}</span> : <File size={14} />}
-            </span>
-            <span className="file-tree-name">{item.name}</span>
-            {item.size !== undefined && item.size > 0 && (
-                <span className="file-tree-size">{formatSize(item.size)}</span>
-            )}
-        </div>
-    );
-}
 
 // ============== TAB: FILES ==============
 
-function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive: boolean }) {
+function FilesTab({
+    workspacePath, isActive, gitDecorations, onOpenFile,
+}: {
+    workspacePath: string;
+    isActive: boolean;
+    gitDecorations: Map<string, GitDecoration>;
+    onOpenFile: (path: string, pin: boolean) => void;
+}) {
     const isConnected = useTaskStore(s => s.isConnected);
-    const [rootItems, setRootItems] = useState<FileItem[]>([]);
+    const [rootItems, setRootItems] = useState<FileTreeItem[]>([]);
     const [loading, setLoading] = useState(false);
     const [hasLoaded, setHasLoaded] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [selectedFile, setSelectedFile] = useState<string | null>(null);
     const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
     const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
     const prevWorkspaceRef = useRef<string | undefined>(undefined);
@@ -413,7 +192,10 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
             const res = await fetch(`${getApiBaseUrl()}/api/workspaces/files?${params}`);
             if (res.ok) {
                 const data = await res.json();
-                setRootItems(data.items || []);
+                const items: FileTreeItem[] = (data.items || []).map((it: FileItem) => ({
+                    id: it.path, name: it.name, type: it.type, path: it.path, size: it.size,
+                }));
+                setRootItems(items);
             } else {
                 const errData = await res.json().catch(() => ({ error: 'Unknown error' }));
                 setError(errData.error || 'Failed to load files');
@@ -443,25 +225,46 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
         }
     }, [isActive, isConnected, hasLoaded, workspacePath, loading, loadRootFiles]);
 
-    const handleFileClick = useCallback((path: string) => {
-        setSelectedFile(path);
-    }, []);
-
-    const handleSelect = useCallback((path: string, _type: 'file' | 'directory', multi: boolean) => {
-        if (multi) {
-            setSelectedPaths(prev => {
-                const newSet = new Set(prev);
-                if (newSet.has(path)) {
-                    newSet.delete(path);
-                } else {
-                    newSet.add(path);
-                }
-                return newSet;
+    const handleMove = useCallback(async (sourcePath: string, destinationPath: string) => {
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/workspaces/files/move`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ workspace: workspacePath, sourcePath, destinationPath }),
             });
-        } else {
-            setSelectedPaths(new Set([path]));
+            if (res.ok) {
+                loadRootFiles();
+            } else {
+                const error = await res.json();
+                alert(`Failed to move: ${error.error}`);
+            }
+        } catch (err) {
+            console.error('Failed to move:', err);
+            alert('Failed to move file');
         }
-    }, []);
+    }, [workspacePath, loadRootFiles]);
+
+    const handleRename = useCallback(async (path: string, newName: string) => {
+        const parentPath = path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '';
+        const destinationPath = parentPath ? `${parentPath}/${newName}` : newName;
+        if (destinationPath === path) return;
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/workspaces/files/move`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ workspace: workspacePath, sourcePath: path, destinationPath }),
+            });
+            if (res.ok) {
+                loadRootFiles();
+            } else {
+                const error = await res.json();
+                alert(`Failed to rename: ${error.error}`);
+            }
+        } catch (err) {
+            console.error('Failed to rename:', err);
+            alert('Failed to rename file');
+        }
+    }, [workspacePath, loadRootFiles]);
 
     const handleContextMenu = useCallback((e: React.MouseEvent, path: string, _type: 'file' | 'directory') => {
         // Select the item if not already selected
@@ -608,43 +411,26 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
                         <RefreshCw size={13} className={loading ? 'spinning' : ''} />
                     </button>
                 </div>
-                <div className="fe-tab-scroll">
+                <div className="fe-tree-scroll">
                     {loading && rootItems.length === 0 && (
                         <div className="fe-loading"><RefreshCw size={16} className="spinning" /><span>Loading files...</span></div>
                     )}
                     {error && <div className="fe-error">{error}</div>}
                     {!loading && !error && hasLoaded && rootItems.length === 0 && <div className="fe-empty">No files found</div>}
-                    {rootItems.map((item) =>
-                        item.type === 'directory'
-                            ? <DirectoryNode
-                                key={item.path}
-                                item={item}
-                                workspacePath={workspacePath}
-                                depth={0}
-                                onFileClick={handleFileClick}
-                                selectedPaths={selectedPaths}
-                                onContextMenu={handleContextMenu}
-                                onSelect={handleSelect}
-                            />
-                            : <FileNode
-                                key={item.path}
-                                item={item}
-                                depth={0}
-                                onFileClick={handleFileClick}
-                                selectedPaths={selectedPaths}
-                                onContextMenu={handleContextMenu}
-                                onSelect={handleSelect}
-                            />
+                    {!loading && !error && rootItems.length > 0 && (
+                        <FileTree
+                            workspacePath={workspacePath}
+                            rootItems={rootItems}
+                            setRootItems={setRootItems}
+                            gitDecorations={gitDecorations}
+                            onOpenFile={onOpenFile}
+                            onContextMenu={handleContextMenu}
+                            onMove={handleMove}
+                            onRename={handleRename}
+                        />
                     )}
                 </div>
             </div>
-            {selectedFile && (
-                <FileContentModal
-                    workspacePath={workspacePath}
-                    filePath={selectedFile}
-                    onClose={() => setSelectedFile(null)}
-                />
-            )}
             {contextMenu && (
                 <ContextMenu
                     x={contextMenu.x}
@@ -659,16 +445,22 @@ function FilesTab({ workspacePath, isActive }: { workspacePath: string; isActive
 
 // ============== TAB: CHANGES ==============
 
-function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActive: boolean }) {
+function ChangesTab({
+    workspacePath, isActive, onOpenFile, onOpenDiff, gitStatus, setGitStatus,
+}: {
+    workspacePath: string;
+    isActive: boolean;
+    onOpenFile: (path: string, pin: boolean) => void;
+    onOpenDiff: (path: string, staged: boolean) => void;
+    gitStatus: GitStatus | null;
+    setGitStatus: React.Dispatch<React.SetStateAction<GitStatus | null>>;
+}) {
     const isConnected = useTaskStore(s => s.isConnected);
-    const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
     const [gitLog, setGitLog] = useState<GitLogEntry[]>([]);
     const [loading, setLoading] = useState(false);
     const [logLoading, setLogLoading] = useState(false);
     const [hasLoaded, setHasLoaded] = useState(false);
     const [hasLogLoaded, setHasLogLoaded] = useState(false);
-    const [selectedChange, setSelectedChange] = useState<{ path: string; staged: boolean } | null>(null);
-    const [selectedFile, setSelectedFile] = useState<string | null>(null);
     const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
         staged: true,
         changes: true,
@@ -772,16 +564,16 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
         }
         // Untracked files have no diff, open as file content
         if (status === 'untracked') {
-            setSelectedFile(path);
+            onOpenFile(path, true);
             return;
         }
-        setSelectedChange({ path, staged });
-    }, []);
+        onOpenDiff(path, staged);
+    }, [onOpenFile, onOpenDiff]);
 
     const handleOpenFile = useCallback((e: React.MouseEvent, path: string) => {
         e.stopPropagation(); // Don't trigger the row's diff click
-        setSelectedFile(path);
-    }, []);
+        onOpenFile(path, true);
+    }, [onOpenFile]);
 
     const handleRefresh = useCallback(() => {
         loadStatus();
@@ -937,22 +729,6 @@ function ChangesTab({ workspacePath, isActive }: { workspacePath: string; isActi
                     </div>
                 </div>
             </div>
-            {selectedChange && (
-                <FileContentModal
-                    workspacePath={workspacePath}
-                    filePath={selectedChange.path}
-                    isDiff={true}
-                    staged={selectedChange.staged}
-                    onClose={() => setSelectedChange(null)}
-                />
-            )}
-            {selectedFile && (
-                <FileContentModal
-                    workspacePath={workspacePath}
-                    filePath={selectedFile}
-                    onClose={() => setSelectedFile(null)}
-                />
-            )}
         </>
     );
 }
@@ -1859,6 +1635,12 @@ function InboxTab({ workspacePath, isActive, onUnreadCount }: { workspacePath: s
 
 const PANEL_WIDTH_KEY = 'claudia-file-explorer-width';
 const DEFAULT_PANEL_WIDTH = 300;
+const EDITOR_WIDTH_KEY = 'claudia-editor-panel-width';
+const DEFAULT_EDITOR_WIDTH = 520;
+
+function editorTabId(path: string, isDiff: boolean, staged?: boolean): string {
+    return isDiff ? `diff:${path}:${staged ? 'staged' : 'unstaged'}` : `file:${path}`;
+}
 
 export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps) {
     const [isExpanded, setIsExpanded] = useState(false);
@@ -1870,15 +1652,102 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
             return saved ? parseInt(saved, 10) : DEFAULT_PANEL_WIDTH;
         } catch { return DEFAULT_PANEL_WIDTH; }
     });
+    const [editorWidth, setEditorWidth] = useState(() => {
+        try {
+            const saved = localStorage.getItem(EDITOR_WIDTH_KEY);
+            return saved ? parseInt(saved, 10) : DEFAULT_EDITOR_WIDTH;
+        } catch { return DEFAULT_EDITOR_WIDTH; }
+    });
     const [isResizing, setIsResizing] = useState(false);
+    const [isResizingEditor, setIsResizingEditor] = useState(false);
     const panelRef = useRef<HTMLDivElement>(null);
 
-    // Persist width
+    // Git decorations shared between the Files tree and the editor tabs
+    const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
+    const gitDecorations = useMemo(() => {
+        const map = new Map<string, GitDecoration>();
+        for (const c of gitStatus?.changes || []) {
+            map.set(c.path, { status: c.status, staged: c.staged });
+        }
+        return map;
+    }, [gitStatus]);
+
+    // Open editor tabs (files + diffs), shared across Files/Changes tabs
+    const [openTabs, setOpenTabs] = useState<EditorTab[]>([]);
+    const [activeTabIdEditor, setActiveTabIdEditor] = useState<string | null>(null);
+
+    // Tab paths are workspace-relative — close them all when the workspace changes
+    // so a stale tab doesn't try to read a same-named file from the wrong repo.
+    const prevWorkspacePathRef = useRef<string | undefined>(workspacePath);
+    useEffect(() => {
+        if (workspacePath !== prevWorkspacePathRef.current) {
+            prevWorkspacePathRef.current = workspacePath;
+            setOpenTabs([]);
+            setActiveTabIdEditor(null);
+            setGitStatus(null);
+        }
+    }, [workspacePath]);
+
+    const openFileTab = useCallback((path: string, pin: boolean) => {
+        const id = editorTabId(path, false);
+        setOpenTabs(prev => {
+            const existing = prev.find(t => t.id === id);
+            if (existing) {
+                if (pin && !existing.pinned) {
+                    return prev.map(t => t.id === id ? { ...t, pinned: true } : t);
+                }
+                return prev;
+            }
+            const newTab: EditorTab = { id, path, isDiff: false, pinned: pin };
+            if (pin) return [...prev, newTab];
+            // Replace the existing (unpinned) preview tab, if any
+            const withoutPreview = prev.filter(t => t.pinned);
+            return [...withoutPreview, newTab];
+        });
+        setActiveTabIdEditor(id);
+    }, []);
+
+    const openDiffTab = useCallback((path: string, staged: boolean) => {
+        const id = editorTabId(path, true, staged);
+        setOpenTabs(prev => {
+            if (prev.some(t => t.id === id)) return prev;
+            const withoutPreview = prev.filter(t => t.pinned);
+            return [...withoutPreview, { id, path, isDiff: true, staged, pinned: true }];
+        });
+        setActiveTabIdEditor(id);
+    }, []);
+
+    const closeTab = useCallback((id: string) => {
+        setOpenTabs(prev => {
+            const idx = prev.findIndex(t => t.id === id);
+            const next = prev.filter(t => t.id !== id);
+            setActiveTabIdEditor(current => {
+                if (current !== id) return current;
+                if (next.length === 0) return null;
+                return next[Math.min(idx, next.length - 1)].id;
+            });
+            return next;
+        });
+    }, []);
+
+    const pinTab = useCallback((id: string) => {
+        setOpenTabs(prev => prev.map(t => t.id === id ? { ...t, pinned: true } : t));
+    }, []);
+
+    const closeAllTabs = useCallback(() => {
+        setOpenTabs([]);
+        setActiveTabIdEditor(null);
+    }, []);
+
+    // Persist widths
     useEffect(() => {
         try { localStorage.setItem(PANEL_WIDTH_KEY, panelWidth.toString()); } catch { /* */ }
     }, [panelWidth]);
+    useEffect(() => {
+        try { localStorage.setItem(EDITOR_WIDTH_KEY, editorWidth.toString()); } catch { /* */ }
+    }, [editorWidth]);
 
-    // Resize handling
+    // Resize handling — sidebar
     useEffect(() => {
         if (!isResizing) return;
         const handleMouseMove = (e: MouseEvent) => {
@@ -1896,79 +1765,131 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
         };
     }, [isResizing]);
 
+    // Resize handling — editor panel
+    useEffect(() => {
+        if (!isResizingEditor) return;
+        const handleMouseMove = (e: MouseEvent) => {
+            const newWidth = window.innerWidth - e.clientX - panelWidth;
+            if (newWidth >= 300 && newWidth <= 1200) {
+                setEditorWidth(newWidth);
+            }
+        };
+        const handleMouseUp = () => setIsResizingEditor(false);
+        document.addEventListener('mousemove', handleMouseMove);
+        document.addEventListener('mouseup', handleMouseUp);
+        return () => {
+            document.removeEventListener('mousemove', handleMouseMove);
+            document.removeEventListener('mouseup', handleMouseUp);
+        };
+    }, [isResizingEditor, panelWidth]);
+
     if (!workspacePath) return null;
 
     return (
-        <div className={`file-explorer ${isExpanded ? 'expanded' : 'collapsed'}`} ref={panelRef}
-            style={isExpanded ? { width: `${panelWidth}px`, minWidth: '200px', maxWidth: '600px' } : undefined}>
-
-            {/* Resize handle */}
-            {isExpanded && (
-                <div className={`fe-resize-handle ${isResizing ? 'resizing' : ''}`}
-                    onMouseDown={() => setIsResizing(true)} />
-            )}
-
-            {/* Toggle tab (collapsed) */}
-            {!isExpanded && (
-                <button className="file-explorer-toggle" onClick={() => setIsExpanded(true)}
-                    title="Expand file explorer">
-                    <ChevronLeft size={14} />
-                    <span className="file-explorer-toggle-label">Files</span>
-                </button>
-            )}
-
-            {/* Expanded panel */}
-            {isExpanded && (
-                <div className="file-explorer-panel">
-                    {/* Header */}
-                    <div className="file-explorer-header">
-                        <div className="file-explorer-title">
-                            <Folder size={14} />
-                            <span>{workspaceName || 'Project'}</span>
-                        </div>
-                        <button className="file-explorer-collapse" onClick={() => setIsExpanded(false)} title="Collapse">
-                            <ChevronRight size={14} />
-                        </button>
-                    </div>
-
-                    {/* Tabs */}
-                    <div className="fe-tabs">
-                        <button className={`fe-tab ${activeTab === 'files' ? 'active' : ''}`}
-                            onClick={() => setActiveTab('files')} title="Project Files">
-                            <Folder size={13} />
-                            <span>Files</span>
-                        </button>
-                        <button className={`fe-tab ${activeTab === 'changes' ? 'active' : ''}`}
-                            onClick={() => setActiveTab('changes')} title="Git Changes">
-                            <GitBranch size={13} />
-                            <span>Changes</span>
-                        </button>
-                        <button className={`fe-tab ${activeTab === 'ci' ? 'active' : ''}`}
-                            onClick={() => setActiveTab('ci')} title="Pull Request">
-                            <GitPullRequest size={13} />
-                            <span>PR</span>
-                        </button>
-                        <button className={`fe-tab ${activeTab === 'issues' ? 'active' : ''}`}
-                            onClick={() => setActiveTab('issues')} title="GitHub Issues">
-                            <CircleDot size={13} />
-                            <span>Issues</span>
-                        </button>
-                        <button className={`fe-tab ${activeTab === 'inbox' ? 'active' : ''}`}
-                            onClick={() => setActiveTab('inbox')} title="GitHub Notifications">
-                            <Bell size={13} />
-                            <span>Inbox</span>
-                            {inboxUnreadCount > 0 && <span className="fe-tab-badge">{inboxUnreadCount > 9 ? '9+' : inboxUnreadCount}</span>}
-                        </button>
-                    </div>
-
-                    {/* Tab content */}
-                    {activeTab === 'files' && <FilesTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'files'} />}
-                    {activeTab === 'changes' && <ChangesTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'changes'} />}
-                    {activeTab === 'ci' && <CITab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'ci'} />}
-                    {activeTab === 'issues' && <IssuesTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'issues'} />}
-                    {activeTab === 'inbox' && <InboxTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'inbox'} onUnreadCount={setInboxUnreadCount} />}
+        <>
+            {isExpanded && openTabs.length > 0 && (
+                <div className="editor-panel-dock" style={{ width: `${editorWidth}px` }}>
+                    <EditorPanel
+                        workspacePath={workspacePath}
+                        tabs={openTabs}
+                        activeTabId={activeTabIdEditor}
+                        onSelectTab={setActiveTabIdEditor}
+                        onCloseTab={closeTab}
+                        onPinTab={pinTab}
+                        onCloseAll={closeAllTabs}
+                    />
+                    <div className={`fe-resize-handle editor-resize ${isResizingEditor ? 'resizing' : ''}`}
+                        onMouseDown={() => setIsResizingEditor(true)} />
                 </div>
             )}
-        </div>
+
+            <div className={`file-explorer ${isExpanded ? 'expanded' : 'collapsed'}`} ref={panelRef}
+                style={isExpanded ? { width: `${panelWidth}px`, minWidth: '200px', maxWidth: '600px' } : undefined}>
+
+                {/* Resize handle */}
+                {isExpanded && (
+                    <div className={`fe-resize-handle ${isResizing ? 'resizing' : ''}`}
+                        onMouseDown={() => setIsResizing(true)} />
+                )}
+
+                {/* Toggle tab (collapsed) */}
+                {!isExpanded && (
+                    <button className="file-explorer-toggle" onClick={() => setIsExpanded(true)}
+                        title="Expand file explorer">
+                        <ChevronLeft size={14} />
+                        <span className="file-explorer-toggle-label">Files</span>
+                    </button>
+                )}
+
+                {/* Expanded panel */}
+                {isExpanded && (
+                    <div className="file-explorer-panel">
+                        {/* Header */}
+                        <div className="file-explorer-header">
+                            <div className="file-explorer-title">
+                                <Folder size={14} />
+                                <span>{workspaceName || 'Project'}</span>
+                            </div>
+                            <button className="file-explorer-collapse" onClick={() => setIsExpanded(false)} title="Collapse">
+                                <ChevronRight size={14} />
+                            </button>
+                        </div>
+
+                        {/* Tabs */}
+                        <div className="fe-tabs">
+                            <button className={`fe-tab ${activeTab === 'files' ? 'active' : ''}`}
+                                onClick={() => setActiveTab('files')} title="Project Files">
+                                <Folder size={13} />
+                                <span>Files</span>
+                            </button>
+                            <button className={`fe-tab ${activeTab === 'changes' ? 'active' : ''}`}
+                                onClick={() => setActiveTab('changes')} title="Git Changes">
+                                <GitBranch size={13} />
+                                <span>Changes</span>
+                            </button>
+                            <button className={`fe-tab ${activeTab === 'ci' ? 'active' : ''}`}
+                                onClick={() => setActiveTab('ci')} title="Pull Request">
+                                <GitPullRequest size={13} />
+                                <span>PR</span>
+                            </button>
+                            <button className={`fe-tab ${activeTab === 'issues' ? 'active' : ''}`}
+                                onClick={() => setActiveTab('issues')} title="GitHub Issues">
+                                <CircleDot size={13} />
+                                <span>Issues</span>
+                            </button>
+                            <button className={`fe-tab ${activeTab === 'inbox' ? 'active' : ''}`}
+                                onClick={() => setActiveTab('inbox')} title="GitHub Notifications">
+                                <Bell size={13} />
+                                <span>Inbox</span>
+                                {inboxUnreadCount > 0 && <span className="fe-tab-badge">{inboxUnreadCount > 9 ? '9+' : inboxUnreadCount}</span>}
+                            </button>
+                        </div>
+
+                        {/* Tab content */}
+                        {activeTab === 'files' && (
+                            <FilesTab
+                                workspacePath={workspacePath}
+                                isActive={isExpanded && activeTab === 'files'}
+                                gitDecorations={gitDecorations}
+                                onOpenFile={openFileTab}
+                            />
+                        )}
+                        {activeTab === 'changes' && (
+                            <ChangesTab
+                                workspacePath={workspacePath}
+                                isActive={isExpanded && activeTab === 'changes'}
+                                onOpenFile={openFileTab}
+                                onOpenDiff={openDiffTab}
+                                gitStatus={gitStatus}
+                                setGitStatus={setGitStatus}
+                            />
+                        )}
+                        {activeTab === 'ci' && <CITab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'ci'} />}
+                        {activeTab === 'issues' && <IssuesTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'issues'} />}
+                        {activeTab === 'inbox' && <InboxTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'inbox'} onUnreadCount={setInboxUnreadCount} />}
+                    </div>
+                )}
+            </div>
+        </>
     );
 }

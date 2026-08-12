@@ -686,18 +686,27 @@ export class TaskSpawner extends EventEmitter {
      * every tool call — including resumed sessions.
      */
     private writeSettingsLocalJson(workspaceId: string, skipPermissions: boolean | undefined, serverNames: string[]): void {
-        // "Allow everything" must be expressed via defaultMode: 'bypassPermissions',
-        // NOT allow: ['*'] — current Claude Code rejects a wildcard tool name in
-        // allow rules ("Wildcard tool name '*' is not supported"), which spams a
-        // warning on every session and leaves the file partially skipped. The
-        // allow list only ever names concrete, valid rules (mcp__* is valid because
-        // the glob follows a literal mcp__ prefix).
+        // NOTE: Claude Code no longer accepts bare "*" OR unanchored "mcp__*"
+        // in permissions.allow — allow-rule globs must anchor to a literal
+        // `mcp__<server>__` prefix, otherwise the rule is skipped with a
+        // "Settings Warning" that interrupts task startup. We build a per-server
+        // allow list from the enabled MCP servers. To broadly skip prompts we
+        // additionally set defaultMode: "bypassPermissions".
+        // See https://code.claude.com/docs/en/permissions
+        const permissions: {
+            allow: string[];
+            deny: string[];
+            defaultMode?: string;
+        } = {
+            allow: serverNames.map(name => `mcp__${name}__*`),
+            deny: [],
+        };
+        if (skipPermissions) {
+            permissions.defaultMode = 'bypassPermissions';
+        }
+
         const settingsContent = {
-            permissions: {
-                allow: ['mcp__*'],
-                deny: [],
-                ...(skipPermissions ? { defaultMode: 'bypassPermissions' } : {})
-            },
+            permissions,
             enableAllProjectMcpServers: true,
             enabledMcpjsonServers: serverNames
         };

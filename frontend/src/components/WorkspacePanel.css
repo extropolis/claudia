@@ -175,7 +175,7 @@
     background: var(--bg-tertiary);
     border-bottom: none;
     transition: background 0.15s ease;
-    font-size: 0.875rem;
+    font-size: 0.95rem;
     font-weight: 600;
     color: var(--text-primary);
     border-radius: 9px; /* Match parent minus 1px for border */
@@ -391,6 +391,15 @@
     color: var(--accent-secondary);
 }
 
+.workspace-action-button.pin.active {
+    color: #f5a623;
+}
+
+.workspace-action-button.pin.active:hover {
+    background: rgba(245, 166, 35, 0.15);
+    color: #f5a623;
+}
+
 /* Workspace Menu Container */
 .workspace-menu-container {
     position: relative;
@@ -520,7 +529,7 @@
     padding: 8px 10px;
     cursor: pointer;
     transition: background 0.15s ease;
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
     color: var(--text-secondary);
 }
 
@@ -639,7 +648,7 @@
     cursor: grab;
     transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
     border-left: 2px solid transparent;
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
     font-weight: 400;
     color: var(--text-secondary);
 }
@@ -1338,6 +1347,24 @@
     background: var(--accent-primary);
     border-color: var(--accent-secondary);
     color: var(--accent-secondary);
+}
+
+.focus-toggle-button {
+    width: auto;
+    padding: 0 8px;
+    gap: 4px;
+}
+
+.focus-toggle-button.active {
+    background: rgba(245, 166, 35, 0.15);
+    border-color: #f5a623;
+    color: #f5a623;
+}
+
+.focus-toggle-count {
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
 }
 
 /* Workspace Manager Button */
@@ -2418,4 +2445,399 @@
 
 .worktree-group-tasks {
     padding-left: 12px;
+}
+
+/* ============================================================================
+   Minimal mode
+   ----------------------------------------------------------------------------
+   When the chat view mode is 'minimal', the sidebar collapses to a plain
+   indented list: no card borders, no badges, no per-row action buttons, no
+   drag affordances. Text sits at a softer weight/color by default; only the
+   selected task and hovered rows come forward to full contrast.
+   Everything here is presentational — the JSX is unchanged apart from the
+   `.minimal` class and the hidden header controls.
+   ========================================================================= */
+
+/* ---- Panel header ---- */
+.workspace-panel.minimal .workspace-panel-header {
+    padding: 10px 12px 6px;
+    border-bottom: none;
+}
+
+.workspace-panel.minimal .workspace-panel-header h2 {
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    opacity: 0.7;
+}
+
+.workspace-panel.minimal .workspace-panel-header-actions button {
+    color: var(--text-muted);
+    opacity: 0.55;
+}
+
+.workspace-panel.minimal .workspace-panel-header-actions button:hover {
+    opacity: 1;
+    color: var(--text-secondary);
+}
+
+/* ---- Layout: always a single column, tight spacing ---- */
+.workspace-panel.minimal .workspace-panel-content {
+    padding: 0 4px 8px;
+    display: block; /* Override the multi-column grid — minimal is a flat list */
+    gap: 0;
+}
+
+/* ---- Workspace section: strip all card chrome ---- */
+.workspace-panel.minimal .workspace-section,
+.workspace-panel.minimal .workspace-section:hover,
+.workspace-panel.minimal .workspace-section.expanded {
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
+.workspace-panel.minimal .workspace-header,
+.workspace-panel.minimal .workspace-section.expanded .workspace-header {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 6px;
+    gap: 4px;
+    font-size: 0.8125rem;
+    font-weight: 400;
+    /* Softer, lighter than the default header treatment. */
+    color: var(--text-muted);
+    opacity: 0.75;
+    transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.workspace-panel.minimal .workspace-header:hover {
+    opacity: 1;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+}
+
+.workspace-panel.minimal .workspace-header + .workspace-content {
+    border-top: none;
+}
+
+.workspace-panel.minimal .workspace-name {
+    font-weight: 400;
+    color: inherit;
+}
+
+/* Chevron: dimmer still, and it sits after the name like the reference.
+   `justify-content: flex-start` keeps the reordered chevron hugging the name
+   instead of drifting to the far edge of the stretched header row. */
+.workspace-panel.minimal .workspace-header-left {
+    gap: 4px;
+    justify-content: flex-start;
+}
+
+.workspace-panel.minimal .workspace-header-left > svg {
+    order: 2; /* Move the expand chevron to the right of the workspace name */
+    opacity: 0.5;
+    flex-shrink: 0;
+}
+
+/* Default `.workspace-name` is `flex: 1`, which would shove the reordered
+   chevron to the far right. Shrink it to its text width instead. */
+.workspace-panel.minimal .workspace-name {
+    order: 1;
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ---- Hide decoration that has no place in a minimal list ---- */
+.workspace-panel.minimal .workspace-drag-handle,
+.workspace-panel.minimal .workspace-icon,
+.workspace-panel.minimal .workspace-rename-button,
+.workspace-panel.minimal .workspace-branch-label,
+.workspace-panel.minimal .workspace-task-count,
+.workspace-panel.minimal .workspace-worktree-count,
+.workspace-panel.minimal .workspace-auto-worktree-badge,
+.workspace-panel.minimal .workspace-ref-indicator,
+.workspace-panel.minimal .workspace-header .pr-badge,
+.workspace-panel.minimal .task-drag-handle,
+.workspace-panel.minimal .task-item .pr-badge,
+.workspace-panel.minimal .task-worktree-badge,
+.workspace-panel.minimal .task-cron-badge,
+.workspace-panel.minimal .task-time-ago,
+.workspace-panel.minimal .task-list-resize-handle {
+    display: none;
+}
+
+/* The workspace menu stays reachable, but only on hover of that row. */
+.workspace-panel.minimal .workspace-action-button.menu {
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.workspace-panel.minimal .workspace-header:hover .workspace-action-button.menu,
+.workspace-panel.minimal .workspace-action-button.menu.active {
+    opacity: 0.6;
+}
+
+.workspace-panel.minimal .workspace-action-button.menu:hover {
+    opacity: 1;
+}
+
+/* ---- Workspace body ---- */
+.workspace-panel.minimal .workspace-content {
+    background: transparent;
+    border-radius: 0;
+    overflow: visible;
+}
+
+/* The new-task composer is chrome in minimal mode; reveal it only when the
+   workspace row or the form itself has focus/hover. */
+.workspace-panel.minimal .task-input-form {
+    padding: 2px 6px 6px 20px;
+    opacity: 0;
+    max-height: 0;
+    overflow: hidden;
+    transition: opacity 0.15s ease, max-height 0.15s ease;
+}
+
+.workspace-panel.minimal .workspace-section:hover .task-input-form,
+.workspace-panel.minimal .task-input-form:focus-within {
+    opacity: 1;
+    max-height: 200px;
+}
+
+.workspace-panel.minimal .task-input {
+    font-size: 0.75rem;
+    padding: 4px 8px;
+}
+
+.workspace-panel.minimal .empty-tasks {
+    padding: 2px 6px 6px 22px;
+    font-size: 0.6875rem;
+    opacity: 0.6;
+}
+
+/* ---- Task rows ---- */
+.workspace-panel.minimal .task-list {
+    /* Row height drops from ~32px to ~24px; keep ~8 rows before scrolling. */
+    max-height: calc(8 * 24px);
+}
+
+.workspace-panel.minimal .task-item {
+    gap: 8px;
+    padding: 2px 6px 2px 22px; /* Indent under the workspace name */
+    border-left: none;
+    font-size: 0.8125rem;
+    font-weight: 400;
+    /* Soft by default — the selected row is the only one at full strength. */
+    color: var(--text-muted);
+    opacity: 0.72;
+    border-radius: 6px;
+    transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.workspace-panel.minimal .task-item:hover {
+    opacity: 1;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+}
+
+.workspace-panel.minimal .task-item.selected {
+    opacity: 1;
+    color: var(--text-primary);
+    background: transparent;
+    border-left: none;
+    font-weight: 500;
+}
+
+.workspace-panel.minimal .task-item.unread {
+    opacity: 1;
+    color: var(--text-secondary);
+}
+
+.workspace-panel.minimal .task-item .task-prompt {
+    line-height: 1.5;
+}
+
+/* Status marker: a small dot rather than a full status icon. Filled when the
+   task is selected or busy, hollow otherwise — matching the reference list. */
+.workspace-panel.minimal .status-icon {
+    width: 6px;
+    height: 6px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    border: 1px solid currentColor;
+    background: transparent;
+    opacity: 0.6;
+}
+
+.workspace-panel.minimal .status-icon > * {
+    display: none; /* Hide the lucide glyph inside; the dot is the border-box */
+}
+
+.workspace-panel.minimal .task-item.selected .status-icon,
+.workspace-panel.minimal .status-icon.spinning,
+.workspace-panel.minimal .status-icon.starting {
+    background: currentColor;
+    opacity: 1;
+}
+
+.workspace-panel.minimal .status-icon.question-icon {
+    width: 6px;
+    height: 6px;
+    font-size: 0; /* Suppress the literal "!" glyph */
+    background: var(--accent-secondary);
+    border-color: var(--accent-secondary);
+    opacity: 1;
+}
+
+.workspace-panel.minimal .archive-checkbox-btn {
+    display: flex;
+    align-items: center;
+}
+
+/* Per-row actions stay hidden until hover, and lose the time-ago column. */
+.workspace-panel.minimal .task-actions {
+    margin-left: auto;
+    gap: 0;
+}
+
+.workspace-panel.minimal .task-action-button {
+    padding: 2px;
+}
+
+/* ---- Worktree sub-groups ---- */
+.workspace-panel.minimal .worktree-group-header {
+    padding: 2px 6px 2px 20px;
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    opacity: 0.6;
+}
+
+.workspace-panel.minimal .worktree-group-header:hover {
+    opacity: 1;
+}
+
+.workspace-panel.minimal .worktree-group-tasks {
+    padding-left: 8px;
+}
+
+/* ---- Minimal mode: warm cream sidebar ----------------------------------------
+ *
+ * Matches the reference UI: cream panel a shade darker than the page, quiet
+ * small-caps section header, and a terracotta highlight for the active row.
+ * Colors are pinned rather than theme-driven — minimal mode is always cream.
+ */
+.workspace-panel.minimal {
+    --wp-bg: #eee8da;
+    --wp-border: #d8cfb8;
+    --wp-text: #191612;
+    --wp-muted: #4d4638;
+    --wp-faint: #6a6252;
+    --wp-accent: #b5651d;
+
+    background: var(--wp-bg);
+    border-right: 1px solid var(--wp-border);
+}
+
+.workspace-panel.minimal .workspace-panel-header {
+    background: transparent;
+    border-bottom: none;
+}
+
+.workspace-panel.minimal .workspace-panel-header h2 {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--wp-faint);
+    font-weight: 600;
+}
+
+.workspace-panel.minimal .workspace-name {
+    font-size: 15px;
+    color: var(--wp-muted);
+    font-weight: 500;
+}
+
+.workspace-panel.minimal .task-prompt {
+    font-size: 14.5px;
+    line-height: 1.5;
+    color: var(--wp-text);
+}
+
+.workspace-panel.minimal .task-time,
+.workspace-panel.minimal .branch-name {
+    font-size: 11px;
+    color: var(--wp-faint);
+}
+
+/* Active task: terracotta text, as in the reference, rather than a filled row. */
+.workspace-panel.minimal .task-item.selected .task-prompt,
+.workspace-panel.minimal .task-item.active .task-prompt {
+    color: var(--wp-accent);
+    font-weight: 600;
+}
+
+.workspace-panel.minimal .task-item.selected,
+.workspace-panel.minimal .task-item.active {
+    background: rgba(181, 101, 29, 0.08);
+}
+
+.workspace-panel.minimal .task-item:hover {
+    background: rgba(0, 0, 0, 0.035);
+}
+
+/* New-task composer: match the cream palette instead of the app's default
+   (dark-theme) input styling. */
+.workspace-panel.minimal .task-input-form {
+    background: transparent;
+    border-bottom: none;
+}
+
+.workspace-panel.minimal .task-input {
+    background: var(--wp-bg);
+    border: 1px solid var(--wp-border);
+    color: var(--wp-text);
+}
+
+.workspace-panel.minimal .task-input:focus {
+    border-color: var(--wp-accent);
+    box-shadow: 0 0 0 3px rgba(181, 101, 29, 0.12);
+}
+
+.workspace-panel.minimal .task-input::placeholder {
+    color: var(--wp-faint);
+}
+
+.workspace-panel.minimal .task-submit-button {
+    background: var(--wp-accent);
+    color: #fff;
+}
+
+.workspace-panel.minimal .task-submit-button:disabled {
+    background: var(--wp-border);
+    color: var(--wp-faint);
+}
+
+.workspace-panel.minimal .task-image-button,
+.workspace-panel.minimal .task-isolate-button {
+    border-color: var(--wp-border);
+    color: var(--wp-faint);
+}
+
+.workspace-panel.minimal .task-image-button:hover,
+.workspace-panel.minimal .task-isolate-button:hover {
+    background: rgba(0, 0, 0, 0.04);
+    border-color: var(--wp-accent);
+    color: var(--wp-accent);
+}
+
+.workspace-panel.minimal .task-isolate-button.active {
+    background: rgba(181, 101, 29, 0.1);
+    border-color: var(--wp-accent);
+    color: var(--wp-accent);
 }

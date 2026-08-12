@@ -1709,3 +1709,55 @@
 [data-theme="light"] .theme-option.active {
     color: #ffffff;
 }
+
+/* View mode selector — stacked because each option carries a description.
+   Mirrors .theme-option's active treatment so Appearance reads as one group. */
+.view-mode-selector {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.view-mode-option {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    padding: 9px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+    transition: all 0.15s ease;
+}
+
+.view-mode-option:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.view-mode-label {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.view-mode-desc {
+    font-size: 11.5px;
+    opacity: 0.75;
+    line-height: 1.4;
+}
+
+.view-mode-option.active {
+    background: var(--accent-secondary);
+    color: #000000;
+    border-color: var(--accent-secondary);
+}
+
+[data-theme="light"] .view-mode-option.active {
+    color: #ffffff;
+}

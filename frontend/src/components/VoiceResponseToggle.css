@@ -1,0 +1,43 @@
+/* Voice Response Toggle Button */
+.voice-response-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    transition: all 0.2s ease;
+}
+
+.voice-response-toggle:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border-color: var(--text-muted);
+}
+
+.voice-response-toggle.active {
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--accent-green, #10b981);
+    border-color: var(--accent-green, #10b981);
+}
+
+.voice-response-toggle.active:hover {
+    background: rgba(16, 185, 129, 0.25);
+}
+
+/* Mobile: icon-only compact button */
+@media (max-width: 768px) {
+    .voice-response-toggle {
+        padding: 6px;
+        gap: 0;
+    }
+
+    .voice-response-toggle > span {
+        display: none;
+    }
+}

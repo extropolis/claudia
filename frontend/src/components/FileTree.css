@@ -1,0 +1,143 @@
+.ft-container {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+}
+
+.ft-row {
+    display: flex;
+    align-items: center;
+    cursor: default;
+    outline: none;
+}
+
+.ft-row:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.ft-row.selected {
+    background: rgba(0, 212, 255, 0.15);
+}
+
+.ft-row.selected:hover {
+    background: rgba(0, 212, 255, 0.2);
+}
+
+.ft-row.drop-target {
+    background: rgba(0, 212, 255, 0.25);
+    outline: 1px solid var(--accent-secondary, #00d4ff);
+    outline-offset: -1px;
+}
+
+.ft-node {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding-right: 8px;
+    height: 100%;
+    width: 100%;
+    font-size: 12px;
+    color: var(--text-primary, #e6edf3);
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.ft-indent {
+    position: relative;
+    flex-shrink: 0;
+    align-self: stretch;
+}
+
+.ft-indent-guide {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: rgba(139, 148, 158, 0.15);
+}
+
+.ft-row:hover .ft-indent-guide,
+.ft-row.selected .ft-indent-guide {
+    background: rgba(139, 148, 158, 0.3);
+}
+
+.ft-chevron {
+    width: 14px;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: var(--text-muted, #6e7681);
+    transition: transform 0.1s ease;
+}
+
+.ft-chevron-hidden {
+    visibility: hidden;
+}
+
+.ft-chevron-open {
+    transform: rotate(90deg);
+}
+
+.ft-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+}
+
+.ft-icon img {
+    display: block;
+    width: 16px;
+    height: 16px;
+    object-fit: contain;
+}
+
+.ft-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 12.5px;
+}
+
+.ft-rename-input {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-primary, #0d1117);
+    border: 1px solid var(--accent-secondary, #00d4ff);
+    border-radius: 3px;
+    color: var(--text-primary, #e6edf3);
+    font-size: 12.5px;
+    padding: 0 4px;
+    height: 18px;
+    font-family: inherit;
+}
+
+.ft-rename-input:focus {
+    outline: none;
+}
+
+/* Git status decorations — mirror VS Code's colors */
+.ft-name-modified { color: #d29922; }
+.ft-name-added { color: #3fb950; }
+.ft-name-untracked { color: #8b949e; }
+.ft-name-deleted { color: #f85149; text-decoration: line-through; }
+.ft-name-renamed { color: #a371f7; }
+
+.ft-git-badge {
+    margin-left: auto;
+    flex-shrink: 0;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    padding-left: 6px;
+}
+
+.ft-git-modified { color: #d29922; }
+.ft-git-added { color: #3fb950; }
+.ft-git-untracked { color: #8b949e; }
+.ft-git-deleted { color: #f85149; }
+.ft-git-renamed { color: #a371f7; }

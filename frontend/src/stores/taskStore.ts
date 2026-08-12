@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask, TaskTokenUsage } from '@claudia/shared';
+import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask, TaskTokenUsage, ChatViewMode } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
 import { ThemePreference } from '../types/theme';
 
@@ -51,6 +51,8 @@ interface TaskStore {
     workspaceColumns: number; // 0 = auto, 1-4 = fixed column count
     workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
     taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
+    pinnedWorkspaces: Set<string>; // Workspace ids the user has pinned for focus mode
+    focusMode: boolean; // When true, only pinned workspaces are shown
 
     // Voice state
     voiceEnabled: boolean;
@@ -112,6 +114,8 @@ interface TaskStore {
     voiceProgressUpdateInterval: number; // milliseconds between progress updates
     themePreference: ThemePreference;
     tokenCostEnabled: boolean;
+    /** How task conversations are rendered: terminal, detailed chat, or minimal chat. */
+    chatViewMode: ChatViewMode;
 
     // Actions
     setConnected: (connected: boolean) => void;
@@ -139,6 +143,8 @@ interface TaskStore {
     reorderWorkspaces: (fromIndex: number, toIndex: number) => void;
     toggleWorkspaceExpanded: (workspaceId: string) => void;
     toggleWorktreeGroupCollapsed: (groupId: string) => void;
+    toggleWorkspacePinned: (workspaceId: string) => void;
+    setFocusMode: (enabled: boolean) => void;
     setTaskListHeight: (height: number | null) => void;
     setShowProjectPicker: (show: boolean) => void;
 
@@ -211,6 +217,7 @@ interface TaskStore {
     setVoiceProgressUpdateInterval: (interval: number) => void;
     setThemePreference: (pref: ThemePreference) => void;
     setTokenCostEnabled: (enabled: boolean) => void;
+    setChatViewMode: (mode: ChatViewMode) => void;
 }
 
 // Storage key for localStorage
@@ -227,6 +234,8 @@ interface PersistedState {
     workspaceColumns: number; // 0 = auto, 1-4 = fixed
     workspaceSortBy: 'date-created' | 'last-modified' | 'alphabetical' | 'manual'; // How to sort workspaces; 'manual' uses drag-drop order persisted on the backend
     taskSortBy: 'date-created' | 'last-modified'; // How to sort tasks within workspaces
+    pinnedWorkspaces: string[];  // Stored as array, converted to Set
+    focusMode: boolean;
     voiceEnabled: boolean;
     autoSpeakResponses: boolean;
     selectedVoiceName: string | null;
@@ -252,6 +261,7 @@ interface PersistedState {
     voiceProgressUpdateInterval: number;
     themePreference: ThemePreference;
     tokenCostEnabled: boolean;
+    chatViewMode: ChatViewMode;
     taskSummaries: [string, TaskSummary][];  // Stored as entries array
     chatMessages: ChatMessage[];
 }
@@ -278,6 +288,8 @@ export const useTaskStore = create<TaskStore>()(
             workspaceColumns: 0, // 0 = auto
             workspaceSortBy: 'date-created', // Default to date created
             taskSortBy: 'date-created', // Default to date created for tasks
+            pinnedWorkspaces: new Set<string>(),
+            focusMode: false,
 
             // Voice initial state
             voiceEnabled: false,
@@ -339,6 +351,7 @@ export const useTaskStore = create<TaskStore>()(
             voiceProgressUpdateInterval: 180000, // 3 minutes (180 seconds)
             themePreference: 'system' as ThemePreference,
             tokenCostEnabled: false,
+            chatViewMode: 'minimal' as ChatViewMode,
 
             // Actions
             setConnected: (connected) => {
@@ -609,6 +622,18 @@ export const useTaskStore = create<TaskStore>()(
                 set({ collapsedWorktreeGroups: newCollapsed });
             },
 
+            toggleWorkspacePinned: (workspaceId) => {
+                const newPinned = new Set(get().pinnedWorkspaces);
+                if (newPinned.has(workspaceId)) {
+                    newPinned.delete(workspaceId);
+                } else {
+                    newPinned.add(workspaceId);
+                }
+                set({ pinnedWorkspaces: newPinned });
+            },
+
+            setFocusMode: (enabled) => set({ focusMode: enabled }),
+
             setTaskListHeight: (height) => set({ taskListHeight: height }),
 
             setShowProjectPicker: (show) => set({ showProjectPicker: show }),
@@ -681,9 +706,10 @@ export const useTaskStore = create<TaskStore>()(
                         if (a.order !== undefined && b.order !== undefined) {
                             return a.order - b.order;
                         }
-                        // If only one has order, it comes first
-                        if (a.order !== undefined) return -1;
-                        if (b.order !== undefined) return 1;
+                        // A task with no order has never been manually placed, i.e.
+                        // it is new — it goes above the manually ordered ones.
+                        if (a.order === undefined && b.order !== undefined) return -1;
+                        if (b.order === undefined && a.order !== undefined) return 1;
                         // Neither has order, sort by creation time (newest first)
                         return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
                     });
@@ -826,6 +852,7 @@ export const useTaskStore = create<TaskStore>()(
             setVoiceProgressUpdatesEnabled: (enabled) => set({ voiceProgressUpdatesEnabled: enabled }),
             setVoiceProgressUpdateInterval: (interval) => set({ voiceProgressUpdateInterval: interval }),
             setThemePreference: (pref) => set({ themePreference: pref }),
+            setChatViewMode: (mode) => set({ chatViewMode: mode }),
             setTokenCostEnabled: (enabled) => set({ tokenCostEnabled: enabled })
         }),
         {
@@ -842,6 +869,8 @@ export const useTaskStore = create<TaskStore>()(
                 workspaceColumns: state.workspaceColumns,
                 workspaceSortBy: state.workspaceSortBy,
                 taskSortBy: state.taskSortBy,
+                pinnedWorkspaces: Array.from(state.pinnedWorkspaces),
+                focusMode: state.focusMode,
                 voiceEnabled: state.voiceEnabled,
                 autoSpeakResponses: state.autoSpeakResponses,
                 selectedVoiceName: state.selectedVoiceName,
@@ -867,6 +896,7 @@ export const useTaskStore = create<TaskStore>()(
                 voiceProgressUpdateInterval: state.voiceProgressUpdateInterval,
                 themePreference: state.themePreference,
                 tokenCostEnabled: state.tokenCostEnabled,
+                chatViewMode: state.chatViewMode,
                 taskSummaries: Array.from(state.taskSummaries.entries()),
                 chatMessages: state.chatMessages,
             }),
@@ -900,6 +930,10 @@ export const useTaskStore = create<TaskStore>()(
                     workspaceColumns: persisted.workspaceColumns ?? currentState.workspaceColumns,
                     workspaceSortBy: persisted.workspaceSortBy ?? currentState.workspaceSortBy,
                     taskSortBy: persisted.taskSortBy ?? currentState.taskSortBy,
+                    pinnedWorkspaces: persisted.pinnedWorkspaces
+                        ? new Set(persisted.pinnedWorkspaces)
+                        : currentState.pinnedWorkspaces,
+                    focusMode: persisted.focusMode ?? currentState.focusMode,
                     voiceEnabled: persisted.voiceEnabled ?? currentState.voiceEnabled,
                     autoSpeakResponses: persisted.autoSpeakResponses ?? currentState.autoSpeakResponses,
                     selectedVoiceName: persisted.selectedVoiceName ?? currentState.selectedVoiceName,
@@ -925,6 +959,7 @@ export const useTaskStore = create<TaskStore>()(
                     voiceProgressUpdateInterval: persisted.voiceProgressUpdateInterval ?? currentState.voiceProgressUpdateInterval,
                     themePreference: persisted.themePreference ?? currentState.themePreference,
                     tokenCostEnabled: persisted.tokenCostEnabled ?? currentState.tokenCostEnabled,
+                    chatViewMode: persisted.chatViewMode ?? currentState.chatViewMode,
                     taskSummaries: persisted.taskSummaries
                         ? new Map(persisted.taskSummaries)
                         : currentState.taskSummaries,

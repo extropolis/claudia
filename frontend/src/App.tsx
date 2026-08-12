@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import type { Workspace } from '@claudia/shared';
 import { WorkspacePanel } from './components/WorkspacePanel';
 import { TerminalView } from './components/TerminalView';
 import { SupervisorChat } from './components/SupervisorChat';
@@ -9,15 +10,17 @@ import { ThinkingSoundManager } from './components/ThinkingSoundManager';
 import { TaskCompletionVoiceManager } from './components/TaskCompletionVoiceManager';
 import { TaskProgressVoiceManager } from './components/TaskProgressVoiceManager';
 import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
+import { VoiceResponseToggle } from './components/VoiceResponseToggle';
 import { SystemStats } from './components/SystemStats';
 import { MobileAccessModal } from './components/MobileAccessModal';
 import { FileExplorer } from './components/FileExplorer';
 import { ShellTerminalView } from './components/ShellTerminalView';
+import { ChatView } from './components/ChatView';
 import { ActivityPanel } from './components/ActivityPanel';
 import { useTheme } from './hooks/useTheme';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useTaskStore } from './stores/taskStore';
-import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff, BarChart3, ChevronRight } from 'lucide-react';
+import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff, BarChart3, ChevronRight, Bot } from 'lucide-react';
 import { UsageDashboard } from './components/UsageDashboard';
 import { getApiBaseUrl } from './config/api-config';
 import { isSoundEnabled, setSoundEnabled } from './utils/browserCapabilities';
@@ -49,6 +52,7 @@ function App() {
         archiveTask,
         revertTask,
         createWorkspace,
+        ensureStandaloneWorkspace,
         deleteWorkspace,
         reorderWorkspaces,
         setWorkspaceOrder,
@@ -75,7 +79,8 @@ function App() {
         wsRef
     } = useWebSocket();
 
-    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats, errorNotification, clearErrorNotification, unreadTaskIds } = useTaskStore();
+    const [headerToolsOpen, setHeaderToolsOpen] = useState(false);
+    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats, errorNotification, clearErrorNotification, unreadTaskIds, chatViewMode } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
     const selectedWorkspace = selectedTask ? workspaces.find(w => w.id === selectedTask.workspaceId) : undefined;
 
@@ -93,9 +98,22 @@ function App() {
     // Embedded shell terminal state
     // activeShellWorkspaceId = which workspace has a shell PTY running (null = none)
     // showingShell = whether we're currently displaying the shell (vs a task)
+    // Standalone terminal — not tied to any workspace, reachable from the header anytime.
+    const STANDALONE_SHELL_ID = '__standalone__';
+    const STANDALONE_SHELL_WORKSPACE: Workspace = { id: STANDALONE_SHELL_ID, name: 'Home', createdAt: '' };
+
     const [activeShellWorkspaceId, setActiveShellWorkspaceId] = useState<string | null>(null);
     const [showingShell, setShowingShell] = useState(false);
-    const activeShellWorkspace = activeShellWorkspaceId ? workspaces.find(w => w.id === activeShellWorkspaceId) : undefined;
+    const activeShellWorkspace = activeShellWorkspaceId === STANDALONE_SHELL_ID
+        ? STANDALONE_SHELL_WORKSPACE
+        : (activeShellWorkspaceId ? workspaces.find(w => w.id === activeShellWorkspaceId) : undefined);
+
+    // Standalone Claude Code instance — a task in a dedicated, always-available directory
+    // (not part of the regular workspace list). awaitingStandaloneTask tracks that we've
+    // asked the backend to get-or-create that directory's workspace and are waiting for it
+    // to show up in the store so we can spawn a task in it.
+    const [awaitingStandaloneTask, setAwaitingStandaloneTask] = useState(false);
+    const STANDALONE_WORKSPACE_SUFFIX = '.claudia-standalone';
 
     // Count tasks that have running processes (not disconnected or archived)
     const activeTasks = Array.from(tasks.values()).filter(t =>
@@ -295,6 +313,37 @@ function App() {
         setShowingShell(true);
     }, []);
 
+    // Open the standalone terminal (home directory, not tied to any workspace).
+    const handleOpenStandaloneTerminal = useCallback(() => {
+        handleOpenShell(STANDALONE_SHELL_ID);
+    }, [handleOpenShell]);
+
+    // No specific task yet — this just opens a general-purpose Claude Code session.
+    const STANDALONE_CLAUDE_PROMPT = 'Hello! Ready to help — what would you like to work on?';
+
+    // Open (or create) a Claude Code task in the standalone directory.
+    const handleOpenStandaloneClaudeCode = useCallback(() => {
+        setShowingShell(false); // reveal the task view once it's created/selected
+        const existing = workspaces.find(w => w.id.endsWith(STANDALONE_WORKSPACE_SUFFIX));
+        if (existing) {
+            createTask(STANDALONE_CLAUDE_PROMPT, existing.id);
+        } else {
+            setAwaitingStandaloneTask(true);
+            ensureStandaloneWorkspace();
+        }
+    }, [workspaces, createTask, ensureStandaloneWorkspace]);
+
+    // Once the standalone workspace shows up in the store (after ensureStandaloneWorkspace
+    // resolves), spawn the task we were waiting to create in it.
+    useEffect(() => {
+        if (!awaitingStandaloneTask) return;
+        const standaloneWorkspace = workspaces.find(w => w.id.endsWith(STANDALONE_WORKSPACE_SUFFIX));
+        if (standaloneWorkspace) {
+            setAwaitingStandaloneTask(false);
+            createTask(STANDALONE_CLAUDE_PROMPT, standaloneWorkspace.id);
+        }
+    }, [awaitingStandaloneTask, workspaces, createTask]);
+
     const handleSelectTask = (taskId: string) => {
         // Hide shell view (but keep PTY alive) when selecting a task
         setShowingShell(false);
@@ -480,8 +529,8 @@ function App() {
     const mobileShowingTerminal = isMobile && mobileShowTerminal && selectedTask;
 
     return (
-        <div className={`app ${isMobile ? 'is-mobile' : ''}`}>
-            <header className="app-header">
+        <div className={`app ${isMobile ? 'is-mobile' : ''}${chatViewMode === 'minimal' ? ' minimal-mode' : ''}`}>
+            <header className={`app-header${chatViewMode === 'minimal' ? ' minimal' : ''}`}>
                 {/* Mobile back button when viewing terminal */}
                 {mobileShowingTerminal && (
                     <button className="mobile-back-button" onClick={handleMobileBack} title="Back to tasks">
@@ -493,7 +542,21 @@ function App() {
                     <h1>Claudia</h1>
                     <span className="app-version">v{__APP_VERSION__}</span>
                 </div>
-                <div className="header-controls">
+                <div className={`header-controls${chatViewMode === 'minimal' ? ' minimal' : ''}`}>
+                    {/* Minimal mode hides the header tools behind a disclosure so the
+                        chrome recedes. Settings stays outside the group — it's how you
+                        switch back out of minimal mode, so it must never be hidden. */}
+                    {chatViewMode === 'minimal' && (
+                        <button
+                            className={`header-tools-toggle${headerToolsOpen ? ' open' : ''}`}
+                            onClick={() => setHeaderToolsOpen((v) => !v)}
+                            title={headerToolsOpen ? 'Hide toolbar' : 'Show toolbar'}
+                            aria-expanded={headerToolsOpen}
+                        >
+                            <ChevronRight size={16} />
+                        </button>
+                    )}
+                    <div className={`header-tools${chatViewMode === 'minimal' && !headerToolsOpen ? ' collapsed' : ''}`}>
                     {isFullscreen && (
                         <button
                             className="exit-fullscreen-button"
@@ -504,6 +567,24 @@ function App() {
                             <span className="btn-label">Exit Fullscreen</span>
                         </button>
                     )}
+                    {/* Standalone terminal - always available, not tied to any workspace */}
+                    <button
+                        className={`chat-toggle-button ${activeShellWorkspaceId === STANDALONE_SHELL_ID && showingShell ? 'active' : ''}`}
+                        onClick={handleOpenStandaloneTerminal}
+                        title="Open Terminal (not tied to any workspace)"
+                    >
+                        <Terminal size={18} />
+                        <span className="btn-label">Terminal</span>
+                    </button>
+                    {/* Standalone Claude Code instance - always available, not tied to any workspace */}
+                    <button
+                        className="chat-toggle-button"
+                        onClick={handleOpenStandaloneClaudeCode}
+                        title="Open Claude Code (not tied to any workspace)"
+                    >
+                        <Bot size={18} />
+                        <span className="btn-label">Claude Code</span>
+                    </button>
                     {/* Activity: task counts + activity panel toggle */}
                     <button
                         className={`activity-button ${showActivityPanel ? 'active' : ''} ${busyCount > 0 ? 'has-busy' : ''}`}
@@ -554,6 +635,7 @@ function App() {
                         </button>
                     )}
                     <GlobalVoiceToggle />
+                    <VoiceResponseToggle />
                     <button
                         className={`notification-toggle-button ${soundMuted ? 'muted' : ''}`}
                         onClick={() => {
@@ -579,6 +661,7 @@ function App() {
                     >
                         <BarChart3 size={isMobile ? 18 : 20} />
                     </button>
+                    </div>
                     <button
                         className="settings-button"
                         onClick={handleSettingsOpen}
@@ -601,13 +684,26 @@ function App() {
                     mobileShowingTerminal ? (
                         // Screen 2: Full-screen terminal
                         <section className="main-panel mobile-full">
-                            <TerminalView
-                                key={`${selectedTask!.id}-${terminalRefreshCounter}`}
-                                task={selectedTask!}
-                                wsRef={wsRef}
-                                workspace={selectedWorkspace}
-                                isMobile={true}
-                            />
+                            <div
+                                className="terminal-view-wrapper"
+                                style={{ display: chatViewMode === 'terminal' ? 'flex' : 'none' }}
+                            >
+                                <TerminalView
+                                    key={`${selectedTask!.id}-${terminalRefreshCounter}`}
+                                    task={selectedTask!}
+                                    wsRef={wsRef}
+                                    workspace={selectedWorkspace}
+                                    isMobile={true}
+                                />
+                            </div>
+                            {chatViewMode !== 'terminal' && (
+                                <ChatView
+                                    key={`chat-${selectedTask!.id}`}
+                                    task={selectedTask!}
+                                    workspaceName={selectedWorkspace?.displayName || selectedWorkspace?.name}
+                                    mode={chatViewMode}
+                                />
+                            )}
                         </section>
                     ) : (
                         // Screen 1: Full-screen workspace list
@@ -731,12 +827,28 @@ function App() {
                                                 <span>Shell running — {activeShellWorkspace.displayName || activeShellWorkspace.name}</span>
                                             </button>
                                         )}
-                                        <TerminalView
-                                            key={`${selectedTask.id}-${terminalRefreshCounter}`}
-                                            task={selectedTask}
-                                            wsRef={wsRef}
-                                            workspace={selectedWorkspace}
-                                        />
+                                        {/* Terminal stays mounted while the chat view is
+                                            showing so xterm scrollback and the task:select
+                                            stream survive toggling between the two views. */}
+                                        <div
+                                            className="terminal-view-wrapper"
+                                            style={{ display: chatViewMode === 'terminal' ? 'flex' : 'none' }}
+                                        >
+                                            <TerminalView
+                                                key={`${selectedTask.id}-${terminalRefreshCounter}`}
+                                                task={selectedTask}
+                                                wsRef={wsRef}
+                                                workspace={selectedWorkspace}
+                                            />
+                                        </div>
+                                        {chatViewMode !== 'terminal' && (
+                                            <ChatView
+                                                key={`chat-${selectedTask.id}`}
+                                                task={selectedTask}
+                                                workspaceName={selectedWorkspace?.displayName || selectedWorkspace?.name}
+                                                mode={chatViewMode}
+                                            />
+                                        )}
                                     </>
                                 ) : (
                                     <div className="empty-state-main">

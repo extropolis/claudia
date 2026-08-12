@@ -66,6 +66,10 @@ backend/chat-history.json
 backend/archived-histories/
 backend/task-histories/
 backend/data/conversations.json
+# Verification cards + their evidence images (runtime state, can be large)
+backend/verifications.json
+backend/evidence/
+backend/checkpoints.json
 
 # Vite cache
 vite

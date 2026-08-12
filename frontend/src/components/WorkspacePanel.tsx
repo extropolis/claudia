@@ -3,7 +3,7 @@ import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace, WorkspacePrInfo } from '@claudia/shared';
 import {
     Loader2, Circle, ChevronRight, ChevronDown, ChevronLeft,
-    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp
+    Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp, Star, Pin
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { PrBadge } from './PrBadge';
@@ -720,6 +720,9 @@ interface WorkspaceSectionProps {
     onRemoveWorktree?: (workspaceId: string, force?: boolean) => Promise<void>;
     onToggleAutoWorktree?: (workspaceId: string, enabled: boolean) => void;
     onSelectWorkspace?: (workspaceId: string) => void; // navigate to a different workspace
+    // Pin/focus
+    isPinned?: boolean;
+    onTogglePin?: () => void;
 }
 
 function WorkspaceSection({
@@ -766,6 +769,8 @@ function WorkspaceSection({
     onRemoveWorktree,
     onToggleAutoWorktree,
     onSelectWorkspace,
+    isPinned = false,
+    onTogglePin,
 }: WorkspaceSectionProps) {
     const isConnected = useTaskStore(s => s.isConnected);
     const [inputValue, setInputValue] = useState('');
@@ -1295,6 +1300,18 @@ function WorkspaceSection({
                         </span>
                     )}
                 </div>
+                {onTogglePin && (
+                    <button
+                        className={`workspace-action-button pin ${isPinned ? 'active' : ''}`}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onTogglePin();
+                        }}
+                        title={isPinned ? 'Unpin workspace' : 'Pin workspace (for focus mode)'}
+                    >
+                        <Star size={14} fill={isPinned ? 'currentColor' : 'none'} />
+                    </button>
+                )}
                 <div className="workspace-menu-container">
                     <button
                         className={`workspace-action-button menu ${isMenuOpen ? 'active' : ''}`}
@@ -1682,106 +1699,6 @@ function WorkspaceSection({
             </div>
             {isExpanded && (
                 <div className="workspace-content">
-                    <form
-                        className={`task-input-form ${isImageDragging ? 'dragging' : ''}`}
-                        onSubmit={handleSubmit}
-                        onDragEnter={handleImageDragEnter}
-                        onDragLeave={handleImageDragLeave}
-                        onDragOver={handleImageDragOver}
-                        onDrop={handleImageDrop}
-                    >
-                        {/* Image previews */}
-                        {images.length > 0 && (
-                            <div className="new-task-images">
-                                {images.map(img => (
-                                    <div key={img.filename} className="new-task-image-preview">
-                                        <img src={img.previewUrl} alt={img.originalName} />
-                                        <button
-                                            type="button"
-                                            className="new-task-image-remove"
-                                            onClick={() => deleteImage(img)}
-                                            title="Remove image"
-                                        >
-                                            <X size={12} />
-                                        </button>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-
-                        {/* Upload status messages */}
-                        {isUploading && (
-                            <div className="new-task-uploading">
-                                <Clipboard size={12} />
-                                <span>Uploading pasted image...</span>
-                            </div>
-                        )}
-                        {uploadError && (
-                            <div className="new-task-upload-error">{uploadError}</div>
-                        )}
-
-                        {/* Drop zone overlay */}
-                        {isImageDragging && (
-                            <div className="new-task-dropzone">
-                                <ImagePlus size={24} />
-                                <span>Drop images here</span>
-                            </div>
-                        )}
-
-                        <div className="task-input-row">
-                            <div className={`task-input-wrapper ${isFocused && globalVoiceEnabled ? 'voice-active' : ''}`}>
-                                <textarea
-                                    className="task-input"
-                                    placeholder="Type or speak a task... (Ctrl+V to paste screenshots)"
-                                    value={inputValue}
-                                    onChange={(e) => setInputValue(e.target.value)}
-                                    onKeyDown={handleKeyDown}
-                                    onPaste={handlePaste}
-                                    onFocus={handleFocus}
-                                    onBlur={handleBlur}
-                                    rows={1}
-                                    data-input-type="new-task-input"
-                                />
-                                {showInterim && (
-                                    <span className="interim-indicator">{voiceInterimTranscript}</span>
-                                )}
-                            </div>
-                            {/* Image upload button */}
-                            <button
-                                type="button"
-                                onClick={() => fileInputRef.current?.click()}
-                                className="task-image-button"
-                                title="Attach image"
-                            >
-                                <ImagePlus size={16} />
-                            </button>
-                            <input
-                                ref={fileInputRef}
-                                type="file"
-                                accept="image/*"
-                                multiple
-                                onChange={(e) => handleFileSelect(e.target.files)}
-                                style={{ display: 'none' }}
-                            />
-                            {!isWorktree && (
-                                <button
-                                    type="button"
-                                    className={`task-isolate-button${isolate ? ' active' : ''}`}
-                                    title={isolate ? 'Isolate in worktree: ON — click to disable' : 'Isolate in worktree: OFF — click to enable'}
-                                    onClick={() => setIsolate(v => !v)}
-                                >
-                                    <GitBranch size={14} />
-                                </button>
-                            )}
-                            <button
-                                type="submit"
-                                className="task-submit-button"
-                                disabled={!inputValue.trim() && images.length === 0}
-                            >
-                                <Send size={16} />
-                            </button>
-                        </div>
-                    </form>
                     {tasks.length === 0 && worktreeGroups.length === 0 ? (
                         <div className="empty-tasks">No tasks yet</div>
                     ) : (
@@ -1816,14 +1733,15 @@ function WorkspaceSection({
                                         }
                                     }
 
-                                    // Sort: items with explicit order first, then by creation time (newest first).
+                                    // Sort: unordered items (new tasks / worktree groups) first by
+                                    // creation time (newest first), then the manually ordered ones.
                                     // For worktree groups, use the newest task's creation time.
                                     items.sort((a, b) => {
                                         const orderA = a.type === 'task' ? a.task.order : undefined;
                                         const orderB = b.type === 'task' ? b.task.order : undefined;
                                         if (orderA !== undefined && orderB !== undefined) return orderA - orderB;
-                                        if (orderA !== undefined) return -1;
-                                        if (orderB !== undefined) return 1;
+                                        if (orderA === undefined && orderB !== undefined) return -1;
+                                        if (orderB === undefined && orderA !== undefined) return 1;
 
                                         const timeA = a.type === 'task'
                                             ? new Date(a.task.createdAt).getTime()
@@ -1925,6 +1843,106 @@ function WorkspaceSection({
                             </div>
                         </div>
                     )}
+                    <form
+                        className={`task-input-form ${isImageDragging ? 'dragging' : ''}`}
+                        onSubmit={handleSubmit}
+                        onDragEnter={handleImageDragEnter}
+                        onDragLeave={handleImageDragLeave}
+                        onDragOver={handleImageDragOver}
+                        onDrop={handleImageDrop}
+                    >
+                        {/* Image previews */}
+                        {images.length > 0 && (
+                            <div className="new-task-images">
+                                {images.map(img => (
+                                    <div key={img.filename} className="new-task-image-preview">
+                                        <img src={img.previewUrl} alt={img.originalName} />
+                                        <button
+                                            type="button"
+                                            className="new-task-image-remove"
+                                            onClick={() => deleteImage(img)}
+                                            title="Remove image"
+                                        >
+                                            <X size={12} />
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Upload status messages */}
+                        {isUploading && (
+                            <div className="new-task-uploading">
+                                <Clipboard size={12} />
+                                <span>Uploading pasted image...</span>
+                            </div>
+                        )}
+                        {uploadError && (
+                            <div className="new-task-upload-error">{uploadError}</div>
+                        )}
+
+                        {/* Drop zone overlay */}
+                        {isImageDragging && (
+                            <div className="new-task-dropzone">
+                                <ImagePlus size={24} />
+                                <span>Drop images here</span>
+                            </div>
+                        )}
+
+                        <div className="task-input-row">
+                            <div className={`task-input-wrapper ${isFocused && globalVoiceEnabled ? 'voice-active' : ''}`}>
+                                <textarea
+                                    className="task-input"
+                                    placeholder="Type or speak a task..."
+                                    value={inputValue}
+                                    onChange={(e) => setInputValue(e.target.value)}
+                                    onKeyDown={handleKeyDown}
+                                    onPaste={handlePaste}
+                                    onFocus={handleFocus}
+                                    onBlur={handleBlur}
+                                    rows={1}
+                                    data-input-type="new-task-input"
+                                />
+                                {showInterim && (
+                                    <span className="interim-indicator">{voiceInterimTranscript}</span>
+                                )}
+                            </div>
+                            {/* Image upload button */}
+                            <button
+                                type="button"
+                                onClick={() => fileInputRef.current?.click()}
+                                className="task-image-button"
+                                title="Attach image"
+                            >
+                                <ImagePlus size={16} />
+                            </button>
+                            <input
+                                ref={fileInputRef}
+                                type="file"
+                                accept="image/*"
+                                multiple
+                                onChange={(e) => handleFileSelect(e.target.files)}
+                                style={{ display: 'none' }}
+                            />
+                            {!isWorktree && (
+                                <button
+                                    type="button"
+                                    className={`task-isolate-button${isolate ? ' active' : ''}`}
+                                    title={isolate ? 'Isolate in worktree: ON — click to disable' : 'Isolate in worktree: OFF — click to enable'}
+                                    onClick={() => setIsolate(v => !v)}
+                                >
+                                    <GitBranch size={14} />
+                                </button>
+                            )}
+                            <button
+                                type="submit"
+                                className="task-submit-button"
+                                disabled={!inputValue.trim() && images.length === 0}
+                            >
+                                <Send size={16} />
+                            </button>
+                        </div>
+                    </form>
                 </div>
             )}
 
@@ -2136,8 +2154,17 @@ export function WorkspacePanel({
         taskSortBy,
         lastSelectedTaskByWorkspace,
         pendingDeleteRequest,
-        setPendingDeleteRequest
+        setPendingDeleteRequest,
+        chatViewMode,
+        pinnedWorkspaces,
+        toggleWorkspacePinned,
+        focusMode,
+        setFocusMode
     } = useTaskStore();
+
+    // Minimal chat view strips the sidebar down to a plain indented list:
+    // no card chrome, no badges, no per-row actions. See .workspace-panel.minimal.
+    const isMinimal = chatViewMode === 'minimal';
 
     // Drag and drop state
     const [dragIndex, setDragIndex] = useState<number | null>(null);
@@ -2198,7 +2225,10 @@ export function WorkspacePanel({
     // Worktree child workspaces are excluded from the top-level list and rendered
     // inline within their parent WorkspaceSection instead.
     const sortedWorkspaces = (() => {
-        const parentWorkspaces = workspaces.filter(w => !w.worktreeParentId);
+        let parentWorkspaces = workspaces.filter(w => !w.worktreeParentId);
+        if (focusMode) {
+            parentWorkspaces = parentWorkspaces.filter(w => pinnedWorkspaces.has(w.id));
+        }
         if (workspaceSortBy === 'manual') return parentWorkspaces;
         return [...parentWorkspaces].sort((a, b) => {
             switch (workspaceSortBy) {
@@ -2289,8 +2319,10 @@ export function WorkspacePanel({
     const sortTasks = (taskList: Task[]): Task[] => {
         return taskList.sort((a, b) => {
             if (a.order !== undefined && b.order !== undefined) return a.order - b.order;
-            if (a.order !== undefined) return -1;
-            if (b.order !== undefined) return 1;
+            // A task with no order has never been manually placed, i.e. it is new.
+            // New tasks go to the TOP, above the manually ordered ones.
+            if (a.order === undefined && b.order !== undefined) return -1;
+            if (b.order === undefined && a.order !== undefined) return 1;
             switch (taskSortBy) {
                 case 'last-modified': {
                     const timeA = new Date(a.lastActivity || a.createdAt).getTime();
@@ -2399,7 +2431,7 @@ export function WorkspacePanel({
 
     return (
         <div
-            className={`workspace-panel${isDragOver ? ' drag-over' : ''}`}
+            className={`workspace-panel${isDragOver ? ' drag-over' : ''}${isMinimal ? ' minimal' : ''}`}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
@@ -2413,6 +2445,16 @@ export function WorkspacePanel({
             <div className="workspace-panel-header">
                 <h2>Workspaces</h2>
                 <div className="workspace-panel-header-actions">
+                    {pinnedWorkspaces.size > 0 && (
+                        <button
+                            className={`archived-toggle-button focus-toggle-button ${focusMode ? 'active' : ''}`}
+                            onClick={() => setFocusMode(!focusMode)}
+                            title={focusMode ? 'Show all workspaces' : `Focus on ${pinnedWorkspaces.size} pinned workspace${pinnedWorkspaces.size !== 1 ? 's' : ''}`}
+                        >
+                            <Pin size={16} />
+                            <span className="focus-toggle-count">{pinnedWorkspaces.size}</span>
+                        </button>
+                    )}
                     <button
                         className={`archived-toggle-button ${showArchivedTasks ? 'active' : ''}`}
                         onClick={handleToggleArchivedTasks}
@@ -2420,6 +2462,8 @@ export function WorkspacePanel({
                     >
                         <Archive size={16} />
                     </button>
+                    {!isMinimal && (
+                    <>
                     <div className="column-selector" title="Sort workspaces by">
                         <ArrowDownAZ size={14} className="column-selector-icon" />
                         <select
@@ -2454,6 +2498,8 @@ export function WorkspacePanel({
                     >
                         <Settings size={16} />
                     </button>
+                    </>
+                    )}
                     <button
                         className="add-workspace-button"
                         onClick={handleAddWorkspace}
@@ -2508,7 +2554,17 @@ export function WorkspacePanel({
                 className="workspace-panel-content"
                 style={workspaceColumns > 0 ? { gridTemplateColumns: `repeat(${workspaceColumns}, 1fr)` } : undefined}
             >
-                {sortedWorkspaces.length === 0 ? (
+                {sortedWorkspaces.length === 0 && focusMode && workspaces.length > 0 ? (
+                    <div className="empty-state">
+                        <p>No pinned workspaces to focus on.</p>
+                        <button
+                            className="create-first-workspace-btn"
+                            onClick={() => setFocusMode(false)}
+                        >
+                            <Pin size={14} /> Show All Workspaces
+                        </button>
+                    </div>
+                ) : sortedWorkspaces.length === 0 ? (
                     <div className="empty-state">
                         <p>No workspaces yet.</p>
                         <button
@@ -2575,6 +2631,8 @@ export function WorkspacePanel({
                             onRemoveWorktree={handleRemoveWorktree}
                             onToggleAutoWorktree={handleToggleAutoWorktree}
                             onSelectWorkspace={handleSelectWorkspace}
+                            isPinned={pinnedWorkspaces.has(workspace.id)}
+                            onTogglePin={() => toggleWorkspacePinned(workspace.id)}
                         />
                     ))
                 )}

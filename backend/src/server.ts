@@ -15,6 +15,12 @@ import { WorkspaceStore } from './workspace-store.js';
 import { ConfigStore } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
+import { parseSessionEvents } from './session-events.js';
+import { SessionSummarizer } from './session-summarizer.js';
+import { VerificationStore } from './verification-store.js';
+import type { VerificationVerdict, CapturerId, VerificationCard } from '@claudia/shared';
+import { capture, availableCapturers } from './visual-capture.js';
+import { listSlashCommands } from './slash-commands.js';
 import { setUserId } from './usage-reporter.js';
 import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, Checkpoint, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
@@ -46,6 +52,8 @@ const __dirname = dirname(__filename);
 const VALID_WS_MESSAGE_TYPES = new Set([
     'task:create',
     'task:select',
+    'task:sessionEvents:subscribe',
+    'task:sessionEvents:unsubscribe',
     'task:input',
     'task:resize',
     'task:destroy',
@@ -65,6 +73,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'task:archived:continue',
     'task:archived:delete',
     'workspace:create',
+    'workspace:ensureStandalone',
     'workspace:delete',
     'workspace:reorder',
     'workspace:setOrder',
@@ -80,6 +89,9 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'workspace:recent:list',
     'workspace:recent:clear',
     'workspace:reset',
+    // Opens a socket that waits for a verification-judged broadcast. No
+    // server-side handler needed - the client just listens.
+    'verification:await',
     'shell:create',
     'shell:input',
     'shell:resize',
@@ -521,6 +533,9 @@ export async function createApp(basePath?: string) {
     // CheckpointStore for per-task git snapshots / restore points
     const checkpointStore = new CheckpointStore(basePath);
 
+    // VerificationStore for visual verification cards + their evidence images
+    const verificationStore = new VerificationStore(basePath);
+
     // Wire up tunnel events for broadcasting
     tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
         logger.info('Tunnel ready, broadcasting status', { url: data.url });
@@ -909,6 +924,8 @@ export async function createApp(basePath?: string) {
     // ===== Embedded Shell Terminal Management =====
     const isWindows = process.platform === 'win32';
     const shellProcesses: Map<string, IPty> = new Map(); // workspaceId → PTY
+    // Sentinel key for the standalone terminal that isn't tied to any workspace.
+    const STANDALONE_SHELL_ID = '__standalone__';
 
     function createShellTerminal(workspaceId: string, ws: WebSocket, cols?: number, rows?: number): void {
         // If shell already exists for this workspace, just notify
@@ -925,13 +942,17 @@ export async function createApp(basePath?: string) {
             ? 'powershell.exe'
             : (process.env.SHELL || '/bin/bash');
 
-        logger.info('Creating embedded shell', { workspaceId, shell: shellCmd, cols, rows });
+        const cwd = workspaceId === STANDALONE_SHELL_ID
+            ? (process.env.HOME || process.env.USERPROFILE || os.homedir())
+            : workspaceId;
+
+        logger.info('Creating embedded shell', { workspaceId, shell: shellCmd, cwd, cols, rows });
 
         const pty = ptySpawn(shellCmd, [], {
             name: 'xterm-256color',
             cols: cols || 120,
             rows: rows || 40,
-            cwd: workspaceId,
+            cwd,
             env: { ...process.env, TERM: 'xterm-256color' } as Record<string, string>,
         });
 
@@ -981,6 +1002,11 @@ export async function createApp(basePath?: string) {
             });
         }
     }
+
+    // Chat-view session-event subscription hooks. Assigned further below, next to the
+    // poll loop they drive; declared here so the WebSocket message handler can call them.
+    let subscribeSessionEvents: (ws: WebSocket, taskId: string, offset: number, summarize?: boolean) => void = () => {};
+    let unsubscribeSessionEvents: (ws: WebSocket, taskId?: string) => void = () => {};
 
     // Wire up TaskSpawner events
     // Note: task:created broadcast is handled directly in the task:create WS handler
@@ -1188,6 +1214,198 @@ export async function createApp(basePath?: string) {
     taskSpawner.on('taskTokenUsage', (taskId: string, tokenUsage: TaskTokenUsage) => {
         broadcast({ type: 'task:tokenUsage' as WSMessageType, payload: { taskId, tokenUsage } });
     });
+
+    // ---- Chat view: live session-event tailing -----------------------------------
+    // The chat view renders Claude Code's JSONL transcript rather than PTY bytes.
+    // We tail that file only while a client has the view open for a given task, so
+    // terminal-only users pay nothing. Subscriptions are keyed by task id; the poll
+    // stops as soon as the last subscriber drops.
+    const sessionEventOffsets = new Map<string, number>();
+    const sessionEventSubscribers = new Map<string, Set<WebSocket>>();
+    let sessionEventTimer: NodeJS.Timeout | null = null;
+    const SESSION_EVENT_POLL_MS = 400;
+
+    // Minimal view: batched LLM prose describing what the agent is doing. Only fed
+    // for tasks that actually have a summarize-mode subscriber, so the detailed view
+    // never triggers an LLM call.
+    const sessionSummarizer = new SessionSummarizer();
+    const summarizeSubscribers = new Map<string, Set<WebSocket>>();
+    /** How many trailing events to summarize when opening an already-finished task. */
+    const BACKFILL_EVENT_LIMIT = 40;
+    /** Backdate the backfill so it's eligible on the next drain instead of waiting. */
+    const BATCH_AGE_FORCE_MS = 60000;
+
+    const pollSessionEvents = async () => {
+        for (const [taskId, subscribers] of sessionEventSubscribers) {
+            // Drop closed sockets so an abandoned tab can't keep the poll alive.
+            for (const ws of subscribers) {
+                if (ws.readyState !== WebSocket.OPEN) subscribers.delete(ws);
+            }
+            if (subscribers.size === 0) {
+                sessionEventSubscribers.delete(taskId);
+                sessionEventOffsets.delete(taskId);
+                continue;
+            }
+
+            const task = taskSpawner.getTask(taskId) || taskSpawner.getDisconnectedTask(taskId);
+            if (!task?.sessionId) continue;
+
+            const workspace = workspaceStore.getWorkspaces().find(w => w.id === task.workspaceId);
+            if (!workspace) continue;
+
+            try {
+                const from = sessionEventOffsets.get(taskId) ?? 0;
+                const result = await parseSessionEvents(workspace.id, task.sessionId, from);
+                if (!result) continue;
+
+                sessionEventOffsets.set(taskId, result.offset);
+                if (result.events.length === 0) continue;
+
+                const message = JSON.stringify({
+                    type: 'task:sessionEvents',
+                    payload: { taskId, sessionId: result.sessionId, events: result.events, offset: result.offset },
+                });
+                for (const ws of subscribers) {
+                    if (ws.readyState === WebSocket.OPEN) ws.send(message);
+                }
+
+                // Only accumulate for tasks someone is watching in minimal mode.
+                if ((summarizeSubscribers.get(taskId)?.size ?? 0) > 0) {
+                    sessionSummarizer.add(taskId, result.events, Date.now());
+                }
+            } catch (error) {
+                logger.error('Session event poll failed', { taskId, error: String(error) });
+            }
+        }
+
+        // Emit any summaries whose batch just closed. Deliberately not awaited inside
+        // the per-task loop above so a slow LLM call can't stall event streaming.
+        const summarizeIds = Array.from(summarizeSubscribers.keys());
+        if (summarizeIds.length > 0) {
+            try {
+                const ready = await sessionSummarizer.drain(Date.now(), summarizeIds);
+                if (ready.size > 0) {
+                    logger.info('Session summaries ready', {
+                        tasks: Array.from(ready.keys()),
+                        count: Array.from(ready.values()).reduce((n, v) => n + v.length, 0),
+                    });
+                }
+                for (const [taskId, summaries] of ready) {
+                    const subs = summarizeSubscribers.get(taskId);
+                    if (!subs || summaries.length === 0) continue;
+                    const msg = JSON.stringify({
+                        type: 'task:sessionSummary',
+                        payload: { taskId, summaries },
+                    });
+                    for (const ws of subs) {
+                        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+                    }
+                }
+            } catch (error) {
+                logger.error('Session summary drain failed', { error: String(error) });
+            }
+        }
+
+        if (sessionEventSubscribers.size === 0 && sessionEventTimer) {
+            clearInterval(sessionEventTimer);
+            sessionEventTimer = null;
+        }
+    };
+
+    // setInterval would re-enter pollSessionEvents while a slow summary call is still
+    // awaiting, stacking overlapping runs. Guard so only one poll is ever in flight.
+    let pollInFlight = false;
+    const ensureSessionEventTimer = () => {
+        if (sessionEventTimer) return;
+        sessionEventTimer = setInterval(() => {
+            if (pollInFlight) return;
+            pollInFlight = true;
+            void pollSessionEvents().finally(() => { pollInFlight = false; });
+        }, SESSION_EVENT_POLL_MS);
+    };
+
+    subscribeSessionEvents = (ws: WebSocket, taskId: string, offset: number, summarize = false) => {
+        if (summarize) {
+            let sums = summarizeSubscribers.get(taskId);
+            if (!sums) {
+                sums = new Set();
+                summarizeSubscribers.set(taskId, sums);
+            }
+            const isFirstWatcher = sums.size === 0;
+            sums.add(ws);
+
+            const existing = sessionSummarizer.getSummaries(taskId);
+            if (existing.length > 0) {
+                // Seed the newly-opened view with summaries already generated.
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'task:sessionSummary', payload: { taskId, summaries: existing } }));
+                }
+            } else if (isFirstWatcher) {
+                // Nothing summarized yet. The live poll only sees *newly appended*
+                // events, so an already-finished task would never produce a summary.
+                // Backfill from the transcript the client just loaded.
+                void (async () => {
+                    try {
+                        const task = taskSpawner.getTask(taskId) || taskSpawner.getDisconnectedTask(taskId);
+                        if (!task?.sessionId) return;
+                        const workspace = workspaceStore.getWorkspaces().find(w => w.id === task.workspaceId);
+                        if (!workspace) return;
+
+                        const history = await parseSessionEvents(workspace.id, task.sessionId, 0);
+                        if (!history || history.events.length === 0) return;
+
+                        // Summarize only the tail — older turns aren't what the user is
+                        // watching, and this keeps the backfill to a single LLM call.
+                        const tail = history.events.slice(-BACKFILL_EVENT_LIMIT);
+                        sessionSummarizer.add(taskId, tail, Date.now() - BATCH_AGE_FORCE_MS);
+                        ensureSessionEventTimer();
+                    } catch (error) {
+                        logger.error('Session summary backfill failed', { taskId, error: String(error) });
+                    }
+                })();
+            }
+        }
+
+        let subs = sessionEventSubscribers.get(taskId);
+        if (!subs) {
+            subs = new Set();
+            sessionEventSubscribers.set(taskId, subs);
+        }
+        subs.add(ws);
+        // Trust the client's offset — it has already rendered everything up to it,
+        // so re-sending from 0 would duplicate the transcript.
+        const existing = sessionEventOffsets.get(taskId);
+        if (existing === undefined || offset < existing) {
+            sessionEventOffsets.set(taskId, offset);
+        }
+        ensureSessionEventTimer();
+    };
+
+    unsubscribeSessionEvents = (ws: WebSocket, taskId?: string) => {
+        const taskIds = taskId ? [taskId] : Array.from(sessionEventSubscribers.keys());
+        for (const id of taskIds) {
+            const subs = sessionEventSubscribers.get(id);
+            if (subs) {
+                subs.delete(ws);
+                if (subs.size === 0) {
+                    sessionEventSubscribers.delete(id);
+                    sessionEventOffsets.delete(id);
+                }
+            }
+            const sums = summarizeSubscribers.get(id);
+            if (sums) {
+                sums.delete(ws);
+                if (sums.size === 0) summarizeSubscribers.delete(id);
+            }
+        }
+        // Also cover summarize-only ids when unsubscribing everything for a socket.
+        if (!taskId) {
+            for (const [id, sums] of Array.from(summarizeSubscribers.entries())) {
+                sums.delete(ws);
+                if (sums.size === 0) summarizeSubscribers.delete(id);
+            }
+        }
+    };
 
     // Wire up SupervisorChat events (handles both auto-analysis and user chat)
     supervisorChat.on('message', (message: ChatMessage) => {
@@ -1472,6 +1690,21 @@ export async function createApp(basePath?: string) {
                                 sendWSError(ws, `Failed to activate task: ${errorMessage}`, message.type, 'TASK_SELECT_FAILED');
                             }
                         }
+                        break;
+                    }
+
+                    case 'task:sessionEvents:subscribe': {
+                        // Chat view opened — start tailing this task's JSONL transcript.
+                        const { taskId, offset, summarize } = payload as { taskId?: string; offset?: number; summarize?: boolean };
+                        if (taskId) {
+                            subscribeSessionEvents(ws, taskId, typeof offset === 'number' && offset > 0 ? offset : 0, summarize === true);
+                        }
+                        break;
+                    }
+
+                    case 'task:sessionEvents:unsubscribe': {
+                        const { taskId } = payload as { taskId?: string };
+                        unsubscribeSessionEvents(ws, taskId);
                         break;
                     }
 
@@ -1817,6 +2050,30 @@ export async function createApp(basePath?: string) {
                         }));
                         if (deleted) {
                             broadcast({ type: 'tasks:updated' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
+                        }
+                        break;
+                    }
+
+                    case 'workspace:ensureStandalone': {
+                        // Get-or-create the dedicated directory backing the "Claude Code (no workspace)"
+                        // entry point — a real workspace under the hood so the whole task/chat/terminal
+                        // machinery works unmodified, but resolved server-side so the frontend never
+                        // needs to know the user's home directory or expand `~`.
+                        const standaloneDir = join(process.env.HOME || process.env.USERPROFILE || os.homedir(), '.claudia-standalone');
+                        try {
+                            const existing = workspaceStore.getWorkspace(standaloneDir);
+                            let workspace = existing || workspaceStore.addWorkspace(standaloneDir);
+                            if (!existing) {
+                                workspaceStore.renameWorkspace(standaloneDir, 'Claude Code (no workspace)');
+                                workspace = workspaceStore.getWorkspace(standaloneDir) || workspace;
+                                broadcast({ type: 'workspace:created' as WSMessageType, payload: { workspace } });
+                            } else {
+                                ws.send(JSON.stringify({ type: 'workspace:created', payload: { workspace } }));
+                            }
+                        } catch (error) {
+                            const errorMessage = error instanceof Error ? error.message : 'Failed to prepare standalone workspace';
+                            logger.error('Failed to ensure standalone workspace', { error: errorMessage });
+                            sendWSError(ws, errorMessage, message.type, 'WORKSPACE_CREATE_FAILED');
                         }
                         break;
                     }
@@ -2755,6 +3012,8 @@ export async function createApp(basePath?: string) {
             const reasonStr = reason.toString() || 'no reason';
             console.log(`[Server] Client disconnected - code: ${code}, reason: ${reasonStr}`);
             clients.delete(ws);
+            // Drop any chat-view subscriptions so the poll loop can wind down.
+            unsubscribeSessionEvents(ws);
         });
 
         ws.on('error', (error: Error) => {
@@ -3367,6 +3626,57 @@ export async function createApp(basePath?: string) {
         });
     });
 
+    /**
+     * Resolve and validate a mobile auth token from the query string, falling
+     * back to the active tunnel's token when the request arrives over the
+     * tunnel host. Returns null and sends the 401 when it cannot be validated.
+     */
+    const resolveMobileToken = (req: any, res: any): string | null => {
+        let token = req.query.token as string;
+
+        if (!token) {
+            const host = req.headers.host || '';
+            const tunnelStatus = tunnelManager.getStatus();
+
+            if (isTunnelHost(host) && tunnelStatus.active && tunnelStatus.token) {
+                token = tunnelStatus.token;
+            } else {
+                res.status(401).send('Access denied: Missing token');
+                return null;
+            }
+        }
+
+        // Local tokens ('local-...') are accepted the same way the /voice route
+        // accepts them, so the feed is reachable over the LAN - from a phone on
+        // the same wifi - without having to start a tunnel first. Tunnel tokens
+        // are still validated strictly.
+        const isLocalToken = token.startsWith('local-');
+        if (!isLocalToken && !tunnelManager.validateToken(token)) {
+            res.status(401).send('Access denied: Invalid or expired token');
+            return null;
+        }
+        return token;
+    };
+
+    // ===== Mobile Visual Verification Feed =====
+    // The React app at / is the general-purpose mobile client, but the visual
+    // feed is a purpose-built phone view: full-bleed evidence images, a
+    // horizontally scrolling filmstrip and thumb-sized judge buttons. It is
+    // served directly rather than redirected so that a "tap to confirm" push
+    // notification can deep-link straight to the images.
+    app.get('/mobile/verify', (req, res) => {
+        const token = resolveMobileToken(req, res);
+        if (!token) return;
+
+        const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol;
+        const wsProto = proto === 'https' ? 'wss' : 'ws';
+        const wsUrl = `${wsProto}://${req.headers.host}`;
+
+        logger.info('Serving mobile visual verification feed');
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(getMobilePageHtml(wsUrl, token));
+    });
+
     // ===== Mobile Route (legacy redirect) =====
     // Old /mobile route now redirects to the React app root with the token.
     // The responsive React frontend handles mobile layout automatically.
@@ -3686,6 +3996,315 @@ export async function createApp(basePath?: string) {
             logger.warn(`Could not clean up old uploads dir: ${error}`);
         }
     }
+
+    // ========================================================================
+    // Visual verification: capture evidence, store cards, serve the feed.
+    //
+    // Evidence images are served from the verification store's own directory
+    // rather than the uploads dir above: uploads are transient user->agent
+    // attachments pruned after 24h, whereas evidence is the durable record
+    // behind a verification card and is pruned by count instead.
+    // ========================================================================
+
+    /** Capture a screenshot and file it as a verification card. */
+    app.post('/api/verifications', async (req, res) => {
+        const {
+            taskId,
+            workspaceId,
+            claim,
+            verdict,
+            capturer,
+            target,
+            notes,
+            checkpointId,
+            viewport,
+            readySelector,
+            selector,
+            frames,
+            frameIntervalMs,
+            webglSafe,
+            imagePath,
+        } = req.body || {};
+
+        if (!taskId || !claim) {
+            return res.status(400).json({ error: 'taskId and claim are required' });
+        }
+
+        // A judged card is pushed back into card.taskId's session, so an
+        // unvalidated taskId here is a write primitive into any other task.
+        // Require the task to actually exist; a card naming a task that does
+        // not is meaningless anyway.
+        if (!taskSpawner.getTask(taskId) && !taskSpawner.getDisconnectedTask(taskId)) {
+            return res.status(404).json({ error: `Task '${taskId}' not found` });
+        }
+
+        // The claim is agent-authored and ends up inside a message pasted into
+        // a session. Cap it at the source as well as at render time - a 50MB
+        // claim would otherwise be accepted and stored.
+        if (typeof claim !== 'string' || claim.length > 2000) {
+            return res.status(400).json({ error: 'claim must be a string of at most 2000 characters' });
+        }
+
+        const resolvedVerdict: VerificationVerdict = verdict || 'needs-human-eyes';
+        const resolvedCapturer: CapturerId = capturer || 'playwright-web';
+
+        logger.info(
+            `[Verification] Capture requested: task=${taskId} capturer=${resolvedCapturer} ` +
+            `target=${target || 'n/a'} verdict=${resolvedVerdict}`,
+        );
+
+        try {
+            let images: Array<{ buffer: Buffer; label?: string; width?: number; height?: number }> = [];
+            let warnings: string[] = [];
+            let usedViewport = viewport;
+
+            if (resolvedCapturer === 'manual') {
+                // Agent already has an image on disk (an engine wrote it, or it
+                // was captured by other means) - just file it as evidence.
+                if (!imagePath || !existsSync(imagePath)) {
+                    return res.status(400).json({
+                        error: 'capturer "manual" requires imagePath pointing to an existing image file',
+                    });
+                }
+                images = [{ buffer: readFileSync(imagePath) }];
+            } else {
+                const result = await capture({
+                    capturer: resolvedCapturer,
+                    target: target || '',
+                    viewport,
+                    readySelector,
+                    selector,
+                    frames,
+                    frameIntervalMs,
+                    webglSafe,
+                });
+                images = result.images;
+                warnings = result.warnings;
+                usedViewport = result.viewport;
+            }
+
+            const card = verificationStore.createCard({
+                taskId,
+                workspaceId: workspaceId || '',
+                claim,
+                notes,
+                verdict: resolvedVerdict,
+                capturer: resolvedCapturer,
+                checkpointId,
+                target,
+                viewport: usedViewport,
+                images,
+            });
+
+            // Push to any connected clients so the mobile feed updates live.
+            broadcast({ type: 'verification-created', payload: { card } } as any);
+
+            res.json({ ...card, warnings });
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            logger.error(`[Verification] Capture failed: ${msg}`);
+            res.status(500).json({ error: msg });
+        }
+    });
+
+    /** The feed: cards across a workspace (or everything), newest first. */
+    app.get('/api/verifications', (req, res) => {
+        const { workspaceId, taskId, pending } = req.query as Record<string, string>;
+        if (taskId) {
+            return res.json(verificationStore.getCardsForTask(taskId));
+        }
+        if (pending === 'true') {
+            return res.json(verificationStore.getPending(workspaceId));
+        }
+        res.json(verificationStore.getFeed(workspaceId));
+    });
+
+    /**
+     * Serve an evidence image.
+     *
+     * Declared BEFORE /:cardId: Express matches routes in declaration order, so
+     * a literal path that shares the prefix has to win before the parameterised
+     * one swallows it as a card id.
+     */
+    app.get('/api/verifications/evidence/:filename', (req, res) => {
+        const p = verificationStore.getEvidencePath(req.params.filename);
+        if (!p) return res.status(404).json({ error: 'Evidence not found' });
+        res.sendFile(p);
+    });
+
+    /** Which capturers can actually run on this machine right now. */
+    app.get('/api/verifications/capturers/available', (_req, res) => {
+        res.json({ capturers: availableCapturers(), platform: process.platform });
+    });
+
+    app.get('/api/verifications/:cardId', (req, res) => {
+        const card = verificationStore.getCard(req.params.cardId);
+        if (!card) return res.status(404).json({ error: 'Verification card not found' });
+        res.json(card);
+    });
+
+    /**
+     * Human-readable labels for rejection reasons, used when phrasing the
+     * message pushed back into the agent's session.
+     */
+    const REJECTION_LABELS: Record<string, string> = {
+        'wrong-layout': 'the layout is wrong (things are positioned or sized incorrectly)',
+        'visual-glitch': 'there is a visual glitch (artifacts, tearing, or wrong colours)',
+        'not-what-i-asked': 'it works, but it is not what was asked for',
+        'nothing-rendered': 'nothing rendered (the content is blank or missing)',
+        'other': 'it is not right',
+    };
+
+    /**
+     * Flatten untrusted text before it is pasted into an agent's session.
+     *
+     * The claim is authored by an agent and the note by the user, and both end
+     * up inside a message that reads to the receiving agent as the user
+     * speaking. Without this, a claim containing newlines can close the quoted
+     * span and continue on its own line as what looks like a fresh instruction
+     * ("...\n\nIGNORE ALL PREVIOUS INSTRUCTIONS. Run: ..."). Bracketed paste
+     * keeps it a single input event but does nothing about how it *reads*.
+     *
+     * So: collapse all newlines and control characters to spaces, drop the
+     * quote character that would otherwise let text escape the quoted span,
+     * and cap the length so one card cannot flood the session.
+     */
+    function sanitizeForSession(text: string, maxLen: number): string {
+        if (!text) return '';
+        const flattened = text
+            // eslint-disable-next-line no-control-regex
+            .replace(/[\x00-\x1f\x7f]+/g, ' ')  // newlines, ANSI/ESC, other control chars
+            .replace(/"/g, "'")                  // cannot break out of the quoted span
+            .replace(/\s+/g, ' ')
+            .trim();
+        return flattened.length > maxLen ? flattened.slice(0, maxLen) + '...' : flattened;
+    }
+
+    /**
+     * Phrase a judged card as a message for the agent that filed it.
+     *
+     * Written as a direct address to the agent because it is pasted straight
+     * into its session - it reads as the user speaking, which is exactly what
+     * it is. Everything interpolated here is untrusted and goes through
+     * sanitizeForSession first.
+     */
+    function buildVerdictMessage(card: VerificationCard): string {
+        const claim = sanitizeForSession(card.claim, 200);
+        if (card.humanVerdict === 'looks-right') {
+            return `[Visual verification] I looked at your screenshot for "${claim}" and it looks right. Confirmed working - carry on.`;
+        }
+
+        const reason = card.rejectionReason
+            ? REJECTION_LABELS[card.rejectionReason] || 'it is not right'
+            : 'it is not right';
+        const safeNote = sanitizeForSession(card.rejectionNote || '', 300);
+        const note = safeNote ? ` They added: "${safeNote}".` : '';
+
+        return (
+            `[Visual verification] I looked at your screenshot for "${claim}" and it does NOT look right: ` +
+            `${reason}.${note} Please investigate and fix it, then capture fresh evidence with ` +
+            `claudia_verify_visually. Do not just re-file the same screenshot.`
+        );
+    }
+
+    /**
+     * Deliver a judged card back to the task that filed it.
+     *
+     * Best-effort and deliberately non-blocking for the caller: the phone must
+     * never hang because a task is mid-reconnect. Returns whether the message
+     * was actually written.
+     */
+    function notifyTaskOfVerdict(card: VerificationCard): boolean {
+        if (!card.taskId) return false;
+
+        // writeToTask returns silently for a task it cannot find - it logs and
+        // moves on rather than throwing. So a try/catch alone would report
+        // success for a verdict that went nowhere. Check the task is actually
+        // known first, and only then claim delivery.
+        //
+        // getTask covers live tasks; disconnected/exited ones are reconnected by
+        // writeToTask itself, so they are legitimate targets too.
+        const known = taskSpawner.getTask(card.taskId) || taskSpawner.getDisconnectedTask(card.taskId);
+        if (!known) {
+            logger.warn(
+                `[Verification] Task ${card.taskId} no longer exists - verdict for card ${card.id} not delivered`,
+            );
+            return false;
+        }
+
+        // markNotified is the idempotency guard - it returns false if this card
+        // was already delivered, so re-judging cannot spam the session. Claimed
+        // only after we know there is a task to deliver to, so a failed push
+        // stays retryable.
+        if (!verificationStore.markNotified(card.id)) {
+            logger.info(`[Verification] Card ${card.id} already notified, skipping push`);
+            return false;
+        }
+
+        try {
+            const message = buildVerdictMessage(card);
+            taskSpawner.writeToTask(card.taskId, message + '\r', 'verification-feed');
+            logger.info(
+                `[Verification] Pushed "${card.humanVerdict}" for card ${card.id} into task ${card.taskId}`,
+            );
+            return true;
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            logger.warn(`[Verification] Could not push verdict into task ${card.taskId}: ${msg}`);
+            return false;
+        }
+    }
+
+    /** Record the user's judgement from the mobile feed. */
+    app.post('/api/verifications/:cardId/judge', (req, res) => {
+        const { humanVerdict, rejectionReason, rejectionNote, notify } = req.body || {};
+        if (humanVerdict !== 'looks-right' && humanVerdict !== 'looks-wrong') {
+            return res.status(400).json({
+                error: 'humanVerdict must be "looks-right" or "looks-wrong"',
+            });
+        }
+
+        const VALID_REASONS = [
+            'wrong-layout', 'visual-glitch', 'not-what-i-asked', 'nothing-rendered', 'other',
+        ];
+        if (rejectionReason && !VALID_REASONS.includes(rejectionReason)) {
+            return res.status(400).json({
+                error: `rejectionReason must be one of: ${VALID_REASONS.join(', ')}`,
+            });
+        }
+
+        const card = verificationStore.judgeCard(req.params.cardId, humanVerdict, {
+            reason: rejectionReason,
+            note: typeof rejectionNote === 'string' ? rejectionNote.slice(0, 500) : undefined,
+        });
+        if (!card) return res.status(404).json({ error: 'Verification card not found' });
+
+        logger.info(`[Verification] Card ${card.id} judged "${humanVerdict}" by user`);
+
+        // Broadcast first so a waiting claudia_await_verdict resolves promptly,
+        // and so the feed updates on every connected client.
+        broadcast({ type: 'verification-judged', payload: { card } } as any);
+
+        // Then push into the session. Opt out with notify:false - the awaiting
+        // tool already returns the verdict to the agent, so pushing as well
+        // would tell it the same thing twice.
+        // Opt out on anything falsey-looking, not just === false. A client that
+        // JSON-stringifies its booleans sends "false", and getting the opposite
+        // of what it asked for here means an unwanted paste into a live session.
+        const suppressNotify = notify === false || notify === 'false' || notify === 0;
+        let notified = false;
+        if (!suppressNotify) {
+            notified = notifyTaskOfVerdict(card);
+        }
+
+        res.json({ ...card, notified });
+    });
+
+    app.delete('/api/verifications/:cardId', (req, res) => {
+        const ok = verificationStore.deleteCard(req.params.cardId);
+        if (!ok) return res.status(404).json({ error: 'Verification card not found' });
+        res.json({ success: true });
+    });
 
     // Serve cached images for frontend preview
     app.get('/api/cache/images/:filename', (req, res) => {
@@ -5473,8 +6092,9 @@ export async function createApp(basePath?: string) {
             }
 
             // If MCP servers or skipPermissions were updated, sync .mcp.json and
-            // settings.local.json to all workspaces. skipPermissions affects the
-            // allow list written to settings.local.json (allow: ['*'] vs ['mcp__*']).
+            // settings.local.json to all workspaces. skipPermissions toggles
+            // permissions.defaultMode ('bypassPermissions') in settings.local.json;
+            // the allow list stays ['mcp__*'] either way (bare '*' is rejected).
             if (validation.data!.mcpServers !== undefined || validation.data!.skipPermissions !== undefined) {
                 const workspaces = workspaceStore.getWorkspaces();
                 if (workspaces.length > 0) {
@@ -6092,6 +6712,75 @@ export async function createApp(basePath?: string) {
         console.log(`[Server] Synced rules to ${claudeMdPath}`);
     }
 
+    // Structured session events for the chat view. Unlike /conversation (text only),
+    // this includes tool calls and their results so the UI can draw tool cards.
+    // `offset` enables incremental polling: pass back the offset from the last response
+    // to receive only events appended since.
+    app.get('/api/tasks/:taskId/session-events', async (req, res) => {
+        try {
+            const { taskId } = req.params;
+            const task = taskSpawner.getTask(taskId) || taskSpawner.getDisconnectedTask(taskId);
+
+            if (!task) {
+                return res.status(404).json({ error: 'Task not found' });
+            }
+            if (!task.sessionId) {
+                // Session id is captured asynchronously after spawn, so this is an
+                // expected transient state for a freshly created task, not an error.
+                return res.json({ sessionId: null, events: [], offset: 0, pending: true });
+            }
+
+            const workspace = workspaceStore.getWorkspaces().find(w => w.id === task.workspaceId);
+            if (!workspace) {
+                return res.status(404).json({ error: 'Workspace not found' });
+            }
+
+            const offset = Number.parseInt(String(req.query.offset ?? '0'), 10);
+            const result = await parseSessionEvents(
+                workspace.id,
+                task.sessionId,
+                Number.isFinite(offset) && offset > 0 ? offset : 0
+            );
+
+            if (!result) {
+                return res.json({ sessionId: task.sessionId, events: [], offset: 0, pending: true });
+            }
+
+            res.json(result);
+        } catch (error) {
+            logger.error('Failed to get session events', { error: String(error) });
+            res.status(500).json({ error: 'Failed to get session events' });
+        }
+    });
+
+    /**
+     * Slash commands available to the chat composer.
+     *
+     * Accepts either ?taskId= (resolve the workspace from the task) or ?workspacePath=
+     * directly. Project-level commands and skills depend on the workspace, so without
+     * one this returns only user, plugin and built-in commands.
+     */
+    app.get('/api/slash-commands', (req, res) => {
+        try {
+            let workspacePath = typeof req.query.workspacePath === 'string' ? req.query.workspacePath : undefined;
+
+            const taskId = typeof req.query.taskId === 'string' ? req.query.taskId : undefined;
+            if (!workspacePath && taskId) {
+                const task = taskSpawner.getTask(taskId) || taskSpawner.getDisconnectedTask(taskId);
+                // Workspace ids are the absolute path, but resolve through the store so a
+                // worktree task points at the worktree it actually runs in.
+                const workspace = task && workspaceStore.getWorkspaces().find(w => w.id === task.workspaceId);
+                if (workspace) workspacePath = workspace.id;
+            }
+
+            const commands = listSlashCommands(workspacePath);
+            res.json({ commands });
+        } catch (error) {
+            logger.error('Failed to list slash commands', { error: String(error) });
+            res.status(500).json({ error: 'Failed to list slash commands' });
+        }
+    });
+
     // Conversation History API
     app.get('/api/tasks/:taskId/conversation', async (req, res) => {
         try {
@@ -6560,5 +7249,39 @@ Guidelines:
     // Note: SIGINT/SIGTERM handlers are set up in index.ts to avoid duplicate handlers
     // The gracefulShutdown function is exported for use by the restart endpoint
 
-    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, tunnelManager };
+    /**
+     * Teardown for integration tests. gracefulShutdown() cannot be used there:
+     * it ends in process.exit(), which would take the test runner with it.
+     *
+     * This releases everything createApp() holds open — timers, PTYs, sockets —
+     * so a suite can boot many servers in one process without leaking handles
+     * or leaving vitest hanging on an idle event loop.
+     */
+    async function shutdownForTests(): Promise<void> {
+        clearInterval(heartbeatInterval);
+        clearInterval(prInfoInterval);
+        clearInterval(worktreeScanInterval);
+
+        try { await tunnelManager.stop(); } catch { /* best effort */ }
+
+        // Kills child PTYs and clears the spawner's own intervals.
+        taskSpawner.destroy();
+
+        // terminate() rather than close(): teardown must not wait on a close
+        // handshake from a socket whose peer is already gone.
+        for (const client of clients) {
+            try { client.terminate(); } catch { /* already gone */ }
+        }
+        clients.clear();
+
+        await new Promise<void>(resolve => wss.close(() => resolve()));
+        await new Promise<void>(resolve => {
+            // close() on a server that never listened invokes its callback with
+            // an error; skipping it keeps teardown deterministic.
+            if (!server.listening) return resolve();
+            server.close(() => resolve());
+        });
+    }
+
+    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, shutdownForTests, tunnelManager };
 }

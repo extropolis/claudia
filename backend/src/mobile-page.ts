@@ -180,6 +180,302 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
             -webkit-overflow-scrolling: touch;
         }
 
+        /* ===== Visual verification feed ===== */
+        .view-tabs {
+            display: flex;
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+
+        .view-tab {
+            flex: 1;
+            padding: 12px 8px;
+            background: none;
+            border: none;
+            border-bottom: 2px solid transparent;
+            color: var(--text-muted);
+            font-size: 14px;
+            font-weight: 500;
+            font-family: inherit;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+
+        .view-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+        /* Count of cards still awaiting a human decision */
+        .pending-badge {
+            min-width: 18px;
+            padding: 0 5px;
+            border-radius: 9px;
+            background: var(--accent);
+            color: var(--bg);
+            font-size: 11px;
+            font-weight: 700;
+            line-height: 18px;
+            text-align: center;
+        }
+        .pending-badge.hidden { display: none; }
+
+        .verify-feed {
+            flex: 1;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            display: none;
+            padding: 12px;
+            gap: 12px;
+            flex-direction: column;
+        }
+        .verify-feed.active { display: flex; }
+
+        .verify-card {
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .verify-card-top {
+            padding: 10px 12px;
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+        }
+
+        .verify-claim {
+            flex: 1;
+            font-size: 14px;
+            line-height: 1.35;
+            word-break: break-word;
+        }
+
+        .verdict-pill {
+            flex-shrink: 0;
+            padding: 3px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .verdict-pill.pass { background: rgba(63, 185, 80, 0.15); color: #3fb950; }
+        .verdict-pill.fail { background: rgba(248, 81, 73, 0.15); color: #f85149; }
+        .verdict-pill.needs-human-eyes { background: rgba(210, 153, 34, 0.15); color: #d29922; }
+
+        /* Evidence strip: horizontal scroll so filmstrips stay one row */
+        .evidence-strip {
+            display: flex;
+            gap: 8px;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            padding: 0 12px 10px;
+        }
+
+        .evidence-item { flex-shrink: 0; max-width: 100%; }
+
+        .evidence-item img {
+            display: block;
+            max-width: 78vw;
+            max-height: 46vh;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: #000;
+        }
+
+        .evidence-label {
+            margin-top: 3px;
+            font-size: 11px;
+            color: var(--text-muted);
+            text-align: center;
+        }
+
+        .verify-meta {
+            padding: 0 12px 10px;
+            font-size: 11px;
+            color: var(--text-muted);
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px 10px;
+        }
+
+        .verify-notes {
+            padding: 0 12px 10px;
+            font-size: 12px;
+            color: var(--text-muted);
+            line-height: 1.4;
+        }
+
+        .judge-row {
+            display: flex;
+            gap: 8px;
+            padding: 10px 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        .judge-btn {
+            flex: 1;
+            padding: 11px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            border: 1px solid var(--border);
+            background: none;
+        }
+        .judge-btn.right { color: #3fb950; border-color: rgba(63, 185, 80, 0.4); }
+        .judge-btn.right:active { background: rgba(63, 185, 80, 0.15); }
+        .judge-btn.wrong { color: #f85149; border-color: rgba(248, 81, 73, 0.4); }
+        .judge-btn.wrong:active { background: rgba(248, 81, 73, 0.15); }
+
+        .judged-row {
+            padding: 9px 12px;
+            border-top: 1px solid var(--border);
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .judged-row.looks-right { color: #3fb950; }
+        .judged-row.looks-wrong { color: #f85149; }
+
+        /* Rejection reason sheet - slides up after "Looks wrong" so the
+           thumbs-down carries something the agent can act on. */
+        .reason-sheet {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 210;
+            background: rgba(0, 0, 0, 0.6);
+            align-items: flex-end;
+        }
+        .reason-sheet.active { display: flex; }
+
+        .reason-panel {
+            width: 100%;
+            background: var(--bg);
+            border-top-left-radius: 16px;
+            border-top-right-radius: 16px;
+            border-top: 1px solid var(--border);
+            padding: 16px 14px calc(16px + env(safe-area-inset-bottom, 0px));
+            max-height: 85vh;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .reason-title {
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 3px;
+        }
+        .reason-sub {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 13px;
+            line-height: 1.35;
+        }
+
+        .reason-opt {
+            display: block;
+            width: 100%;
+            text-align: left;
+            padding: 13px 12px;
+            margin-bottom: 7px;
+            border-radius: 9px;
+            border: 1px solid var(--border);
+            background: none;
+            color: var(--text);
+            font-size: 14px;
+            font-family: inherit;
+            cursor: pointer;
+        }
+        .reason-opt.selected {
+            border-color: #f85149;
+            background: rgba(248, 81, 73, 0.12);
+            color: #f85149;
+            font-weight: 600;
+        }
+
+        .reason-note {
+            width: 100%;
+            box-sizing: border-box;
+            margin: 5px 0 12px;
+            padding: 11px 12px;
+            border-radius: 9px;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text);
+            font-size: 14px;
+            font-family: inherit;
+            resize: none;
+        }
+        .reason-note::placeholder { color: var(--text-muted); }
+
+        .reason-actions { display: flex; gap: 8px; }
+        .reason-actions button {
+            flex: 1;
+            padding: 13px;
+            border-radius: 9px;
+            font-size: 14px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            border: 1px solid var(--border);
+            background: none;
+            color: var(--text-muted);
+        }
+        .reason-actions .reason-submit {
+            background: #f85149;
+            border-color: #f85149;
+            color: #fff;
+        }
+
+        /* Confirmation that the verdict reached the agent */
+        .verify-toast {
+            position: fixed;
+            left: 50%;
+            bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+            transform: translateX(-50%) translateY(8px);
+            z-index: 220;
+            padding: 10px 16px;
+            border-radius: 20px;
+            background: rgba(28, 28, 30, 0.97);
+            border: 1px solid var(--border);
+            color: var(--text);
+            font-size: 13px;
+            font-weight: 500;
+            white-space: nowrap;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease, transform 0.2s ease;
+        }
+        .verify-toast.active {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        /* Shown on a card once its verdict reached the agent */
+        .notified-hint {
+            padding: 0 12px 10px;
+            font-size: 11px;
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        /* Fullscreen evidence viewer */
+        .evidence-viewer {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 200;
+            background: rgba(0, 0, 0, 0.94);
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+        }
+        .evidence-viewer.active { display: flex; }
+        .evidence-viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }
+
         .empty-state {
             display: flex;
             align-items: center;
@@ -557,8 +853,42 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
         <select class="workspace-select" id="workspaceSelect"></select>
     </div>
 
+    <div class="view-tabs">
+        <button class="view-tab active" id="tabTasks" data-view="tasks">Tasks</button>
+        <button class="view-tab" id="tabVerify" data-view="verify">
+            Verified
+            <span class="pending-badge hidden" id="pendingBadge">0</span>
+        </button>
+    </div>
+
     <div class="task-list" id="taskList">
         <div class="empty-state" id="emptyState">Connecting...</div>
+    </div>
+
+    <div class="verify-feed" id="verifyFeed">
+        <div class="empty-state" id="verifyEmpty">No visual verifications yet.</div>
+    </div>
+
+    <div class="evidence-viewer" id="evidenceViewer">
+        <img id="evidenceViewerImg" alt="" />
+    </div>
+
+    <div class="reason-sheet" id="reasonSheet">
+        <div class="reason-panel">
+            <div class="reason-title">What's wrong with it?</div>
+            <div class="reason-sub">This goes back to the agent so it knows what to fix.</div>
+            <button class="reason-opt" data-reason="nothing-rendered">Nothing rendered &mdash; it's blank</button>
+            <button class="reason-opt" data-reason="wrong-layout">Layout is wrong</button>
+            <button class="reason-opt" data-reason="visual-glitch">Visual glitch or artifacts</button>
+            <button class="reason-opt" data-reason="not-what-i-asked">Not what I asked for</button>
+            <button class="reason-opt" data-reason="other">Something else</button>
+            <textarea class="reason-note" id="reasonNote" rows="2" maxlength="500"
+                placeholder="Add detail (optional)"></textarea>
+            <div class="reason-actions">
+                <button id="reasonCancel">Cancel</button>
+                <button class="reason-submit" id="reasonSubmit">Send to agent</button>
+            </div>
+        </div>
     </div>
 
     <div class="voice-overlay" id="voiceOverlay">
@@ -654,6 +984,17 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
         var voiceSendBtn = document.getElementById('voiceSendBtn');
         var voiceClearBtn = document.getElementById('voiceClearBtn');
         var noSpeechBanner = document.getElementById('noSpeechBanner');
+        var tabTasks = document.getElementById('tabTasks');
+        var tabVerify = document.getElementById('tabVerify');
+        var pendingBadge = document.getElementById('pendingBadge');
+        var verifyFeedEl = document.getElementById('verifyFeed');
+        var verifyEmpty = document.getElementById('verifyEmpty');
+        var evidenceViewer = document.getElementById('evidenceViewer');
+        var evidenceViewerImg = document.getElementById('evidenceViewerImg');
+        var reasonSheet = document.getElementById('reasonSheet');
+        var reasonNote = document.getElementById('reasonNote');
+        var reasonCancel = document.getElementById('reasonCancel');
+        var reasonSubmit = document.getElementById('reasonSubmit');
 
         // ===== Utilities =====
         function truncate(str, len) {
@@ -1085,6 +1426,7 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
             try { localStorage.setItem('claudia-mobile-workspace', currentWorkspaceId); } catch(e) {}
             selectedTaskId = null;
             autoSelectFirstTask();
+            renderVerifyFeed();
         });
 
         // ===== WebSocket =====
@@ -1240,6 +1582,17 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
                     }
                     break;
 
+                case 'verification-created':
+                case 'verification-judged':
+                    // A card arriving while the user is on the Tasks tab still
+                    // bumps the pending badge, which is the whole point of the
+                    // feed: you find out without going looking.
+                    if (p.card) {
+                        upsertVerifyCard(p.card);
+                        renderVerifyFeed();
+                    }
+                    break;
+
                 case 'supervisor:chat:response':
                     // Used for voice summaries — check if tagged with a taskId
                     if (p.message && p.message.taskId && pendingVoiceSummaries[p.message.taskId]) {
@@ -1255,6 +1608,392 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
                     break;
             }
         }
+
+        // ===== Visual Verification Feed =====
+        // Cards arrive two ways: an initial GET on load, and live over the
+        // WebSocket. Both funnel through upsertVerifyCard so a card that is
+        // judged after it was fetched replaces the stale copy rather than
+        // appearing twice.
+        var verifyCards = [];
+        var activeView = 'tasks';
+
+        // The API routes are not themselves token-gated (only the page HTML is,
+        // see resolveMobileToken in server.ts), but the token is appended anyway
+        // so these calls keep working if that gate is ever tightened.
+        function verifyApiUrl(path) {
+            return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
+        }
+
+        function evidenceUrl(filename) {
+            return verifyApiUrl('/api/verifications/evidence/' + encodeURIComponent(filename));
+        }
+
+        /** Insert a card, or replace it in place if we already know about it. */
+        function upsertVerifyCard(card) {
+            if (!card || !card.id) return;
+            var idx = verifyCards.findIndex(function(c) { return c.id === card.id; });
+            if (idx >= 0) {
+                verifyCards[idx] = card;
+            } else {
+                verifyCards.push(card);
+            }
+        }
+
+        function getFilteredVerifyCards() {
+            var list = verifyCards.filter(function(c) {
+                return !currentWorkspaceId || !c.workspaceId || c.workspaceId === currentWorkspaceId;
+            });
+            // Newest first, matching the order the feed endpoint returns.
+            return list.sort(function(a, b) {
+                return String(b.timestamp).localeCompare(String(a.timestamp));
+            });
+        }
+
+        /** Cards the agent could not call itself, still awaiting the user. */
+        function pendingVerifyCount() {
+            return getFilteredVerifyCards().filter(function(c) {
+                return c.verdict === 'needs-human-eyes' && !c.humanVerdict;
+            }).length;
+        }
+
+        function updatePendingBadge() {
+            var count = pendingVerifyCount();
+            pendingBadge.textContent = String(count);
+            if (count > 0) pendingBadge.classList.remove('hidden');
+            else pendingBadge.classList.add('hidden');
+        }
+
+        function verdictLabel(verdict) {
+            var map = {
+                pass: 'Pass',
+                fail: 'Fail',
+                'needs-human-eyes': 'Needs eyes'
+            };
+            return map[verdict] || verdict || 'Unknown';
+        }
+
+        function formatVerifyTime(iso) {
+            if (!iso) return '';
+            var d = new Date(iso);
+            if (isNaN(d.getTime())) return '';
+            return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        }
+
+        function buildVerifyCardEl(card) {
+            var el = document.createElement('div');
+            el.className = 'verify-card';
+            el.setAttribute('data-card-id', card.id);
+
+            var top = document.createElement('div');
+            top.className = 'verify-card-top';
+            var claim = document.createElement('div');
+            claim.className = 'verify-claim';
+            claim.textContent = card.claim || '(no claim)';
+            var pill = document.createElement('span');
+            pill.className = 'verdict-pill ' + (card.verdict || '');
+            pill.textContent = verdictLabel(card.verdict);
+            top.appendChild(claim);
+            top.appendChild(pill);
+            el.appendChild(top);
+
+            var evidence = card.evidence || [];
+            if (evidence.length > 0) {
+                var strip = document.createElement('div');
+                strip.className = 'evidence-strip';
+                evidence.forEach(function(ev) {
+                    var item = document.createElement('div');
+                    item.className = 'evidence-item';
+                    var img = document.createElement('img');
+                    img.src = evidenceUrl(ev.filename);
+                    img.alt = ev.label || card.claim || 'evidence';
+                    img.loading = 'lazy';
+                    // Tap any thumbnail to inspect it full-bleed - the images are
+                    // downscaled hard in the strip and detail is the whole point.
+                    img.addEventListener('click', function() {
+                        openEvidenceViewer(img.src, img.alt);
+                    });
+                    item.appendChild(img);
+                    if (ev.label) {
+                        var label = document.createElement('div');
+                        label.className = 'evidence-label';
+                        label.textContent = ev.label;
+                        item.appendChild(label);
+                    }
+                    strip.appendChild(item);
+                });
+                el.appendChild(strip);
+            }
+
+            if (card.notes) {
+                var notes = document.createElement('div');
+                notes.className = 'verify-notes';
+                notes.textContent = card.notes;
+                el.appendChild(notes);
+            }
+
+            var meta = document.createElement('div');
+            meta.className = 'verify-meta';
+            var bits = [];
+            var time = formatVerifyTime(card.timestamp);
+            if (time) bits.push(time);
+            if (card.capturer) bits.push(card.capturer);
+            if (card.target) bits.push(truncate(card.target, 40));
+            if (card.viewport && card.viewport.width) {
+                bits.push(card.viewport.width + '×' + card.viewport.height);
+            }
+            bits.forEach(function(b) {
+                var span = document.createElement('span');
+                span.textContent = b;
+                meta.appendChild(span);
+            });
+            el.appendChild(meta);
+
+            if (card.humanVerdict) {
+                var judged = document.createElement('div');
+                judged.className = 'judged-row ' + card.humanVerdict;
+                if (card.humanVerdict === 'looks-right') {
+                    judged.textContent = '✓ You marked this as looking right';
+                } else {
+                    judged.textContent = '✗ Sent back to the agent'
+                        + (card.rejectionReason ? ' — ' + reasonLabel(card.rejectionReason) : '');
+                }
+                el.appendChild(judged);
+
+                if (card.rejectionNote) {
+                    var noteEl = document.createElement('div');
+                    noteEl.className = 'verify-notes';
+                    noteEl.textContent = '"' + card.rejectionNote + '"';
+                    el.appendChild(noteEl);
+                }
+
+                // Confirms the loop actually closed - the agent was told.
+                if (card.notifiedAt) {
+                    var hint = document.createElement('div');
+                    hint.className = 'notified-hint';
+                    hint.textContent = 'Agent notified';
+                    el.appendChild(hint);
+                }
+            } else {
+                var row = document.createElement('div');
+                row.className = 'judge-row';
+                row.appendChild(buildJudgeBtn(card.id, 'looks-right', 'right', 'Looks right'));
+                row.appendChild(buildJudgeBtn(card.id, 'looks-wrong', 'wrong', 'Looks wrong'));
+                el.appendChild(row);
+            }
+
+            return el;
+        }
+
+        function reasonLabel(reason) {
+            var map = {
+                'wrong-layout': 'layout is wrong',
+                'visual-glitch': 'visual glitch',
+                'not-what-i-asked': 'not what I asked for',
+                'nothing-rendered': 'nothing rendered',
+                'other': 'other'
+            };
+            return map[reason] || reason;
+        }
+
+        function buildJudgeBtn(cardId, humanVerdict, cls, label) {
+            var btn = document.createElement('button');
+            btn.className = 'judge-btn ' + cls;
+            btn.textContent = label;
+            btn.addEventListener('click', function() {
+                if (humanVerdict === 'looks-wrong') {
+                    // Ask what's wrong first - a bare rejection tells the agent
+                    // nothing it can act on.
+                    openReasonSheet(cardId, btn);
+                } else {
+                    judgeVerifyCard(cardId, humanVerdict, btn, null);
+                }
+            });
+            return btn;
+        }
+
+        // ===== Toast =====
+        var verifyToastEl = null;
+        var verifyToastTimer = null;
+
+        function showVerifyToast(text) {
+            if (!verifyToastEl) {
+                verifyToastEl = document.createElement('div');
+                verifyToastEl.className = 'verify-toast';
+                document.body.appendChild(verifyToastEl);
+            }
+            verifyToastEl.textContent = text;
+            verifyToastEl.classList.add('active');
+            if (verifyToastTimer) clearTimeout(verifyToastTimer);
+            verifyToastTimer = setTimeout(function() {
+                verifyToastEl.classList.remove('active');
+            }, 2200);
+        }
+
+        // ===== Rejection reason sheet =====
+        var reasonTargetCardId = null;
+        var reasonTargetBtn = null;
+        var selectedReason = null;
+
+        function openReasonSheet(cardId, btn) {
+            reasonTargetCardId = cardId;
+            reasonTargetBtn = btn;
+            selectedReason = null;
+            reasonNote.value = '';
+            var opts = reasonSheet.querySelectorAll('.reason-opt');
+            for (var i = 0; i < opts.length; i++) opts[i].classList.remove('selected');
+            reasonSheet.classList.add('active');
+        }
+
+        function closeReasonSheet() {
+            reasonSheet.classList.remove('active');
+            reasonTargetCardId = null;
+            reasonTargetBtn = null;
+            selectedReason = null;
+        }
+
+        (function wireReasonSheet() {
+            var opts = reasonSheet.querySelectorAll('.reason-opt');
+            for (var i = 0; i < opts.length; i++) {
+                (function(opt) {
+                    opt.addEventListener('click', function() {
+                        for (var j = 0; j < opts.length; j++) opts[j].classList.remove('selected');
+                        opt.classList.add('selected');
+                        selectedReason = opt.getAttribute('data-reason');
+                    });
+                })(opts[i]);
+            }
+
+            reasonCancel.addEventListener('click', closeReasonSheet);
+
+            // Tapping the dimmed backdrop cancels; taps inside the panel must not.
+            reasonSheet.addEventListener('click', function(e) {
+                if (e.target === reasonSheet) closeReasonSheet();
+            });
+
+            reasonSubmit.addEventListener('click', function() {
+                var cardId = reasonTargetCardId;
+                var btn = reasonTargetBtn;
+                // A reason is optional - never block sending the rejection.
+                var payload = {
+                    reason: selectedReason || 'other',
+                    note: reasonNote.value.trim()
+                };
+                closeReasonSheet();
+                if (cardId) judgeVerifyCard(cardId, 'looks-wrong', btn, payload);
+            });
+        })();
+
+        function renderVerifyFeed() {
+            var cards = getFilteredVerifyCards();
+
+            // Clear everything except the empty-state node, which is reused.
+            var existing = verifyFeedEl.querySelectorAll('.verify-card');
+            for (var i = 0; i < existing.length; i++) {
+                existing[i].remove();
+            }
+
+            if (cards.length === 0) {
+                verifyEmpty.style.display = '';
+            } else {
+                verifyEmpty.style.display = 'none';
+                cards.forEach(function(card) {
+                    verifyFeedEl.appendChild(buildVerifyCardEl(card));
+                });
+            }
+
+            updatePendingBadge();
+        }
+
+        function judgeVerifyCard(cardId, humanVerdict, btn, rejection) {
+            // Disable both buttons in the row so a double-tap cannot double-post.
+            var row = btn ? btn.parentElement : null;
+            if (row) {
+                var btns = row.querySelectorAll('.judge-btn');
+                for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
+            }
+
+            var body = { humanVerdict: humanVerdict };
+            if (rejection) {
+                body.rejectionReason = rejection.reason;
+                if (rejection.note) body.rejectionNote = rejection.note;
+            }
+
+            console.log('[Mobile] Judging card', cardId, humanVerdict, rejection || '');
+            fetch(verifyApiUrl('/api/verifications/' + encodeURIComponent(cardId) + '/judge'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            }).then(function(res) {
+                if (!res.ok) throw new Error('Judge HTTP ' + res.status);
+                return res.json();
+            }).then(function(card) {
+                // The server also broadcasts verification-judged; upserting here
+                // too keeps the UI responsive if that message is slow or lost.
+                upsertVerifyCard(card);
+                renderVerifyFeed();
+                vibrateDevice();
+                // Say out loud whether the loop actually closed. "Recorded" vs
+                // "sent to the agent" are very different outcomes to the user.
+                showVerifyToast(card.notified
+                    ? (humanVerdict === 'looks-wrong' ? 'Sent back to the agent' : 'Agent notified')
+                    : 'Saved');
+            }).catch(function(err) {
+                console.error('[Mobile] Judge failed:', err);
+                if (row) {
+                    var retry = row.querySelectorAll('.judge-btn');
+                    for (var j = 0; j < retry.length; j++) retry[j].disabled = false;
+                }
+            });
+        }
+
+        function loadVerifyFeed() {
+            fetch(verifyApiUrl('/api/verifications')).then(function(res) {
+                if (!res.ok) throw new Error('Feed HTTP ' + res.status);
+                return res.json();
+            }).then(function(cards) {
+                console.log('[Mobile] Loaded', (cards || []).length, 'verification cards');
+                (cards || []).forEach(upsertVerifyCard);
+                renderVerifyFeed();
+            }).catch(function(err) {
+                console.error('[Mobile] Failed to load verification feed:', err);
+            });
+        }
+
+        // ===== Evidence viewer =====
+        function openEvidenceViewer(src, alt) {
+            evidenceViewerImg.src = src;
+            evidenceViewerImg.alt = alt || '';
+            evidenceViewer.classList.add('active');
+        }
+
+        function closeEvidenceViewer() {
+            evidenceViewer.classList.remove('active');
+            // Drop the src so a large PNG is not held in memory behind the overlay.
+            evidenceViewerImg.src = '';
+        }
+
+        evidenceViewer.addEventListener('click', closeEvidenceViewer);
+
+        // ===== View tabs =====
+        function setActiveView(view) {
+            activeView = view;
+            var showVerify = view === 'verify';
+
+            tabTasks.className = showVerify ? 'view-tab' : 'view-tab active';
+            tabVerify.className = showVerify ? 'view-tab active' : 'view-tab';
+
+            taskListEl.style.display = showVerify ? 'none' : '';
+            if (showVerify) verifyFeedEl.classList.add('active');
+            else verifyFeedEl.classList.remove('active');
+
+            // The composer targets the selected task, which is meaningless while
+            // the feed is up.
+            inputArea.style.display = showVerify ? 'none' : '';
+            if (!showVerify) updateInputArea();
+        }
+
+        tabTasks.addEventListener('click', function() { setActiveView('tasks'); });
+        tabVerify.addEventListener('click', function() { setActiveView('verify'); });
 
         // ===== Voice Summary =====
         var pendingVoiceSummaries = {};
@@ -2081,6 +2820,7 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
 
         // ===== Init =====
         connectWebSocket();
+        loadVerifyFeed();
     })();
     </script>
 </body>

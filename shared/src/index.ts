@@ -156,6 +156,87 @@ export interface Checkpoint {
     };
 }
 
+// ---------------------------------------------------------------------------
+// Visual verification types
+//
+// An agent "verifies" something visually by capturing evidence (screenshots)
+// and attaching it to a claim. The capture mechanism differs wildly per stack
+// (Playwright for web, in-engine hooks for Unity/Godot, OS-level window grab
+// as a universal fallback) but every capturer produces the same thing: PNG
+// bytes plus metadata. That is the contract the rest of the system is built
+// on, which is what lets new capturers be added without touching storage or UI.
+// ---------------------------------------------------------------------------
+
+/** Which capture mechanism produced a piece of evidence. */
+export type CapturerId =
+    | 'playwright-web'      // Web pages / 2D canvas / WebGL via Chromium
+    | 'desktop-window'      // OS-level window grab - universal fallback
+    | 'unity'               // In-engine capture hook
+    | 'godot'               // In-engine capture hook
+    | 'manual';             // Human-supplied or agent-supplied existing file
+
+/** Verdict an agent reaches after looking at the evidence it captured. */
+export type VerificationVerdict =
+    | 'pass'                // Agent is confident it works
+    | 'fail'                // Agent is confident it does not
+    | 'needs-human-eyes';   // Subjective - routed to the user to judge
+
+/** How the user responded when asked to judge a card. */
+export type HumanVerdict = 'looks-right' | 'looks-wrong';
+
+/**
+ * Why a card was rejected. A bare thumbs-down is not actionable - the agent
+ * needs to know which way it is wrong to have any chance of fixing it.
+ * 'other' pairs with the free-text note.
+ */
+export type RejectionReason =
+    | 'wrong-layout'      // Renders, but positioned/sized wrong
+    | 'visual-glitch'     // Artifacts, tearing, wrong colours
+    | 'not-what-i-asked'  // Works, but is not the requested thing
+    | 'nothing-rendered'  // Blank / missing content
+    | 'other';
+
+/** A single captured image belonging to a verification card. */
+export interface VisualEvidence {
+    id: string;
+    filename: string;              // Stored file name under the evidence dir
+    label?: string;                // e.g. "before", "after", "frame 3"
+    width?: number;
+    height?: number;
+    bytes?: number;
+}
+
+/**
+ * A verification card: a claim, the visual evidence for it, and a verdict.
+ * This is the unit displayed in the mobile visual feed.
+ */
+export interface VerificationCard {
+    id: string;
+    taskId: string;
+    workspaceId: string;
+    checkpointId?: string;         // Optional link to a timeline checkpoint
+    claim: string;                 // What the agent says it verified
+    notes?: string;                // Agent's description of what it sees
+    verdict: VerificationVerdict;
+    capturer: CapturerId;
+    evidence: VisualEvidence[];
+    viewport?: { width: number; height: number };
+    target?: string;               // URL / window title / scene that was captured
+    timestamp: string;             // ISO
+    /** Set when the user judges the card from the mobile feed. */
+    humanVerdict?: HumanVerdict;
+    humanVerdictAt?: string;       // ISO
+    /** Why it was rejected. Only meaningful alongside a 'looks-wrong' verdict. */
+    rejectionReason?: RejectionReason;
+    /** Free-text detail from the user, paired with rejectionReason. */
+    rejectionNote?: string;
+    /**
+     * Whether the judgement was delivered back into the task's session.
+     * Recorded so the feed can show it and so we never double-notify.
+     */
+    notifiedAt?: string;           // ISO
+}
+
 // Scheduled task (cron) for recurring/one-shot prompts
 export interface ScheduledTask {
     id: string;                    // 8-char unique ID
@@ -241,8 +322,15 @@ export type WSMessageType =
     | 'checkpoint:deleted'
     | 'checkpoint:forked'
     | 'checkpoint:error'
+    // Visual verification
+    | 'verification:created'
+    | 'verification:list'
+    | 'verification:judged'
     // Token usage
     | 'task:tokenUsage'
+    // Structured session events for the chat view
+    | 'task:sessionEvents'
+    | 'task:sessionSummary'
     // Server status
     | 'server:reloading'
     | 'server:reconnecting'
@@ -310,4 +398,78 @@ export interface UsageDashboardData {
     byModel: Record<string, ModelTokenUsage>;
     taskCount: number;
     lastUpdated: string;
+}
+
+// ---- Chat view session events -------------------------------------------------
+// Normalized view of Claude Code's JSONL transcript. The chat view renders these
+// instead of PTY bytes. Kept deliberately source-agnostic so a future stream-json
+// feed could produce the same shapes without touching the UI layer.
+
+export interface SessionTextEvent {
+    type: 'text';
+    id: string;
+    role: 'user' | 'assistant';
+    text: string;
+    timestamp: string;
+}
+
+export interface SessionThinkingEvent {
+    type: 'thinking';
+    id: string;
+    text: string;
+    timestamp: string;
+}
+
+export interface SessionToolEvent {
+    type: 'tool';
+    id: string;
+    /** Tool name, e.g. "Read", "Bash", "mcp__server__tool". Empty on a result-only stub. */
+    name: string;
+    input: Record<string, unknown>;
+    /** Absent while the tool is still running. */
+    result?: string;
+    isError?: boolean;
+    timestamp: string;
+}
+
+export type SessionEvent = SessionTextEvent | SessionThinkingEvent | SessionToolEvent;
+
+export interface SessionEventsPayload {
+    taskId: string;
+    sessionId: string | null;
+    events: SessionEvent[];
+    offset: number;
+    /** True when the session file does not exist yet (session id not captured). */
+    pending?: boolean;
+}
+
+/** Which rendering Claudia uses for a task's conversation. */
+export type ChatViewMode = 'terminal' | 'detailed' | 'minimal';
+
+/** One batched, LLM-written status line for the minimal view. */
+export interface SessionSummary {
+    id: string;
+    text: string;
+    eventCount: number;
+    timestamp: string;
+    /** True when generated deterministically because the LLM was unavailable. */
+    isFallback?: boolean;
+}
+
+export interface SessionSummaryPayload {
+    taskId: string;
+    summaries: SessionSummary[];
+}
+
+/**
+ * A slash command offered by the chat composer's autocomplete. Discovered from the
+ * same sources Claude Code reads: project/user commands and skills, plugins, built-ins.
+ */
+export interface SlashCommand {
+    /** Invocation name without the leading slash, e.g. "review" or "cloudflare:wrangler". */
+    name: string;
+    description: string;
+    source: 'project' | 'user' | 'plugin' | 'builtin';
+    /** Frontmatter argument-hint, e.g. "[pr-number]". */
+    argumentHint?: string;
 }

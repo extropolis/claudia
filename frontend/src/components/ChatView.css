@@ -1,0 +1,777 @@
+/*
+ * ChatView — Claude-app-inspired conversation rendering.
+ *
+ * Layout borrows from the Claude desktop app: a narrow centered column, user turns in
+ * a soft rounded container, assistant turns borderless and full-width, tool calls as
+ * flat collapsible cards. Colors and fonts intentionally reuse Claudia's existing
+ * variables so this sits alongside the sidebar and file explorer without clashing.
+ *
+ * One Claude-specific borrowing: elevation comes from surface contrast and hairline
+ * borders, never drop shadows.
+ */
+
+.cv-root {
+    /* Warm brown-tinted surfaces, local to the chat pane — distinct from the
+       app's neutral gray theme without touching global variables. */
+    --cv-bg: #1c1613;
+    --cv-bg-raised: #2a211c;
+    --cv-bg-sunken: #150f0d;
+    --cv-border: #3d302a;
+
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    position: relative;
+    background: var(--cv-bg);
+}
+
+[data-theme="light"] .cv-root {
+    --cv-bg: #f5efe9;
+    --cv-bg-raised: #ece2d8;
+    --cv-bg-sunken: #fbf7f3;
+    --cv-border: #ddccbe;
+}
+
+/* ---- Header ---------------------------------------------------------------- */
+
+.cv-header {
+    flex-shrink: 0;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--cv-border);
+    background: var(--cv-bg-raised);
+}
+
+.cv-header-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.cv-header-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+/* ---- Scroll region and column ---------------------------------------------- */
+
+.cv-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scroll-behavior: auto;
+}
+
+.cv-thread {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 24px 24px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.cv-row {
+    display: flex;
+    flex-direction: column;
+}
+
+.cv-row-user {
+    align-items: flex-end;
+}
+
+.cv-row-assistant {
+    align-items: stretch;
+}
+
+/* ---- User turn: soft rounded container ------------------------------------- */
+
+.cv-user-bubble {
+    max-width: 85%;
+    background: var(--cv-bg-raised);
+    border: 1px solid var(--cv-border);
+    border-radius: 18px;
+    padding: 11px 18px;
+    font-size: 15.5px;
+    line-height: 1.6;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* ---- Assistant turn: borderless, full width -------------------------------- */
+
+.cv-markdown {
+    font-size: 16px;
+    line-height: 1.7;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+.cv-markdown > *:first-child { margin-top: 0; }
+.cv-markdown > *:last-child { margin-bottom: 0; }
+
+.cv-markdown p { margin: 0 0 12px; }
+.cv-markdown ul,
+.cv-markdown ol { margin: 0 0 12px; padding-left: 22px; }
+.cv-markdown li { margin: 3px 0; }
+
+.cv-markdown h1,
+.cv-markdown h2,
+.cv-markdown h3,
+.cv-markdown h4 {
+    margin: 20px 0 10px;
+    line-height: 1.3;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.cv-markdown h1 { font-size: 20px; }
+.cv-markdown h2 { font-size: 17px; }
+.cv-markdown h3 { font-size: 15px; }
+.cv-markdown h4 { font-size: 14px; }
+
+.cv-markdown a { color: var(--accent-secondary); text-decoration: none; }
+.cv-markdown a:hover { text-decoration: underline; }
+
+.cv-markdown code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    background: var(--cv-bg-raised);
+    border: 1px solid var(--cv-border);
+    border-radius: 5px;
+    padding: 1px 5px;
+}
+
+.cv-markdown pre {
+    background: var(--cv-bg-sunken);
+    border: 1px solid var(--cv-border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    margin: 0 0 12px;
+}
+
+.cv-markdown pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 12.5px;
+    line-height: 1.55;
+}
+
+.cv-markdown blockquote {
+    margin: 0 0 12px;
+    padding-left: 14px;
+    border-left: 3px solid var(--cv-border);
+    color: var(--text-secondary);
+}
+
+.cv-markdown table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0 0 12px;
+    display: block;
+    overflow-x: auto;
+}
+
+.cv-markdown th,
+.cv-markdown td {
+    border: 1px solid var(--cv-border);
+    padding: 6px 10px;
+    font-size: 13px;
+    text-align: left;
+}
+
+.cv-markdown th { background: var(--cv-bg-sunken); font-weight: 600; }
+
+.cv-markdown hr {
+    border: none;
+    border-top: 1px solid var(--cv-border);
+    margin: 16px 0;
+}
+
+/* ---- Tool cards ------------------------------------------------------------ */
+
+.cv-tool {
+    border: 1px solid var(--cv-border);
+    border-radius: 10px;
+    background: var(--cv-bg-raised);
+    overflow: hidden;
+}
+
+.cv-tool.is-error {
+    border-color: var(--accent-red);
+}
+
+/* Tint the header so a failed call reads as failed without expanding it. */
+.cv-tool.is-error .cv-tool-header {
+    background: color-mix(in srgb, var(--accent-red) 10%, transparent);
+}
+
+.cv-tool.is-error .cv-tool-header:hover {
+    background: color-mix(in srgb, var(--accent-red) 16%, transparent);
+}
+
+.cv-tool-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 12px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    font-family: inherit;
+}
+
+.cv-tool-header:hover { background: var(--bg-hover); }
+
+.cv-chevron {
+    flex-shrink: 0;
+    transition: transform 0.15s ease;
+    color: var(--text-muted);
+}
+
+.cv-chevron.open { transform: rotate(90deg); }
+
+.cv-tool-icon {
+    display: flex;
+    flex-shrink: 0;
+    color: var(--accent-secondary);
+}
+
+.cv-tool-name {
+    flex-shrink: 0;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+}
+
+.cv-tool-summary {
+    flex: 1;
+    min-width: 0;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11.5px;
+}
+
+.cv-tool-status { flex-shrink: 0; margin-left: auto; }
+.cv-error-icon { color: var(--accent-red); }
+
+.cv-tool-body {
+    padding: 4px 12px 12px;
+    border-top: 1px solid var(--cv-border);
+}
+
+.cv-tool-label {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    margin: 10px 0 5px;
+    font-weight: 600;
+}
+
+.cv-code {
+    margin: 0;
+    padding: 10px 12px;
+    background: var(--cv-bg-sunken);
+    border: 1px solid var(--cv-border);
+    border-radius: 8px;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 420px;
+    overflow-y: auto;
+}
+
+/* ---- Thinking -------------------------------------------------------------- */
+
+.cv-thinking {
+    border: 1px dashed var(--cv-border);
+    border-radius: 10px;
+    background: transparent;
+}
+
+.cv-thinking-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 12px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 12.5px;
+    font-style: italic;
+    font-family: inherit;
+}
+
+.cv-thinking-header:hover { color: var(--text-secondary); }
+
+.cv-thinking-body {
+    padding: 4px 14px 12px 34px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    font-style: italic;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* ---- Status / empty -------------------------------------------------------- */
+
+.cv-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 48px 20px;
+    color: var(--text-muted);
+    font-size: 13px;
+    text-align: center;
+}
+
+.cv-working {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 13px;
+    padding: 2px 0;
+}
+
+.cv-spin { animation: cv-spin 1s linear infinite; }
+
+@keyframes cv-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .cv-spin { animation: none; }
+    .cv-chevron { transition: none; }
+}
+
+/* ---- Jump-to-latest -------------------------------------------------------- */
+
+.cv-jump {
+    position: absolute;
+    bottom: 96px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 1px solid var(--cv-border);
+    background: var(--cv-bg-raised);
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 5;
+}
+
+.cv-jump:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+/* ---- Composer -------------------------------------------------------------- */
+
+.cv-composer-wrap {
+    flex-shrink: 0;
+    padding: 12px 24px 14px;
+    background: var(--cv-bg);
+    border-top: 1px solid var(--cv-border);
+    /* Anchors the slash-command menu, which floats above the composer. */
+    position: relative;
+}
+
+/* ---- Slash command autocomplete -------------------------------------------- */
+
+.cv-slash-menu {
+    position: absolute;
+    bottom: calc(100% - 6px);
+    left: 24px;
+    right: 24px;
+    max-width: 780px;
+    margin: 0 auto;
+    max-height: 320px;
+    overflow-y: auto;
+    background: var(--cv-bg-sunken);
+    border: 1px solid var(--cv-border);
+    border-radius: 12px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
+    padding: 4px;
+    z-index: 20;
+}
+
+.cv-slash-item {
+    width: 100%;
+    display: grid;
+    /* name | args | source tag, with the description wrapping onto row two. */
+    grid-template-columns: auto auto 1fr;
+    align-items: baseline;
+    gap: 4px 8px;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 8px;
+    background: none;
+    text-align: left;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.cv-slash-item.is-active {
+    background: var(--bg-hover, rgba(255, 255, 255, 0.07));
+}
+
+.cv-slash-name {
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 13px;
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.cv-slash-args {
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.cv-slash-source {
+    justify-self: end;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
+    border-radius: 6px;
+    background: var(--cv-bg-raised, rgba(255, 255, 255, 0.06));
+    color: var(--text-muted);
+}
+
+.cv-slash-project { color: var(--accent-secondary); }
+
+.cv-slash-desc {
+    grid-column: 1 / -1;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-muted);
+    /* Descriptions run long (skills especially) — cap at two lines. */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.cv-composer {
+    max-width: 780px;
+    margin: 0 auto;
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    background: var(--cv-bg-raised);
+    border: 1px solid var(--cv-border);
+    border-radius: 20px;
+    padding: 8px 8px 8px 16px;
+    transition: border-color 0.15s ease;
+}
+
+.cv-composer:focus-within {
+    border-color: var(--accent-secondary);
+}
+
+.cv-input {
+    flex: 1;
+    background: none;
+    border: none;
+    outline: none;
+    resize: none;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 15px;
+    line-height: 1.55;
+    max-height: 180px;
+    padding: 5px 0;
+    field-sizing: content;
+}
+
+.cv-input::placeholder { color: var(--text-muted); }
+
+.cv-send {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: none;
+    background: var(--accent-secondary);
+    color: var(--bg-primary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+}
+
+.cv-send:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.cv-composer-hint {
+    max-width: 780px;
+    margin: 6px auto 0;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+/* ---- Mobile ---------------------------------------------------------------- */
+
+@media (max-width: 768px) {
+    .cv-thread { padding: 16px 14px 8px; }
+    .cv-composer-wrap { padding: 10px 12px 12px; }
+    .cv-user-bubble { max-width: 92%; }
+}
+
+/* ---- Minimal mode ----------------------------------------------------------
+ * Modelled on the Claude desktop app: tool activity recedes to a single quiet
+ * line of text with no border, box, or fill. Nothing here should read as a card.
+ */
+
+.cv-min-tool {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-muted);
+    padding: 1px 0;
+}
+
+.cv-min-verb {
+    flex-shrink: 0;
+    color: var(--text-secondary);
+}
+
+.cv-min-target {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.cv-min-spin { flex-shrink: 0; align-self: center; }
+
+.cv-min-tool.is-error .cv-min-verb { color: var(--accent-red); }
+
+.cv-min-failed {
+    flex-shrink: 0;
+    font-size: 11.5px;
+    color: var(--accent-red);
+}
+
+/* Assistant lead-in: plain prose, no markdown rendering. Streams in left-to-right
+   with a soft fade so new text doesn't just pop onto the screen. */
+.cv-min-text {
+    font-size: 16px;
+    line-height: 1.7;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+    animation: cv-fade-stream 0.5s ease-out both;
+}
+
+@keyframes cv-fade-stream {
+    from {
+        opacity: 0;
+        clip-path: inset(0 100% 0 0);
+    }
+    to {
+        opacity: 1;
+        clip-path: inset(0 0 0 0);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .cv-min-text { animation: none; }
+}
+
+/* Periodic AI status line — the one element allowed to draw a little attention. */
+.cv-min-summary {
+    margin-top: 6px;
+    padding-left: 10px;
+    border-left: 2px solid var(--cv-border);
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+/* Minimal mode: single-line header, tighter padding, and a shorter top gap so the
+   conversation starts near the top of the pane instead of below stacked chrome. */
+.cv-header.minimal {
+    padding: 6px 20px;
+    background: transparent;
+}
+
+.cv-header.minimal .cv-header-title {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+/* ---- Minimal mode: warm cream palette + editorial type scale ------------------
+ *
+ * Modelled on the reference UI: a warm off-white page, terracotta accent, and a
+ * clear hierarchy where body prose is large and airy while chrome stays small and
+ * quiet. Colors are pinned here rather than driven by Claudia's theme variables —
+ * minimal mode is deliberately always cream, in light or dark app themes.
+ */
+
+.cv-root.minimal {
+    /* Warm cream palette matched to the alice project (accent #b5651d, cream #f5f1e8). */
+    --cv-bg: #f5f1e8;
+    --cv-surface: #eee8da;
+    --cv-border: #d8cfb8;
+    --cv-text: #191612;
+    --cv-muted: #4d4638;
+    --cv-faint: #6a6252;
+    --cv-accent: #b5651d;
+
+    background: var(--cv-bg);
+    color: var(--cv-text);
+}
+
+.cv-root.minimal .cv-header.minimal {
+    background: transparent;
+    border-bottom: 1px solid var(--cv-border);
+}
+
+.cv-root.minimal .cv-header.minimal .cv-header-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--cv-faint);
+}
+
+.cv-root.minimal .cv-scroll {
+    background: var(--cv-bg);
+}
+
+/* Body prose: the element the reference gives the most room to. */
+.cv-root.minimal .cv-min-text {
+    font-size: 17px;
+    line-height: 1.75;
+    color: var(--cv-text);
+}
+
+/* Tool lines stay quiet — smaller and lighter than the prose around them. */
+.cv-root.minimal .cv-min-tool {
+    color: var(--cv-faint);
+}
+
+.cv-root.minimal .cv-min-verb {
+    font-size: 14px;
+    color: var(--cv-muted);
+}
+
+.cv-root.minimal .cv-min-target {
+    font-size: 13px;
+    color: var(--cv-faint);
+}
+
+.cv-root.minimal .cv-min-failed {
+    font-size: 13px;
+    color: #B93535;
+}
+
+.cv-root.minimal .cv-min-tool.is-error .cv-min-verb {
+    color: #B93535;
+}
+
+/* User turns: soft rounded container one step off the page, as in the reference. */
+.cv-root.minimal .cv-user-bubble {
+    font-size: 16px;
+    line-height: 1.6;
+    background: var(--cv-surface);
+    border: 1px solid var(--cv-border);
+    color: var(--cv-text);
+}
+
+/* Status line: accented left rule so it reads as commentary, not body copy. */
+.cv-root.minimal .cv-min-summary {
+    font-size: 15px;
+    line-height: 1.7;
+    color: var(--cv-muted);
+    border-left: 2px solid var(--cv-accent);
+    padding-left: 12px;
+}
+
+.cv-root.minimal .cv-empty,
+.cv-root.minimal .cv-working {
+    color: var(--cv-faint);
+    font-size: 14.5px;
+}
+
+/* Composer */
+.cv-root.minimal .cv-composer-wrap {
+    background: var(--cv-bg);
+    border-top: 1px solid var(--cv-border);
+}
+
+.cv-root.minimal .cv-composer {
+    background: var(--cv-bg);
+    border: 1px solid var(--cv-border);
+    border-radius: 12px;
+}
+
+.cv-root.minimal .cv-composer:focus-within {
+    border-color: var(--cv-accent);
+}
+
+.cv-root.minimal .cv-input {
+    font-size: 15.5px;
+    color: var(--cv-text);
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.cv-root.minimal .cv-input::placeholder {
+    color: var(--cv-faint);
+}
+
+.cv-root.minimal .cv-send {
+    background: var(--cv-accent);
+    color: #FFFFFF;
+    border-radius: 8px;
+}
+
+.cv-root.minimal .cv-composer-hint {
+    color: var(--cv-faint);
+    font-size: 11.5px;
+}
+
+.cv-root.minimal .cv-jump {
+    background: var(--cv-surface);
+    border-color: var(--cv-border);
+    color: var(--cv-muted);
+}

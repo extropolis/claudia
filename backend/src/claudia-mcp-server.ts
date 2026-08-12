@@ -1179,6 +1179,274 @@ server.tool(
 );
 
 // ============================================================================
+// Tool: claudia_verify_visually
+// ============================================================================
+server.tool(
+    'claudia_verify_visually',
+    'Capture a screenshot as PROOF that something you changed actually works, and file it to the ' +
+    'user\'s visual feed (visible on mobile). Use this after any change with a visual result - a web ' +
+    'page, a 2D/3D game, a UI tweak - instead of just claiming it works.\n\n' +
+    'Choosing a verdict:\n' +
+    '  - "pass": you looked at the capture and it clearly works.\n' +
+    '  - "fail": you looked and it is clearly broken.\n' +
+    '  - "needs-human-eyes": correctness is subjective ("does this animation feel right?"). ' +
+    'This pushes the card to the user\'s phone with Looks right / Looks wrong buttons.\n\n' +
+    'Choosing a capturer:\n' +
+    '  - "playwright-web": web pages, 2D canvas and WebGL/Three.js. Runs headless. Pass target=URL.\n' +
+    '  - "desktop-window": OS-level screen grab, for engines with no scriptable hook (Unity, Godot, ' +
+    'native apps). Needs a GUI session; on macOS needs Screen Recording permission.\n' +
+    '  - "manual": you already produced an image file (e.g. an in-engine screenshot). Pass imagePath.\n\n' +
+    'For animation, set frames>1 to capture a filmstrip - a single frame cannot show motion. ' +
+    'If the page exposes window.__claudiaCapture.step(), frames are stepped deterministically.',
+    {
+        claim: z.string().describe('What you are verifying, in plain language. e.g. "Coin pickup plays the sparkle animation"'),
+        verdict: z.enum(['pass', 'fail', 'needs-human-eyes']).optional()
+            .describe('Your judgement after looking at the capture. Defaults to needs-human-eyes.'),
+        capturer: z.enum(['playwright-web', 'desktop-window', 'manual']).optional()
+            .describe('Capture mechanism. Defaults to playwright-web.'),
+        target: z.string().optional()
+            .describe('URL for playwright-web (e.g. http://localhost:5173). Ignored by desktop-window.'),
+        notes: z.string().optional()
+            .describe('What you actually see in the capture. Be specific - this is what the user reads next to the image.'),
+        imagePath: z.string().optional().describe('Absolute path to an existing image. Required when capturer is "manual".'),
+        readySelector: z.string().optional()
+            .describe('CSS selector to wait for before capturing, e.g. \'canvas[data-ready="1"]\'. Strongly preferred over any fixed delay.'),
+        selector: z.string().optional().describe('CSS selector to capture instead of the full viewport, e.g. "canvas".'),
+        frames: z.number().optional().describe('Number of frames for a filmstrip (max 12). Use for animation; omit for a still.'),
+        frameIntervalMs: z.number().optional().describe('Delay between filmstrip frames when the page exposes no step() hook. Default 200ms.'),
+        webglSafe: z.boolean().optional()
+            .describe('Set true for WebGL/Three.js. Redraws via window.__claudiaCapture.draw() so the canvas does not read back blank.'),
+        viewportWidth: z.number().optional().describe('Viewport width. Default 1280. Use 390 to verify a mobile layout.'),
+        viewportHeight: z.number().optional().describe('Viewport height. Default 720. Use 844 to verify a mobile layout.'),
+    },
+    async ({
+        claim, verdict, capturer, target, notes, imagePath,
+        readySelector, selector, frames, frameIntervalMs, webglSafe,
+        viewportWidth, viewportHeight,
+    }) => {
+        try {
+            if (!SELF_TASK_ID) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: 'Error: CLAUDIA_TASK_ID is not set, so this verification cannot be attributed to a task.',
+                    }]
+                };
+            }
+
+            const resolvedCapturer = capturer || 'playwright-web';
+            log.info(`Visual verification: capturer=${resolvedCapturer} target=${target || 'n/a'} claim="${claim}"`);
+
+            // Fail fast on the two mistakes that otherwise surface as a confusing
+            // capture error deep in the backend.
+            if (resolvedCapturer === 'manual' && !imagePath) {
+                return { content: [{ type: 'text', text: 'Error: capturer "manual" requires imagePath pointing to an existing image file.' }] };
+            }
+            if (resolvedCapturer === 'playwright-web' && !target) {
+                return { content: [{ type: 'text', text: 'Error: capturer "playwright-web" requires target (the URL to capture).' }] };
+            }
+
+            const viewport = viewportWidth && viewportHeight
+                ? { width: viewportWidth, height: viewportHeight }
+                : undefined;
+
+            const response = await backendFetch('/api/verifications', {
+                method: 'POST',
+                body: JSON.stringify({
+                    taskId: SELF_TASK_ID,
+                    workspaceId: WORKSPACE_ID,
+                    claim, verdict, capturer: resolvedCapturer, target, notes, imagePath,
+                    readySelector, selector, frames, frameIntervalMs, webglSafe, viewport,
+                }),
+            });
+
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                return { content: [{ type: 'text', text: `Error: Visual verification failed: ${error.error || response.statusText}` }] };
+            }
+
+            const card = await response.json();
+            const warnings: string[] = card.warnings || [];
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        cardId: card.id,
+                        verdict: card.verdict,
+                        capturer: card.capturer,
+                        evidenceCount: card.evidence?.length || 0,
+                        message: card.verdict === 'needs-human-eyes'
+                            ? 'Filed. The user will see this on their phone and can tap Looks right / Looks wrong.'
+                            : 'Filed to the visual feed with your evidence attached.',
+                        // Warnings are how a blank-canvas capture announces itself.
+                        // Surface them so the agent can react rather than trusting a bad image.
+                        ...(warnings.length ? { warnings } : {}),
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Visual verification failed:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_await_verdict
+// ============================================================================
+server.tool(
+    'claudia_await_verdict',
+    'Wait for the user to judge a verification card you filed with claudia_verify_visually ' +
+    '(one whose verdict was "needs-human-eyes"). Blocks until they tap Looks right / Looks wrong ' +
+    'on their phone, or until the timeout expires.\n\n' +
+    'Use this when the correctness of what you just built is genuinely subjective and you should ' +
+    'not continue until a human has looked - e.g. "does this animation feel right?". ' +
+    'Do NOT use it for work you can verify yourself.\n\n' +
+    'On a timeout this returns success:false with judged:false - that is not an error, it just ' +
+    'means the user has not looked yet. The verdict is still delivered to your session later if ' +
+    'and when they do judge it, so prefer a short timeout over a long block.',
+    {
+        cardId: z.string().describe('The cardId returned by claudia_verify_visually.'),
+        timeoutSeconds: z.number().optional()
+            .describe('How long to wait. Default 120, max 600. Prefer short - you get told later regardless.'),
+    },
+    async ({ cardId, timeoutSeconds }) => {
+        try {
+            // Clamp: an unbounded block would hang the agent indefinitely.
+            const timeoutMs = Math.min(Math.max(timeoutSeconds || 120, 5), 600) * 1000;
+
+            // Subscribe BEFORE the already-judged check. Doing the HTTP check
+            // first leaves a window where a judgement lands between the response
+            // and the socket opening, and the tool then blocks to timeout on a
+            // card that was judged a moment earlier.
+            const waiter = sendWSMessageWithMultiResponse(
+                'verification:await',
+                { cardId },
+                (msg) => {
+                    if (msg.type === 'verification-judged' && msg.payload?.card?.id === cardId) {
+                        return { card: msg.payload.card };
+                    }
+                    return null;
+                },
+                timeoutMs,
+            );
+            // Nothing may reject before we await it, or Node reports an
+            // unhandled rejection when the timeout fires on the early-return path.
+            waiter.catch(() => { /* handled below or deliberately abandoned */ });
+
+            // Already judged? Return immediately rather than waiting for a
+            // broadcast that has already been and gone.
+            const existing = await backendFetch(`/api/verifications/${encodeURIComponent(cardId)}`);
+            if (!existing.ok) {
+                return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Verification card '${cardId}' not found.` }, null, 2) }] };
+            }
+            const card = await existing.json();
+            if (card.humanVerdict) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({
+                            success: true,
+                            judged: true,
+                            humanVerdict: card.humanVerdict,
+                            rejectionReason: card.rejectionReason,
+                            rejectionNote: card.rejectionNote,
+                            message: card.humanVerdict === 'looks-right'
+                                ? 'The user says it looks right.'
+                                : 'The user says it looks WRONG. Investigate, fix, and capture fresh evidence.',
+                        }, null, 2)
+                    }]
+                };
+            }
+
+            log.info(`Awaiting verdict for card ${cardId} (timeout ${timeoutMs / 1000}s)`);
+
+            // Wait on the broadcast opened above. The judge route emits
+            // verification-judged with the full card, so no polling is needed.
+            const result = await waiter;
+            const judged = result.card;
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        judged: true,
+                        humanVerdict: judged.humanVerdict,
+                        rejectionReason: judged.rejectionReason,
+                        rejectionNote: judged.rejectionNote,
+                        message: judged.humanVerdict === 'looks-right'
+                            ? 'The user says it looks right.'
+                            : 'The user says it looks WRONG. Investigate, fix, and capture fresh evidence.',
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            if (msg.includes('timed out')) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({
+                            success: false,
+                            judged: false,
+                            message: 'The user has not judged this card yet. Carry on with other work - ' +
+                                'their verdict will be delivered into this session when they do look.',
+                        }, null, 2)
+                    }]
+                };
+            }
+            log.error('Failed to await verdict:', error);
+            return { content: [{ type: 'text', text: `Error awaiting verdict: ${msg}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_list_pending_verifications
+// ============================================================================
+server.tool(
+    'claudia_list_pending_verifications',
+    'List verification cards still awaiting a human decision. Use this to check whether ' +
+    'anything you filed is still sitting unjudged before you wrap up and report done.',
+    {
+        mine: z.boolean().optional()
+            .describe('Only cards filed by this task. Defaults to true.'),
+    },
+    async ({ mine }) => {
+        try {
+            const response = await backendFetch('/api/verifications?pending=true');
+            if (!response.ok) {
+                return { content: [{ type: 'text', text: `Error: could not list pending verifications (HTTP ${response.status})` }] };
+            }
+            let cards = await response.json();
+            if (mine !== false && SELF_TASK_ID) {
+                cards = cards.filter((c: any) => c.taskId === SELF_TASK_ID);
+            }
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        pendingCount: cards.length,
+                        cards: cards.map((c: any) => ({
+                            cardId: c.id,
+                            claim: c.claim,
+                            filedAt: c.timestamp,
+                            evidenceCount: c.evidence?.length || 0,
+                        })),
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to list pending verifications:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
 // Start the server
 // ============================================================================
 async function main() {

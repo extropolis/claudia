@@ -257,6 +257,187 @@ body {
   gap: 12px;
 }
 
+/* Minimal mode trims vertical chrome. The app header is nearly empty once the tools
+   collapse, and the chat view repeats the task name directly below it, so the tall
+   padding and large wordmark just push content down. */
+.app-header.minimal {
+  padding: 5px 20px;
+}
+
+.app-header.minimal .logo h1 {
+  font-size: 0.95rem;
+}
+
+.app-header.minimal .logo svg {
+  width: 16px;
+  height: 16px;
+}
+
+.app-header.minimal .app-version {
+  display: none;
+}
+
+/* Panels outside the chat view (file explorer rail, resize handles, scrollbars) are
+   siblings of .cv-root, so they need an app-level hook to pick up the cream palette.
+   Without this they stay grey/dark and frame the cream page. */
+.app.minimal-mode .file-explorer,
+.app.minimal-mode .file-explorer-toggle {
+  background: #eee8da;
+  border-color: #d8cfb8;
+  color: #4d4638;
+}
+
+.app.minimal-mode .file-explorer-toggle:hover {
+  background: #e5ddcb;
+  color: #191612;
+}
+
+.app.minimal-mode .resize-handle {
+  background: #d8cfb8;
+}
+
+.app.minimal-mode .main-panel {
+  background: #f5f1e8;
+}
+
+/* Warm scrollbars so the dark default doesn't cut through the cream panels. */
+.app.minimal-mode *::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.app.minimal-mode *::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.app.minimal-mode *::-webkit-scrollbar-thumb {
+  background: #cfc4a8;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.app.minimal-mode *::-webkit-scrollbar-thumb:hover {
+  background: #c2b696;
+  background-clip: content-box;
+}
+
+/* Warm cream chrome so the header doesn't sit as a grey strip above a cream page.
+   Pinned, not theme-driven — minimal mode is always cream. */
+.app-header.minimal {
+  background: #eee8da;
+  border-bottom: 1px solid #d8cfb8;
+}
+
+.app-header.minimal .logo h1 {
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  color: #191612;
+}
+
+.app-header.minimal .logo svg {
+  color: #b5651d;
+}
+
+.app-header.minimal .header-controls button {
+  color: #4d4638;
+  border-color: #d8cfb8;
+}
+
+.app-header.minimal .header-controls button:hover {
+  background: rgba(0, 0, 0, 0.04);
+  color: #191612;
+  border-color: #cfc4a8;
+}
+
+.app-header.minimal .header-tools-toggle {
+  background: transparent;
+  border-color: #d8cfb8;
+  color: #6a6252;
+}
+
+/* The icon buttons set the row height (8px padding + a 20px icon = 38px), so the
+   header stays tall no matter how little padding it has. Shrink them to match. */
+.app-header.minimal .header-controls button {
+  padding: 4px;
+}
+
+.app-header.minimal .header-controls svg {
+  width: 16px;
+  height: 16px;
+}
+
+.app-header.minimal .activity-button {
+  padding: 3px 8px;
+  font-size: 0.75rem;
+}
+
+.app-header.minimal .header-tools-toggle {
+  width: 24px;
+  height: 24px;
+}
+
+/* Minimal mode: the header tools collapse behind a chevron so the chrome recedes.
+   Settings lives outside .header-tools and stays visible — it is the way back out
+   of minimal mode, so it must never be hidden behind this disclosure. */
+.header-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  overflow: hidden;
+  transition: max-width 0.2s ease, opacity 0.15s ease;
+  max-width: 1200px;
+  max-height: 60px;
+  opacity: 1;
+}
+
+.header-tools.collapsed {
+  max-width: 0;
+  opacity: 0;
+  gap: 0;
+  pointer-events: none;
+  /* Collapse height too. max-width alone leaves the tallest child (Voice Agent, 40px)
+     dictating the header height even though nothing is visible. */
+  max-height: 0;
+  margin: 0;
+}
+
+.header-tools-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.header-tools-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.header-tools-toggle svg {
+  transition: transform 0.2s ease;
+}
+
+.header-tools-toggle.open svg {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .header-tools,
+  .header-tools-toggle svg {
+    transition: none;
+  }
+}
+
 /* running-tasks-indicator styles merged into .activity-button above */
 
 @keyframes pulse-ring {
@@ -673,6 +854,15 @@ body {
 
 /* Shell terminal wrapper - fills main panel when visible */
 .shell-terminal-wrapper {
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Task terminal wrapper - kept mounted (display:none) while the chat view is
+   showing, so xterm scrollback survives toggling between the two views. */
+.terminal-view-wrapper {
   flex: 1;
   flex-direction: column;
   min-height: 0;
@@ -2138,7 +2328,8 @@ body {
 
 /* View Toggle - deprecated, kept for backwards compatibility */
 
-/* Empty state for main panel */
+/* Empty state for main panel — matches the chat pane's warm background (.cv-root's
+   --cv-bg) so there's no white/grey flash before a task is selected. */
 .empty-state-main {
   flex: 1;
   display: flex;
@@ -2147,7 +2338,11 @@ body {
   justify-content: center;
   gap: 16px;
   color: var(--text-muted);
-  background: var(--bg-primary);
+  background: #1c1613;
+}
+
+[data-theme="light"] .empty-state-main {
+  background: #f5efe9;
 }
 
 .empty-state-main svg {

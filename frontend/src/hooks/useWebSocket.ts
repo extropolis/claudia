@@ -473,6 +473,17 @@ export function useWebSocket() {
                         useTaskStore.getState().updateTaskTokenUsage(payload.taskId, payload.tokenUsage);
                         break;
                     }
+                    case 'task:sessionEvents': {
+                        // Chat-view transcript deltas. Dispatched as a DOM event rather
+                        // than stored: like terminal output, this is high-volume and only
+                        // the mounted ChatView cares about it.
+                        window.dispatchEvent(new CustomEvent('claudia:sessionEvents', { detail: message.payload }));
+                        break;
+                    }
+                    case 'task:sessionSummary': {
+                        window.dispatchEvent(new CustomEvent('claudia:sessionSummary', { detail: message.payload }));
+                        break;
+                    }
                     case 'task:archived:list': {
                         const payload = message.payload as { tasks: Task[] };
                         console.log('[WebSocket] Archived tasks received:', payload.tasks.length);
@@ -696,6 +707,10 @@ export function useWebSocket() {
         sendMessage('workspace:create', { path });
     }, [sendMessage]);
 
+    const ensureStandaloneWorkspace = useCallback(() => {
+        sendMessage('workspace:ensureStandalone', {});
+    }, [sendMessage]);
+
     const deleteWorkspace = useCallback((workspaceId: string) => {
         sendMessage('workspace:delete', { workspaceId });
     }, [sendMessage]);
@@ -831,6 +846,7 @@ export function useWebSocket() {
         archiveTask,
         revertTask,
         createWorkspace,
+        ensureStandaloneWorkspace,
         deleteWorkspace,
         reorderWorkspaces,
         setWorkspaceOrder,

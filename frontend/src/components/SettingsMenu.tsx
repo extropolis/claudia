@@ -75,7 +75,7 @@ function CollapsiblePanel({ title, icon, isExpanded, onToggle, children }: Colla
 }
 
 export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProps) {
-    const { showSystemStats, setShowSystemStats, browserNotificationsEnabled, setBrowserNotificationsEnabled, notifyOnCompletion, setNotifyOnCompletion, notifyOnWaitingInput, setNotifyOnWaitingInput, themePreference, setThemePreference } = useTaskStore();
+    const { showSystemStats, setShowSystemStats, browserNotificationsEnabled, setBrowserNotificationsEnabled, notifyOnCompletion, setNotifyOnCompletion, notifyOnWaitingInput, setNotifyOnWaitingInput, themePreference, setThemePreference, chatViewMode, setChatViewMode } = useTaskStore();
     const { showWarning } = useNotification();
     const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
         appearance: false,
@@ -1331,6 +1331,25 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                         onClick={() => setThemePreference(option)}
                                     >
                                         {option === 'system' ? '\u2699 System' : option === 'light' ? '\u2600 Light' : '\uD83C\uDF19 Dark'}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                        <div className="settings-field" style={{ padding: '0 20px 16px' }}>
+                            <label className="settings-label">View Mode</label>
+                            <div className="view-mode-selector">
+                                {([
+                                    { id: 'terminal', label: 'Terminal', desc: 'The raw Claude Code TUI. Full interactivity.' },
+                                    { id: 'detailed', label: 'Chat', desc: 'Formatted conversation with expandable tool cards.' },
+                                    { id: 'minimal', label: 'Minimal', desc: 'Quiet status lines and periodic AI summaries. No code.' },
+                                ] as const).map((opt) => (
+                                    <button
+                                        key={opt.id}
+                                        className={`view-mode-option ${chatViewMode === opt.id ? 'active' : ''}`}
+                                        onClick={() => setChatViewMode(opt.id)}
+                                    >
+                                        <span className="view-mode-label">{opt.label}</span>
+                                        <span className="view-mode-desc">{opt.desc}</span>
                                     </button>
                                 ))}
                             </div>
