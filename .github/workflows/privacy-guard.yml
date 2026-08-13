@@ -7,9 +7,14 @@ name: Privacy Guard
 
 on:
   push:
-    branches: [main, develop]
+    branches: [ main, develop ]
+  # NO `branches:` filter here on purpose. `pull_request.branches` filters on
+  # the BASE branch, so a stacked PR (one targeting another feature branch
+  # rather than main) triggered nothing at all — PRs #179 and #183 both showed
+  # "no checks reported". Stacked PRs are exactly the ones that most need CI,
+  # since they carry the union of two changesets.
   pull_request:
-    branches: [main, develop]
+  workflow_dispatch:
 
 jobs:
   check-forbidden-paths:

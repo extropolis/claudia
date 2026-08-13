@@ -1,8 +1,17 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
+import { fileURLToPath } from 'url';
+
+// Tests resolve @claudia/shared to SOURCE, not shared/dist. Without this the
+// suite silently validates whatever was last built. (vite.config.ts is left
+// alone deliberately — the production build should keep using the package.)
+const SHARED_SRC = fileURLToPath(new URL('../shared/src/index.ts', import.meta.url));
 
 export default defineConfig({
     plugins: [react()],
+    resolve: {
+        alias: { '@claudia/shared': SHARED_SRC },
+    },
     test: {
         globals: true,
         environment: 'jsdom',
@@ -11,6 +20,12 @@ export default defineConfig({
         coverage: {
             provider: 'v8',
             reporter: ['text', 'json', 'html'],
+            // HONESTY: without `all`, files never imported by any test are
+            // absent from the report — this suite showed "85%" while
+            // WorkspacePanel/TerminalView/useWebSocket (5000+ lines) were
+            // invisible to it. Count everything under src/.
+            all: true,
+            include: ['src/**/*.{ts,tsx}'],
             exclude: [
                 'node_modules/',
                 'dist/',

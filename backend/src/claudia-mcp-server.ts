@@ -27,6 +27,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { pathToFileURL } from 'url';
 import { z } from 'zod';
 import { writeFileSync } from 'fs';
 import { join, resolve, basename } from 'path';
@@ -35,16 +36,11 @@ import { isPathInside } from './validation.js';
 // Backend URL - defaults to localhost:4001, can be overridden via env
 const BACKEND_URL = process.env.CLAUDIA_BACKEND_URL || 'http://localhost:4001';
 
-// Workspace this MCP server is scoped to (set by task-spawner)
-const WORKSPACE_ID = process.env.CLAUDIA_WORKSPACE_ID || '';
-
-// This agent's own task ID (set by task-spawner, used for self-rename)
-const SELF_TASK_ID = process.env.CLAUDIA_TASK_ID || '';
-
-// Whether complexity-based model tiering is enabled. Set by task-spawner when
-// the operator turns on the toggle in Settings. Controls whether the
-// `complexity` parameter is exposed on claudia_create_task.
-const MODEL_TIERING_ENABLED = process.env.CLAUDIA_MODEL_TIERING_ENABLED === '1';
+/**
+ * Shared wording for cross-worktree task collaboration. Kept in one place so the
+ * scope semantics can't drift between the tool descriptions that reference them.
+ */
+const SIBLING_TASKS = 'sibling tasks (tasks running in other git worktrees of the same workspace)';
 
 /**
  * Format a duration in milliseconds to a human-readable string
@@ -98,71 +94,10 @@ function resolveWorktreeRoot(wsById: Map<string, any>, startId: string): string 
 }
 
 /**
- * READ scope for a session: the ROOT workspace plus every workspace whose own
- * root-walk lands on the same root (transitive — covers legacy grandchild
- * worktrees, not just direct children). Used by claudia_list_tasks so fleet
- * coordinators inside worktrees see their siblings.
- *
- * NOTE: claudia_stop_all_tasks deliberately does NOT use this — stopping is
- * destructive, and widening its blast radius to the whole workspace meant a
- * worktree session's cleanup could kill the coordinator and every sibling.
- * Stop keeps the original self+children scope via getStopScope().
- */
-async function getWorkspaceScope(): Promise<{ ids: Set<string>; wsById: Map<string, any> }> {
-    const ids = new Set<string>();
-    const wsById = new Map<string, any>();
-    if (!WORKSPACE_ID) return { ids, wsById };
-
-    try {
-        const response = await backendFetch('/api/workspaces');
-        if (response.ok) {
-            const data = await response.json();
-            const workspaces = data.workspaces || data;
-            for (const ws of workspaces) wsById.set(ws.id, ws);
-
-            const root = resolveWorktreeRoot(wsById, WORKSPACE_ID);
-            ids.add(root);
-            for (const ws of workspaces) {
-                if (resolveWorktreeRoot(wsById, ws.id) === root && ws.worktreeParentId) ids.add(ws.id);
-            }
-        }
-    } catch {
-        // Backend unreachable — fall through to self-only scope below
-    }
-
-    // Always include the session's own workspace (also the fallback when the
-    // backend fetch fails or the workspace isn't registered)
-    ids.add(WORKSPACE_ID);
-
-    return { ids, wsById };
-}
-
-/**
- * STOP scope: the session's own workspace + its direct worktree children only
- * (the pre-widening semantics). A worktree session stopping "all" tasks must
- * not reach the parent workspace or sibling worktrees.
- */
-async function getStopScope(): Promise<Set<string>> {
-    const ids = new Set<string>();
-    if (!WORKSPACE_ID) return ids;
-    ids.add(WORKSPACE_ID);
-    try {
-        const response = await backendFetch('/api/workspaces');
-        if (response.ok) {
-            const data = await response.json();
-            const workspaces = data.workspaces || data;
-            for (const ws of workspaces) {
-                if (ws.worktreeParentId === WORKSPACE_ID) ids.add(ws.id);
-            }
-        }
-    } catch { /* self-only fallback */ }
-    return ids;
-}
-
-/**
  * Make an HTTP request to the Claudia backend
  */
-async function backendFetch(path: string, options: RequestInit = {}): Promise<Response> {
+async function backendFetchAt(baseUrl: string, path: string, options: RequestInit = {}): Promise<Response> {
+    const BACKEND_URL = baseUrl;
     const url = `${BACKEND_URL}${path}`;
     log.debug(`Fetching: ${options.method || 'GET'} ${url}`);
 
@@ -184,11 +119,11 @@ async function backendFetch(path: string, options: RequestInit = {}): Promise<Re
 /**
  * WebSocket helper for operations that require WS (task:create, task:input, etc.)
  */
-async function sendWSMessage(type: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function sendWSMessageAt(baseUrl: string, type: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     const WebSocket = (await import('ws')).default;
 
     return new Promise((resolve, reject) => {
-        const wsUrl = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss://');
+        const wsUrl = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://');
         const ws = new WebSocket(wsUrl);
         const timeout = setTimeout(() => {
             ws.close();
@@ -289,7 +224,8 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
  * The matcher function is called for each incoming message and should return
  * a result object if the message is the expected response, or null to keep waiting.
  */
-async function sendWSMessageWithMultiResponse<T>(
+async function sendWSMessageWithMultiResponseAt<T>(
+    baseUrl: string,
     type: string,
     payload: Record<string, unknown>,
     matcher: (msg: { type: string; payload?: any }) => T | null,
@@ -298,7 +234,7 @@ async function sendWSMessageWithMultiResponse<T>(
     const WebSocket = (await import('ws')).default;
 
     return new Promise((resolve, reject) => {
-        const wsUrl = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss://');
+        const wsUrl = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://');
         const ws = new WebSocket(wsUrl);
         const timeout = setTimeout(() => {
             ws.close();
@@ -340,22 +276,141 @@ async function sendWSMessageWithMultiResponse<T>(
     });
 }
 
-// Create the MCP server
-const server = new McpServer({
-    name: 'claudia',
-    version: '1.0.0',
-}, {
-    capabilities: {
-        tools: {},
+/**
+ * Per-session scope. In stdio mode this comes from the env vars the
+ * task-spawner sets on the child process. In shared/HTTP mode there is no child
+ * process to carry env, so it comes from request headers instead — which is the
+ * whole reason this is a factory rather than a module-level singleton.
+ */
+export interface ClaudiaMcpScope {
+    /** Workspace this session is scoped to (CLAUDIA_WORKSPACE_ID). */
+    workspaceId: string;
+    /** The calling agent's own task ID, used for self-rename (CLAUDIA_TASK_ID). */
+    taskId: string;
+    /** Whether to expose the `complexity` param on claudia_create_task. */
+    modelTieringEnabled: boolean;
+    /** Whether to register the claudia_todo_* tools. */
+    todoEnabled: boolean;
+    /**
+     * Base URL of the Claudia backend these tools call.
+     *
+     * Required when mounting in-process: the backend must address ITSELF, and
+     * it does not always listen on the default port (tests use ephemeral ports,
+     * and CLAUDIA_BACKEND_PORT can override it). Defaulting to :4001 here would
+     * silently point one server's tools at a different server's tasks.
+     */
+    backendUrl?: string;
+}
+
+/**
+ * Build a Claudia MCP server bound to one session's scope.
+ *
+ * This used to be a module-level singleton, which forced one OS process per
+ * Claude Code session. Because the config launched it through the tsx CLI, tsx
+ * forked and each session actually cost TWO processes — 3.9GB measured across a
+ * live fleet — purely to relay HTTP calls to a backend that is already running.
+ * Every tool here is a thin proxy over backendFetch(), so the servers hold no
+ * state worth isolating: the backend now mounts them in-process and hands each
+ * session its own cheap McpServer object instead of its own process.
+ */
+export function createClaudiaMcpServer(scope: ClaudiaMcpScope): McpServer {
+    const WORKSPACE_ID = scope.workspaceId;
+    const SELF_TASK_ID = scope.taskId;
+    const MODEL_TIERING_ENABLED = scope.modelTieringEnabled;
+    const TODO_ENABLED = scope.todoEnabled;
+    const BASE_URL = scope.backendUrl || BACKEND_URL;
+
+    // Bind the transport helpers to THIS session's backend. Every tool below
+    // calls these by name, so scoping them here keeps the call sites untouched.
+    const backendFetch = (path: string, options: RequestInit = {}) =>
+        backendFetchAt(BASE_URL, path, options);
+    const sendWSMessage = (type: string, payload: Record<string, unknown>) =>
+        sendWSMessageAt(BASE_URL, type, payload);
+    const sendWSMessageWithMultiResponse = <T>(
+        type: string,
+        payload: Record<string, unknown>,
+        matcher: (msg: { type: string; payload?: any }) => T | null,
+        timeoutMs: number = 30000,
+    ) => sendWSMessageWithMultiResponseAt(BASE_URL, type, payload, matcher, timeoutMs);
+
+    /**
+     * READ scope for a session: the ROOT workspace plus every workspace whose own
+     * root-walk lands on the same root (transitive — covers legacy grandchild
+     * worktrees, not just direct children). Used by claudia_list_tasks so fleet
+     * coordinators inside worktrees see their siblings.
+     *
+     * NOTE: claudia_stop_all_tasks deliberately does NOT use this — stopping is
+     * destructive, and widening its blast radius to the whole workspace meant a
+     * worktree session's cleanup could kill the coordinator and every sibling.
+     * Stop keeps the original self+children scope via getStopScope().
+     */
+    async function getWorkspaceScope(): Promise<{ ids: Set<string>; wsById: Map<string, any> }> {
+        const ids = new Set<string>();
+        const wsById = new Map<string, any>();
+        if (!WORKSPACE_ID) return { ids, wsById };
+
+        try {
+            const response = await backendFetch('/api/workspaces');
+            if (response.ok) {
+                const data = await response.json();
+                const workspaces = data.workspaces || data;
+                for (const ws of workspaces) wsById.set(ws.id, ws);
+
+                const root = resolveWorktreeRoot(wsById, WORKSPACE_ID);
+                ids.add(root);
+                for (const ws of workspaces) {
+                    if (resolveWorktreeRoot(wsById, ws.id) === root && ws.worktreeParentId) ids.add(ws.id);
+                }
+            }
+        } catch {
+            // Backend unreachable — fall through to self-only scope below
+        }
+
+        // Always include the session's own workspace (also the fallback when the
+        // backend fetch fails or the workspace isn't registered)
+        ids.add(WORKSPACE_ID);
+
+        return { ids, wsById };
     }
-});
+
+    /**
+     * STOP scope: the session's own workspace + its direct worktree children only
+     * (the pre-widening semantics). A worktree session stopping "all" tasks must
+     * not reach the parent workspace or sibling worktrees.
+     */
+    async function getStopScope(): Promise<Set<string>> {
+        const ids = new Set<string>();
+        if (!WORKSPACE_ID) return ids;
+        ids.add(WORKSPACE_ID);
+        try {
+            const response = await backendFetch('/api/workspaces');
+            if (response.ok) {
+                const data = await response.json();
+                const workspaces = data.workspaces || data;
+                for (const ws of workspaces) {
+                    if (ws.worktreeParentId === WORKSPACE_ID) ids.add(ws.id);
+                }
+            }
+        } catch { /* self-only fallback */ }
+        return ids;
+    }
+
+    // Create the MCP server
+    const server = new McpServer({
+        name: 'claudia',
+        version: '1.0.0',
+    }, {
+        capabilities: {
+            tools: {},
+        }
+    });
 
 // ============================================================================
 // Tool: claudia_list_tasks
 // ============================================================================
 server.tool(
     'claudia_list_tasks',
-    `List all tasks in the current workspace (including disconnected/interrupted ones). Shows task ID, state, prompt, and whether it is waiting for input. Disconnected tasks can be resumed via claudia_continue_task.${WORKSPACE_ID ? ` Scoped to workspace: ${WORKSPACE_ID}` : ''}`,
+    `List all tasks in this workspace, including ${SIBLING_TASKS} and disconnected/interrupted ones. Shows task ID, state, prompt, and whether it is waiting for input. Use this to discover siblings to collaborate with: read one with claudia_get_task_output, then coordinate via claudia_send_input or claudia_continue_task. Disconnected tasks can be resumed via claudia_continue_task.${WORKSPACE_ID ? ` This session runs in ${WORKSPACE_ID}; the listing spans that workspace's whole worktree tree, not just this directory.` : ''}`,
     {},
     async () => {
         try {
@@ -493,7 +548,7 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_get_task_output',
-    'Fetch recent terminal output from a task. Use this to see what a sibling task has been doing, check its progress, or read its results. Returns the most recent output (up to 16KB by default).',
+    `Fetch recent terminal output from a task, including ${SIBLING_TASKS}. Use this to see what a sibling has been doing, check its progress, or read its results before coordinating with it. Returns the most recent output (up to 16KB by default).`,
     {
         taskId: z.string().describe('The task ID to get output from'),
         maxBytes: z.number().optional().describe('Maximum bytes of output to return (default: 16384, max: 32768)'),
@@ -692,7 +747,7 @@ if (MODEL_TIERING_ENABLED) {
 // ============================================================================
 server.tool(
     'claudia_send_input',
-    'Send input to a task that is waiting for input (e.g., answering a question, granting permission, or providing text). Check task status first to see if the task is in waiting_input state.',
+    `Send input or a message to another task, including ${SIBLING_TASKS}. Two uses: (1) answer a task in waiting_input state (a question or permission prompt); (2) message a sibling task to coordinate with it. IMPORTANT: only send to a task in waiting_input or idle state — check claudia_get_task_status first. Sending to a busy task types keystrokes into its running session and can corrupt its in-flight work. Discover sibling IDs with claudia_list_tasks.`,
     {
         taskId: z.string().describe('The task ID to send input to'),
         input: z.string().describe('The input text to send to the task'),
@@ -733,7 +788,7 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_continue_task',
-    'Send a follow-up prompt to an idle, exited, disconnected, or interrupted Claude Code task, resuming its session with a new instruction. Disconnected/interrupted tasks will be automatically reconnected before the prompt is delivered. The task will start processing the new prompt.',
+    `Send a follow-up prompt to an idle, exited, disconnected, or interrupted Claude Code task, resuming its session with a new instruction. Disconnected/interrupted tasks will be automatically reconnected before the prompt is delivered. The task will start processing the new prompt. Also use this to hand work to ${SIBLING_TASKS} — e.g. ask one to rebase onto main, review your branch, or report status. The same state rule applies: the target must be idle, exited, disconnected, or interrupted (not busy); discover sibling IDs with claudia_list_tasks.`,
     {
         taskId: z.string().describe('The task ID to continue'),
         prompt: z.string().describe('The follow-up prompt/instructions to send to the task'),
@@ -1489,17 +1544,245 @@ server.tool(
     }
 );
 
+
 // ============================================================================
-// Start the server
+// TODO Tools (only registered when TODO_ENABLED)
 // ============================================================================
+if (TODO_ENABLED) {
+server.tool(
+    'claudia_todo_create',
+    `Add an item to your task's TODO work-plan, shown live in the Claudia toolbar. This list is YOUR working plan for the task — seed it up front with the steps you intend to take, keep it current as you work, and the user watches progress at a glance.
+
+Track every kind of work item here:
+- Your own steps ('source: claude', 'kind: action') — what you're going to do.
+- Actions the user must take ('source: user', 'kind: manual') — run a VPN, approve a deploy, test in a browser; you're notified when they check it off.
+- GitHub issues/PRs the task involves ('source: github', 'kind: github-issue' | 'github-pr', with 'url' + 'externalRef' like "amd/gaia#1859") — these render as clickable links.
+
+Order items in execution sequence ('order', lower = earlier) and set 'priority'. Use 'parentId' to break a big item into subtasks (one level only). Mark exactly one item 'status: active' as you work it (via claudia_todo_update).${SELF_TASK_ID ? ` Your task ID is: ${SELF_TASK_ID}` : ''}`,
+    {
+        title: z.string().describe('Concise, actionable work item'),
+        description: z.string().optional().describe('Optional details or instructions'),
+        status: z.enum(['pending', 'active', 'completed']).optional().describe("Item state; default 'pending'. Set 'active' for the one item you're working on now."),
+        priority: z.enum(['high', 'normal', 'low']).optional().describe("Priority badge; default 'normal'"),
+        source: z.enum(['user', 'claude', 'github']).optional().describe("Who owns it: 'user' (needs the human), 'claude' (your step), 'github'. Default 'user'."),
+        kind: z.enum(['manual', 'action', 'github-issue', 'github-pr']).optional().describe("Item type; default 'manual'. Use github-issue/github-pr for GitHub work."),
+        url: z.string().optional().describe('External link (GitHub issue/PR URL) — rendered clickable'),
+        externalRef: z.string().optional().describe('Short ref like "amd/gaia#1859"; re-adding the same ref updates it instead of duplicating'),
+        parentId: z.string().optional().describe('Parent TODO id to make this a subtask (one level of nesting only)'),
+        order: z.number().optional().describe('Execution sequence (lower = earlier); defaults to end of list'),
+    },
+    async ({ title, description, status, priority, source, kind, url, externalRef, parentId, order }) => {
+        const taskId = SELF_TASK_ID;
+        if (!taskId) {
+            return { content: [{ type: 'text', text: 'Error: No task ID configured (CLAUDIA_TASK_ID not set).' }] };
+        }
+
+        try {
+            log.info(`Creating TODO for task ${taskId}: ${title}`);
+            const response = await backendFetch(`/api/tasks/${taskId}/todos`, {
+                method: 'POST',
+                body: JSON.stringify({ title, description, status, priority, source, kind, url, externalRef, parentId, order }),
+            });
+
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                return { content: [{ type: 'text', text: `Error: ${error.error || response.statusText}` }] };
+            }
+
+            const todo = await response.json();
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        todoId: todo.id,
+                        title: todo.title,
+                        status: todo.status,
+                        message: `TODO created: "${todo.title}". It's live in the toolbar work-plan.`
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to create TODO:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_todo_list
+// ============================================================================
+server.tool(
+    'claudia_todo_list',
+    'Read back your task work-plan: all items ordered by execution sequence, plus a progress summary (percent done, which item is active now, which is next). Call this to re-orient on what is left and keep the plan in sync with reality.',
+    {
+        taskId: z.string().optional().describe(`Task ID to list TODOs for. Defaults to your own task.${SELF_TASK_ID ? ` Your task ID is: ${SELF_TASK_ID}` : ''}`),
+    },
+    async ({ taskId }) => {
+        const effectiveTaskId = taskId || SELF_TASK_ID;
+        try {
+            const url = effectiveTaskId ? `/api/tasks/${effectiveTaskId}/todos` : '/api/todos';
+            const response = await backendFetch(url);
+
+            if (!response.ok) {
+                return { content: [{ type: 'text', text: `Error: Failed to list TODOs (HTTP ${response.status})` }] };
+            }
+
+            const todos = await response.json();
+
+            if (!todos || todos.length === 0) {
+                return { content: [{ type: 'text', text: effectiveTaskId ? `No TODOs for this task yet. Seed your work-plan with claudia_todo_create.` : 'No TODOs.' }] };
+            }
+
+            let summary: any = null;
+            if (effectiveTaskId) {
+                const sres = await backendFetch(`/api/tasks/${effectiveTaskId}/todos/summary`).catch(() => null);
+                if (sres && sres.ok) summary = await sres.json();
+            }
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        summary,
+                        todos: todos.map((t: any) => ({
+                            id: t.id,
+                            title: t.title,
+                            description: t.description || null,
+                            status: t.status || (t.completed ? 'completed' : 'pending'),
+                            priority: t.priority || 'normal',
+                            order: t.order ?? null,
+                            source: t.source || 'user',
+                            kind: t.kind || 'manual',
+                            url: t.url || null,
+                            externalRef: t.externalRef || null,
+                            parentId: t.parentId || null,
+                            completedAt: t.completedAt || null,
+                            createdAt: t.createdAt,
+                        })),
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_todo_update
+// ============================================================================
+server.tool(
+    'claudia_todo_update',
+    "Update a work-plan item: retitle, edit details, change priority/order/parent, or set status. Setting status:'active' marks it as what you're working on now (any previously-active item in the task is demoted to pending — only one is active at a time). Mark status:'completed' as you finish each item so the progress bar advances.",
+    {
+        todoId: z.string().describe('The TODO item ID to update'),
+        title: z.string().optional().describe('New title'),
+        description: z.string().optional().describe('New description'),
+        completed: z.boolean().optional().describe('Shortcut: true marks completed, false reopens as pending'),
+        status: z.enum(['pending', 'active', 'completed']).optional().describe("New state. 'active' = working on it now (single active per task)."),
+        priority: z.enum(['high', 'normal', 'low']).optional().describe('New priority'),
+        order: z.number().optional().describe('New execution-sequence index (lower = earlier)'),
+        parentId: z.string().nullable().optional().describe('Set a parent id to make this a subtask, or null to detach'),
+    },
+    async ({ todoId, title, description, completed, status, priority, order, parentId }) => {
+        try {
+            log.info(`Updating TODO ${todoId}`, { title, description, completed, status, priority, order, parentId });
+            const response = await backendFetch(`/api/todos/${todoId}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ title, description, completed, status, priority, order, parentId }),
+            });
+
+            if (!response.ok) {
+                if (response.status === 404) {
+                    return { content: [{ type: 'text', text: `Error: TODO '${todoId}' not found.` }] };
+                }
+                const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                return { content: [{ type: 'text', text: `Error: ${error.error || response.statusText}` }] };
+            }
+
+            const todo = await response.json();
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: true,
+                        todo: { id: todo.id, title: todo.title, status: todo.status, completed: todo.completed },
+                        message: `TODO '${todo.title}' updated.`
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to update TODO:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_todo_reorder
+// ============================================================================
+server.tool(
+    'claudia_todo_reorder',
+    'Set the execution sequence of your work-plan by listing item ids in the order you intend to do them. The first id becomes order 0, and so on. Use this when priorities shift.',
+    {
+        orderedIds: z.array(z.string()).describe('Item ids in the desired execution order'),
+        taskId: z.string().optional().describe(`Task whose TODOs to reorder. Defaults to your own task.${SELF_TASK_ID ? ` Your task ID is: ${SELF_TASK_ID}` : ''}`),
+    },
+    async ({ orderedIds, taskId }) => {
+        const effectiveTaskId = taskId || SELF_TASK_ID;
+        if (!effectiveTaskId) {
+            return { content: [{ type: 'text', text: 'Error: No task ID configured (CLAUDIA_TASK_ID not set).' }] };
+        }
+        try {
+            const response = await backendFetch(`/api/tasks/${effectiveTaskId}/todos/reorder`, {
+                method: 'POST',
+                body: JSON.stringify({ orderedIds }),
+            });
+            if (!response.ok) {
+                return { content: [{ type: 'text', text: `Error: Failed to reorder TODOs (HTTP ${response.status})` }] };
+            }
+            const todos = await response.json();
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({ success: true, count: todos.length, message: 'Work-plan reordered.' }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to reorder TODOs:', error);
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+} // end if (TODO_ENABLED)
+
+    return server;
+}
+
+// ============================================================================
+// Standalone stdio entrypoint
+// ============================================================================
+// Retained so the server still works as a spawned child process (external MCP
+// clients, debugging, and any config that hasn't migrated to the shared HTTP
+// endpoint). Scope comes from env, exactly as before.
+
 async function main() {
+    const scope: ClaudiaMcpScope = {
+        workspaceId: process.env.CLAUDIA_WORKSPACE_ID || '',
+        taskId: process.env.CLAUDIA_TASK_ID || '',
+        modelTieringEnabled: process.env.CLAUDIA_MODEL_TIERING_ENABLED === '1',
+        todoEnabled: process.env.CLAUDIA_TODO_ENABLED === '1',
+    };
+
     log.info('Starting Claudia MCP Server...');
     log.info(`Backend URL: ${BACKEND_URL}`);
-    log.info(`Workspace: ${WORKSPACE_ID || '(not scoped)'}`);
+    log.info(`Workspace: ${scope.workspaceId || '(not scoped)'}`);
 
     // Verify backend connectivity
     try {
-        const health = await backendFetch('/api/health');
+        const health = await backendFetchAt(BACKEND_URL, '/api/health');
         if (health.ok) {
             log.info('Backend connection verified');
         } else {
@@ -1510,11 +1793,26 @@ async function main() {
     }
 
     const transport = new StdioServerTransport();
-    await server.connect(transport);
+    await createClaudiaMcpServer(scope).connect(transport);
     log.info('Claudia MCP Server running on stdio');
 }
 
-main().catch((error) => {
-    log.error('Fatal error:', error);
-    process.exit(1);
-});
+// Only self-start when run as a script. The backend imports this module to
+// mount the shared HTTP endpoint — booting a stdio transport there would
+// hijack the backend's own stdin/stdout.
+const isDirectRun = (() => {
+    try {
+        const entry = process.argv[1];
+        if (!entry) return false;
+        return import.meta.url === pathToFileURL(entry).href;
+    } catch {
+        return false;
+    }
+})();
+
+if (isDirectRun) {
+    main().catch((error) => {
+        log.error('Fatal error:', error);
+        process.exit(1);
+    });
+}

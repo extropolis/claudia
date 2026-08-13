@@ -1,0 +1,29 @@
+{
+    "generatedBy": "scripts/coverage.mjs",
+    "total": {
+        "lines": 29.51,
+        "statements": 29.01,
+        "branches": 28.03,
+        "functions": 22.13
+    },
+    "packages": {
+        "backend": {
+            "lines": 36.68,
+            "statements": 36.68,
+            "branches": 73.39,
+            "functions": 61.44
+        },
+        "frontend": {
+            "lines": 7.56,
+            "statements": 7.35,
+            "branches": 5.19,
+            "functions": 7.17
+        },
+        "shared": {
+            "lines": 73.08,
+            "statements": 73.08,
+            "branches": 100,
+            "functions": 100
+        }
+    }
+}

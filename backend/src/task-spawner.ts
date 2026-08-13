@@ -4,7 +4,7 @@ import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, Ta
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
-import { tmpdir } from 'os';
+import { tmpdir, homedir } from 'os';
 import { execSync } from 'child_process';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { buildSettingsLocalContent } from './settings-local.js';
@@ -12,6 +12,7 @@ import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
 import { sanitizePrompt, decodeHtmlEntities } from './validation.js';
 import { createLogger } from './logger.js';
+import { getSharedMcpToken } from './mcp-auth.js';
 import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
@@ -134,7 +135,17 @@ function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } {
             return { command: process.execPath, prefixArgs: [cliPath] };
         }
     }
-    console.warn('[TaskSpawner] APPDATA-based Claude CLI not found, falling back to cmd.exe /c claude.cmd');
+    // Native-installer layout: %USERPROFILE%\.local\bin\claude.exe. This install
+    // path ships no claude.cmd shim (npm creates that, the native installer does
+    // not), so the cmd.exe fallback below cannot find it and the spawn fails with
+    // "'claude.cmd' is not recognized". Spawn the exe directly, same as the
+    // APPDATA bin/claude.exe case above.
+    const nativeExe = join(process.env['USERPROFILE'] || homedir(), '.local', 'bin', 'claude.exe');
+    if (existsSync(nativeExe)) {
+        console.log(`[TaskSpawner] Resolved Claude CLI exe via native install: ${nativeExe}`);
+        return { command: nativeExe, prefixArgs: [] };
+    }
+    console.warn('[TaskSpawner] APPDATA/native Claude CLI not found, falling back to cmd.exe /c claude.cmd');
     return { command: 'cmd.exe', prefixArgs: ['/c', 'claude.cmd'] };
 }
 
@@ -265,6 +276,7 @@ interface PersistedTask {
     processStartedAt?: string; // When the current processing run started (preserved across reconnect)
     order?: number;            // Display order within workspace (lower = higher in list)
     tokenUsage?: TaskTokenUsage; // Aggregated token usage for this task
+    parentTaskId?: string;     // Task that spawned this one via MCP claudia_create_task
 }
 
 // Lightweight metadata for archived tasks (no outputHistory - loaded lazily from disk)
@@ -426,6 +438,15 @@ export class TaskSpawner extends EventEmitter {
     /** After rotation, how many bytes of the tail we keep. */
     private readonly historyFileKeepBytes: number;
 
+    // Auto-reconnect pacing. reconnectTask() is synchronous, so these do NOT
+    // control the reconnect itself — they stagger CLI + MCP process startup so
+    // a boot with dozens of interrupted tasks doesn't spawn every claude
+    // process at once. Tunable via RECONNECT_CONCURRENCY / RECONNECT_SETTLE_MS.
+    /** How many tasks reconnect per wave. */
+    private readonly reconnectConcurrency: number;
+    /** Quiet period between waves, letting each wave's MCP servers come up. */
+    private readonly reconnectSettleMs: number;
+
     /** Wall-clock time when this TaskSpawner instance was created. Used by the
      *  idle reaper to avoid disconnecting tasks that were already idle before
      *  this server session started — their lastActivity timestamp predates the
@@ -511,6 +532,19 @@ export class TaskSpawner extends EventEmitter {
         this.historyFileKeepBytes = !isNaN(envKeepBytes) && envKeepBytes > 0
             ? envKeepBytes
             : 5 * 1024 * 1024;
+
+        // Auto-reconnect pacing. Default: 4 concurrent reconnects per wave,
+        // 750ms of quiet between waves. Previously this was a strictly serial
+        // loop with a 5s sleep per task (8s every 2), which cost ~182s of
+        // startup for a working set of 29 interrupted tasks.
+        const envReconnectConc = parseInt(process.env.RECONNECT_CONCURRENCY || '', 10);
+        this.reconnectConcurrency = !isNaN(envReconnectConc) && envReconnectConc >= 1
+            ? envReconnectConc
+            : 4;
+        const envReconnectSettle = parseInt(process.env.RECONNECT_SETTLE_MS || '', 10);
+        this.reconnectSettleMs = !isNaN(envReconnectSettle) && envReconnectSettle >= 0
+            ? envReconnectSettle
+            : 750;
 
         // Initialize backend based on config
         this.backendType = configStore?.getBackend() || 'claude-code';
@@ -726,29 +760,41 @@ export class TaskSpawner extends EventEmitter {
         // doesn't load. CLAUDIA_TASK_ID is omitted but the core tools (list, create,
         // status, output) work without it — only self-rename needs the task ID.
         if (claudiaMcpEnabled) {
-            const mcpServerPath = join(__dirname, 'claudia-mcp-server.ts');
-            // Use tsx cli directly instead of npx tsx (saves ~25 seconds on Windows).
-            // Full paths ensure it works regardless of Claude Code's cwd.
-            const tsxCliPath = join(__dirname, '..', '..', 'node_modules', 'tsx', 'dist', 'cli.mjs');
-            const useTsxDirect = existsSync(tsxCliPath);
-            const claudiaConfig: Record<string, unknown> = useTsxDirect
-                ? { command: process.execPath, args: [tsxCliPath, mcpServerPath] }
-                : { command: 'npx', args: ['tsx', mcpServerPath] };
-            // Pass workspace ID and task ID so the MCP server is scoped appropriately
-            const mcpEnv: Record<string, string> = {};
-            if (workspaceId) mcpEnv.CLAUDIA_WORKSPACE_ID = workspaceId;
-            if (taskId) mcpEnv.CLAUDIA_TASK_ID = taskId;
-            // Signal to the MCP server whether the complexity-tiering parameter
-            // should be exposed on claudia_create_task.
+            // Point at the SHARED in-process MCP endpoint on the backend rather
+            // than spawning a per-session child. The stdio form cost two
+            // processes per session (the tsx launcher forks) — 3.9GB measured
+            // across a live fleet — to do nothing but relay HTTP calls to this
+            // very backend. #180 shared the Playwright server the same way and
+            // left this as the remaining sidecar cost.
+            //
+            // Scope travels in headers because an HTTP server has no per-session
+            // env to read, and a bearer token guards an endpoint that can spawn
+            // and stop tasks.
+            const backendPort = process.env.CLAUDIA_BACKEND_PORT || PORTS.BACKEND;
+            const headers: Record<string, string> = {
+                Authorization: `Bearer ${getSharedMcpToken()}`,
+            };
+            if (workspaceId) headers['X-Claudia-Workspace-Id'] = workspaceId;
+            if (taskId) headers['X-Claudia-Task-Id'] = taskId;
             if (this.configStore?.getModelTiering().enabled) {
-                mcpEnv.CLAUDIA_MODEL_TIERING_ENABLED = '1';
+                headers['X-Claudia-Model-Tiering'] = '1';
             }
-            if (Object.keys(mcpEnv).length > 0) {
-                claudiaConfig.env = mcpEnv;
+            if (this.configStore?.getTodoEnabled()) {
+                headers['X-Claudia-Todo-Enabled'] = '1';
             }
+
+            const claudiaConfig: Record<string, unknown> = {
+                type: 'http',
+                url: `http://127.0.0.1:${backendPort}/mcp`,
+                headers,
+            };
+
             mcpConfig['claudia'] = claudiaConfig;
             enabledMcpServers.push({ name: 'claudia', enabled: true });
-            logger.info('Injected Claudia MCP server into MCP config', { path: mcpServerPath, workspaceId: workspaceId || '(global)' });
+            logger.info('Injected shared Claudia MCP endpoint into MCP config', {
+                url: claudiaConfig.url,
+                workspaceId: workspaceId || '(global)',
+            });
         }
 
         return { mcpConfig, enabledMcpServers };
@@ -804,12 +850,15 @@ export class TaskSpawner extends EventEmitter {
         // (it's inside .claude/ which tsx doesn't watch).
         const selfRoot = resolve(join(__dirname, '..', '..'));
 
-        // When skip-permissions is enabled, allow ALL tools in project settings
+        // When skip-permissions is enabled (either via the dedicated toggle or via
+        // permissionMode=bypassPermissions), allow ALL tools in project settings
         // so resumed sessions don't get permission prompts from the narrow
         // MCP-only allowlist. This is the primary mechanism for making skip-
         // permissions work on --resume'd sessions, since CLI flags from the
         // original spawn are baked into the session state.
-        const skipPermsSync = this.configStore?.getSkipPermissions();
+        const switches = this.configStore?.getClaudeCodeSwitches();
+        const permModeIsBypass = switches?.permissionMode === 'bypassPermissions' || switches?.permissionMode === 'dangerous';
+        const skipPermsSync = this.configStore?.getSkipPermissions() || permModeIsBypass;
 
         let syncCount = 0;
         for (const workspaceId of workspaceIds) {
@@ -1682,52 +1731,70 @@ export class TaskSpawner extends EventEmitter {
             return timeB - timeA; // most recent first
         });
 
-        // Reconnect in batches of BATCH_SIZE to prevent resource exhaustion
-        // (each task starts 2 MCP servers — too many at once overwhelms the system).
-        // Unlike the old approach which abandoned tasks beyond the cap, this
-        // processes ALL eligible tasks in staggered batches.
-        const BATCH_SIZE = 2;
+        // Reconnect in bounded parallel WAVES rather than one task at a time.
+        //
+        // reconnectTask() is synchronous — it spawns the PTY and returns. The
+        // old serial loop's 5s/8s sleeps were never waiting on the reconnect
+        // itself, only staggering CLI + MCP process startup so we don't spawn
+        // every claude process at once. A wave of `concurrency` reconnects
+        // followed by a short settle delay buys the same thundering-herd
+        // protection at a fraction of the wall-clock: for a measured working set
+        // of 29 eligible tasks, ~182s serial becomes ~5s. This matters because
+        // the WebSocket init path used to block on waitForReconnect(), so every
+        // second here was a second the UI showed nothing.
+        const concurrency = this.reconnectConcurrency;
+        const settleMs = this.reconnectSettleMs;
+        const totalWaves = Math.ceil(tasksToReconnect.length / concurrency);
 
         this.isReconnecting = true;
         this.emit('reconnectStart', tasksToReconnect.length);
-        console.log(`[TaskSpawner] Auto-reconnecting ${tasksToReconnect.length} tasks in batches of ${BATCH_SIZE}...`);
+        console.log(
+            `[TaskSpawner] Auto-reconnecting ${tasksToReconnect.length} tasks in ${totalWaves} wave(s) ` +
+            `of up to ${concurrency} (settle ${settleMs}ms between waves)...`
+        );
 
         const failedTasks: string[] = [];
+        let completed = 0;
 
-        for (let i = 0; i < tasksToReconnect.length; i++) {
-            const taskId = tasksToReconnect[i];
-            const persisted = this.disconnectedTasks.get(taskId);
-            if (!persisted) continue;
+        for (let i = 0; i < tasksToReconnect.length; i += concurrency) {
+            const wave = tasksToReconnect.slice(i, i + concurrency);
+            const waveNum = Math.floor(i / concurrency) + 1;
+            console.log(`[TaskSpawner] Reconnect wave ${waveNum}/${totalWaves} (${wave.length} task(s))`);
 
-            const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-            const totalBatches = Math.ceil(tasksToReconnect.length / BATCH_SIZE);
-            console.log(`[TaskSpawner] Auto-reconnecting task ${i + 1}/${tasksToReconnect.length} (batch ${batchNum}/${totalBatches}): ${taskId}`);
+            await Promise.all(wave.map(async (taskId) => {
+                const persisted = this.disconnectedTasks.get(taskId);
+                if (!persisted) return;
 
-            let success = false;
-            try {
-                const task = this.reconnectTask(taskId);
-                if (task) {
-                    console.log(`[TaskSpawner] Successfully reconnected task ${taskId}`);
-                    success = true;
+                let success = false;
+                try {
+                    const task = this.reconnectTask(taskId);
+                    if (task) {
+                        console.log(`[TaskSpawner] Successfully reconnected task ${taskId}`);
+                        success = true;
+                    }
+                } catch (error) {
+                    console.error(`[TaskSpawner] Error reconnecting task ${taskId}:`, error);
                 }
-            } catch (error) {
-                console.error(`[TaskSpawner] Error reconnecting task ${taskId}:`, error);
-            }
 
-            if (!success) {
-                failedTasks.push(taskId);
-                // Clear shouldContinue on failed tasks to prevent infinite retry loops
-                if (persisted) {
+                if (!success) {
+                    failedTasks.push(taskId);
+                    // Clear shouldContinue on failed tasks to prevent infinite retry loops
                     persisted.shouldContinue = false;
                     persisted.wasInterrupted = false;
                 }
-            }
+                completed++;
+                // Stream per-task progress so the UI can light tasks up as they
+                // come online instead of waiting for the whole run to finish.
+                this.emit('reconnectProgress', {
+                    taskId,
+                    success,
+                    completed,
+                    total: tasksToReconnect.length,
+                });
+            }));
 
-            // 5-second delay between reconnects to let MCP servers initialize.
-            // Extra 3-second pause between batches for system recovery.
-            if (i < tasksToReconnect.length - 1) {
-                const isBatchBoundary = (i + 1) % BATCH_SIZE === 0;
-                await new Promise(resolve => setTimeout(resolve, isBatchBoundary ? 8000 : 5000));
+            if (i + concurrency < tasksToReconnect.length && settleMs > 0) {
+                await new Promise(resolve => setTimeout(resolve, settleMs));
             }
         }
 
@@ -2096,6 +2163,7 @@ export class TaskSpawner extends EventEmitter {
                     processStartedAt: task.processStartedAt?.toISOString(),
                     order: task.order,
                     tokenUsage: task.tokenUsage,
+                    parentTaskId: task.parentTaskId,
                 });
             }
 
@@ -2861,7 +2929,7 @@ export class TaskSpawner extends EventEmitter {
      * @param systemPrompt - Optional system prompt override
      * @returns The created task object
      */
-    async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number, modelOverride?: string): Promise<Task> {
+    async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number, modelOverride?: string, parentTaskId?: string): Promise<Task> {
         // Sanitize prompt to prevent command injection and other issues
         const sanitizedPrompt = sanitizePrompt(prompt);
         let sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
@@ -2916,6 +2984,14 @@ export class TaskSpawner extends EventEmitter {
             // on the task once resolved (non-blocking).
             logger.info('Using Claude Code backend for task creation');
             task = await this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStatePromise, initialCols, initialRows, modelOverride);
+        }
+
+        // Attach parentTaskId if this task was spawned by another via MCP
+        if (parentTaskId) {
+            task.parentTaskId = parentTaskId;
+            const internalTask = this.tasks.get(task.id);
+            if (internalTask) internalTask.parentTaskId = parentTaskId;
+            logger.info('Task spawned by parent', { taskId: task.id, parentTaskId });
         }
 
         // Resolve learnings and inject into system prompt / track after task is created
@@ -3034,9 +3110,12 @@ export class TaskSpawner extends EventEmitter {
 
         const claudeArgs = [...customArgs];
 
-        if (this.configStore?.getSkipPermissions()) {
+        const skipPerms = this.configStore?.getSkipPermissions();
+        const switchesForPerms = this.configStore?.getClaudeCodeSwitches();
+        const bypassViaMode = switchesForPerms?.permissionMode === 'bypassPermissions' || switchesForPerms?.permissionMode === 'dangerous';
+        if (skipPerms || bypassViaMode) {
             claudeArgs.push('--dangerously-skip-permissions');
-            logger.info(`Skip permissions enabled`);
+            logger.info(`Skip permissions enabled (skipPermissions=${skipPerms}, permissionMode=${switchesForPerms?.permissionMode})`);
         }
 
         // Inject Claudia MCP orchestration guidance into system prompt when enabled
@@ -3106,7 +3185,13 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - While waiting for spawned tasks, do NOT start implementing features that overlap with what they're doing
 - **Deleting tasks**: You can request task deletion via \`claudia_delete_task\`, but it requires **explicit user approval** — a confirmation popup appears in the UI and the user must click "Delete" before the task is removed. NEVER call this automatically after tasks complete. Only call it when the user explicitly asks to delete/remove/clean up tasks.
 
-**Scheduling prompts (self-scheduling):**
+${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the toolbar):**
+- The Claudia toolbar shows a live TODO work-plan for this task. Treat it as YOUR working plan and keep it current so the user can watch progress at a glance.
+- **The moment a new user request arrives, reflect it in the work-plan BEFORE doing the work.** Call 'claudia_todo_create' to capture the task. If it is multi-step, decompose it into an ordered set of items in the sequence you will execute them — use 'parentId' to nest one level of subtasks under a parent item for the overall request.
+- As you work: set the item you are starting to status "active" (only one active at a time), and status "completed" as you finish each — the progress bar advances automatically. Re-read the plan any time with 'claudia_todo_list', and use 'claudia_todo_reorder' when priorities shift.
+- Track every kind of item here, tagged by 'source': your own steps ('source: "claude"'), GitHub issues/PRs you are acting on ('source: "github"', 'kind: "github-pr"' or '"github-issue"', with 'url' + 'externalRef' like "amd/gaia#1859"), and actions the USER must take themselves ('source: "user"' — run a VPN, approve a deploy, test in a browser). You are notified with a '[TODO COMPLETED]' message when the user checks off one of their items.
+- Do NOT put work you can do yourself into user-action items — use 'source: "claude"' for your own steps. Keep titles short and actionable.
+` : ''}**Scheduling prompts (self-scheduling):**
 - You can schedule prompts to be sent to any task (including your own) on a cron schedule using \`claudia_cron_create\`.
 - Use this to set up recurring checks, periodic polling, or delayed follow-ups — e.g. "check CI status every 10 minutes" or "remind me to review in 2 hours".
 - Your own task ID is \`${id}\` — pass it as \`taskId\` to schedule prompts on yourself.
@@ -3153,14 +3238,12 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             logger.warn('No enabled MCP servers found!');
         }
 
-        // When skip-permissions is enabled, --dangerously-skip-permissions (added
-        // above) already bypasses ALL permission checks, so no allowlist is needed.
-        // Do NOT pass `--allowedTools '*'` — current Claude Code rejects '*' as an
-        // invalid allow rule ("Wildcard tool name '*' is not supported"), which both
-        // prints a warning and leaves permission prompts active. Only set the narrow
-        // MCP allowlist in the non-skip case.
-        const skipPerms = this.configStore?.getSkipPermissions();
-        if (!skipPerms) {
+        // When skip-permissions is enabled, allow ALL tools so the narrow
+        // allowlist doesn't reintroduce permission prompts. Otherwise, only
+        // auto-approve MCP tools (non-MCP tools go through normal permission flow).
+        if (skipPerms || bypassViaMode) {
+            claudeArgs.push('--allowedTools', '*');
+        } else {
             claudeArgs.push('--allowedTools', 'mcp__*');
         }
 
@@ -3388,6 +3471,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             tokenUsage: task.tokenUsage,
             sessionWorktreeBranch: task.sessionWorktreeBranch,
             sessionWorktreePrInfo: task.sessionWorktreePrInfo,
+            parentTaskId: task.parentTaskId,
         };
     }
 
@@ -4598,6 +4682,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             backendType: this.taskBackends.get(persisted.id) || 'claude-code' as const,
             order: persisted.order,
             tokenUsage: persisted.tokenUsage,
+            parentTaskId: persisted.parentTaskId,
         }));
 
         return [...liveTasks, ...disconnectedTasks];
@@ -4629,6 +4714,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 displayNameEditedByUser: existing.displayNameEditedByUser,
                 order: existing.order,
                 tokenUsage: existing.tokenUsage,
+                parentTaskId: existing.parentTaskId,
             };
             this.disconnectedTasks.set(taskId, persisted);
             this.tasks.delete(taskId);
@@ -4727,10 +4813,11 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 claudeArgs.push('--dangerously-skip-permissions');
             }
 
-            // When skip-permissions is enabled, --dangerously-skip-permissions (above)
-            // bypasses all checks; do NOT pass `--allowedTools '*'` — Claude Code rejects
-            // '*' as an invalid allow rule, which spams a warning and leaves prompts active.
-            if (!skipPermsReconnect) {
+            // When skip-permissions is enabled, allow ALL tools to avoid
+            // the narrow MCP-only allowlist reintroducing permission prompts.
+            if (skipPermsReconnect) {
+                claudeArgs.push('--allowedTools', '*');
+            } else {
                 claudeArgs.push('--allowedTools', 'mcp__*');
             }
 
@@ -4752,6 +4839,15 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 atomicWriteFileSync(mcpConfigFile, mcpConfigJson);
                 claudeArgs.push('--mcp-config', mcpConfigFile);
                 console.log(`[TaskSpawner] Added ${mcpResult.enabledMcpServers.length} MCP server(s) for reconnection via ${mcpConfigFile}`);
+            }
+
+            // Re-apply the persisted system prompt. This was silently DROPPED on
+            // every reconnect (tsx-watch restart, sleep/wake, lazy restore) —
+            // killing workspace prompts and any per-task guard (e.g. read-only)
+            // exactly when the task resumed. Mirrors the create path.
+            if (persisted.systemPrompt && persisted.systemPrompt.trim()) {
+                claudeArgs.push('--system-prompt', persisted.systemPrompt.trim());
+                console.log(`[TaskSpawner] Re-applied persisted system prompt on reconnect for ${taskId}`);
             }
 
             if (sessionIdToUse) {
@@ -4883,6 +4979,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             systemPrompt: persisted.systemPrompt,  // Preserve custom system prompt
             gitStateBefore: persisted.gitState ? persisted.gitState : undefined,  // Preserve git state
             tokenUsage: persisted.tokenUsage,  // Preserve token usage across reconnection
+            parentTaskId: persisted.parentTaskId,  // Preserve spawner relationship across reconnection
         };
 
         // Remove from disconnectedTasks FIRST before registering handlers or emitting events.
@@ -5025,6 +5122,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             displayName: task.displayName,
             wasInterrupted: true, // Mark as interrupted so it shows correct state on resume
             shouldContinue: false,
+            parentTaskId: task.parentTaskId,
         };
 
         this.disconnectedTasks.set(taskId, persisted);
