@@ -30,7 +30,8 @@ const __dirname = dirname(__filename);
 const MAX_SCHEDULED_TASKS_PER_TASK = 50;
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 const CHECK_INTERVAL_MS = 1000; // Check every second
-const PERSISTENCE_PATH = join(__dirname, '..', 'scheduled-tasks.json');
+/** Legacy location, used when no data directory is configured. */
+const LEGACY_PERSISTENCE_PATH = join(__dirname, '..', 'scheduled-tasks.json');
 
 /** Schema version for scheduled-tasks.json. Bump when ScheduledTask shape changes. */
 const CRON_SCHEMA_VERSION = 1;
@@ -245,10 +246,16 @@ export class CronScheduler extends EventEmitter {
     private pendingFires: Map<string, string> = new Map(); // scheduledTaskId → prompt (waiting for task to be idle)
     private saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
-    constructor(fireCallback: CronFireCallback, taskStateChecker: TaskStateChecker) {
+    /** Absolute path to scheduled-tasks.json for this instance. */
+    private readonly persistencePath: string;
+
+    constructor(fireCallback: CronFireCallback, taskStateChecker: TaskStateChecker, dataDir?: string) {
         super();
         this.fireCallback = fireCallback;
         this.taskStateChecker = taskStateChecker;
+        this.persistencePath = dataDir
+            ? join(dataDir, 'scheduled-tasks.json')
+            : LEGACY_PERSISTENCE_PATH;
         this.load();
     }
 
@@ -614,7 +621,7 @@ export class CronScheduler extends EventEmitter {
     private save(): void {
         try {
             const data = Array.from(this.scheduledTasks.values());
-            saveVersioned(PERSISTENCE_PATH, data, CRON_SCHEMA_VERSION);
+            saveVersioned(this.persistencePath, data, CRON_SCHEMA_VERSION);
             logger.debug('Saved scheduled tasks', { count: data.length });
         } catch (error) {
             logger.error('Failed to save scheduled tasks', { error });
@@ -626,9 +633,9 @@ export class CronScheduler extends EventEmitter {
      */
     private load(): void {
         try {
-            if (!existsSync(PERSISTENCE_PATH)) return;
+            if (!existsSync(this.persistencePath)) return;
 
-            const data = loadVersioned<ScheduledTask[]>(PERSISTENCE_PATH, {
+            const data = loadVersioned<ScheduledTask[]>(this.persistencePath, {
                 currentVersion: CRON_SCHEMA_VERSION,
                 defaultData: [],
                 // Legacy format was a bare ScheduledTask[] — pass through.
