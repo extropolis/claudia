@@ -10,6 +10,8 @@
 import { EventEmitter } from 'events';
 import { randomUUID } from 'crypto';
 import { spawn, execSync, ChildProcess } from 'child_process';
+import { writeFileSync, readFileSync, existsSync } from 'fs';
+import { join } from 'path';
 import { createLogger } from './logger.js';
 
 const logger = createLogger('[TunnelManager]');
@@ -37,6 +39,7 @@ export class TunnelManager extends EventEmitter {
     private stopping = false;
     private port: number;
     private domain: string | null;
+    private dataDir: string | null;
     /**
      * Non-null when tracking an orphaned ngrok we didn't spawn
      * (e.g. left behind by a previous server instance after tsx watch reload).
@@ -44,11 +47,40 @@ export class TunnelManager extends EventEmitter {
      */
     private adoptedMonitor: NodeJS.Timeout | null = null;
 
-    constructor(port: number, domain?: string) {
+    constructor(port: number, domain?: string, dataDir?: string) {
         super();
         this.port = port;
         this.domain = domain || null;
+        this.dataDir = dataDir || null;
         logger.info('TunnelManager initialized (ngrok)', { port, domain: this.domain || '(random)' });
+    }
+
+    private get tokenPersistPath(): string | null {
+        return this.dataDir ? join(this.dataDir, 'tunnel-token.json') : null;
+    }
+
+    private saveToken(url: string, token: string): void {
+        if (!this.tokenPersistPath) return;
+        try {
+            writeFileSync(this.tokenPersistPath, JSON.stringify({ url, token }), 'utf-8');
+        } catch (err) {
+            logger.warn('Failed to persist tunnel token', { error: err instanceof Error ? err.message : String(err) });
+        }
+    }
+
+    private loadPersistedToken(url: string): string | null {
+        if (!this.tokenPersistPath) return null;
+        try {
+            if (!existsSync(this.tokenPersistPath)) return null;
+            const data = JSON.parse(readFileSync(this.tokenPersistPath, 'utf-8')) as { url: string; token: string };
+            if (data.url === url) {
+                logger.info('Reusing persisted tunnel token (same URL)', { url });
+                return data.token;
+            }
+        } catch (err) {
+            logger.warn('Failed to load persisted tunnel token', { error: err instanceof Error ? err.message : String(err) });
+        }
+        return null;
     }
 
     /**
@@ -92,6 +124,7 @@ export class TunnelManager extends EventEmitter {
         if (existingUrl) {
             logger.info('Found existing ngrok tunnel — adopting it (keeps same URL, no re-scan needed)', { url: existingUrl });
             this.url = existingUrl;
+            this.token = this.loadPersistedToken(existingUrl) || this.token;
             this.startedAt = new Date().toISOString();
             this.startAdoptedMonitor();
             this.emit('tunnel:ready', { url: this.url, token: this.token });
@@ -237,6 +270,7 @@ export class TunnelManager extends EventEmitter {
 
         this.url = url;
         this.startedAt = new Date().toISOString();
+        this.saveToken(url, this.token!);
         logger.info('Ngrok tunnel started', { url: this.url, token: this.token });
         this.emit('tunnel:ready', { url: this.url, token: this.token });
     }
@@ -421,7 +455,7 @@ export class TunnelManager extends EventEmitter {
 
         logger.info('Auto-recovering orphaned ngrok tunnel on server startup', { url: existingUrl });
         this.url = existingUrl;
-        this.token = randomUUID();
+        this.token = this.loadPersistedToken(existingUrl) || randomUUID();
         this.startedAt = new Date().toISOString();
         this.startAdoptedMonitor();
         this.emit('tunnel:ready', { url: this.url, token: this.token });

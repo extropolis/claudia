@@ -114,11 +114,15 @@ export interface AppConfig {
     };
     enabledPlugins?: string[];  // List of enabled plugin names (all disabled by default)
     claudiaMcpServerEnabled: boolean;  // Enable Claudia MCP server for Claude Code sessions
+<<<<<<< HEAD
     tokenPricing?: Record<string, ModelPricing>;  // Custom token pricing per model
     tokenTrackingEnabled?: boolean;  // Enable token usage tracking
     tokenCostEnabled?: boolean;  // Enable cost calculation display (default: false)
     defaultBaseDirectory?: string;  // Default base directory for new workspaces (optional)
     modelTiering?: ModelTieringConfig;  // Complexity-based model selection for MCP-spawned tasks
+=======
+    useWsl: boolean;  // Run Claude Code sessions inside WSL (Windows only)
+>>>>>>> ff2f9f8 (feat: add WSL support and persist tunnel token across restarts)
 }
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
@@ -201,9 +205,13 @@ const DEFAULT_CONFIG: AppConfig = {
     hyperspaceProxy: DEFAULT_HYPERSPACE_PROXY,
     enabledPlugins: [],  // All plugins disabled by default
     claudiaMcpServerEnabled: true,  // Enabled by default
+<<<<<<< HEAD
     tokenTrackingEnabled: true,  // Token usage tracking enabled by default
     defaultBaseDirectory: undefined,  // No default base directory set
     modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } }
+=======
+    useWsl: false  // Run Claude Code sessions inside WSL (Windows only)
+>>>>>>> ff2f9f8 (feat: add WSL support and persist tunnel token across restarts)
 };
 
 export class ConfigStore {
@@ -265,6 +273,7 @@ export class ConfigStore {
 
     private loadConfig(): AppConfig {
         try {
+<<<<<<< HEAD
             // loadVersioned handles: missing file → defaultData; legacy unversioned
             // file → legacyLoader; future versioned files → migrations (none yet).
             // We run normalize() over the result so newly-added fields always have
@@ -275,10 +284,60 @@ export class ConfigStore {
                 legacyLoader: (raw) => raw as Partial<AppConfig>,
             });
             return this.normalize(data);
+=======
+            if (existsSync(this.configFile)) {
+                const data = readFileSync(this.configFile, 'utf-8');
+                const loaded = JSON.parse(data) as Partial<AppConfig>;
+                return {
+                    // Use defaults if mcpServers is undefined or empty array
+                    mcpServers: (loaded.mcpServers && loaded.mcpServers.length > 0) ? loaded.mcpServers : DEFAULT_MCP_SERVERS,
+                    skipPermissions: loaded.skipPermissions ?? false,
+                    rules: loaded.rules ?? '',
+                    supervisorEnabled: loaded.supervisorEnabled ?? false,
+                    supervisorSystemPrompt: loaded.supervisorSystemPrompt ?? DEFAULT_SUPERVISOR_PROMPT,
+                    autoFocusOnInput: loaded.autoFocusOnInput ?? false,
+                    apiMode: loaded.apiMode ?? 'default',
+                    customAnthropicApiKey: loaded.customAnthropicApiKey,
+                    deepgramApiKey: loaded.deepgramApiKey,
+                    backend: loaded.backend ?? 'claude-code',
+                    opencodePort: loaded.opencodePort ?? 4096,
+                    useLearnings: loaded.useLearnings ?? false,
+                    claudeCodeSwitches: {
+                        ...DEFAULT_CLAUDE_CODE_SWITCHES,
+                        ...(loaded.claudeCodeSwitches || {})
+                    },
+                    hyperspaceProxy: loaded.hyperspaceProxy ?? DEFAULT_HYPERSPACE_PROXY,
+                    aiCoreCredentials: loaded.aiCoreCredentials,
+                    enabledPlugins: loaded.enabledPlugins ?? [],
+                    claudiaMcpServerEnabled: loaded.claudiaMcpServerEnabled ?? true,
+                    useWsl: loaded.useWsl ?? false
+                };
+            }
+>>>>>>> ff2f9f8 (feat: add WSL support and persist tunnel token across restarts)
         } catch (error) {
             console.error('[ConfigStore] Error loading config:', error);
             return this.defaultConfig();
         }
+<<<<<<< HEAD
+=======
+        return {
+            mcpServers: [...DEFAULT_MCP_SERVERS],
+            skipPermissions: false,
+            rules: '',
+            supervisorEnabled: false,
+            supervisorSystemPrompt: DEFAULT_SUPERVISOR_PROMPT,
+            autoFocusOnInput: false,
+            apiMode: 'default',
+            backend: 'claude-code',
+            opencodePort: 4096,
+            useLearnings: false,
+            claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
+            hyperspaceProxy: { ...DEFAULT_HYPERSPACE_PROXY },
+            enabledPlugins: [],
+            claudiaMcpServerEnabled: true,
+            useWsl: false
+        };
+>>>>>>> ff2f9f8 (feat: add WSL support and persist tunnel token across restarts)
     }
 
     private saveConfig(): void {
@@ -347,6 +406,7 @@ export class ConfigStore {
         if (updates.claudiaMcpServerEnabled !== undefined) {
             this.config.claudiaMcpServerEnabled = updates.claudiaMcpServerEnabled;
         }
+<<<<<<< HEAD
         if (updates.tokenTrackingEnabled !== undefined) {
             this.config.tokenTrackingEnabled = updates.tokenTrackingEnabled;
         }
@@ -367,6 +427,10 @@ export class ConfigStore {
                 enabled: updates.modelTiering.enabled ?? existing.enabled,
                 tiers: { ...existing.tiers, ...(updates.modelTiering.tiers || {}) }
             };
+=======
+        if (updates.useWsl !== undefined) {
+            this.config.useWsl = updates.useWsl;
+>>>>>>> ff2f9f8 (feat: add WSL support and persist tunnel token across restarts)
         }
         this.saveConfig();
         return this.getConfig();
@@ -425,11 +489,15 @@ export class ConfigStore {
             claudeCodeSwitches: { ...DEFAULT_CLAUDE_CODE_SWITCHES },
             hyperspaceProxy: { ...DEFAULT_HYPERSPACE_PROXY },
             claudiaMcpServerEnabled: true,
+<<<<<<< HEAD
             tokenTrackingEnabled: true,
             tokenCostEnabled: false,
             tokenPricing: { ...DEFAULT_TOKEN_PRICING },
             defaultBaseDirectory: undefined,
             modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } }
+=======
+            useWsl: false
+>>>>>>> ff2f9f8 (feat: add WSL support and persist tunnel token across restarts)
         };
         this.saveConfig();
         return this.getConfig();
@@ -543,6 +611,7 @@ export class ConfigStore {
         this.saveConfig();
     }
 
+<<<<<<< HEAD
     getTokenTrackingEnabled(): boolean {
         return this.config.tokenTrackingEnabled ?? true;
     }
@@ -576,6 +645,14 @@ export class ConfigStore {
 
     setDefaultBaseDirectory(directory: string | undefined): void {
         this.config.defaultBaseDirectory = directory;
+=======
+    getUseWsl(): boolean {
+        return this.config.useWsl ?? false;
+    }
+
+    setUseWsl(useWsl: boolean): void {
+        this.config.useWsl = useWsl;
+>>>>>>> ff2f9f8 (feat: add WSL support and persist tunnel token across restarts)
         this.saveConfig();
     }
 }

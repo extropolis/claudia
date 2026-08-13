@@ -82,6 +82,7 @@ export interface ConfigUpdatePayload {
         timeoutMs?: number;
     };
     claudiaMcpServerEnabled?: boolean;
+<<<<<<< HEAD
     modelTiering?: {
         enabled?: boolean;
         tiers?: {
@@ -90,6 +91,9 @@ export interface ConfigUpdatePayload {
             high?: string;
         };
     };
+=======
+    useWsl?: boolean;
+>>>>>>> ff2f9f8 (feat: add WSL support and persist tunnel token across restarts)
 }
 
 /**
@@ -197,7 +201,8 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
         'skipPermissions',
         'autoFocusOnInput',
         'supervisorEnabled',
-        'claudiaMcpServerEnabled'
+        'claudiaMcpServerEnabled',
+        'useWsl'
     ];
 
     for (const field of booleanFields) {
