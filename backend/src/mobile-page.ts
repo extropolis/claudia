@@ -4,7 +4,12 @@
  * Shows tasks in an accordion view with xterm.js terminal rendering (same as desktop).
  * Connects via WebSocket. Voice input via Deepgram Nova-3, voice summaries via ElevenLabs TTS.
  * Loads xterm.js + fit addon from CDN. No React or build dependencies.
+ *
+ * All caller-supplied values land inside an inline <script>, so they MUST go
+ * through jsLiteral() — see html-escape.ts for why JSON.stringify alone is not
+ * enough (it does not stop `</script>` from ending the element).
  */
+import { jsLiteral } from './html-escape.js';
 
 export function getMobilePageHtml(wsUrl: string, token: string): string {
     return `<!DOCTYPE html>
@@ -596,8 +601,8 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
     (function() {
         'use strict';
 
-        var WS_URL = ${JSON.stringify(wsUrl)};
-        var TOKEN = ${JSON.stringify(token)};
+        var WS_URL = ${jsLiteral(wsUrl)};
+        var TOKEN = ${jsLiteral(token)};
 
         // State
         var ws = null;
