@@ -124,7 +124,8 @@ const TOOLS: ToolDefinition[] = [
 ];
 
 // Path for chat history persistence
-const CHAT_HISTORY_FILE = join(__dirname, '..', 'chat-history.json');
+/** Legacy location, used when no data directory is configured. */
+const LEGACY_CHAT_HISTORY_FILE = join(__dirname, '..', 'chat-history.json');
 /** Maximum number of chat messages to retain in memory and on disk */
 const MAX_HISTORY_MESSAGES = 200;
 
@@ -224,20 +225,25 @@ export class SupervisorChat extends EventEmitter {
     private runClaude: ClaudeRunner;
 
     /**
-     * @param options.historyFile Override the chat-history path (test seam; defaults to backend/chat-history.json).
+     * @param dataDir             Data directory for persisted state; defaults to the legacy backend/ location.
+     * @param options.historyFile Override the chat-history path (test seam). Takes precedence over dataDir.
      * @param options.runClaude   Override how the claude CLI is invoked (test seam; defaults to a real spawn).
      */
     constructor(
         taskSpawner: TaskSpawner,
         workspaceStore: { getWorkspaces: () => { id: string; name: string }[] },
         configStore: ConfigStore,
+        dataDir?: string,
         options?: { historyFile?: string; runClaude?: ClaudeRunner }
     ) {
         super();
         this.taskSpawner = taskSpawner;
         this.workspaceStore = workspaceStore;
         this.configStore = configStore;
-        this.historyFile = options?.historyFile ?? CHAT_HISTORY_FILE;
+        // An explicit override wins over the data directory, which in turn wins
+        // over the legacy backend/ location.
+        this.historyFile = options?.historyFile
+            ?? (dataDir ? join(dataDir, 'chat-history.json') : LEGACY_CHAT_HISTORY_FILE);
         this.runClaude = options?.runClaude ?? defaultClaudeRunner;
 
         // Load persisted chat history

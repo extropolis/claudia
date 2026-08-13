@@ -109,6 +109,7 @@ function build(opts: {
         spawner as unknown as TaskSpawner,
         { getWorkspaces: () => opts.workspaces ?? [{ id: '/ws/a', name: 'Alpha' }] },
         configStore,
+        undefined,                              // dataDir — historyFile overrides it
         { historyFile, runClaude: runner }
     );
 
@@ -1208,6 +1209,7 @@ exit "\${SHIM_EXIT:-0}"
             new FakeSpawner() as unknown as TaskSpawner,
             { getWorkspaces: () => [{ id: work, name: 'W' }] },
             { isSupervisorEnabled: () => true, getSupervisorSystemPrompt: () => 'SP' } as unknown as ConfigStore,
+            undefined,                          // dataDir — historyFile overrides it
             { historyFile: nextHistoryFile() }   // runClaude deliberately omitted
         );
         harnesses.push(chat);
