@@ -107,7 +107,13 @@ beforeAll(async () => {
 
 afterAll(async () => {
     if (h) await h.stop();                                  // restores env + rm -rf's the harness base
-    if (root) rmSync(root, { recursive: true, force: true }); // rm -rf's the workspace tree
+    try {
+        // Tolerant for the same reason as the harness: Windows holds the git
+        // worktree handles briefly after shutdown and rmdir throws EBUSY.
+        if (root) rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    } catch {
+        // Ignore cleanup errors
+    }
 });
 
 describe('GET /api/workspaces', () => {
