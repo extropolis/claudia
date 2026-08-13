@@ -1,20 +1,5 @@
 import { vi } from 'vitest';
 import '@testing-library/jest-dom';
-import { vi } from 'vitest';
-
-// ---------------------------------------------------------------------------
-// No network. Any test that needs a real response should override global.fetch
-// itself; this default exists so an unstubbed call can never reach the network
-// (or hang a test) and so `.then(r => r.json())` chains resolve instead of
-// throwing unhandled rejections.
-// ---------------------------------------------------------------------------
-global.fetch = vi.fn(async () => ({
-    ok: true,
-    status: 200,
-    statusText: 'OK',
-    json: async () => ({}),
-    text: async () => '',
-})) as unknown as typeof fetch;
 
 // Mock localStorage
 const localStorageMock = (() => {
