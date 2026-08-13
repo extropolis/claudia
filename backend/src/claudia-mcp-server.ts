@@ -27,10 +27,10 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { pathToFileURL } from 'url';
 import { z } from 'zod';
-import { writeFileSync } from 'fs';
+import { writeFileSync, realpathSync } from 'fs';
 import { join, resolve, basename } from 'path';
+import { fileURLToPath } from 'url';
 import { isPathInside } from './validation.js';
 
 // Backend URL - defaults to localhost:4001, can be overridden via env
@@ -135,6 +135,25 @@ async function sendWSMessageAt(baseUrl: string, type: string, payload: Record<st
             ws.send(JSON.stringify({ type, payload }));
         });
 
+        // The WS connection receives BROADCASTS for every task in the server, not
+        // just the one this call targeted. Matching on message type alone let an
+        // unrelated task's state change satisfy our wait — so claudia_send_input
+        // could report "input delivered" for a task id that does not even exist,
+        // whenever any other task happened to change state within the window.
+        // That is the normal case in a fleet. Every matcher below that keys off a
+        // broadcast must therefore confirm the broadcast is about OUR task.
+        const targetTaskId = typeof payload.taskId === 'string' ? payload.taskId : undefined;
+        const isAboutTarget = (msg: { payload?: any }): boolean => {
+            if (!targetTaskId) return true;
+            const p = msg.payload;
+            if (!p) return false;
+            if (typeof p.taskId === 'string') return p.taskId === targetTaskId;
+            if (p.task?.id) return p.task.id === targetTaskId;
+            // Bulk update (tasks:updated) — satisfied only if our task is in it.
+            if (Array.isArray(p.tasks)) return p.tasks.some((t: any) => t?.id === targetTaskId);
+            return false;
+        };
+
         ws.on('message', (data: Buffer) => {
             try {
                 const msg = JSON.parse(data.toString());
@@ -149,35 +168,35 @@ async function sendWSMessageAt(baseUrl: string, type: string, payload: Record<st
                 }
 
                 // For task:input, wait for task:stateChanged (busy means input was accepted)
-                if (type === 'task:input' && msg.type === 'task:stateChanged') {
+                if (type === 'task:input' && msg.type === 'task:stateChanged' && isAboutTarget(msg)) {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
                 }
 
                 // For task:archive, wait for task:destroyed (archiving emits taskDestroyed internally)
-                if (type === 'task:archive' && msg.type === 'task:destroyed') {
+                if (type === 'task:archive' && msg.type === 'task:destroyed' && isAboutTarget(msg)) {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
                 }
 
                 // For task:interrupt, wait for state change
-                if (type === 'task:interrupt' && msg.type === 'task:stateChanged') {
+                if (type === 'task:interrupt' && msg.type === 'task:stateChanged' && isAboutTarget(msg)) {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
                 }
 
                 // For task:rename, wait for task:stateChanged (active tasks) or tasks:updated (disconnected/archived)
-                if (type === 'task:rename' && (msg.type === 'task:stateChanged' || msg.type === 'tasks:updated')) {
+                if (type === 'task:rename' && (msg.type === 'task:stateChanged' || msg.type === 'tasks:updated') && isAboutTarget(msg)) {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
                 }
 
                 // For task:stop, wait for task:stopped response
-                if (type === 'task:stop' && msg.type === 'task:stopped') {
+                if (type === 'task:stop' && msg.type === 'task:stopped' && isAboutTarget(msg)) {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
@@ -191,7 +210,7 @@ async function sendWSMessageAt(baseUrl: string, type: string, payload: Record<st
                 }
 
                 // For task:destroy, wait for task:destroyed broadcast
-                if (type === 'task:destroy' && msg.type === 'task:destroyed') {
+                if (type === 'task:destroy' && msg.type === 'task:destroyed' && isAboutTarget(msg)) {
                     clearTimeout(timeout);
                     ws.close();
                     resolve(msg.payload);
@@ -282,6 +301,75 @@ async function sendWSMessageWithMultiResponseAt<T>(
  * process to carry env, so it comes from request headers instead — which is the
  * whole reason this is a factory rather than a module-level singleton.
  */
+/**
+ * READ scope for a session: the ROOT workspace plus every workspace whose own
+ * root-walk lands on the same root (transitive — covers legacy grandchild
+ * worktrees, not just direct children). Used by claudia_list_tasks so fleet
+ * coordinators inside worktrees see their siblings.
+ *
+ * NOTE: claudia_stop_all_tasks deliberately does NOT use this — stopping is
+ * destructive, and widening its blast radius to the whole workspace meant a
+ * worktree session's cleanup could kill the coordinator and every sibling.
+ * Stop keeps the original self+children scope via getStopScopeFor().
+ *
+ * Module-level and parameterized rather than a closure over the session scope,
+ * so the contract can be tested directly — the blast radius of getting it wrong
+ * is why it is worth pinning.
+ */
+export async function getWorkspaceScopeFor(
+    workspaceId: string,
+    baseUrl: string,
+): Promise<{ ids: Set<string>; wsById: Map<string, any> }> {
+    const ids = new Set<string>();
+    const wsById = new Map<string, any>();
+    if (!workspaceId) return { ids, wsById };
+
+    try {
+        const response = await backendFetchAt(baseUrl, '/api/workspaces');
+        if (response.ok) {
+            const data = await response.json();
+            const workspaces = data.workspaces || data;
+            for (const ws of workspaces) wsById.set(ws.id, ws);
+
+            const root = resolveWorktreeRoot(wsById, workspaceId);
+            ids.add(root);
+            for (const ws of workspaces) {
+                if (resolveWorktreeRoot(wsById, ws.id) === root && ws.worktreeParentId) ids.add(ws.id);
+            }
+        }
+    } catch {
+        // Backend unreachable — fall through to self-only scope below
+    }
+
+    // Always include the session's own workspace (also the fallback when the
+    // backend fetch fails or the workspace isn't registered)
+    ids.add(workspaceId);
+
+    return { ids, wsById };
+}
+
+/**
+ * STOP scope: the session's own workspace + its direct worktree children only
+ * (the pre-widening semantics). A worktree session stopping "all" tasks must
+ * not reach the parent workspace or sibling worktrees.
+ */
+export async function getStopScopeFor(workspaceId: string, baseUrl: string): Promise<Set<string>> {
+    const ids = new Set<string>();
+    if (!workspaceId) return ids;
+    ids.add(workspaceId);
+    try {
+        const response = await backendFetchAt(baseUrl, '/api/workspaces');
+        if (response.ok) {
+            const data = await response.json();
+            const workspaces = data.workspaces || data;
+            for (const ws of workspaces) {
+                if (ws.worktreeParentId === workspaceId) ids.add(ws.id);
+            }
+        }
+    } catch { /* self-only fallback */ }
+    return ids;
+}
+
 export interface ClaudiaMcpScope {
     /** Workspace this session is scoped to (CLAUDIA_WORKSPACE_ID). */
     workspaceId: string;
@@ -344,56 +432,14 @@ export function createClaudiaMcpServer(scope: ClaudiaMcpScope): McpServer {
      * worktree session's cleanup could kill the coordinator and every sibling.
      * Stop keeps the original self+children scope via getStopScope().
      */
-    async function getWorkspaceScope(): Promise<{ ids: Set<string>; wsById: Map<string, any> }> {
-        const ids = new Set<string>();
-        const wsById = new Map<string, any>();
-        if (!WORKSPACE_ID) return { ids, wsById };
-
-        try {
-            const response = await backendFetch('/api/workspaces');
-            if (response.ok) {
-                const data = await response.json();
-                const workspaces = data.workspaces || data;
-                for (const ws of workspaces) wsById.set(ws.id, ws);
-
-                const root = resolveWorktreeRoot(wsById, WORKSPACE_ID);
-                ids.add(root);
-                for (const ws of workspaces) {
-                    if (resolveWorktreeRoot(wsById, ws.id) === root && ws.worktreeParentId) ids.add(ws.id);
-                }
-            }
-        } catch {
-            // Backend unreachable — fall through to self-only scope below
-        }
-
-        // Always include the session's own workspace (also the fallback when the
-        // backend fetch fails or the workspace isn't registered)
-        ids.add(WORKSPACE_ID);
-
-        return { ids, wsById };
-    }
+    const getWorkspaceScope = () => getWorkspaceScopeFor(WORKSPACE_ID, BASE_URL);
 
     /**
      * STOP scope: the session's own workspace + its direct worktree children only
      * (the pre-widening semantics). A worktree session stopping "all" tasks must
      * not reach the parent workspace or sibling worktrees.
      */
-    async function getStopScope(): Promise<Set<string>> {
-        const ids = new Set<string>();
-        if (!WORKSPACE_ID) return ids;
-        ids.add(WORKSPACE_ID);
-        try {
-            const response = await backendFetch('/api/workspaces');
-            if (response.ok) {
-                const data = await response.json();
-                const workspaces = data.workspaces || data;
-                for (const ws of workspaces) {
-                    if (ws.worktreeParentId === WORKSPACE_ID) ids.add(ws.id);
-                }
-            }
-        } catch { /* self-only fallback */ }
-        return ids;
-    }
+    const getStopScope = () => getStopScopeFor(WORKSPACE_ID, BASE_URL);
 
     // Create the MCP server
     const server = new McpServer({
@@ -1797,22 +1843,43 @@ async function main() {
     log.info('Claudia MCP Server running on stdio');
 }
 
-// Only self-start when run as a script. The backend imports this module to
-// mount the shared HTTP endpoint — booting a stdio transport there would
-// hijack the backend's own stdin/stdout.
-const isDirectRun = (() => {
+/**
+ * Only auto-start when this module IS the process entrypoint (how task-spawner
+ * launches it: `node tsx/cli.mjs .../claudia-mcp-server.ts`). Importing the
+ * module — as the tests do, to drive `server` over an in-memory transport —
+ * must not grab stdio or dial the backend. Production behavior is unchanged:
+ * as an entrypoint the argv check passes and main() runs exactly as before.
+ */
+function isEntrypoint(): boolean {
+    const entry = process.argv[1];
+    if (!entry) return false;
     try {
-        const entry = process.argv[1];
-        if (!entry) return false;
-        return import.meta.url === pathToFileURL(entry).href;
+        // realpathSync on BOTH sides: tsx sets argv[1] to this file's path, but
+        // the two spellings can differ through symlinks (on macOS /tmp vs
+        // /private/tmp is the classic case). A plain resolve() compare would
+        // silently report "not the entrypoint" and the server would never start.
+        const canonical = (p: string) => { try { return realpathSync(p); } catch { return resolve(p); } };
+        return canonical(entry) === canonical(fileURLToPath(import.meta.url));
     } catch {
         return false;
     }
-})();
+}
 
-if (isDirectRun) {
+// NOTE: this supersedes the `pathToFileURL(argv[1]).href === import.meta.url`
+// comparison that arrived from the shared-MCP-endpoint work. Both guard the
+// same thing — don't boot a stdio transport when the backend merely imports
+// this module — but that comparison comes apart when argv[1] and
+// import.meta.url spell the same file differently through a symlink, and then
+// the MCP server silently never starts. realpathSync on both sides is exact.
+if (isEntrypoint()) {
     main().catch((error) => {
         log.error('Fatal error:', error);
         process.exit(1);
     });
 }
+
+// Test seam: lets the suite exercise the pure helpers directly. The MCP server
+// itself is built with createClaudiaMcpServer(scope) — exported above — which
+// the suite connects to a real MCP Client over an in-memory transport so tool
+// listing and dispatch go through the real protocol.
+export { formatDuration, resolveWorktreeRoot };

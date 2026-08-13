@@ -53,6 +53,7 @@ export default defineConfig({
                 'src/token-parser.ts': { lines: 90 },
                 'src/task-state-detection.ts': { lines: 90 },
                 'src/config-store.ts': { lines: 85 },
+                'src/supervisor-chat.ts': { lines: 95 },
                 'src/cron-scheduler.ts': { lines: 95 },
                 // Fully dependency-injected suites — no PTY, no bash fixture —
                 // so they run identically on the Windows CI leg and can be
@@ -65,5 +66,14 @@ export default defineConfig({
             },
         },
         testTimeout: 10000,
+        // Hooks do NOT inherit testTimeout — vitest applies its own 10s default
+        // unless hookTimeout is set. Several suites build a real git repository
+        // in beforeEach (git init + config + commits), which is a handful of
+        // process spawns; on a cold Windows CI runner that intermittently
+        // crosses 10s and fails as "Hook timed out in 10000ms" with every
+        // assertion in the file reported red, naming innocent tests. Give hooks
+        // the headroom that setup work actually needs while keeping tests
+        // themselves on the tight 10s budget.
+        hookTimeout: 30000,
     },
 });
