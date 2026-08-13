@@ -221,7 +221,14 @@ export async function startHarness(opts: HarnessOptions = {}): Promise<Harness> 
             if (v === undefined) delete process.env[k];
             else process.env[k] = v;
         }
-        rmSync(base, { recursive: true, force: true });
+        try {
+            // maxRetries/retryDelay + catch: on Windows the just-closed server and
+            // git-worktree handles linger a moment and rmdir throws EBUSY, which
+            // fails the suite during teardown rather than on a real assertion.
+            rmSync(base, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+        } catch {
+            // Ignore cleanup errors
+        }
     };
 
     return { base, port, baseUrl, fakeDir, server: parts, fetch: doFetch, req, send, stop };
