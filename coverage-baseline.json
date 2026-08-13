@@ -1,17 +1,17 @@
 {
     "generatedBy": "scripts/coverage.mjs",
     "total": {
-        "lines": 28.25,
-        "statements": 27.78,
-        "branches": 26.86,
-        "functions": 21.76
+        "lines": 29.51,
+        "statements": 29.01,
+        "branches": 28.03,
+        "functions": 22.13
     },
     "packages": {
         "backend": {
-            "lines": 35.06,
-            "statements": 35.06,
-            "branches": 72.79,
-            "functions": 61.03
+            "lines": 36.68,
+            "statements": 36.68,
+            "branches": 73.39,
+            "functions": 61.44
         },
         "frontend": {
             "lines": 7.56,

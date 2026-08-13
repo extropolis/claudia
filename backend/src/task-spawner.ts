@@ -4,7 +4,7 @@ import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, Ta
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
-import { tmpdir } from 'os';
+import { tmpdir, homedir } from 'os';
 import { execSync } from 'child_process';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { buildSettingsLocalContent } from './settings-local.js';
@@ -12,6 +12,7 @@ import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
 import { sanitizePrompt, decodeHtmlEntities } from './validation.js';
 import { createLogger } from './logger.js';
+import { getSharedMcpToken } from './mcp-auth.js';
 import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
@@ -134,7 +135,17 @@ function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } {
             return { command: process.execPath, prefixArgs: [cliPath] };
         }
     }
-    console.warn('[TaskSpawner] APPDATA-based Claude CLI not found, falling back to cmd.exe /c claude.cmd');
+    // Native-installer layout: %USERPROFILE%\.local\bin\claude.exe. This install
+    // path ships no claude.cmd shim (npm creates that, the native installer does
+    // not), so the cmd.exe fallback below cannot find it and the spawn fails with
+    // "'claude.cmd' is not recognized". Spawn the exe directly, same as the
+    // APPDATA bin/claude.exe case above.
+    const nativeExe = join(process.env['USERPROFILE'] || homedir(), '.local', 'bin', 'claude.exe');
+    if (existsSync(nativeExe)) {
+        console.log(`[TaskSpawner] Resolved Claude CLI exe via native install: ${nativeExe}`);
+        return { command: nativeExe, prefixArgs: [] };
+    }
+    console.warn('[TaskSpawner] APPDATA/native Claude CLI not found, falling back to cmd.exe /c claude.cmd');
     return { command: 'cmd.exe', prefixArgs: ['/c', 'claude.cmd'] };
 }
 
@@ -427,6 +438,15 @@ export class TaskSpawner extends EventEmitter {
     /** After rotation, how many bytes of the tail we keep. */
     private readonly historyFileKeepBytes: number;
 
+    // Auto-reconnect pacing. reconnectTask() is synchronous, so these do NOT
+    // control the reconnect itself — they stagger CLI + MCP process startup so
+    // a boot with dozens of interrupted tasks doesn't spawn every claude
+    // process at once. Tunable via RECONNECT_CONCURRENCY / RECONNECT_SETTLE_MS.
+    /** How many tasks reconnect per wave. */
+    private readonly reconnectConcurrency: number;
+    /** Quiet period between waves, letting each wave's MCP servers come up. */
+    private readonly reconnectSettleMs: number;
+
     /** Wall-clock time when this TaskSpawner instance was created. Used by the
      *  idle reaper to avoid disconnecting tasks that were already idle before
      *  this server session started — their lastActivity timestamp predates the
@@ -512,6 +532,19 @@ export class TaskSpawner extends EventEmitter {
         this.historyFileKeepBytes = !isNaN(envKeepBytes) && envKeepBytes > 0
             ? envKeepBytes
             : 5 * 1024 * 1024;
+
+        // Auto-reconnect pacing. Default: 4 concurrent reconnects per wave,
+        // 750ms of quiet between waves. Previously this was a strictly serial
+        // loop with a 5s sleep per task (8s every 2), which cost ~182s of
+        // startup for a working set of 29 interrupted tasks.
+        const envReconnectConc = parseInt(process.env.RECONNECT_CONCURRENCY || '', 10);
+        this.reconnectConcurrency = !isNaN(envReconnectConc) && envReconnectConc >= 1
+            ? envReconnectConc
+            : 4;
+        const envReconnectSettle = parseInt(process.env.RECONNECT_SETTLE_MS || '', 10);
+        this.reconnectSettleMs = !isNaN(envReconnectSettle) && envReconnectSettle >= 0
+            ? envReconnectSettle
+            : 750;
 
         // Initialize backend based on config
         this.backendType = configStore?.getBackend() || 'claude-code';
@@ -727,32 +760,41 @@ export class TaskSpawner extends EventEmitter {
         // doesn't load. CLAUDIA_TASK_ID is omitted but the core tools (list, create,
         // status, output) work without it — only self-rename needs the task ID.
         if (claudiaMcpEnabled) {
-            const mcpServerPath = join(__dirname, 'claudia-mcp-server.ts');
-            // Use tsx cli directly instead of npx tsx (saves ~25 seconds on Windows).
-            // Full paths ensure it works regardless of Claude Code's cwd.
-            const tsxCliPath = join(__dirname, '..', '..', 'node_modules', 'tsx', 'dist', 'cli.mjs');
-            const useTsxDirect = existsSync(tsxCliPath);
-            const claudiaConfig: Record<string, unknown> = useTsxDirect
-                ? { command: process.execPath, args: [tsxCliPath, mcpServerPath] }
-                : { command: 'npx', args: ['tsx', mcpServerPath] };
-            // Pass workspace ID and task ID so the MCP server is scoped appropriately
-            const mcpEnv: Record<string, string> = {};
-            if (workspaceId) mcpEnv.CLAUDIA_WORKSPACE_ID = workspaceId;
-            if (taskId) mcpEnv.CLAUDIA_TASK_ID = taskId;
-            // Signal to the MCP server whether the complexity-tiering parameter
-            // should be exposed on claudia_create_task.
+            // Point at the SHARED in-process MCP endpoint on the backend rather
+            // than spawning a per-session child. The stdio form cost two
+            // processes per session (the tsx launcher forks) — 3.9GB measured
+            // across a live fleet — to do nothing but relay HTTP calls to this
+            // very backend. #180 shared the Playwright server the same way and
+            // left this as the remaining sidecar cost.
+            //
+            // Scope travels in headers because an HTTP server has no per-session
+            // env to read, and a bearer token guards an endpoint that can spawn
+            // and stop tasks.
+            const backendPort = process.env.CLAUDIA_BACKEND_PORT || PORTS.BACKEND;
+            const headers: Record<string, string> = {
+                Authorization: `Bearer ${getSharedMcpToken()}`,
+            };
+            if (workspaceId) headers['X-Claudia-Workspace-Id'] = workspaceId;
+            if (taskId) headers['X-Claudia-Task-Id'] = taskId;
             if (this.configStore?.getModelTiering().enabled) {
-                mcpEnv.CLAUDIA_MODEL_TIERING_ENABLED = '1';
+                headers['X-Claudia-Model-Tiering'] = '1';
             }
             if (this.configStore?.getTodoEnabled()) {
-                mcpEnv.CLAUDIA_TODO_ENABLED = '1';
+                headers['X-Claudia-Todo-Enabled'] = '1';
             }
-            if (Object.keys(mcpEnv).length > 0) {
-                claudiaConfig.env = mcpEnv;
-            }
+
+            const claudiaConfig: Record<string, unknown> = {
+                type: 'http',
+                url: `http://127.0.0.1:${backendPort}/mcp`,
+                headers,
+            };
+
             mcpConfig['claudia'] = claudiaConfig;
             enabledMcpServers.push({ name: 'claudia', enabled: true });
-            logger.info('Injected Claudia MCP server into MCP config', { path: mcpServerPath, workspaceId: workspaceId || '(global)' });
+            logger.info('Injected shared Claudia MCP endpoint into MCP config', {
+                url: claudiaConfig.url,
+                workspaceId: workspaceId || '(global)',
+            });
         }
 
         return { mcpConfig, enabledMcpServers };
@@ -1689,52 +1731,70 @@ export class TaskSpawner extends EventEmitter {
             return timeB - timeA; // most recent first
         });
 
-        // Reconnect in batches of BATCH_SIZE to prevent resource exhaustion
-        // (each task starts 2 MCP servers — too many at once overwhelms the system).
-        // Unlike the old approach which abandoned tasks beyond the cap, this
-        // processes ALL eligible tasks in staggered batches.
-        const BATCH_SIZE = 2;
+        // Reconnect in bounded parallel WAVES rather than one task at a time.
+        //
+        // reconnectTask() is synchronous — it spawns the PTY and returns. The
+        // old serial loop's 5s/8s sleeps were never waiting on the reconnect
+        // itself, only staggering CLI + MCP process startup so we don't spawn
+        // every claude process at once. A wave of `concurrency` reconnects
+        // followed by a short settle delay buys the same thundering-herd
+        // protection at a fraction of the wall-clock: for a measured working set
+        // of 29 eligible tasks, ~182s serial becomes ~5s. This matters because
+        // the WebSocket init path used to block on waitForReconnect(), so every
+        // second here was a second the UI showed nothing.
+        const concurrency = this.reconnectConcurrency;
+        const settleMs = this.reconnectSettleMs;
+        const totalWaves = Math.ceil(tasksToReconnect.length / concurrency);
 
         this.isReconnecting = true;
         this.emit('reconnectStart', tasksToReconnect.length);
-        console.log(`[TaskSpawner] Auto-reconnecting ${tasksToReconnect.length} tasks in batches of ${BATCH_SIZE}...`);
+        console.log(
+            `[TaskSpawner] Auto-reconnecting ${tasksToReconnect.length} tasks in ${totalWaves} wave(s) ` +
+            `of up to ${concurrency} (settle ${settleMs}ms between waves)...`
+        );
 
         const failedTasks: string[] = [];
+        let completed = 0;
 
-        for (let i = 0; i < tasksToReconnect.length; i++) {
-            const taskId = tasksToReconnect[i];
-            const persisted = this.disconnectedTasks.get(taskId);
-            if (!persisted) continue;
+        for (let i = 0; i < tasksToReconnect.length; i += concurrency) {
+            const wave = tasksToReconnect.slice(i, i + concurrency);
+            const waveNum = Math.floor(i / concurrency) + 1;
+            console.log(`[TaskSpawner] Reconnect wave ${waveNum}/${totalWaves} (${wave.length} task(s))`);
 
-            const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-            const totalBatches = Math.ceil(tasksToReconnect.length / BATCH_SIZE);
-            console.log(`[TaskSpawner] Auto-reconnecting task ${i + 1}/${tasksToReconnect.length} (batch ${batchNum}/${totalBatches}): ${taskId}`);
+            await Promise.all(wave.map(async (taskId) => {
+                const persisted = this.disconnectedTasks.get(taskId);
+                if (!persisted) return;
 
-            let success = false;
-            try {
-                const task = this.reconnectTask(taskId);
-                if (task) {
-                    console.log(`[TaskSpawner] Successfully reconnected task ${taskId}`);
-                    success = true;
+                let success = false;
+                try {
+                    const task = this.reconnectTask(taskId);
+                    if (task) {
+                        console.log(`[TaskSpawner] Successfully reconnected task ${taskId}`);
+                        success = true;
+                    }
+                } catch (error) {
+                    console.error(`[TaskSpawner] Error reconnecting task ${taskId}:`, error);
                 }
-            } catch (error) {
-                console.error(`[TaskSpawner] Error reconnecting task ${taskId}:`, error);
-            }
 
-            if (!success) {
-                failedTasks.push(taskId);
-                // Clear shouldContinue on failed tasks to prevent infinite retry loops
-                if (persisted) {
+                if (!success) {
+                    failedTasks.push(taskId);
+                    // Clear shouldContinue on failed tasks to prevent infinite retry loops
                     persisted.shouldContinue = false;
                     persisted.wasInterrupted = false;
                 }
-            }
+                completed++;
+                // Stream per-task progress so the UI can light tasks up as they
+                // come online instead of waiting for the whole run to finish.
+                this.emit('reconnectProgress', {
+                    taskId,
+                    success,
+                    completed,
+                    total: tasksToReconnect.length,
+                });
+            }));
 
-            // 5-second delay between reconnects to let MCP servers initialize.
-            // Extra 3-second pause between batches for system recovery.
-            if (i < tasksToReconnect.length - 1) {
-                const isBatchBoundary = (i + 1) % BATCH_SIZE === 0;
-                await new Promise(resolve => setTimeout(resolve, isBatchBoundary ? 8000 : 5000));
+            if (i + concurrency < tasksToReconnect.length && settleMs > 0) {
+                await new Promise(resolve => setTimeout(resolve, settleMs));
             }
         }
 

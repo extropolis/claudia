@@ -4,7 +4,13 @@
  * Provides voice input via Deepgram Nova-3 and voice output via ElevenLabs TTS.
  * Includes voice selection UI with preview capabilities.
  * Loads from CDN. No React or build dependencies.
+ *
+ * All caller-supplied values land inside an inline <script>, so they MUST go
+ * through jsLiteral() — see html-escape.ts for why JSON.stringify alone is not
+ * enough. `token` here is attacker-controlled: GET /voice?token=... accepts any
+ * `local-` prefixed token without validation.
  */
+import { jsLiteral } from './html-escape.js';
 
 export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiKey: string): string {
     return `<!DOCTYPE html>
@@ -350,9 +356,9 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
     </div>
 
     <script>
-        const WS_URL = '${wsUrl}';
-        const TOKEN = '${token}';
-        const DEEPGRAM_API_KEY = '${deepgramApiKey}';
+        const WS_URL = ${jsLiteral(wsUrl)};
+        const TOKEN = ${jsLiteral(token)};
+        const DEEPGRAM_API_KEY = ${jsLiteral(deepgramApiKey)};
 
         let ws = null;
         let mediaRecorder = null;

@@ -11,6 +11,15 @@ import type { ConfigStore } from './config-store.js';
 const LLM_API_URL = `http://localhost:${PORTS.BACKEND}/v1/messages`;
 const DEFAULT_LLM_MODEL = 'claude-sonnet-4-5-20250929';
 
+/**
+ * Resolve the endpoint to call. In production this is always the built-in
+ * proxy on the backend port; CLAUDIA_LLM_API_URL exists purely so tests can
+ * point the service at an ephemeral local server instead of the real backend.
+ */
+function getLLMApiUrl(): string {
+    return process.env.CLAUDIA_LLM_API_URL || LLM_API_URL;
+}
+
 let configStoreRef: ConfigStore | null = null;
 
 /**
@@ -68,7 +77,7 @@ export async function generateLLMResponse(
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-        const response = await fetch(LLM_API_URL, {
+        const response = await fetch(getLLMApiUrl(), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',

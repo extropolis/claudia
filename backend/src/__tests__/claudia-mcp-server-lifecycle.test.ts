@@ -108,9 +108,16 @@ beforeAll(async () => {
     process.env.CLAUDIA_TASK_ID = 'task-self-not-real';
 
     const mod = await import('../claudia-mcp-server.js');
+    const server = mod.createClaudiaMcpServer({
+        workspaceId: repo,
+        taskId: 'task-self-not-real',
+        modelTieringEnabled: false,
+        todoEnabled: false,
+        backendUrl: `http://127.0.0.1:${port}`,
+    });
     const [ct, st] = InMemoryTransport.createLinkedPair();
     client = new Client({ name: 'lifecycle-client', version: '1.0.0' });
-    await Promise.all([mod.server.connect(st), client.connect(ct)]);
+    await Promise.all([server.connect(st), client.connect(ct)]);
 }, 60000);
 
 afterAll(async () => {
@@ -250,9 +257,16 @@ describe.skipIf(!SUPPORTS_FAKE_CLI)('model tiering toggle', () => {
         process.env.CLAUDIA_MODEL_TIERING_ENABLED = '1';
         try {
             const mod = await import('../claudia-mcp-server.js');
+            const tieredServer = mod.createClaudiaMcpServer({
+                workspaceId: repo,
+                taskId: 'task-self-not-real',
+                modelTieringEnabled: true,
+                todoEnabled: false,
+                backendUrl: `http://127.0.0.1:${port}`,
+            });
             const [ct, st] = InMemoryTransport.createLinkedPair();
             const tieredClient = new Client({ name: 'tiered', version: '1.0.0' });
-            await Promise.all([mod.server.connect(st), tieredClient.connect(ct)]);
+            await Promise.all([tieredServer.connect(st), tieredClient.connect(ct)]);
 
             const { tools } = await tieredClient.listTools();
             const create = tools.find(t => t.name === 'claudia_create_task')!;

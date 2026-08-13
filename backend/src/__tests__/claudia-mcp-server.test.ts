@@ -113,19 +113,29 @@ beforeAll(async () => {
     });
     port = (appParts.server.address() as { port: number }).port;
 
-    // The MCP module reads its config from env at import time, so env must be
-    // set BEFORE the dynamic import. Scope the session to the WORKTREE — that is
-    // the case the cross-worktree listing contract is about.
+    // BACKEND_URL is still read from env at module load, so it must be set
+    // before the dynamic import. The rest of the session's scope is passed
+    // explicitly to createClaudiaMcpServer — the server stopped being a
+    // module-level singleton when it moved in-process (one McpServer per
+    // session instead of one OS process per session).
     process.env.CLAUDIA_BACKEND_URL = `http://127.0.0.1:${port}`;
-    process.env.CLAUDIA_WORKSPACE_ID = worktree;
-    process.env.CLAUDIA_TASK_ID = SELF_TASK;
 
     const mod = await import('../claudia-mcp-server.js');
+
+    // Scope the session to the WORKTREE — that is the case the cross-worktree
+    // listing contract is about.
+    const server = mod.createClaudiaMcpServer({
+        workspaceId: worktree,
+        taskId: SELF_TASK,
+        modelTieringEnabled: false,
+        todoEnabled: false,
+        backendUrl: `http://127.0.0.1:${port}`,
+    });
 
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     client = new Client({ name: 'test-client', version: '1.0.0' });
     await Promise.all([
-        mod.server.connect(serverTransport),
+        server.connect(serverTransport),
         client.connect(clientTransport),
     ]);
 }, 60000);
@@ -135,7 +145,10 @@ afterAll(async () => {
     if (shutdown) await shutdown();
     // Detach the worktree before deleting, so no stale admin dir is left behind.
     try { git(repo, 'worktree', 'remove', '--force', worktree); } catch { /* best effort */ }
-    rmSync(base, { recursive: true, force: true });
+    // maxRetries: on Windows the just-removed worktree's handles can still be
+    // open when rmdir runs, and an EBUSY here fails the whole suite even though
+    // every test passed. Matches the retry guard the other suites use.
+    rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 });
     delete process.env.CLAUDIA_BACKEND_URL;
     delete process.env.CLAUDIA_WORKSPACE_ID;
     delete process.env.CLAUDIA_TASK_ID;
@@ -495,15 +508,15 @@ describe('pure helpers', () => {
 // ============================================================================
 describe('workspace scope resolution', () => {
     it('read scope spans the whole worktree tree', async () => {
-        const { getWorkspaceScope } = await import('../claudia-mcp-server.js');
-        const { ids } = await getWorkspaceScope();
+        const { getWorkspaceScopeFor } = await import('../claudia-mcp-server.js');
+        const { ids } = await getWorkspaceScopeFor(worktree, `http://127.0.0.1:${port}`);
         expect(ids.has(repo)).toBe(true);
         expect(ids.has(worktree)).toBe(true);
     });
 
     it('stop scope stays narrow — a worktree session cannot reach its parent', async () => {
-        const { getStopScope } = await import('../claudia-mcp-server.js');
-        const ids = await getStopScope();
+        const { getStopScopeFor } = await import('../claudia-mcp-server.js');
+        const ids = await getStopScopeFor(worktree, `http://127.0.0.1:${port}`);
         // Stopping is destructive: widening this to the whole workspace once let a
         // worktree session's cleanup kill the coordinator and every sibling.
         expect(ids.has(worktree)).toBe(true);
@@ -528,9 +541,16 @@ describe('TODO tools (CLAUDIA_TODO_ENABLED)', () => {
         process.env.CLAUDIA_TODO_ENABLED = '1';
         try {
             const mod = await import('../claudia-mcp-server.js');
+            const todoServer = mod.createClaudiaMcpServer({
+                workspaceId: worktree,
+                taskId: SELF_TASK,
+                modelTieringEnabled: false,
+                todoEnabled: true,
+                backendUrl: `http://127.0.0.1:${port}`,
+            });
             const [ct, st] = InMemoryTransport.createLinkedPair();
             const todoClient = new Client({ name: 'todo', version: '1.0.0' });
-            await Promise.all([mod.server.connect(st), todoClient.connect(ct)]);
+            await Promise.all([todoServer.connect(st), todoClient.connect(ct)]);
 
             const { tools } = await todoClient.listTools();
             const todoTools = tools.map(t => t.name).filter(n => n.startsWith('claudia_todo_')).sort();

@@ -124,7 +124,8 @@ const TOOLS: ToolDefinition[] = [
 ];
 
 // Path for chat history persistence
-const CHAT_HISTORY_FILE = join(__dirname, '..', 'chat-history.json');
+/** Legacy location, used when no data directory is configured. */
+const LEGACY_CHAT_HISTORY_FILE = join(__dirname, '..', 'chat-history.json');
 /** Maximum number of chat messages to retain in memory and on disk */
 const MAX_HISTORY_MESSAGES = 200;
 
@@ -146,6 +147,8 @@ export class SupervisorChat extends EventEmitter {
     private workspaceStore: { getWorkspaces: () => { id: string; name: string }[] };
     private configStore: ConfigStore;
     private chatHistory: ChatMessage[] = [];
+    /** Absolute path to chat-history.json for this instance. */
+    private readonly chatHistoryFile: string;
     private isProcessing: boolean = false;
     private processingTasks: Set<string> = new Set();  // Prevent duplicate auto-analysis
     private saveDebounceTimer: NodeJS.Timeout | null = null;
@@ -156,9 +159,13 @@ export class SupervisorChat extends EventEmitter {
     constructor(
         taskSpawner: TaskSpawner,
         workspaceStore: { getWorkspaces: () => { id: string; name: string }[] },
-        configStore: ConfigStore
+        configStore: ConfigStore,
+        dataDir?: string
     ) {
         super();
+        this.chatHistoryFile = dataDir
+            ? join(dataDir, 'chat-history.json')
+            : LEGACY_CHAT_HISTORY_FILE;
         this.taskSpawner = taskSpawner;
         this.workspaceStore = workspaceStore;
         this.configStore = configStore;
@@ -175,8 +182,8 @@ export class SupervisorChat extends EventEmitter {
      */
     private loadChatHistory(): void {
         try {
-            if (existsSync(CHAT_HISTORY_FILE)) {
-                const data = readFileSync(CHAT_HISTORY_FILE, 'utf-8');
+            if (existsSync(this.chatHistoryFile)) {
+                const data = readFileSync(this.chatHistoryFile, 'utf-8');
                 const parsed = JSON.parse(data);
                 if (Array.isArray(parsed)) {
                     this.chatHistory = parsed;
@@ -243,7 +250,7 @@ export class SupervisorChat extends EventEmitter {
             if (this.chatHistory.length > MAX_HISTORY_MESSAGES) {
                 this.chatHistory = this.chatHistory.slice(-MAX_HISTORY_MESSAGES);
             }
-            writeFileSync(CHAT_HISTORY_FILE, JSON.stringify(this.chatHistory, null, 2));
+            writeFileSync(this.chatHistoryFile, JSON.stringify(this.chatHistory, null, 2));
             console.log(`[SupervisorChat] Saved ${this.chatHistory.length} messages to history`);
         } catch (error) {
             console.error('[SupervisorChat] Failed to save chat history:', error);
