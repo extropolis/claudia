@@ -4,7 +4,7 @@ import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, Ta
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
-import { tmpdir } from 'os';
+import { tmpdir, homedir } from 'os';
 import { execSync } from 'child_process';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { buildSettingsLocalContent } from './settings-local.js';
@@ -134,7 +134,17 @@ function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } {
             return { command: process.execPath, prefixArgs: [cliPath] };
         }
     }
-    console.warn('[TaskSpawner] APPDATA-based Claude CLI not found, falling back to cmd.exe /c claude.cmd');
+    // Native-installer layout: %USERPROFILE%\.local\bin\claude.exe. This install
+    // path ships no claude.cmd shim (npm creates that, the native installer does
+    // not), so the cmd.exe fallback below cannot find it and the spawn fails with
+    // "'claude.cmd' is not recognized". Spawn the exe directly, same as the
+    // APPDATA bin/claude.exe case above.
+    const nativeExe = join(process.env['USERPROFILE'] || homedir(), '.local', 'bin', 'claude.exe');
+    if (existsSync(nativeExe)) {
+        console.log(`[TaskSpawner] Resolved Claude CLI exe via native install: ${nativeExe}`);
+        return { command: nativeExe, prefixArgs: [] };
+    }
+    console.warn('[TaskSpawner] APPDATA/native Claude CLI not found, falling back to cmd.exe /c claude.cmd');
     return { command: 'cmd.exe', prefixArgs: ['/c', 'claude.cmd'] };
 }
 
