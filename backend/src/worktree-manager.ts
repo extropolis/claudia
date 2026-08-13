@@ -9,7 +9,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { existsSync, lstatSync, appendFileSync, readFileSync, writeFileSync } from 'fs';
-import { join, resolve, basename } from 'path';
+import { join, resolve, basename, normalize } from 'path';
 import { WorktreeInfo } from '@claudia/shared';
 import { createLogger } from './logger.js';
 
@@ -47,7 +47,11 @@ function parseWorktreeListOutput(stdout: string): WorktreeInfo[] {
 
         for (const line of lines) {
             if (line.startsWith('worktree ')) {
-                info.path = line.slice('worktree '.length).trim();
+                // git prints POSIX separators here even on Windows, while task
+                // workspaceIds (and everything built with join()) are native.
+                // Without normalizing, `t.workspaceId === wt.path` never matched
+                // on Windows, so every worktree reported taskCount 0.
+                info.path = normalize(line.slice('worktree '.length).trim());
             } else if (line.startsWith('HEAD ')) {
                 info.commitHash = line.slice('HEAD '.length).trim();
             } else if (line.startsWith('branch ')) {
