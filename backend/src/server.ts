@@ -21,6 +21,7 @@ import { CronScheduler, validateCronExpression, describeCronExpression } from '.
 import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
 import { validateConfigUpdate, validateWorkspacePath, isPathInside } from './validation.js';
+import { isVoiceTokenAcceptable, isTunnelHostname } from './voice-auth.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
 import { selectWorkspacesToRefresh } from './pr-refresh.js';
 import { WorktreeManager } from './worktree-manager.js';
@@ -407,9 +408,10 @@ export async function createApp(basePath?: string) {
     // Instead of relying on env vars, we try Vite first and fall back to static
     // if Vite isn't running (connection refused = production mode).
 
+    // Delegates to the shared predicate so the middleware below and the /voice
+    // token check can never drift apart on what counts as tunnel traffic.
     function isTunnelHost(host: string): boolean {
-        return host.includes('.loca.lt') || host.includes('localtunnel') ||
-               host.includes('.ngrok-free.app') || host.includes('.ngrok.io') || host.includes('ngrok');
+        return isTunnelHostname(host);
     }
 
     app.use((req, res, next) => {
@@ -3660,9 +3662,15 @@ export async function createApp(basePath?: string) {
             }
         }
 
-        // Allow local tokens (starting with 'local-') or validate tunnel tokens
-        const isLocalToken = token.startsWith('local-');
-        if (!isLocalToken && !tunnelManager.validateToken(token)) {
+        // See voice-auth.ts: a `local-` prefix is not a credential, so it is
+        // only honored for requests that did not arrive over a public tunnel.
+        // This page embeds the Deepgram API key.
+        const requestHost = req.headers.host || '';
+        if (!isVoiceTokenAcceptable(token, requestHost, t => tunnelManager.validateToken(t))) {
+            logger.warn('[Voice Agent] Rejected token', {
+                host: requestHost,
+                tunnelHost: isTunnelHostname(requestHost),
+            });
             res.status(401).send('Access denied: Invalid or expired token');
             return;
         }
