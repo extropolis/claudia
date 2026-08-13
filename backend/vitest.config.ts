@@ -58,5 +58,14 @@ export default defineConfig({
             },
         },
         testTimeout: 10000,
+        // Hooks do NOT inherit testTimeout — vitest applies its own 10s default
+        // unless hookTimeout is set. Several suites build a real git repository
+        // in beforeEach (git init + config + commits), which is a handful of
+        // process spawns; on a cold Windows CI runner that intermittently
+        // crosses 10s and fails as "Hook timed out in 10000ms" with every
+        // assertion in the file reported red, naming innocent tests. Give hooks
+        // the headroom that setup work actually needs while keeping tests
+        // themselves on the tight 10s budget.
+        hookTimeout: 30000,
     },
 });
