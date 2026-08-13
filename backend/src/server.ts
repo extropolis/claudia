@@ -21,6 +21,7 @@ import { CronScheduler, validateCronExpression, describeCronExpression } from '.
 import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
 import { validateConfigUpdate, validateWorkspacePath, isPathInside } from './validation.js';
+import { isVoiceTokenAcceptable, isTunnelHostname } from './voice-auth.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
 import { selectWorkspacesToRefresh } from './pr-refresh.js';
 import { WorktreeManager } from './worktree-manager.js';
@@ -33,7 +34,11 @@ import { VoiceSupervisor } from './voice-supervisor.js';
 // import { ElevenLabsTTS } from './elevenlabs-tts.js'; // TODO: Implement ElevenLabs TTS
 import { createLogger } from './logger.js';
 import { PluginManager, PluginContext } from './plugin-system/index.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createClaudiaMcpServer } from './claudia-mcp-server.js';
+import { isValidSharedMcpToken } from './mcp-auth.js';
 import { JiraClient, JiraError, parseIssueKey } from './jira-client.js';
+import { ensureDataDir, dataPath, describeDataDir } from './paths.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
 // - config-routes.ts: Config API routes template
@@ -368,6 +373,11 @@ function notifyTasksOfMcpChange(
 }
 
 export async function createApp(basePath?: string) {
+    // Resolve where mutable state lives before anything touches disk. `basePath`
+    // is Electron's userData; CLAUDIA_DATA_DIR covers container and home-server
+    // deployments; unset keeps the legacy in-source-tree location.
+    const dataDir = ensureDataDir(basePath);
+
     const app = express();
     const server = createServer(app);
     // Use noServer mode so we can manually route WebSocket upgrade requests.
@@ -407,9 +417,10 @@ export async function createApp(basePath?: string) {
     // Instead of relying on env vars, we try Vite first and fall back to static
     // if Vite isn't running (connection refused = production mode).
 
+    // Delegates to the shared predicate so the middleware below and the /voice
+    // token check can never drift apart on what counts as tunnel traffic.
     function isTunnelHost(host: string): boolean {
-        return host.includes('.loca.lt') || host.includes('localtunnel') ||
-               host.includes('.ngrok-free.app') || host.includes('.ngrok.io') || host.includes('ngrok');
+        return isTunnelHostname(host);
     }
 
     app.use((req, res, next) => {
@@ -478,8 +489,12 @@ export async function createApp(basePath?: string) {
         req.pipe(proxyReq);
     });
 
+    // Surfaced early and unconditionally: an operator deploying a container needs
+    // to see in the first lines of output whether their volume mount took effect.
+    logger.info(describeDataDir(dataDir));
+
     // Initialize configStore first to determine API mode
-    const configStore = new ConfigStore(basePath);
+    const configStore = new ConfigStore(dataDir);
 
     // Initialize Plugin System
     logger.info('Initializing plugin system...');
@@ -503,16 +518,94 @@ export async function createApp(basePath?: string) {
     // Register plugin routes (handles both SAP AI Core and HAI Proxy)
     pluginManager.registerRoutes(app);
 
+    // ===== Shared Claudia MCP endpoint =====
+    // Every Claude Code session used to spawn its OWN claudia MCP server child
+    // process, and because the config launched it via tsx, that forked into two
+    // — 3.9GB measured across a live fleet, all of it relaying HTTP calls to
+    // THIS server. The tools are stateless proxies over the backend's own REST
+    // API, so they can be served in-process instead. #180 did the same for the
+    // Playwright server and called this out as the remaining sidecar cost.
+    //
+    // Stateless transport: one McpServer + transport per request, torn down when
+    // the response closes. Session scope arrives per-request in headers, since
+    // there is no longer a child process to carry CLAUDIA_* env vars.
+    app.post('/mcp', async (req, res) => {
+        // Bearer token: this endpoint can create, stop and delete tasks, and
+        // loopback is shared by every process on the machine.
+        const auth = req.header('authorization') || '';
+        const bearer = auth.startsWith('Bearer ') ? auth.slice(7) : undefined;
+        if (!isValidSharedMcpToken(bearer)) {
+            logger.warn('Rejected MCP request with missing/invalid token');
+            res.status(401).json({
+                jsonrpc: '2.0',
+                error: { code: -32001, message: 'Unauthorized' },
+                id: null,
+            });
+            return;
+        }
+
+        // The tools reach the backend over HTTP, and in-process that means THIS
+        // server. Derive the address from the live socket rather than assuming
+        // the default port — tests and CLAUDIA_BACKEND_PORT both move it, and a
+        // hardcoded :4001 would aim one server's tools at another's tasks.
+        const addr = server.address();
+        const selfPort = typeof addr === 'object' && addr ? addr.port : PORTS.BACKEND;
+
+        const scope = {
+            workspaceId: (req.header('x-claudia-workspace-id') || '').trim(),
+            taskId: (req.header('x-claudia-task-id') || '').trim(),
+            modelTieringEnabled: req.header('x-claudia-model-tiering') === '1',
+            todoEnabled: req.header('x-claudia-todo-enabled') === '1',
+            backendUrl: `http://127.0.0.1:${selfPort}`,
+        };
+
+        try {
+            const mcpServer = createClaudiaMcpServer(scope);
+            const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+            res.on('close', () => {
+                transport.close().catch(() => { /* already closing */ });
+                mcpServer.close().catch(() => { /* already closing */ });
+            });
+            await mcpServer.connect(transport);
+            await transport.handleRequest(req, res, req.body);
+        } catch (error) {
+            logger.error('Shared MCP request failed', {
+                error: error instanceof Error ? error.message : String(error),
+                taskId: scope.taskId,
+            });
+            if (!res.headersSent) {
+                res.status(500).json({
+                    jsonrpc: '2.0',
+                    error: { code: -32603, message: 'Internal server error' },
+                    id: null,
+                });
+            }
+        }
+    });
+
+    // Stateless mode has no server-initiated streams and no session to delete.
+    const mcpMethodNotAllowed = (_req: express.Request, res: express.Response) => {
+        res.status(405).json({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: 'Method not allowed: the shared MCP endpoint is stateless' },
+            id: null,
+        });
+    };
+    app.get('/mcp', mcpMethodNotAllowed);
+    app.delete('/mcp', mcpMethodNotAllowed);
+
     // Initialize remaining services
-    const persistencePath = basePath ? join(basePath, 'tasks.json') : undefined;
+    // TaskSpawner derives its history directory from dirname(persistencePath),
+    // so pointing this at the data dir relocates task-histories/ with it.
+    const persistencePath = dataDir ? dataPath(dataDir, 'tasks.json') : undefined;
     const taskSpawner = new TaskSpawner(persistencePath, true, configStore);
-    const workspaceStore = new WorkspaceStore(basePath);
+    const workspaceStore = new WorkspaceStore(dataDir);
     // SupervisorChat now handles both auto-analysis (formerly TaskSupervisor) and chat
-    const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore);
+    const supervisorChat = new SupervisorChat(taskSpawner, workspaceStore, configStore, dataDir);
     // VoiceSupervisor for hands-free voice control
     const voiceSupervisor = new VoiceSupervisor(supervisorChat, taskSpawner);
     // LearningsStore for RAG-based learnings
-    const learningsStore = new LearningsStore(basePath, configStore);
+    const learningsStore = new LearningsStore(dataDir, configStore);
 
     // CronScheduler for scheduled/recurring prompts
     const cronScheduler = new CronScheduler(
@@ -538,7 +631,8 @@ export async function createApp(basePath?: string) {
             // so the cron fires immediately, which triggers auto-reconnect via writeToTask
             if (found.state === 'disconnected' || found.state === 'interrupted') return 'idle';
             return 'busy';
-        }
+        },
+        dataDir
     );
     cronScheduler.start();
 
@@ -1359,6 +1453,24 @@ export async function createApp(basePath?: string) {
         });
     });
 
+    // Per-task reconnect progress. Because the WS init path no longer blocks on
+    // waitForReconnect(), this is what lets the UI fill in live as each task
+    // comes online instead of snapping from empty to complete at the end.
+    taskSpawner.on('reconnectProgress', (p: { taskId: string; success: boolean; completed: number; total: number }) => {
+        broadcast({
+            type: 'server:reconnecting' as WSMessageType,
+            payload: {
+                message: `Reconnecting task(s)... ${p.completed}/${p.total}`,
+                count: p.total,
+                completed: p.completed,
+            }
+        });
+        // Batched, not immediate: a full task list is sent per broadcast, and a
+        // busy boot reconnects dozens of tasks. queueTasksUpdated() dedupes them
+        // into one send per batch interval.
+        queueTasksUpdated();
+    });
+
     taskSpawner.on('reconnectComplete', (result: { total: number; failed: number; failedIds: string[] }) => {
         console.log(`[Server] Reconnection complete: ${result.total - result.failed}/${result.total} tasks`);
         // Send updated task list after reconnection (immediate, not batched - important for startup)
@@ -1454,18 +1566,22 @@ export async function createApp(basePath?: string) {
             clientAliveMap.set(ws, true);
         });
 
-        // If reconnection is in progress, send a status message and wait
+        // If reconnection is in progress, tell the client — but do NOT block on
+        // it. This used to `await taskSpawner.waitForReconnect()` before sending
+        // init, so a boot with N interrupted tasks showed an empty UI for the
+        // entire reconnect run (~3 minutes at the old serial pacing). The task
+        // list is valid immediately: reconnecting tasks are already present in
+        // getAllTasks(), and each one queues a `tasks:updated` as it comes
+        // online via the reconnectProgress handler above.
         if (taskSpawner.isReconnectInProgress()) {
-            console.log('[Server] Reconnection in progress, notifying client...');
+            console.log('[Server] Reconnection in progress, sending state immediately and streaming updates...');
             ws.send(JSON.stringify({
                 type: 'server:reconnecting',
                 payload: { message: 'Reconnecting tasks...' }
             }));
-            // Wait for reconnection to complete before sending init
-            await taskSpawner.waitForReconnect();
         }
 
-        // Send current state to new client (after reconnection completes)
+        // Send current state to new client
         const tasks = taskSpawner.getAllTasks();
         const workspaces = workspaceStore.getWorkspaces();
         ws.send(JSON.stringify({
@@ -3660,9 +3776,15 @@ export async function createApp(basePath?: string) {
             }
         }
 
-        // Allow local tokens (starting with 'local-') or validate tunnel tokens
-        const isLocalToken = token.startsWith('local-');
-        if (!isLocalToken && !tunnelManager.validateToken(token)) {
+        // See voice-auth.ts: a `local-` prefix is not a credential, so it is
+        // only honored for requests that did not arrive over a public tunnel.
+        // This page embeds the Deepgram API key.
+        const requestHost = req.headers.host || '';
+        if (!isVoiceTokenAcceptable(token, requestHost, t => tunnelManager.validateToken(t))) {
+            logger.warn('[Voice Agent] Rejected token', {
+                host: requestHost,
+                tunnelHost: isTunnelHostname(requestHost),
+            });
             res.status(401).send('Access denied: Invalid or expired token');
             return;
         }
@@ -3996,8 +4118,8 @@ export async function createApp(basePath?: string) {
     cleanupOldUploads();
     const uploadCleanupInterval = setInterval(cleanupOldUploads, 60 * 60 * 1000);
 
-    // One-time migration: clean up old uploads from previous {basePath}/uploads/ location
-    const oldUploadsDir = join(basePath || process.cwd(), 'uploads');
+    // One-time migration: clean up old uploads from previous {dataDir}/uploads/ location
+    const oldUploadsDir = join(dataDir || process.cwd(), 'uploads');
     if (oldUploadsDir !== uploadsDir && existsSync(oldUploadsDir)) {
         try {
             const oldFiles = readdirSync(oldUploadsDir);

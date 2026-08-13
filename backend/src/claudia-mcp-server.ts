@@ -27,6 +27,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { pathToFileURL } from 'url';
 import { z } from 'zod';
 import { writeFileSync } from 'fs';
 import { join, resolve, basename } from 'path';
@@ -34,20 +35,6 @@ import { isPathInside } from './validation.js';
 
 // Backend URL - defaults to localhost:4001, can be overridden via env
 const BACKEND_URL = process.env.CLAUDIA_BACKEND_URL || 'http://localhost:4001';
-
-// Workspace this MCP server is scoped to (set by task-spawner)
-const WORKSPACE_ID = process.env.CLAUDIA_WORKSPACE_ID || '';
-
-// This agent's own task ID (set by task-spawner, used for self-rename)
-const SELF_TASK_ID = process.env.CLAUDIA_TASK_ID || '';
-
-// Whether complexity-based model tiering is enabled. Set by task-spawner when
-// the operator turns on the toggle in Settings. Controls whether the
-// `complexity` parameter is exposed on claudia_create_task.
-const MODEL_TIERING_ENABLED = process.env.CLAUDIA_MODEL_TIERING_ENABLED === '1';
-
-// Whether per-task TODO list is enabled. Controls whether claudia_todo_* tools are registered.
-const TODO_ENABLED = process.env.CLAUDIA_TODO_ENABLED === '1';
 
 /**
  * Shared wording for cross-worktree task collaboration. Kept in one place so the
@@ -107,71 +94,10 @@ function resolveWorktreeRoot(wsById: Map<string, any>, startId: string): string 
 }
 
 /**
- * READ scope for a session: the ROOT workspace plus every workspace whose own
- * root-walk lands on the same root (transitive — covers legacy grandchild
- * worktrees, not just direct children). Used by claudia_list_tasks so fleet
- * coordinators inside worktrees see their siblings.
- *
- * NOTE: claudia_stop_all_tasks deliberately does NOT use this — stopping is
- * destructive, and widening its blast radius to the whole workspace meant a
- * worktree session's cleanup could kill the coordinator and every sibling.
- * Stop keeps the original self+children scope via getStopScope().
- */
-async function getWorkspaceScope(): Promise<{ ids: Set<string>; wsById: Map<string, any> }> {
-    const ids = new Set<string>();
-    const wsById = new Map<string, any>();
-    if (!WORKSPACE_ID) return { ids, wsById };
-
-    try {
-        const response = await backendFetch('/api/workspaces');
-        if (response.ok) {
-            const data = await response.json();
-            const workspaces = data.workspaces || data;
-            for (const ws of workspaces) wsById.set(ws.id, ws);
-
-            const root = resolveWorktreeRoot(wsById, WORKSPACE_ID);
-            ids.add(root);
-            for (const ws of workspaces) {
-                if (resolveWorktreeRoot(wsById, ws.id) === root && ws.worktreeParentId) ids.add(ws.id);
-            }
-        }
-    } catch {
-        // Backend unreachable — fall through to self-only scope below
-    }
-
-    // Always include the session's own workspace (also the fallback when the
-    // backend fetch fails or the workspace isn't registered)
-    ids.add(WORKSPACE_ID);
-
-    return { ids, wsById };
-}
-
-/**
- * STOP scope: the session's own workspace + its direct worktree children only
- * (the pre-widening semantics). A worktree session stopping "all" tasks must
- * not reach the parent workspace or sibling worktrees.
- */
-async function getStopScope(): Promise<Set<string>> {
-    const ids = new Set<string>();
-    if (!WORKSPACE_ID) return ids;
-    ids.add(WORKSPACE_ID);
-    try {
-        const response = await backendFetch('/api/workspaces');
-        if (response.ok) {
-            const data = await response.json();
-            const workspaces = data.workspaces || data;
-            for (const ws of workspaces) {
-                if (ws.worktreeParentId === WORKSPACE_ID) ids.add(ws.id);
-            }
-        }
-    } catch { /* self-only fallback */ }
-    return ids;
-}
-
-/**
  * Make an HTTP request to the Claudia backend
  */
-async function backendFetch(path: string, options: RequestInit = {}): Promise<Response> {
+async function backendFetchAt(baseUrl: string, path: string, options: RequestInit = {}): Promise<Response> {
+    const BACKEND_URL = baseUrl;
     const url = `${BACKEND_URL}${path}`;
     log.debug(`Fetching: ${options.method || 'GET'} ${url}`);
 
@@ -193,11 +119,11 @@ async function backendFetch(path: string, options: RequestInit = {}): Promise<Re
 /**
  * WebSocket helper for operations that require WS (task:create, task:input, etc.)
  */
-async function sendWSMessage(type: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function sendWSMessageAt(baseUrl: string, type: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     const WebSocket = (await import('ws')).default;
 
     return new Promise((resolve, reject) => {
-        const wsUrl = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss://');
+        const wsUrl = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://');
         const ws = new WebSocket(wsUrl);
         const timeout = setTimeout(() => {
             ws.close();
@@ -298,7 +224,8 @@ async function sendWSMessage(type: string, payload: Record<string, unknown>): Pr
  * The matcher function is called for each incoming message and should return
  * a result object if the message is the expected response, or null to keep waiting.
  */
-async function sendWSMessageWithMultiResponse<T>(
+async function sendWSMessageWithMultiResponseAt<T>(
+    baseUrl: string,
     type: string,
     payload: Record<string, unknown>,
     matcher: (msg: { type: string; payload?: any }) => T | null,
@@ -307,7 +234,7 @@ async function sendWSMessageWithMultiResponse<T>(
     const WebSocket = (await import('ws')).default;
 
     return new Promise((resolve, reject) => {
-        const wsUrl = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss://');
+        const wsUrl = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://');
         const ws = new WebSocket(wsUrl);
         const timeout = setTimeout(() => {
             ws.close();
@@ -349,15 +276,134 @@ async function sendWSMessageWithMultiResponse<T>(
     });
 }
 
-// Create the MCP server
-const server = new McpServer({
-    name: 'claudia',
-    version: '1.0.0',
-}, {
-    capabilities: {
-        tools: {},
+/**
+ * Per-session scope. In stdio mode this comes from the env vars the
+ * task-spawner sets on the child process. In shared/HTTP mode there is no child
+ * process to carry env, so it comes from request headers instead — which is the
+ * whole reason this is a factory rather than a module-level singleton.
+ */
+export interface ClaudiaMcpScope {
+    /** Workspace this session is scoped to (CLAUDIA_WORKSPACE_ID). */
+    workspaceId: string;
+    /** The calling agent's own task ID, used for self-rename (CLAUDIA_TASK_ID). */
+    taskId: string;
+    /** Whether to expose the `complexity` param on claudia_create_task. */
+    modelTieringEnabled: boolean;
+    /** Whether to register the claudia_todo_* tools. */
+    todoEnabled: boolean;
+    /**
+     * Base URL of the Claudia backend these tools call.
+     *
+     * Required when mounting in-process: the backend must address ITSELF, and
+     * it does not always listen on the default port (tests use ephemeral ports,
+     * and CLAUDIA_BACKEND_PORT can override it). Defaulting to :4001 here would
+     * silently point one server's tools at a different server's tasks.
+     */
+    backendUrl?: string;
+}
+
+/**
+ * Build a Claudia MCP server bound to one session's scope.
+ *
+ * This used to be a module-level singleton, which forced one OS process per
+ * Claude Code session. Because the config launched it through the tsx CLI, tsx
+ * forked and each session actually cost TWO processes — 3.9GB measured across a
+ * live fleet — purely to relay HTTP calls to a backend that is already running.
+ * Every tool here is a thin proxy over backendFetch(), so the servers hold no
+ * state worth isolating: the backend now mounts them in-process and hands each
+ * session its own cheap McpServer object instead of its own process.
+ */
+export function createClaudiaMcpServer(scope: ClaudiaMcpScope): McpServer {
+    const WORKSPACE_ID = scope.workspaceId;
+    const SELF_TASK_ID = scope.taskId;
+    const MODEL_TIERING_ENABLED = scope.modelTieringEnabled;
+    const TODO_ENABLED = scope.todoEnabled;
+    const BASE_URL = scope.backendUrl || BACKEND_URL;
+
+    // Bind the transport helpers to THIS session's backend. Every tool below
+    // calls these by name, so scoping them here keeps the call sites untouched.
+    const backendFetch = (path: string, options: RequestInit = {}) =>
+        backendFetchAt(BASE_URL, path, options);
+    const sendWSMessage = (type: string, payload: Record<string, unknown>) =>
+        sendWSMessageAt(BASE_URL, type, payload);
+    const sendWSMessageWithMultiResponse = <T>(
+        type: string,
+        payload: Record<string, unknown>,
+        matcher: (msg: { type: string; payload?: any }) => T | null,
+        timeoutMs: number = 30000,
+    ) => sendWSMessageWithMultiResponseAt(BASE_URL, type, payload, matcher, timeoutMs);
+
+    /**
+     * READ scope for a session: the ROOT workspace plus every workspace whose own
+     * root-walk lands on the same root (transitive — covers legacy grandchild
+     * worktrees, not just direct children). Used by claudia_list_tasks so fleet
+     * coordinators inside worktrees see their siblings.
+     *
+     * NOTE: claudia_stop_all_tasks deliberately does NOT use this — stopping is
+     * destructive, and widening its blast radius to the whole workspace meant a
+     * worktree session's cleanup could kill the coordinator and every sibling.
+     * Stop keeps the original self+children scope via getStopScope().
+     */
+    async function getWorkspaceScope(): Promise<{ ids: Set<string>; wsById: Map<string, any> }> {
+        const ids = new Set<string>();
+        const wsById = new Map<string, any>();
+        if (!WORKSPACE_ID) return { ids, wsById };
+
+        try {
+            const response = await backendFetch('/api/workspaces');
+            if (response.ok) {
+                const data = await response.json();
+                const workspaces = data.workspaces || data;
+                for (const ws of workspaces) wsById.set(ws.id, ws);
+
+                const root = resolveWorktreeRoot(wsById, WORKSPACE_ID);
+                ids.add(root);
+                for (const ws of workspaces) {
+                    if (resolveWorktreeRoot(wsById, ws.id) === root && ws.worktreeParentId) ids.add(ws.id);
+                }
+            }
+        } catch {
+            // Backend unreachable — fall through to self-only scope below
+        }
+
+        // Always include the session's own workspace (also the fallback when the
+        // backend fetch fails or the workspace isn't registered)
+        ids.add(WORKSPACE_ID);
+
+        return { ids, wsById };
     }
-});
+
+    /**
+     * STOP scope: the session's own workspace + its direct worktree children only
+     * (the pre-widening semantics). A worktree session stopping "all" tasks must
+     * not reach the parent workspace or sibling worktrees.
+     */
+    async function getStopScope(): Promise<Set<string>> {
+        const ids = new Set<string>();
+        if (!WORKSPACE_ID) return ids;
+        ids.add(WORKSPACE_ID);
+        try {
+            const response = await backendFetch('/api/workspaces');
+            if (response.ok) {
+                const data = await response.json();
+                const workspaces = data.workspaces || data;
+                for (const ws of workspaces) {
+                    if (ws.worktreeParentId === WORKSPACE_ID) ids.add(ws.id);
+                }
+            }
+        } catch { /* self-only fallback */ }
+        return ids;
+    }
+
+    // Create the MCP server
+    const server = new McpServer({
+        name: 'claudia',
+        version: '1.0.0',
+    }, {
+        capabilities: {
+            tools: {},
+        }
+    });
 
 // ============================================================================
 // Tool: claudia_list_tasks
@@ -1712,17 +1758,31 @@ server.tool(
 
 } // end if (TODO_ENABLED)
 
+    return server;
+}
+
 // ============================================================================
-// Start the server
+// Standalone stdio entrypoint
 // ============================================================================
+// Retained so the server still works as a spawned child process (external MCP
+// clients, debugging, and any config that hasn't migrated to the shared HTTP
+// endpoint). Scope comes from env, exactly as before.
+
 async function main() {
+    const scope: ClaudiaMcpScope = {
+        workspaceId: process.env.CLAUDIA_WORKSPACE_ID || '',
+        taskId: process.env.CLAUDIA_TASK_ID || '',
+        modelTieringEnabled: process.env.CLAUDIA_MODEL_TIERING_ENABLED === '1',
+        todoEnabled: process.env.CLAUDIA_TODO_ENABLED === '1',
+    };
+
     log.info('Starting Claudia MCP Server...');
     log.info(`Backend URL: ${BACKEND_URL}`);
-    log.info(`Workspace: ${WORKSPACE_ID || '(not scoped)'}`);
+    log.info(`Workspace: ${scope.workspaceId || '(not scoped)'}`);
 
     // Verify backend connectivity
     try {
-        const health = await backendFetch('/api/health');
+        const health = await backendFetchAt(BACKEND_URL, '/api/health');
         if (health.ok) {
             log.info('Backend connection verified');
         } else {
@@ -1733,11 +1793,26 @@ async function main() {
     }
 
     const transport = new StdioServerTransport();
-    await server.connect(transport);
+    await createClaudiaMcpServer(scope).connect(transport);
     log.info('Claudia MCP Server running on stdio');
 }
 
-main().catch((error) => {
-    log.error('Fatal error:', error);
-    process.exit(1);
-});
+// Only self-start when run as a script. The backend imports this module to
+// mount the shared HTTP endpoint — booting a stdio transport there would
+// hijack the backend's own stdin/stdout.
+const isDirectRun = (() => {
+    try {
+        const entry = process.argv[1];
+        if (!entry) return false;
+        return import.meta.url === pathToFileURL(entry).href;
+    } catch {
+        return false;
+    }
+})();
+
+if (isDirectRun) {
+    main().catch((error) => {
+        log.error('Fatal error:', error);
+        process.exit(1);
+    });
+}

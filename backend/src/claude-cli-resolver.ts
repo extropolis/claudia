@@ -9,6 +9,7 @@
  */
 import { existsSync } from 'fs';
 import { join } from 'path';
+import { homedir } from 'os';
 
 /**
  * On Windows, `npm install -g` creates `claude.cmd` not `claude.exe`, so
@@ -39,6 +40,16 @@ export function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } 
             return { command: process.execPath, prefixArgs: [cliPath] };
         }
     }
-    console.warn('[TaskSpawner] APPDATA-based Claude CLI not found, falling back to cmd.exe /c claude.cmd');
+    // Native-installer layout: %USERPROFILE%\.local\bin\claude.exe. This install
+    // path ships no claude.cmd shim (npm creates that, the native installer does
+    // not), so the cmd.exe fallback below cannot find it and the spawn fails with
+    // "'claude.cmd' is not recognized". Spawn the exe directly, same as the
+    // APPDATA bin/claude.exe case above.
+    const nativeExe = join(process.env['USERPROFILE'] || homedir(), '.local', 'bin', 'claude.exe');
+    if (existsSync(nativeExe)) {
+        console.log(`[TaskSpawner] Resolved Claude CLI exe via native install: ${nativeExe}`);
+        return { command: nativeExe, prefixArgs: [] };
+    }
+    console.warn('[TaskSpawner] APPDATA/native Claude CLI not found, falling back to cmd.exe /c claude.cmd');
     return { command: 'cmd.exe', prefixArgs: ['/c', 'claude.cmd'] };
 }
