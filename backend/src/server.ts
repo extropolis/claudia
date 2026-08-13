@@ -33,6 +33,9 @@ import { VoiceSupervisor } from './voice-supervisor.js';
 // import { ElevenLabsTTS } from './elevenlabs-tts.js'; // TODO: Implement ElevenLabs TTS
 import { createLogger } from './logger.js';
 import { PluginManager, PluginContext } from './plugin-system/index.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createClaudiaMcpServer } from './claudia-mcp-server.js';
+import { isValidSharedMcpToken } from './mcp-auth.js';
 import { JiraClient, JiraError, parseIssueKey } from './jira-client.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
@@ -502,6 +505,82 @@ export async function createApp(basePath?: string) {
 
     // Register plugin routes (handles both SAP AI Core and HAI Proxy)
     pluginManager.registerRoutes(app);
+
+    // ===== Shared Claudia MCP endpoint =====
+    // Every Claude Code session used to spawn its OWN claudia MCP server child
+    // process, and because the config launched it via tsx, that forked into two
+    // — 3.9GB measured across a live fleet, all of it relaying HTTP calls to
+    // THIS server. The tools are stateless proxies over the backend's own REST
+    // API, so they can be served in-process instead. #180 did the same for the
+    // Playwright server and called this out as the remaining sidecar cost.
+    //
+    // Stateless transport: one McpServer + transport per request, torn down when
+    // the response closes. Session scope arrives per-request in headers, since
+    // there is no longer a child process to carry CLAUDIA_* env vars.
+    app.post('/mcp', async (req, res) => {
+        // Bearer token: this endpoint can create, stop and delete tasks, and
+        // loopback is shared by every process on the machine.
+        const auth = req.header('authorization') || '';
+        const bearer = auth.startsWith('Bearer ') ? auth.slice(7) : undefined;
+        if (!isValidSharedMcpToken(bearer)) {
+            logger.warn('Rejected MCP request with missing/invalid token');
+            res.status(401).json({
+                jsonrpc: '2.0',
+                error: { code: -32001, message: 'Unauthorized' },
+                id: null,
+            });
+            return;
+        }
+
+        // The tools reach the backend over HTTP, and in-process that means THIS
+        // server. Derive the address from the live socket rather than assuming
+        // the default port — tests and CLAUDIA_BACKEND_PORT both move it, and a
+        // hardcoded :4001 would aim one server's tools at another's tasks.
+        const addr = server.address();
+        const selfPort = typeof addr === 'object' && addr ? addr.port : PORTS.BACKEND;
+
+        const scope = {
+            workspaceId: (req.header('x-claudia-workspace-id') || '').trim(),
+            taskId: (req.header('x-claudia-task-id') || '').trim(),
+            modelTieringEnabled: req.header('x-claudia-model-tiering') === '1',
+            todoEnabled: req.header('x-claudia-todo-enabled') === '1',
+            backendUrl: `http://127.0.0.1:${selfPort}`,
+        };
+
+        try {
+            const mcpServer = createClaudiaMcpServer(scope);
+            const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+            res.on('close', () => {
+                transport.close().catch(() => { /* already closing */ });
+                mcpServer.close().catch(() => { /* already closing */ });
+            });
+            await mcpServer.connect(transport);
+            await transport.handleRequest(req, res, req.body);
+        } catch (error) {
+            logger.error('Shared MCP request failed', {
+                error: error instanceof Error ? error.message : String(error),
+                taskId: scope.taskId,
+            });
+            if (!res.headersSent) {
+                res.status(500).json({
+                    jsonrpc: '2.0',
+                    error: { code: -32603, message: 'Internal server error' },
+                    id: null,
+                });
+            }
+        }
+    });
+
+    // Stateless mode has no server-initiated streams and no session to delete.
+    const mcpMethodNotAllowed = (_req: express.Request, res: express.Response) => {
+        res.status(405).json({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: 'Method not allowed: the shared MCP endpoint is stateless' },
+            id: null,
+        });
+    };
+    app.get('/mcp', mcpMethodNotAllowed);
+    app.delete('/mcp', mcpMethodNotAllowed);
 
     // Initialize remaining services
     const persistencePath = basePath ? join(basePath, 'tasks.json') : undefined;
@@ -1359,6 +1438,24 @@ export async function createApp(basePath?: string) {
         });
     });
 
+    // Per-task reconnect progress. Because the WS init path no longer blocks on
+    // waitForReconnect(), this is what lets the UI fill in live as each task
+    // comes online instead of snapping from empty to complete at the end.
+    taskSpawner.on('reconnectProgress', (p: { taskId: string; success: boolean; completed: number; total: number }) => {
+        broadcast({
+            type: 'server:reconnecting' as WSMessageType,
+            payload: {
+                message: `Reconnecting task(s)... ${p.completed}/${p.total}`,
+                count: p.total,
+                completed: p.completed,
+            }
+        });
+        // Batched, not immediate: a full task list is sent per broadcast, and a
+        // busy boot reconnects dozens of tasks. queueTasksUpdated() dedupes them
+        // into one send per batch interval.
+        queueTasksUpdated();
+    });
+
     taskSpawner.on('reconnectComplete', (result: { total: number; failed: number; failedIds: string[] }) => {
         console.log(`[Server] Reconnection complete: ${result.total - result.failed}/${result.total} tasks`);
         // Send updated task list after reconnection (immediate, not batched - important for startup)
@@ -1454,18 +1551,22 @@ export async function createApp(basePath?: string) {
             clientAliveMap.set(ws, true);
         });
 
-        // If reconnection is in progress, send a status message and wait
+        // If reconnection is in progress, tell the client — but do NOT block on
+        // it. This used to `await taskSpawner.waitForReconnect()` before sending
+        // init, so a boot with N interrupted tasks showed an empty UI for the
+        // entire reconnect run (~3 minutes at the old serial pacing). The task
+        // list is valid immediately: reconnecting tasks are already present in
+        // getAllTasks(), and each one queues a `tasks:updated` as it comes
+        // online via the reconnectProgress handler above.
         if (taskSpawner.isReconnectInProgress()) {
-            console.log('[Server] Reconnection in progress, notifying client...');
+            console.log('[Server] Reconnection in progress, sending state immediately and streaming updates...');
             ws.send(JSON.stringify({
                 type: 'server:reconnecting',
                 payload: { message: 'Reconnecting tasks...' }
             }));
-            // Wait for reconnection to complete before sending init
-            await taskSpawner.waitForReconnect();
         }
 
-        // Send current state to new client (after reconnection completes)
+        // Send current state to new client
         const tasks = taskSpawner.getAllTasks();
         const workspaces = workspaceStore.getWorkspaces();
         ws.send(JSON.stringify({
