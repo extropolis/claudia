@@ -53,6 +53,7 @@ export default defineConfig({
                 'src/token-parser.ts': { lines: 90 },
                 'src/task-state-detection.ts': { lines: 90 },
                 'src/config-store.ts': { lines: 85 },
+                'src/supervisor-chat.ts': { lines: 95 },
                 'src/cron-scheduler.ts': { lines: 95 },
             },
         },
