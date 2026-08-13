@@ -31,6 +31,7 @@ import { pathToFileURL } from 'url';
 import { z } from 'zod';
 import { writeFileSync } from 'fs';
 import { join, resolve, basename } from 'path';
+import { isPathInside } from './validation.js';
 
 // Backend URL - defaults to localhost:4001, can be overridden via env
 const BACKEND_URL = process.env.CLAUDIA_BACKEND_URL || 'http://localhost:4001';
@@ -1416,7 +1417,7 @@ server.tool(
             const destPath = join(WORKSPACE_ID, safeName);
             const resolvedDest = resolve(destPath);
             const resolvedWorkspace = resolve(WORKSPACE_ID);
-            if (!resolvedDest.startsWith(resolvedWorkspace)) {
+            if (!isPathInside(resolvedWorkspace, resolvedDest)) {
                 return { content: [{ type: 'text', text: 'Error: Refusing to write outside the workspace.' }] };
             }
 
