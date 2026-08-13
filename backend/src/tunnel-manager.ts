@@ -25,6 +25,25 @@ export interface TunnelStatus {
 
 // No default domain - use random ngrok URL unless user configures one
 
+/**
+ * Injectable side-effecting dependencies.
+ *
+ * Production always uses the node defaults below; the seam exists purely so
+ * tests can drive the state machine (adopt / spawn / retry / stop) without
+ * touching the network or launching a real ngrok process.
+ */
+export interface TunnelManagerDeps {
+    spawn: typeof spawn;
+    execSync: typeof execSync;
+    fetch: (input: string, init?: { signal?: AbortSignal }) => Promise<{ json(): Promise<unknown> }>;
+}
+
+const defaultDeps: TunnelManagerDeps = {
+    spawn,
+    execSync,
+    fetch: (input, init) => fetch(input, init),
+};
+
 export class TunnelManager extends EventEmitter {
     private ngrokProcess: ChildProcess | null = null;
     private token: string | null = null;
@@ -43,11 +62,13 @@ export class TunnelManager extends EventEmitter {
      * Its presence is the single source of truth for "adopted mode".
      */
     private adoptedMonitor: NodeJS.Timeout | null = null;
+    private deps: TunnelManagerDeps;
 
-    constructor(port: number, domain?: string) {
+    constructor(port: number, domain?: string, deps?: Partial<TunnelManagerDeps>) {
         super();
         this.port = port;
         this.domain = domain || null;
+        this.deps = { ...defaultDeps, ...deps };
         logger.info('TunnelManager initialized (ngrok)', { port, domain: this.domain || '(random)' });
     }
 
@@ -77,7 +98,7 @@ export class TunnelManager extends EventEmitter {
 
         // Fetch public IP for reference
         try {
-            const ipRes = await fetch('https://api.ipify.org?format=json');
+            const ipRes = await this.deps.fetch('https://api.ipify.org?format=json');
             const ipData = await ipRes.json() as { ip: string };
             this.publicIp = ipData.ip;
             logger.info('Public IP resolved', { ip: this.publicIp });
@@ -126,7 +147,7 @@ export class TunnelManager extends EventEmitter {
         // Use 'ngrok' (not 'ngrok.exe') because npm installs it as ngrok.cmd on Windows
         const ngrokExe = 'ngrok';
         try {
-            execSync(`${process.platform === 'win32' ? 'where' : 'which'} ${ngrokExe}`, { stdio: 'ignore' });
+            this.deps.execSync(`${process.platform === 'win32' ? 'where' : 'which'} ${ngrokExe}`, { stdio: 'ignore' });
         } catch {
             throw new Error(`ngrok is not installed. Install it from https://ngrok.com/download and ensure it's in your PATH.`);
         }
@@ -138,7 +159,7 @@ export class TunnelManager extends EventEmitter {
             const killCmd = process.platform === 'win32'
                 ? 'taskkill /f /im ngrok.exe 2>nul || exit /b 0'
                 : 'pkill -f ngrok 2>/dev/null || true';
-            execSync(killCmd, { stdio: 'ignore' });
+            this.deps.execSync(killCmd, { stdio: 'ignore' });
             await new Promise(r => setTimeout(r, 500));
         } catch {
             // ignore
@@ -149,7 +170,7 @@ export class TunnelManager extends EventEmitter {
             : ['http', String(this.port)];
         logger.info('Spawning ngrok', { args: ngrokArgs });
 
-        const ngrok = spawn(ngrokExe, ngrokArgs, {
+        const ngrok = this.deps.spawn(ngrokExe, ngrokArgs, {
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: process.platform === 'win32', // Required on Windows to find .cmd files
         });
@@ -246,7 +267,7 @@ export class TunnelManager extends EventEmitter {
      * Shared by checkNgrokRunning() and pollNgrokApi() to avoid duplicate parse logic.
      */
     private async fetchNgrokUrl(signal?: AbortSignal): Promise<string | null> {
-        const res = await fetch('http://127.0.0.1:4040/api/tunnels', signal ? { signal } : undefined);
+        const res = await this.deps.fetch('http://127.0.0.1:4040/api/tunnels', signal ? { signal } : undefined);
         const data = await res.json() as { tunnels: Array<{ public_url: string; proto: string }> };
         return data.tunnels?.find(t => t.proto === 'https')?.public_url ?? null;
     }
@@ -370,7 +391,7 @@ export class TunnelManager extends EventEmitter {
                     // On Windows, kill('SIGTERM') only kills the cmd.exe shell wrapper —
                     // ngrok.exe (the grandchild) survives as an orphan.
                     // /T kills the entire process tree.
-                    execSync(`taskkill /F /T /PID ${this.ngrokProcess.pid} 2>nul || exit /b 0`, { stdio: 'ignore' });
+                    this.deps.execSync(`taskkill /F /T /PID ${this.ngrokProcess.pid} 2>nul || exit /b 0`, { stdio: 'ignore' });
                 } else {
                     this.ngrokProcess.kill('SIGTERM');
                     await new Promise(resolve => setTimeout(resolve, 1000));
@@ -386,7 +407,7 @@ export class TunnelManager extends EventEmitter {
         // In adopted mode we had no PID, so kill ngrok by name instead
         if (process.platform === 'win32' && wasAdopted) {
             try {
-                execSync('taskkill /f /im ngrok.exe 2>nul || exit /b 0', { stdio: 'ignore' });
+                this.deps.execSync('taskkill /f /im ngrok.exe 2>nul || exit /b 0', { stdio: 'ignore' });
             } catch { /* ignore */ }
         }
 
