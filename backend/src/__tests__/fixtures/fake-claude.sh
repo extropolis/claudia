@@ -42,6 +42,22 @@ while IFS= read -r -t 600 line; do
     printf '%s\n' "$line"
     case "$line" in
         *EMIT_OUTPUT*) printf 'FAKE_OUTPUT_MARKER_9000\n' ;;
+        # Render a permission/choice dialog and STOP — no trailing idle banner,
+        # so the task must settle on waiting_input rather than bouncing to idle.
+        *EMIT_PROMPT*)
+            printf '\nDo you want to proceed?\n  ❯ 1. Yes\n    2. No\n'
+            continue
+            ;;
+        # Stream output for several seconds so state polling sees sustained
+        # change (busy), then fall through to the idle banner (idle).
+        *EMIT_BUSY*)
+            i=0
+            while [ "$i" -lt 30 ]; do
+                printf '✳ Working on it %s\n' "$i"
+                i=$((i + 1))
+                sleep 0.25
+            done
+            ;;
     esac
     printf '\n❯ \n? for shortcuts\n'
 done

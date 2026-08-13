@@ -1,4 +1,5 @@
 import { spawn, IPty } from 'node-pty';
+import { resolveClaudeSpawn } from './claude-cli-resolver.js';
 import { EventEmitter } from 'events';
 import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, TaskTokenUsage, stripTerminalQueries, incompleteEscapeSuffixStart } from '@claudia/shared';
 import { fileURLToPath } from 'url';
@@ -107,46 +108,6 @@ export function buildClaudeCodeSwitchArgs(switches: ClaudeCodeSwitches): string[
 const isWindows = process.platform === 'win32';
 function exe(name: string): string {
     return isWindows ? `${name}.exe` : name;
-}
-
-/**
- * On Windows, `npm install -g` creates `claude.cmd` not `claude.exe`, so
- * node-pty cannot spawn it directly. Locate the underlying JS entry-point
- * via APPDATA and run it with the current node executable — no PATH needed.
- */
-function resolveClaudeSpawn(): { command: string; prefixArgs: string[] } {
-    if (!isWindows) return { command: 'claude', prefixArgs: [] };
-    const appData = process.env['APPDATA'];
-    if (appData) {
-        const pkgDir = join(appData, 'npm', 'node_modules', '@anthropic-ai', 'claude-code');
-        // Newer claude-code ships a native bin/claude.exe (no cli.js). Spawn it
-        // directly so multiline args like --system-prompt are passed verbatim.
-        // The cmd.exe /c claude.cmd fallback re-parses the command line and
-        // corrupts long/multiline args (e.g. dropping --model after the prompt).
-        const exePath = join(pkgDir, 'bin', 'claude.exe');
-        if (existsSync(exePath)) {
-            console.log(`[TaskSpawner] Resolved Claude CLI exe via APPDATA: ${exePath}`);
-            return { command: exePath, prefixArgs: [] };
-        }
-        // Older layout: cli.js run via node.
-        const cliPath = join(pkgDir, 'cli.js');
-        if (existsSync(cliPath)) {
-            console.log(`[TaskSpawner] Resolved Claude CLI via APPDATA: ${process.execPath} ${cliPath}`);
-            return { command: process.execPath, prefixArgs: [cliPath] };
-        }
-    }
-    // Native-installer layout: %USERPROFILE%\.local\bin\claude.exe. This install
-    // path ships no claude.cmd shim (npm creates that, the native installer does
-    // not), so the cmd.exe fallback below cannot find it and the spawn fails with
-    // "'claude.cmd' is not recognized". Spawn the exe directly, same as the
-    // APPDATA bin/claude.exe case above.
-    const nativeExe = join(process.env['USERPROFILE'] || homedir(), '.local', 'bin', 'claude.exe');
-    if (existsSync(nativeExe)) {
-        console.log(`[TaskSpawner] Resolved Claude CLI exe via native install: ${nativeExe}`);
-        return { command: nativeExe, prefixArgs: [] };
-    }
-    console.warn('[TaskSpawner] APPDATA/native Claude CLI not found, falling back to cmd.exe /c claude.cmd');
-    return { command: 'cmd.exe', prefixArgs: ['/c', 'claude.cmd'] };
 }
 
 /** Window and cap for the context-destroying-input (/clear, /compact, /reset) throttle. */
