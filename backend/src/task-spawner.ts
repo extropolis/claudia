@@ -433,10 +433,14 @@ export class TaskSpawner extends EventEmitter {
     /** Track which learnings were injected into which tasks (for utility updates) */
     private taskLearnings: Map<string, string[]> = new Map();
 
+    /** Whether auto-reconnect is permitted; the kickoff is deferred to startAutoReconnect(). */
+    private autoReconnectEnabled: boolean = false;
+
     /**
      * Creates a new TaskSpawner instance
      * @param persistencePath - Optional path for task persistence file (default: tasks.json in backend dir)
-     * @param autoReconnect - Whether to automatically reconnect disconnected tasks on startup
+     * @param autoReconnect - Whether disconnected tasks may be auto-reconnected on startup.
+     *   This only ARMS auto-reconnect — call startAutoReconnect() to actually begin it.
      * @param configStore - Optional config store for reading settings
      */
     constructor(persistencePath?: string, autoReconnect: boolean = true, configStore?: ConfigStore) {
@@ -531,10 +535,33 @@ export class TaskSpawner extends EventEmitter {
             this.startMemoryGuard();
         }
 
-        if (autoReconnect && this.disconnectedTasks.size > 0) {
-            // Start auto-reconnect immediately but track the promise
-            this.autoReconnectPromise = this.autoReconnectTasks();
-        }
+        // Auto-reconnect is ARMED here but NOT started. Reconnecting spawns
+        // claude processes whose --mcp-config points at this backend's own
+        // http://127.0.0.1:<port>/mcp endpoint, and the constructor runs inside
+        // createApp() — before index.ts calls server.listen(). Starting here
+        // raced the listener: every reconnected session hit ECONNREFUSED on the
+        // claudia MCP server, and Claude Code does not retry a server that
+        // failed at startup, so those sessions ran with NO claudia_* tools for
+        // their entire lifetime while the endpoint itself looked perfectly
+        // healthy afterwards. index.ts now calls startAutoReconnect() from the
+        // listen callback.
+        this.autoReconnectEnabled = autoReconnect;
+    }
+
+    /**
+     * Begin auto-reconnecting interrupted tasks.
+     *
+     * Call this only once the HTTP listener is accepting connections: the
+     * reconnected sessions immediately dial the backend's shared MCP endpoint,
+     * and a connection refused there is permanent for that session.
+     *
+     * Idempotent — a second call while a reconnect is in flight is a no-op.
+     */
+    startAutoReconnect(): void {
+        if (!this.autoReconnectEnabled) return;
+        if (this.autoReconnectPromise) return;
+        if (this.disconnectedTasks.size === 0) return;
+        this.autoReconnectPromise = this.autoReconnectTasks();
     }
 
     /**
