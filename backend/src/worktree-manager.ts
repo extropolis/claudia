@@ -12,6 +12,7 @@ import { existsSync, lstatSync, appendFileSync, readFileSync, writeFileSync } fr
 import { join, resolve, basename, normalize } from 'path';
 import { WorktreeInfo } from '@claudia/shared';
 import { createLogger } from './logger.js';
+import { getDefaultBranch } from './git-utils.js';
 
 const execFileAsync = promisify(execFile);
 const logger = createLogger('[WorktreeManager]');
@@ -166,10 +167,21 @@ export class WorktreeManager {
         createBranch?: boolean;
         targetDir?: string;
     }): Promise<{ path: string; branch: string }> {
-        const { repoPath, branch, baseBranch, createBranch = true } = opts;
+        const { repoPath, branch, createBranch = true } = opts;
+        let { baseBranch } = opts;
 
         // Resolve to the main worktree root so the .claudia-worktrees dir is always in the repo root
         const mainPath = await this.getMainWorktreePath(repoPath) ?? repoPath;
+
+        // No explicit base for a NEW branch → branch from the head of the
+        // default branch, freshly fetched. Worktrees used to branch from
+        // whatever the workspace HEAD happened to be, which was frequently a
+        // stale checkout or another task's feature branch — every task spawned
+        // on top of it then carried unrelated diffs into its PR. Explicit
+        // baseBranch (the UI's branch picker) still wins unchanged.
+        if (createBranch && !baseBranch) {
+            baseBranch = await this.resolveFreshDefaultBase(mainPath) ?? undefined;
+        }
 
         // Check if branch is already in use by another worktree
         const existingWorktreePath = await this.isBranchInWorktree(mainPath, branch);
@@ -212,6 +224,40 @@ export class WorktreeManager {
         this.initSubmodulesAsync(targetDir);
 
         return { path: targetDir, branch };
+    }
+
+    /**
+     * Resolve the freshest available ref for the repo's default branch.
+     *
+     * Best-effort `git fetch origin <default>` first (10s cap — task creation
+     * must not hang on a dead network), then prefer `origin/<default>` and fall
+     * back to the local branch. Returns null when the repo has no default
+     * branch at all (fresh init), which keeps the old branch-from-HEAD
+     * behavior as the last resort.
+     */
+    private async resolveFreshDefaultBase(mainPath: string): Promise<string | null> {
+        const defaultBranch = await getDefaultBranch(mainPath);
+        if (!defaultBranch) return null;
+
+        try {
+            await execFileAsync('git', ['fetch', 'origin', defaultBranch], {
+                cwd: mainPath,
+                timeout: 10_000,
+            });
+        } catch (err) {
+            logger.warn('resolveFreshDefaultBase: fetch failed, using last-known refs', {
+                mainPath,
+                error: err instanceof Error ? err.message : String(err),
+            });
+        }
+
+        // origin/<default> if it exists (fetched or last-known), else local.
+        try {
+            await execFileAsync('git', ['rev-parse', '--verify', `origin/${defaultBranch}`], { cwd: mainPath });
+            return `origin/${defaultBranch}`;
+        } catch {
+            return defaultBranch;
+        }
     }
 
     /**

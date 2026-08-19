@@ -13,6 +13,8 @@
  *   - claudia_get_task_status: Get detailed status of a specific task
  *   - claudia_get_task_output: Fetch recent terminal output from a task
  *   - claudia_create_task: Create a new task in the current workspace
+ *   - claudia_create_tasks: Batch fan-out — create several child tasks at once
+ *   - claudia_wait_for_task: Block until a task settles (idle/exited/waiting)
  *   - claudia_send_input: Send input to a task waiting for input
  *   - claudia_continue_task: Send a follow-up prompt to resume an idle task
  *   - claudia_stop_task: Gracefully stop a running task
@@ -41,6 +43,23 @@ const BACKEND_URL = process.env.CLAUDIA_BACKEND_URL || 'http://localhost:4001';
  * scope semantics can't drift between the tool descriptions that reference them.
  */
 const SIBLING_TASKS = 'sibling tasks (tasks running in other git worktrees of the same workspace)';
+
+/**
+ * Wording appended to every taskId parameter: tools accept the short ref too.
+ * The backend resolves "#48"/"48" on its WS and REST surfaces; this matcher
+ * mirrors that for the handlers that filter a fetched task list client-side.
+ */
+const TASK_REF_HINT = 'Accepts the full id ("task-...") or the short ref ("#48" / "48") shown by claudia_list_tasks.';
+
+/** Match a task in a fetched list by full id or short ref ("#48"/"48"). */
+function matchTaskRef(tasks: { id: string; taskNumber?: number }[], ref: string): { id: string; taskNumber?: number } | undefined {
+    const byId = tasks.find(t => t.id === ref);
+    if (byId) return byId;
+    const m = /^#?(\d{1,9})$/.exec(ref.trim());
+    if (!m) return undefined;
+    const num = parseInt(m[1], 10);
+    return tasks.find(t => t.taskNumber === num);
+}
 
 /**
  * Format a duration in milliseconds to a human-readable string
@@ -496,6 +515,8 @@ server.tool(
 
                 return {
                     id: t.id,
+                    ref: typeof t.taskNumber === 'number' ? `#${t.taskNumber}` : null,
+                    parent: t.parentTaskId || null,
                     state: t.state,
                     prompt: t.displayName || (t.prompt?.substring(0, 100) + (t.prompt?.length > 100 ? '...' : '')),
                     createdAt: t.createdAt,
@@ -527,7 +548,7 @@ server.tool(
     'claudia_get_task_status',
     'Get detailed status of a specific task including state, runtime duration, and a snippet of recent output. Works for all task states including disconnected and interrupted tasks. Use this to check progress of spawned tasks without fetching full output.',
     {
-        taskId: z.string().describe('The task ID to get status for'),
+        taskId: z.string().describe('The task ID to get status for. ' + TASK_REF_HINT),
     },
     async ({ taskId }) => {
         try {
@@ -542,7 +563,7 @@ server.tool(
             }
 
             const tasks = await tasksResponse.json();
-            const task = tasks.find((t: any) => t.id === taskId);
+            const task = matchTaskRef(tasks, taskId) as any;
 
             if (!task) {
                 return { content: [{ type: 'text', text: `Error: Task '${taskId}' not found.` }] };
@@ -596,7 +617,7 @@ server.tool(
     'claudia_get_task_output',
     `Fetch recent terminal output from a task, including ${SIBLING_TASKS}. Use this to see what a sibling has been doing, check its progress, or read its results before coordinating with it. Returns the most recent output (up to 16KB by default).`,
     {
-        taskId: z.string().describe('The task ID to get output from'),
+        taskId: z.string().describe('The task ID to get output from. ' + TASK_REF_HINT),
         maxBytes: z.number().optional().describe('Maximum bytes of output to return (default: 16384, max: 32768)'),
     },
     async ({ taskId, maxBytes }) => {
@@ -633,7 +654,7 @@ server.tool(
 // ============================================================================
 // Tool: claudia_create_task
 // ============================================================================
-const createTaskBaseDescription = `Create a new task in Claudia. The task will be assigned to a Claude Code agent in the current workspace (${WORKSPACE_ID || 'unknown'}). Use this to delegate work to other agents running in parallel. PREFER this over launching your own internal subagent (the built-in Agent/Task tool) for any delegatable work — Claudia tasks are user-visible, monitorable, resumable, and isolated. Only use your own subagent for a quick throwaway lookup you need inline, or when a Claudia task would clearly give a worse result.`;
+const createTaskBaseDescription = `Create a new task in Claudia. The task will be assigned to a Claude Code agent in the current workspace (${WORKSPACE_ID || 'unknown'}). Use this to delegate work to other agents running in parallel. PREFER this over launching your own internal subagent (the built-in Agent/Task tool) for any delegatable work — Claudia tasks are user-visible, monitorable, resumable, and isolated. Only use your own subagent for a quick throwaway lookup you need inline, or when a Claudia task would clearly give a worse result. The new task records YOU as its parent (grouped under you in the sidebar), and when it settles you receive a [CLAUDIA TASK UPDATE] message automatically — you do not need to poll it. To block on it explicitly, use claudia_wait_for_task. The response includes a short ref like "#48" that every claudia_* tool accepts in place of the long id.`;
 
 const createTaskTieringSuffix = `
 
@@ -694,6 +715,10 @@ async function handleCreateTask(args: { prompt: string; displayName?: string; co
             prompt,
             workspaceId: effectiveWorkspaceId,
             source: 'mcp',
+            // Record the spawning task so the UI can group children under it.
+            // This was the missing link in the hierarchy: the field existed
+            // end-to-end but nothing ever sent it.
+            ...(SELF_TASK_ID ? { parentTaskId: SELF_TASK_ID } : {}),
         };
         if (MODEL_TIERING_ENABLED && complexity) {
             payload.complexity = complexity;
@@ -720,6 +745,8 @@ async function handleCreateTask(args: { prompt: string; displayName?: string; co
                     text: JSON.stringify({
                         success: true,
                         taskId: task.id,
+                        ref: typeof task.taskNumber === 'number' ? `#${task.taskNumber}` : null,
+                        parentTaskId: SELF_TASK_ID || null,
                         displayName: displayName || null,
                         state: task.state,
                         workspace: effectiveWorkspaceId,
@@ -789,13 +816,136 @@ if (MODEL_TIERING_ENABLED) {
 }
 
 // ============================================================================
+// Tool: claudia_create_tasks (batch fan-out)
+// ============================================================================
+server.tool(
+    'claudia_create_tasks',
+    `Create SEVERAL tasks in one call — the fan-out form of claudia_create_task. All children record this task as their parent, so the Claudia sidebar groups them under you. Returns one entry per child with its id and short ref. Prefer this over repeated claudia_create_task calls when decomposing work into parallel pieces.`,
+    {
+        tasks: z.array(z.object({
+            prompt: z.string().describe('The prompt/instructions for this task'),
+            displayName: z.string().optional().describe('Optional short display name for the Claudia sidebar'),
+            ...(MODEL_TIERING_ENABLED ? {
+                complexity: z.enum(['low', 'medium', 'high']).optional().describe('Cost/capability tier for this task'),
+            } : {}),
+            ...isolateParam,
+        })).min(1).max(10).describe('The tasks to create, in order (max 10 per call)'),
+    },
+    async ({ tasks }) => {
+        const results: unknown[] = [];
+        for (const spec of tasks) {
+            // Sequential on purpose: each isolate=true child creates a worktree,
+            // and parallel `git worktree add` calls contend on the same repo lock.
+            const res = await handleCreateTask(spec as { prompt: string; displayName?: string; complexity?: 'low' | 'medium' | 'high'; isolate?: boolean });
+            const text = (res as { content?: { text?: string }[] }).content?.[0]?.text ?? '';
+            try {
+                results.push(JSON.parse(text));
+            } catch {
+                results.push({ success: false, error: text.slice(0, 500) });
+            }
+        }
+        const created = results.filter(r => (r as { success?: boolean }).success).length;
+        return {
+            content: [{
+                type: 'text',
+                text: JSON.stringify({ created, requested: tasks.length, results }, null, 2)
+            }]
+        };
+    }
+);
+
+// ============================================================================
+// Tool: claudia_wait_for_task
+// ============================================================================
+server.tool(
+    'claudia_wait_for_task',
+    `Wait until a task stops running — it goes idle, exits, or asks for input — then return its final state plus a tail of its output. Replaces polling claudia_get_task_status in a loop after delegating work. If the task is still busy when the timeout lapses, returns { timedOut: true } with its current state; simply call again to keep waiting (each call is one bounded wait, so long waits are a sequence of calls, not one huge timeout).`,
+    {
+        taskId: z.string().describe('The task ID to wait for. ' + TASK_REF_HINT),
+        timeoutSeconds: z.number().optional().describe('How long to wait before returning timedOut (default 60, max 240)'),
+    },
+    async ({ taskId, timeoutSeconds }) => {
+        const RUNNING_STATES = new Set(['busy', 'starting']);
+        const POLL_MS = 2500;
+        const capMs = Math.min(Math.max(timeoutSeconds ?? 60, 5), 240) * 1000;
+        const deadline = Date.now() + capMs;
+
+        try {
+            // Resolve once up front so a short ref keeps working even if the
+            // list shifts underneath us while we wait.
+            const first = await backendFetch('/api/tasks');
+            if (!first.ok) {
+                return { content: [{ type: 'text', text: `Error: Failed to fetch tasks (HTTP ${first.status})` }] };
+            }
+            const initial = matchTaskRef(await first.json(), taskId) as { id: string } | undefined;
+            if (!initial) {
+                return { content: [{ type: 'text', text: `Error: Task '${taskId}' not found.` }] };
+            }
+            const canonicalId = initial.id;
+
+            let lastState = 'unknown';
+            for (;;) {
+                const response = await backendFetch('/api/tasks');
+                if (response.ok) {
+                    const task = (await response.json()).find((t: { id: string }) => t.id === canonicalId) as { state?: string; waitingInputType?: string } | undefined;
+                    if (!task) {
+                        return { content: [{ type: 'text', text: JSON.stringify({ taskId: canonicalId, state: 'deleted', message: 'Task no longer exists.' }, null, 2) }] };
+                    }
+                    lastState = task.state ?? 'unknown';
+                    if (!RUNNING_STATES.has(lastState)) {
+                        // Settled — attach a tail of output so the caller usually
+                        // needs no follow-up claudia_get_task_output call.
+                        let tail: string | null = null;
+                        try {
+                            const out = await backendFetch(`/api/tasks/${canonicalId}/output?maxBytes=4096`);
+                            if (out.ok) {
+                                const data = await out.json() as { output?: string };
+                                tail = data.output ?? null;
+                            }
+                        } catch { /* output tail is best-effort */ }
+                        return {
+                            content: [{
+                                type: 'text',
+                                text: JSON.stringify({
+                                    taskId: canonicalId,
+                                    state: lastState,
+                                    waitingInputType: task.waitingInputType || null,
+                                    timedOut: false,
+                                    recentOutput: tail,
+                                }, null, 2)
+                            }]
+                        };
+                    }
+                }
+                if (Date.now() + POLL_MS > deadline) {
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify({
+                                taskId: canonicalId,
+                                state: lastState,
+                                timedOut: true,
+                                message: 'Still running after the wait window. Call claudia_wait_for_task again to keep waiting.',
+                            }, null, 2)
+                        }]
+                    };
+                }
+                await new Promise(r => setTimeout(r, POLL_MS));
+            }
+        } catch (error) {
+            return { content: [{ type: 'text', text: `Error: ${error instanceof Error ? error.message : String(error)}` }] };
+        }
+    }
+);
+
+// ============================================================================
 // Tool: claudia_send_input
 // ============================================================================
 server.tool(
     'claudia_send_input',
     `Send input or a message to another task, including ${SIBLING_TASKS}. Two uses: (1) answer a task in waiting_input state (a question or permission prompt); (2) message a sibling task to coordinate with it. IMPORTANT: only send to a task in waiting_input or idle state — check claudia_get_task_status first. Sending to a busy task types keystrokes into its running session and can corrupt its in-flight work. Discover sibling IDs with claudia_list_tasks.`,
     {
-        taskId: z.string().describe('The task ID to send input to'),
+        taskId: z.string().describe('The task ID to send input to. ' + TASK_REF_HINT),
         input: z.string().describe('The input text to send to the task'),
     },
     async ({ taskId, input }) => {
@@ -836,7 +986,7 @@ server.tool(
     'claudia_continue_task',
     `Send a follow-up prompt to an idle, exited, disconnected, or interrupted Claude Code task, resuming its session with a new instruction. Disconnected/interrupted tasks will be automatically reconnected before the prompt is delivered. The task will start processing the new prompt. Also use this to hand work to ${SIBLING_TASKS} — e.g. ask one to rebase onto main, review your branch, or report status. The same state rule applies: the target must be idle, exited, disconnected, or interrupted (not busy); discover sibling IDs with claudia_list_tasks.`,
     {
-        taskId: z.string().describe('The task ID to continue'),
+        taskId: z.string().describe('The task ID to continue. ' + TASK_REF_HINT),
         prompt: z.string().describe('The follow-up prompt/instructions to send to the task'),
     },
     async ({ taskId, prompt }) => {
@@ -845,7 +995,7 @@ server.tool(
             const tasksResponse = await backendFetch('/api/tasks');
             if (tasksResponse.ok) {
                 const tasks = await tasksResponse.json();
-                const task = tasks.find((t: any) => t.id === taskId);
+                const task = matchTaskRef(tasks, taskId) as any;
                 if (!task) {
                     return {
                         content: [{
@@ -908,7 +1058,7 @@ server.tool(
     'claudia_stop_task',
     'Gracefully stop a running task by sending an interrupt signal (ESC). This cancels the current Claude Code operation without killing the process — the task transitions to idle and can be resumed later. Works on tasks in busy, starting, or waiting_input states.',
     {
-        taskId: z.string().describe('The task ID to stop'),
+        taskId: z.string().describe('The task ID to stop. ' + TASK_REF_HINT),
     },
     async ({ taskId }) => {
         // Prevent a task from stopping itself — would kill the orchestrating Claude session
@@ -1033,7 +1183,7 @@ server.tool(
     'claudia_rename_task',
     `Rename a task's display name in the Claudia UI sidebar. Use this to give tasks descriptive names that reflect what they're working on. Will be rejected if the user has manually edited the task title. ${SELF_TASK_ID ? `YOUR OWN TASK ID IS: ${SELF_TASK_ID} — after you have written your first response about the task, call this tool with taskId="${SELF_TASK_ID}" and a short descriptive title (3-6 words). Do NOT call this before producing output.` : ''}`,
     {
-        taskId: z.string().describe(`The task ID to rename.${SELF_TASK_ID ? ` To title your own task, use "${SELF_TASK_ID}".` : ''}`),
+        taskId: z.string().describe(`The task ID to rename. ${TASK_REF_HINT}${SELF_TASK_ID ? ` To title your own task, use "${SELF_TASK_ID}".` : ''}`),
         displayName: z.string().describe('The new display name for the task (short, descriptive)'),
     },
     async ({ taskId, displayName }) => {
@@ -1042,7 +1192,7 @@ server.tool(
             const tasksResponse = await backendFetch('/api/tasks');
             if (tasksResponse.ok) {
                 const tasks = await tasksResponse.json();
-                const task = tasks.find((t: any) => t.id === taskId);
+                const task = matchTaskRef(tasks, taskId) as any;
                 if (task?.displayNameEditedByUser) {
                     log.info(`Rename blocked for task ${taskId} — title was edited by user`);
                     return {
@@ -1094,7 +1244,7 @@ server.tool(
     'claudia_delete_task',
     'Request deletion (archival) of a task. This sends a confirmation popup to the user — the task is only deleted if the user approves. IMPORTANT: Only call this when the user explicitly asks to delete/remove a task. Never delete tasks automatically after completion — users want to review outputs.',
     {
-        taskId: z.string().describe('The task ID to delete'),
+        taskId: z.string().describe('The task ID to delete. ' + TASK_REF_HINT),
     },
     async ({ taskId }) => {
         if (SELF_TASK_ID && taskId === SELF_TASK_ID) {
@@ -1116,7 +1266,7 @@ server.tool(
                 const tasksResponse = await backendFetch('/api/tasks');
                 if (tasksResponse.ok) {
                     const tasks = await tasksResponse.json();
-                    const task = tasks.find((t: any) => t.id === taskId);
+                    const task = matchTaskRef(tasks, taskId) as any;
                     if (!task) {
                         return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
                     }
@@ -1184,7 +1334,7 @@ server.tool(
     'claudia_cron_create',
     `Schedule a recurring or one-shot prompt for a task. The prompt will be sent to the task's terminal at the scheduled time. Uses standard 5-field cron expressions (minute hour day-of-month month day-of-week). Examples: "*/5 * * * *" = every 5 minutes, "0 * * * *" = every hour, "0 9 * * 1-5" = weekdays at 9am. Recurring tasks auto-expire after 3 days. Max 50 scheduled tasks per task.`,
     {
-        taskId: z.string().describe(`The task ID to schedule a prompt for.${SELF_TASK_ID ? ` Use "${SELF_TASK_ID}" for yourself.` : ''}`),
+        taskId: z.string().describe(`The task ID to schedule a prompt for. ${TASK_REF_HINT}${SELF_TASK_ID ? ` Use "${SELF_TASK_ID}" for yourself.` : ''}`),
         cronExpression: z.string().describe('5-field cron expression: "minute hour day-of-month month day-of-week". Examples: "*/5 * * * *" (every 5 min), "0 9 * * *" (daily 9am), "30 14 * * 1-5" (weekdays 2:30pm)'),
         prompt: z.string().describe('The prompt to send when the schedule fires'),
         isRecurring: z.boolean().optional().describe('true (default) for recurring, false for one-shot (fires once then deletes itself)'),

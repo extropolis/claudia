@@ -699,6 +699,15 @@
     overflow: hidden;
 }
 
+/* Short task ref (#48) — the id agents and developers reference tasks by. */
+.workspace-panel .task-item .task-ref {
+    margin-right: 5px;
+    font-size: 10px;
+    font-family: var(--font-mono, monospace);
+    color: var(--text-tertiary, var(--text-secondary));
+    opacity: 0.85;
+}
+
 /* Scheduled task (cron) badge */
 .workspace-panel .task-item .task-cron-badge {
     display: inline-flex;

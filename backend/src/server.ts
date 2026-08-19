@@ -1622,6 +1622,23 @@ export async function createApp(basePath?: string) {
 
                 const payload = message.payload || {};
 
+                // Short-ref resolution: any handler that takes a taskId also
+                // accepts the short number ("#48"/"48"). Normalized ONCE here so
+                // the two dozen extraction sites below never see anything but a
+                // canonical id. Unresolvable refs pass through untouched — each
+                // handler's own "task not found" error is the right message, and
+                // task:create's parentTaskId is resolved inside createTask.
+                {
+                    const p = payload as { taskId?: unknown };
+                    if (typeof p.taskId === 'string' && p.taskId) {
+                        const resolved = taskSpawner.resolveTaskRef(p.taskId);
+                        if (resolved && resolved !== p.taskId) {
+                            logger.debug('Resolved short task ref', { ref: p.taskId, taskId: resolved });
+                            p.taskId = resolved;
+                        }
+                    }
+                }
+
                 switch (message.type) {
                     case 'task:create': {
                         // Create a new Claude Code CLI instance
@@ -3210,6 +3227,18 @@ export async function createApp(basePath?: string) {
     // REST API routes
     app.get('/api/health', (_req, res) => {
         res.json({ status: 'ok' });
+    });
+
+    // Short-ref resolution for REST: every route with a :taskId param accepts
+    // the short number ("#48"/"48") as well as the full id. Mirrors the WS-side
+    // normalization; unresolvable refs pass through so each route's own
+    // "task not found" fires.
+    app.param('taskId', (req, _res, next, value: string) => {
+        const resolved = taskSpawner.resolveTaskRef(value);
+        if (resolved && resolved !== value) {
+            req.params.taskId = resolved;
+        }
+        next();
     });
 
     // Byte-range read of a task's history file. Used by the terminal's

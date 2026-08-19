@@ -51,6 +51,11 @@ export interface Task {
     sessionWorktreeBranch?: string;
     sessionWorktreePrInfo?: WorkspacePrInfo | null; // PR for that branch (if any)
     parentTaskId?: string;  // Task that spawned this one via claudia_create_task (MCP)
+    // Short sequential identifier (1, 2, 3…) unique per install, rendered as
+    // "#48". Stable for the task's lifetime, never reused. Both agents (MCP
+    // tools accept "#48"/"48" wherever they take a taskId) and developers
+    // ("restart 48") reference tasks by it; the long id stays the primary key.
+    taskNumber?: number;
 }
 
 export interface WorkspaceReference {

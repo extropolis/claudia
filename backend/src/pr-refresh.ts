@@ -34,8 +34,10 @@ export function isPrNonTerminal(pr: WorkspacePrInfo | null | undefined): boolean
  *
  * A workspace qualifies when any of:
  *   1. it has an actively-running task;
- *   2. it has never been looked up (lazy first fetch);
- *   3. its PR is non-terminal — CI running, or still open/draft.
+ *   2. it has a task and has never been looked up (lazy first fetch);
+ *   3. its PR is non-terminal — CI running, or still open/draft — with or
+ *      without any remaining task (badges must settle to merged/failed even
+ *      after the task that opened the PR is archived or deleted).
  *
  * @param tasks      current tasks (workspaceId + state)
  * @param workspaces workspaces with their last-known PR info
@@ -57,6 +59,17 @@ export function selectWorkspacesToRefresh(
         if (ACTIVE_TASK_STATES.has(task.state)) { toRefresh.add(id); continue; }
         if (!seen.has(id)) { toRefresh.add(id); continue; }
         if (isPrNonTerminal(prByWorkspace.get(id))) toRefresh.add(id);
+    }
+
+    // Workspaces with a live PR qualify on their own, not only via their tasks.
+    // The task-driven loop above misses the common endgame: the task is
+    // archived or deleted after pushing, the PR merges or CI fails afterwards,
+    // and the badge stays frozen at its last task-era state forever. A
+    // non-terminal PR is itself the reason to keep polling, whatever the tasks
+    // are doing.
+    for (const ws of workspaces) {
+        if (toRefresh.has(ws.id)) continue;
+        if (isPrNonTerminal(ws.prInfo)) toRefresh.add(ws.id);
     }
     return [...toRefresh];
 }

@@ -101,6 +101,8 @@ beforeAll(async () => {
             mkTask(SELF_TASK, worktree),
             // Title hand-edited by the user — agents must not be able to rename it.
             mkTask('task-locked', repo, { displayName: 'User Chosen Name', displayNameEditedByUser: true }),
+            // Spawned child with a fixed short number — exercises refs + hierarchy.
+            mkTask('task-child-1', worktree, { parentTaskId: SELF_TASK, taskNumber: 77 }),
             mkTask('task-other-1', other),
         ],
         archivedTasks: [],
@@ -160,7 +162,8 @@ afterAll(async () => {
 describe('tool schema integrity', () => {
     const EXPECTED_TOOLS = [
         'claudia_list_tasks', 'claudia_get_task_status', 'claudia_get_task_output',
-        'claudia_create_task', 'claudia_send_input', 'claudia_continue_task',
+        'claudia_create_task', 'claudia_create_tasks', 'claudia_wait_for_task',
+        'claudia_send_input', 'claudia_continue_task',
         'claudia_stop_task', 'claudia_stop_all_tasks', 'claudia_rename_task',
         'claudia_delete_task', 'claudia_cron_create', 'claudia_cron_list',
         'claudia_cron_delete', 'claudia_cron_pause',
@@ -197,6 +200,8 @@ describe('tool schema integrity', () => {
             claudia_get_task_status: ['taskId'],
             claudia_get_task_output: ['taskId'],
             claudia_create_task: ['prompt'],
+            claudia_create_tasks: ['tasks'],
+            claudia_wait_for_task: ['taskId'],
             claudia_send_input: ['taskId', 'input'],
             claudia_continue_task: ['taskId', 'prompt'],
             claudia_stop_task: ['taskId'],
@@ -286,6 +291,58 @@ describe('claudia_list_tasks cross-worktree scope', () => {
         const locked = json.find((t: any) => t.id === 'task-locked');
         expect(locked.prompt).toBe('User Chosen Name');
         expect(locked.canResume).toBe(true); // idle → resumable
+    });
+});
+
+// ============================================================================
+// Short refs (#48), hierarchy fields, and claudia_wait_for_task
+// ============================================================================
+describe('short refs and hierarchy', () => {
+    it('list_tasks gives every task a short ref and exposes parent links', async () => {
+        const { json } = await callTool('claudia_list_tasks');
+        for (const t of json) {
+            expect(t.ref, `${t.id} must carry a ref`).toMatch(/^#\d+$/);
+        }
+        const child = json.find((t: any) => t.id === 'task-child-1');
+        expect(child.ref).toBe('#77');
+        // The hierarchy the sidebar renders comes from exactly this field.
+        expect(child.parent).toBe(SELF_TASK);
+    });
+
+    it('resolves a short ref anywhere a taskId is accepted', async () => {
+        const { json } = await callTool('claudia_get_task_status', { taskId: '#77' });
+        expect(json.id).toBe('task-child-1');
+        const bare = await callTool('claudia_get_task_status', { taskId: '77' });
+        expect(bare.json.id).toBe('task-child-1');
+    });
+
+    it('an unknown short ref is an error, not a guess', async () => {
+        const { text } = await callTool('claudia_get_task_status', { taskId: '#99999' });
+        expect(text).toMatch(/not found/i);
+    });
+});
+
+describe('claudia_wait_for_task', () => {
+    it('returns immediately for a task that is not running', async () => {
+        const started = Date.now();
+        const { json } = await callTool('claudia_wait_for_task', { taskId: 'task-root-1' });
+        expect(json.taskId).toBe('task-root-1');
+        expect(json.timedOut).toBe(false);
+        // idle-on-disk loads as a lazy disconnected task — the point is that a
+        // settled state comes back without burning the wait window.
+        expect(['idle', 'disconnected', 'exited', 'waiting_input']).toContain(json.state);
+        expect(Date.now() - started).toBeLessThan(10_000);
+    });
+
+    it('accepts a short ref and reports the canonical id back', async () => {
+        const { json } = await callTool('claudia_wait_for_task', { taskId: '#77' });
+        expect(json.taskId).toBe('task-child-1');
+        expect(json.timedOut).toBe(false);
+    });
+
+    it('errors cleanly on an unknown task', async () => {
+        const { text } = await callTool('claudia_wait_for_task', { taskId: 'task-nope' });
+        expect(text).toMatch(/not found/i);
     });
 });
 
