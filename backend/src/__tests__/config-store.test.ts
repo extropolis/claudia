@@ -124,6 +124,69 @@ describe('ConfigStore', () => {
         });
     });
 
+    /**
+     * updateConfig is a per-key allowlist. ngrokDomain was declared on
+     * AppConfig, validated by validateConfigUpdate, defaulted, and read at
+     * boot by resolveNgrokDomain() — but never listed in updateConfig, so
+     * PUT /api/config answered 200 and persisted nothing. That made the one
+     * documented workaround for a blocked ngrok zone (pin a domain on another
+     * zone) impossible to apply. Observed live: the ngrok-free.dev zone was
+     * unreachable, and setting a .ngrok-free.app domain silently did nothing.
+     */
+    describe('ngrokDomain', () => {
+        it('defaults to undefined (free tier: ngrok assigns the URL)', () => {
+            expect(store.getConfig().ngrokDomain).toBeUndefined();
+        });
+
+        it('persists a domain through updateConfig', () => {
+            store.updateConfig({ ngrokDomain: 'claudia.ngrok-free.app' });
+            expect(store.getConfig().ngrokDomain).toBe('claudia.ngrok-free.app');
+        });
+
+        it('survives a reload from disk', () => {
+            store.updateConfig({ ngrokDomain: 'claudia.ngrok-free.app' });
+            const reloaded = new ConfigStore(testBaseDir);
+            expect(reloaded.getConfig().ngrokDomain).toBe('claudia.ngrok-free.app');
+        });
+
+        it('clears the pin when set to an empty string', () => {
+            store.updateConfig({ ngrokDomain: 'claudia.ngrok-free.app' });
+            store.updateConfig({ ngrokDomain: '' });
+            expect(store.getConfig().ngrokDomain).toBeUndefined();
+        });
+
+        it('is left alone by an update that does not mention it', () => {
+            store.updateConfig({ ngrokDomain: 'claudia.ngrok-free.app' });
+            store.updateConfig({ rules: 'unrelated change' });
+            expect(store.getConfig().ngrokDomain).toBe('claudia.ngrok-free.app');
+        });
+    });
+
+    /**
+     * Same root cause as ngrokDomain, found by auditing AppConfig against
+     * normalize(): both of these were rebuilt away on every load. The
+     * user-visible symptom is a setting that saves, survives the session, and
+     * quietly reverts the next time the server boots.
+     */
+    describe('fields normalize() used to drop on reload', () => {
+        it('keeps worktreeRetentionDays across a reload (and defaults to 30)', () => {
+            expect(store.getConfig().worktreeRetentionDays).toBe(30);
+            store.updateConfig({ worktreeRetentionDays: 7 });
+            expect(new ConfigStore(testBaseDir).getConfig().worktreeRetentionDays).toBe(7);
+        });
+
+        it('keeps a 0 retention (never sweep) rather than falling back to 30', () => {
+            store.updateConfig({ worktreeRetentionDays: 0 });
+            expect(new ConfigStore(testBaseDir).getConfig().worktreeRetentionDays).toBe(0);
+        });
+
+        it('keeps todoEnabled across a reload (and defaults to false)', () => {
+            expect(store.getConfig().todoEnabled).toBe(false);
+            store.updateConfig({ todoEnabled: true });
+            expect(new ConfigStore(testBaseDir).getConfig().todoEnabled).toBe(true);
+        });
+    });
+
     describe('helper methods', () => {
         it('should get apiMode', () => {
             store.updateConfig({ apiMode: 'custom-anthropic' });
