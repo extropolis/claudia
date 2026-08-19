@@ -122,7 +122,9 @@ The lock file will prevent accidental duplicate starts.
 - **macOS/Linux**: Use `./start.sh` for startup.
 - The codebase uses `@homebridge/node-pty-prebuilt-multiarch` for cross-platform PTY support.
 - Claude CLI is resolved via `APPDATA` on Windows (not PATH) — see `resolveClaudeSpawn()` in task-spawner.ts.
-- CI runs on both Ubuntu and Windows to ensure compatibility.
+- CI runs on Ubuntu, Windows, and macOS to ensure compatibility. The macOS leg
+  is the one that catches the `os.tmpdir()` gotcha below, since `/var` is only
+  blocklisted there.
 
 ## Known Gotchas
 
