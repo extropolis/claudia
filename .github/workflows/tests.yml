@@ -22,7 +22,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # macOS is a first-class target (start.sh, the Electron dmg, node-pty
+        # prebuilds) and has platform behavior neither other leg reaches: the
+        # 'darwin' branch of resolveClaudeSpawn, and validateWorkspacePath's
+        # system-path blocklist, which rejects /var — where os.tmpdir() resolves
+        # on macOS but on neither Linux nor Windows.
+        os: [ubuntu-latest, windows-latest, macos-latest]
       fail-fast: false
 
     steps:
