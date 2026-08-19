@@ -64,6 +64,10 @@ backend/mcp-token
 backend/tasks.json
 backend/tasks.json.bak
 backend/tasks.json.*.tmp
+backend/archived-tasks.json
+backend/archived-tasks.json.bak
+backend/archived-tasks.json.*.tmp
+backend/checkpoints.json
 backend/scheduled-tasks.json
 backend/config.json
 backend/workspace-config.json
