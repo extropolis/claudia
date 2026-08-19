@@ -118,6 +118,15 @@ function urlsOf(fetchMock: ReturnType<typeof stubFetch>) {
     return fetchMock.mock.calls.map(c => String(c[0]));
 }
 
+/**
+ * Tunnel-status polls only. The modal also GETs /api/config on open to load
+ * the reserved-domain setting, so a bare call count conflates that one-shot
+ * read with the 2s poll these tests are actually about.
+ */
+function statusPolls(fetchMock: ReturnType<typeof stubFetch>) {
+    return urlsOf(fetchMock).filter(u => u.includes('/api/tunnel/status'));
+}
+
 let clipboardWrite: ReturnType<typeof vi.fn>;
 
 function makeTask(over: Partial<Task> = {}): Task {
@@ -763,8 +772,10 @@ describe('MobileAccessModal', () => {
         render(<MobileAccessModal isOpen onClose={vi.fn()} />);
 
         expect(await screen.findByText('Tunnel active')).toBeInTheDocument();
-        expect(screen.getByRole('textbox')).toHaveValue('https://demo.ngrok.app/?token=tok-9');
-        expect(urlsOf(fetchMock)[0]).toContain('/api/tunnel/status');
+        expect(screen.getByRole('textbox', { name: 'Mobile URL' })).toHaveValue('https://demo.ngrok.app/?token=tok-9');
+        // Not urlsOf()[0]: the modal also reads /api/config on open, and that
+        // request wins the race. What matters is that the status poll happened.
+        expect(statusPolls(fetchMock)).toHaveLength(1);
     });
 
     it('shows the not-connected placeholder when no tunnel is up', async () => {
@@ -783,7 +794,7 @@ describe('MobileAccessModal', () => {
         expect(screen.getByText('Connection failed')).toBeInTheDocument();
         expect(screen.getByText('ngrok not installed')).toBeInTheDocument();
         expect(screen.getByText('Failed')).toBeInTheDocument();
-        expect(fetchMock).not.toHaveBeenCalled();
+        expect(statusPolls(fetchMock)).toHaveLength(0);
     });
 
     it('shows the starting state while the tunnel spins up', async () => {
@@ -803,18 +814,18 @@ describe('MobileAccessModal', () => {
         render(<MobileAccessModal isOpen onClose={vi.fn()} />);
 
         await act(async () => { await Promise.resolve(); });
-        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(statusPolls(fetchMock)).toHaveLength(1);
 
         await act(async () => { vi.advanceTimersByTime(2000); });
-        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(statusPolls(fetchMock)).toHaveLength(2);
 
         active = true;
         await act(async () => { vi.advanceTimersByTime(2000); });
-        expect(fetchMock).toHaveBeenCalledTimes(3);
+        expect(statusPolls(fetchMock)).toHaveLength(3);
 
         // Polling has stopped now that the tunnel is up.
         await act(async () => { vi.advanceTimersByTime(6000); });
-        expect(fetchMock).toHaveBeenCalledTimes(3);
+        expect(statusPolls(fetchMock)).toHaveLength(3);
     });
 
     it('generates a QR code for the mobile URL once the tunnel is active', async () => {

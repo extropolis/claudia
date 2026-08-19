@@ -639,3 +639,67 @@ describe('branch listings', () => {
         expect(await mgr.getRemoteBranches(plain)).toEqual([]);
     });
 });
+
+describe('createWorktree default base ref', () => {
+    // New branches must spawn from the HEAD of the default branch — freshly
+    // fetched from origin when there is one — not from whatever the local
+    // checkout happens to have. Branching from a stale HEAD made every task
+    // carry the staleness (or another task's feature diff) into its PR.
+    it('branches from origin/main when the local main is BEHIND the remote', async () => {
+        // origin repo with two commits...
+        const origin = makeRepo();
+        writeFileSync(join(origin, 'second.txt'), 'newer\n');
+        git(['add', '-A'], origin);
+        git(['commit', '-qm', 'second'], origin);
+        const originHead = git(['rev-parse', 'HEAD'], origin).trim();
+
+        // ...cloned at the first commit, then left stale.
+        const clone = join(base, `clone-${++repoCounter}`);
+        git(['clone', '-q', origin, clone], base);
+        git(['config', 'user.email', 'test@test.com'], clone);
+        git(['config', 'user.name', 'Test User'], clone);
+        git(['reset', '-q', '--hard', 'HEAD~1'], clone);
+        // Make the stale remote-tracking ref match the stale local view, so
+        // only the fetch inside createWorktree can know about originHead.
+        git(['update-ref', 'refs/remotes/origin/main', 'HEAD'], clone);
+
+        const manager = new WorktreeManager();
+        const wt = await manager.createWorktree({ repoPath: clone, branch: 'feat/from-fresh-main' });
+
+        const wtHead = git(['rev-parse', 'HEAD'], wt.path).trim();
+        expect(wtHead).toBe(originHead);
+    });
+
+    it('falls back to the local default branch when there is no remote', async () => {
+        const repo = makeRepo();
+        const mainHead = git(['rev-parse', 'main'], repo).trim();
+
+        // Move the working checkout OFF main so branching from HEAD would differ.
+        git(['checkout', '-q', '-b', 'other'], repo);
+        writeFileSync(join(repo, 'other.txt'), 'divergent\n');
+        git(['add', '-A'], repo);
+        git(['commit', '-qm', 'divergent'], repo);
+
+        const manager = new WorktreeManager();
+        const wt = await manager.createWorktree({ repoPath: repo, branch: 'feat/from-local-main' });
+
+        const wtHead = git(['rev-parse', 'HEAD'], wt.path).trim();
+        expect(wtHead).toBe(mainHead);
+    });
+
+    it('an explicit baseBranch still wins over the default-branch rule', async () => {
+        const repo = makeRepo();
+        git(['checkout', '-q', '-b', 'release'], repo);
+        writeFileSync(join(repo, 'rel.txt'), 'rel\n');
+        git(['add', '-A'], repo);
+        git(['commit', '-qm', 'rel'], repo);
+        const releaseHead = git(['rev-parse', 'release'], repo).trim();
+        git(['checkout', '-q', 'main'], repo);
+
+        const manager = new WorktreeManager();
+        const wt = await manager.createWorktree({ repoPath: repo, branch: 'feat/from-release', baseBranch: 'release' });
+
+        const wtHead = git(['rev-parse', 'HEAD'], wt.path).trim();
+        expect(wtHead).toBe(releaseHead);
+    });
+});

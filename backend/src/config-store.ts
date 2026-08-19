@@ -130,6 +130,25 @@ export interface AppConfig {
     todoEnabled?: boolean;  // Enable per-task TODO list feature (default: false)
     jiraEnabled: boolean;  // Master toggle for the Jira integration (default false)
     jira?: JiraConfig;  // Jira Cloud connection (only set once the user configures it)
+    /**
+     * Reserved ngrok domain to pin the tunnel to, e.g. "your-name.ngrok.app"
+     * or a custom domain on a paid plan. Empty/undefined keeps the free
+     * behaviour: ngrok picks the URL and it can change between sessions.
+     *
+     * The domain must already be reserved on YOUR ngrok account — Claudia
+     * cannot create it, and a name someone else reserved will never bind.
+     * Reserve it under Universal Gateway -> Domains. Do NOT create a Cloud
+     * Endpoint for the same name: a Cloud Endpoint serves the URL itself and
+     * permanently occupies it, so the agent is refused with ERR_NGROK_334
+     * ("the endpoint is already online").
+     *
+     * This is not only a convenience. ngrok hands free tunnels out on
+     * `*.ngrok-free.dev`, and that domain is blocked outright on some networks
+     * and mobile carriers — the TLS handshake fails before any HTTP happens,
+     * so the tunnel looks dead from the phone while the agent reports healthy.
+     * Pinning a domain on another zone is the way out of that.
+     */
+    ngrokDomain?: string;
 }
 
 /**
@@ -224,7 +243,8 @@ const DEFAULT_CONFIG: AppConfig = {
     modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } },
     worktreeRetentionDays: 30,  // Per the archived-worktree retention spec
     jiraEnabled: false,  // Jira integration off by default
-    jira: undefined
+    jira: undefined,
+    ngrokDomain: undefined  // free tier: let ngrok assign the URL
 };
 
 export class ConfigStore {
@@ -278,7 +298,18 @@ export class ConfigStore {
                 tiers: { ...DEFAULT_MODEL_TIERING.tiers, ...(loaded.modelTiering?.tiers || {}) }
             },
             jiraEnabled: loaded.jiraEnabled ?? false,
-            jira: loaded.jira
+            jira: loaded.jira,
+            // normalize() REBUILDS the config field by field, so anything
+            // omitted here is wiped on every load — the setting appears to
+            // save, then reverts on the next boot. These three were omitted:
+            // ngrokDomain (the documented escape hatch for a blocked ngrok
+            // zone), worktreeRetentionDays (silently back to 30 every start),
+            // and todoEnabled. Note the defaults come from HERE, not from the
+            // DEFAULT_CONFIG constant above — defaultConfig() is normalize({}),
+            // so DEFAULT_CONFIG never applied to these fields either.
+            worktreeRetentionDays: loaded.worktreeRetentionDays ?? 30,
+            todoEnabled: loaded.todoEnabled ?? false,
+            ngrokDomain: loaded.ngrokDomain
         };
     }
 
@@ -331,6 +362,15 @@ export class ConfigStore {
         if (updates.worktreeRetentionDays !== undefined) {
             this.config.worktreeRetentionDays = updates.worktreeRetentionDays;
         }
+        // updateConfig is a per-key allowlist, so a field that is declared,
+        // validated, defaulted and read at boot is still silently dropped
+        // until it is listed HERE. ngrokDomain was — PUT /api/config answered
+        // 200 and nothing changed, which made the one documented workaround
+        // for a blocked ngrok zone impossible to apply from the UI.
+        // An empty string clears the pin back to ngrok's assigned URL.
+        if (updates.ngrokDomain !== undefined) {
+            this.config.ngrokDomain = updates.ngrokDomain || undefined;
+        }
         if (updates.rules !== undefined) {
             this.config.rules = updates.rules;
         }
@@ -381,6 +421,9 @@ export class ConfigStore {
         }
         if (updates.tokenCostEnabled !== undefined) {
             this.config.tokenCostEnabled = updates.tokenCostEnabled;
+        }
+        if (updates.todoEnabled !== undefined) {
+            this.config.todoEnabled = updates.todoEnabled;
         }
         if (updates.tokenPricing !== undefined) {
             this.config.tokenPricing = updates.tokenPricing;

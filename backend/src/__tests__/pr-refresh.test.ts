@@ -70,3 +70,49 @@ describe('selectWorkspacesToRefresh', () => {
         expect(sel).toEqual(['/w']);
     });
 });
+
+describe('selectWorkspacesToRefresh — workspaces without tasks', () => {
+    // The task loop alone froze badges the moment a workspace's last task was
+    // archived or deleted: the PR merged (or CI failed) afterwards and nothing
+    // ever re-polled it. A non-terminal PR must keep its workspace in the pass
+    // regardless of tasks.
+    it('refreshes a task-less workspace whose PR is still open (the frozen-badge bug)', () => {
+        const sel = selectWorkspacesToRefresh(
+            [],                                     // last task archived/deleted
+            [{ id: '/w', prInfo: open_passed }],
+            new Set(['/w'])
+        );
+        expect(sel).toContain('/w');
+    });
+
+    it('refreshes a task-less workspace whose CI is still running', () => {
+        const sel = selectWorkspacesToRefresh(
+            [],
+            [{ id: '/w', prInfo: open_running }],
+            new Set(['/w'])
+        );
+        expect(sel).toContain('/w');
+    });
+
+    it('still skips task-less workspaces with terminal or absent PRs', () => {
+        const sel = selectWorkspacesToRefresh(
+            [],
+            [
+                { id: '/merged', prInfo: merged_passed },
+                { id: '/closed', prInfo: closed_failed },
+                { id: '/nopr' },
+            ],
+            new Set(['/merged', '/closed', '/nopr'])
+        );
+        expect(sel).toEqual([]);
+    });
+
+    it('does not duplicate a workspace already selected via its task', () => {
+        const sel = selectWorkspacesToRefresh(
+            [{ workspaceId: '/w', state: 'busy' }],
+            [{ id: '/w', prInfo: open_passed }],
+            new Set(['/w'])
+        );
+        expect(sel).toEqual(['/w']);
+    });
+});

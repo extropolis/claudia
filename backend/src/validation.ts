@@ -54,6 +54,7 @@ interface MCPServerConfig {
  */
 export interface ConfigUpdatePayload {
     rules?: string;
+    ngrokDomain?: string;
     worktreeRetentionDays?: number;
     mcpServers?: MCPServerConfig[];
     skipPermissions?: boolean;
@@ -138,6 +139,30 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
             return { valid: false, error: 'rules must be a string' };
         }
         result.rules = payload.rules;
+    }
+
+    // Validate ngrokDomain (optional hostname; empty string clears it back to
+    // ngrok's assigned URL). Goes straight onto an `ngrok http --domain <x>`
+    // argv, so anything shell-ish or space-separated is refused outright.
+    if (payload.ngrokDomain !== undefined) {
+        const d = payload.ngrokDomain;
+        if (typeof d !== 'string') {
+            return { valid: false, error: 'ngrokDomain must be a string' };
+        }
+        const trimmed = d.trim();
+        if (trimmed !== '') {
+            if (trimmed.length > 253) {
+                return { valid: false, error: 'ngrokDomain must be 253 characters or fewer' };
+            }
+            // Hostname only — no scheme, port, path, or argv separators.
+            if (!/^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(trimmed)) {
+                return {
+                    valid: false,
+                    error: 'ngrokDomain must be a bare hostname such as "your-name.ngrok.app" (no https://, port, or path)',
+                };
+            }
+        }
+        result.ngrokDomain = trimmed;
     }
 
     // Validate worktreeRetentionDays (optional non-negative integer; 0 = sweep disabled)

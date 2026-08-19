@@ -21,9 +21,71 @@ export interface TunnelStatus {
     startedAt: string | null;
     error: string | null;
     publicIp: string | null;
+    /** The reserved domain the tunnel is pinned to, or null on ngrok's assigned URL. */
+    domain: string | null;
+    /**
+     * Whether the public URL actually answered when this machine fetched it.
+     * null = not probed yet. false is the interesting one: the agent is happily
+     * connected but the URL is unreachable, which is what a network-level block
+     * of the ngrok domain looks like. Without this the UI shows a healthy green
+     * tunnel while every phone that scans the QR gets nothing.
+     */
+    reachable: boolean | null;
+    /** Human-readable explanation when `reachable` is false. */
+    warning: string | null;
 }
 
 // No default domain - use random ngrok URL unless user configures one
+
+/** Shape of one entry in ngrok's local `/api/tunnels` response. */
+interface NgrokApiTunnel {
+    public_url: string;
+    proto: string;
+    config?: { addr?: string };
+}
+
+/**
+ * Pull the port out of an ngrok tunnel's forwarding address.
+ * ngrok reports it as a URL ("http://localhost:4001") on modern versions and
+ * as a bare host:port ("localhost:4001") on older ones. Returns null when the
+ * address carries no port we can trust (e.g. a plain "80" shorthand).
+ */
+export function parseNgrokAddrPort(addr: string): number | null {
+    const m = /:(\d{1,5})(?:\/|$)/.exec(addr.trim());
+    if (!m) return null;
+    const port = Number(m[1]);
+    return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+}
+
+/**
+ * Turn a configured reserved domain into the full URL `--url` expects.
+ * The setting is stored as a bare hostname ("example.ngrok.app"), while
+ * `--url` wants a scheme. An operator who pastes a full URL anyway is
+ * accommodated rather than rejected.
+ */
+export function ngrokDomainToUrl(domain: string): string {
+    const d = domain.trim();
+    return /^[a-z][a-z0-9+.-]*:\/\//i.test(d) ? d : `https://${d}`;
+}
+
+/**
+ * Read execSync output as text.
+ *
+ * `String(buf)` is not enough: under vitest's `vmThreads` pool a Buffer built
+ * in the test realm is a different class from the module realm's Buffer, and
+ * the coercion yields "[object Object]" rather than the bytes -- which turned
+ * the capability probe below into a silent always-false. Decode explicitly so
+ * the answer does not depend on which realm allocated the buffer.
+ */
+export function decodeExecOutput(out: unknown): string {
+    if (typeof out === 'string') return out;
+    if (out == null) return '';
+    if (ArrayBuffer.isView(out as ArrayBufferView)) {
+        const v = out as ArrayBufferView;
+        return Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString('utf8');
+    }
+    return String(out);
+}
 
 /**
  * Injectable side-effecting dependencies.
@@ -50,6 +112,8 @@ export class TunnelManager extends EventEmitter {
     private url: string | null = null;
     private startedAt: string | null = null;
     private publicIp: string | null = null;
+    private reachable: boolean | null = null;
+    private warning: string | null = null;
     private retryCount = 0;
     private maxRetries = 3;
     private retryTimeout: NodeJS.Timeout | null = null;
@@ -62,6 +126,8 @@ export class TunnelManager extends EventEmitter {
      * Its presence is the single source of truth for "adopted mode".
      */
     private adoptedMonitor: NodeJS.Timeout | null = null;
+    /** Cached answer from the agent's own --help; null until first probed. */
+    private urlFlagSupported: boolean | null = null;
     private deps: TunnelManagerDeps;
 
     constructor(port: number, domain?: string, deps?: Partial<TunnelManagerDeps>) {
@@ -77,6 +143,28 @@ export class TunnelManager extends EventEmitter {
      */
     setPort(port: number): void {
         this.port = port;
+    }
+
+    /** The port tunnels are opened against — exposed for logging/diagnostics. */
+    getPort(): number {
+        return this.port;
+    }
+
+    /**
+     * Pin future tunnels to a reserved domain (paid ngrok), or pass an empty
+     * value to go back to ngrok's assigned URL (free). Takes effect on the next
+     * start(); an already-running tunnel is left alone so changing the setting
+     * never yanks a URL out from under a connected phone.
+     */
+    setDomain(domain: string | null | undefined): void {
+        const next = domain && domain.trim() ? domain.trim() : null;
+        if (next === this.domain) return;
+        logger.info('Tunnel domain changed', { from: this.domain || '(assigned)', to: next || '(assigned)' });
+        this.domain = next;
+    }
+
+    getDomain(): string | null {
+        return this.domain;
     }
 
     /**
@@ -133,7 +221,10 @@ export class TunnelManager extends EventEmitter {
                 token: null,
                 startedAt: null,
                 error: errorMsg,
-                publicIp: this.publicIp
+                publicIp: this.publicIp,
+                domain: this.domain,
+                reachable: null,
+                warning: null
             };
         }
     }
@@ -165,9 +256,19 @@ export class TunnelManager extends EventEmitter {
             // ignore
         }
 
-        const ngrokArgs = this.domain
-            ? ['http', '--domain', this.domain, String(this.port)]
-            : ['http', String(this.port)];
+        let ngrokArgs: string[];
+        if (this.domain) {
+            // ngrok deprecated --domain ("Flag --domain has been deprecated, use
+            // --url instead") and prints that warning on every start. Older
+            // agents, though, do not know --url at all, so switching outright
+            // would break anyone who has not upgraded. Ask the installed binary
+            // which flag it speaks rather than guessing.
+            ngrokArgs = this.supportsUrlFlag(ngrokExe)
+                ? ['http', '--url', ngrokDomainToUrl(this.domain), String(this.port)]
+                : ['http', '--domain', this.domain, String(this.port)];
+        } else {
+            ngrokArgs = ['http', String(this.port)];
+        }
         logger.info('Spawning ngrok', { args: ngrokArgs });
 
         const ngrok = this.deps.spawn(ngrokExe, ngrokArgs, {
@@ -266,10 +367,55 @@ export class TunnelManager extends EventEmitter {
      * Single HTTP call to the ngrok local API.
      * Shared by checkNgrokRunning() and pollNgrokApi() to avoid duplicate parse logic.
      */
+    /**
+     * Does the installed ngrok agent accept `--url`?
+     *
+     * Probed from `ngrok http --help` and cached: it costs one process spawn,
+     * and only when a reserved domain is actually configured. A probe failure
+     * answers "no", which lands on the older `--domain` flag — the safe side,
+     * since that one still works (with a deprecation warning) on every agent
+     * that has not yet removed it.
+     */
+    private supportsUrlFlag(exe: string): boolean {
+        if (this.urlFlagSupported === null) {
+            try {
+                const help = decodeExecOutput(this.deps.execSync(`${exe} http --help`, { stdio: 'pipe' }));
+                this.urlFlagSupported = help.includes('--url');
+            } catch {
+                this.urlFlagSupported = false;
+            }
+            logger.info('ngrok flag probe', { supportsUrl: this.urlFlagSupported });
+        }
+        return this.urlFlagSupported;
+    }
+
     private async fetchNgrokUrl(signal?: AbortSignal): Promise<string | null> {
         const res = await this.deps.fetch('http://127.0.0.1:4040/api/tunnels', signal ? { signal } : undefined);
-        const data = await res.json() as { tunnels: Array<{ public_url: string; proto: string }> };
-        return data.tunnels?.find(t => t.proto === 'https')?.public_url ?? null;
+        const data = await res.json() as { tunnels: Array<NgrokApiTunnel> };
+        const match = data.tunnels?.find(t => t.proto === 'https' && this.tunnelTargetsOurPort(t));
+        return match?.public_url ?? null;
+    }
+
+    /**
+     * Does this ngrok tunnel forward to the port THIS manager is serving?
+     *
+     * Without the check, every extra process that calls createApp() — the
+     * integration-test harness on an ephemeral port, a second backend
+     * instance — adopted whatever ngrok happened to be running, and its
+     * teardown then ran `taskkill /f /im ngrok.exe` and killed the real
+     * tunnel out from under the live server. Running `npm test` took the
+     * user's mobile access down.
+     *
+     * A tunnel whose addr we cannot parse is treated as ours: the field is
+     * advisory, and refusing to adopt on a parse miss would regress the
+     * tsx-watch orphan recovery this whole path exists for.
+     */
+    private tunnelTargetsOurPort(t: NgrokApiTunnel): boolean {
+        const addr = t.config?.addr;
+        if (!addr) return true;
+        const port = parseNgrokAddrPort(addr);
+        if (port === null) return true;
+        return port === this.port;
     }
 
     /**
@@ -425,8 +571,58 @@ export class TunnelManager extends EventEmitter {
             token: this.token,
             startedAt: this.startedAt,
             error: null,
-            publicIp: this.publicIp
+            publicIp: this.publicIp,
+            domain: this.domain,
+            reachable: this.reachable,
+            warning: this.warning
         };
+    }
+
+    /**
+     * Fetch the tunnel's own public URL from this machine to confirm the edge
+     * is really serving it.
+     *
+     * Diagnoses the failure that is otherwise invisible: the ngrok agent stays
+     * connected and reports the tunnel as up, but the public hostname is
+     * blocked on the network — the TLS handshake is refused before any HTTP is
+     * exchanged, so phones and browsers get "nothing" while every local health
+     * check stays green. Observed with `*.ngrok-free.dev`, which some networks
+     * and mobile carriers drop by SNI while every other ngrok zone works.
+     *
+     * Best-effort and non-fatal: a failure here downgrades status, never the
+     * tunnel itself.
+     */
+    async checkReachable(): Promise<boolean | null> {
+        if (!this.url) {
+            this.reachable = null;
+            this.warning = null;
+            return null;
+        }
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15000);
+        try {
+            await this.deps.fetch(this.url, { signal: controller.signal });
+            this.reachable = true;
+            this.warning = null;
+            logger.info('Tunnel URL is reachable', { url: this.url });
+        } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            this.reachable = false;
+            const host = (() => { try { return new URL(this.url!).hostname; } catch { return this.url!; } })();
+            const zone = host.split('.').slice(-2).join('.');
+            this.warning =
+                `The tunnel is running but ${host} could not be reached from this machine (${detail}). ` +
+                `Something on THIS network — a DNS filter, firewall, or router "safe browsing" feature — is ` +
+                `almost certainly blocking the ${zone} hostname; nothing is wrong with Claudia, and the check ` +
+                `says nothing about other networks. Devices on this network get a block page or a failed ` +
+                `connection, while a phone on cellular is on a different network and may work fine. To fix it ` +
+                `here: reserve a domain on another zone in your ngrok dashboard, then set it under ` +
+                `Settings -> ngrok domain.`;
+            logger.warn('Tunnel URL is NOT reachable from this machine', { url: this.url, error: detail });
+        } finally {
+            clearTimeout(timer);
+        }
+        return this.reachable;
     }
 
     /**
@@ -470,6 +666,8 @@ export class TunnelManager extends EventEmitter {
         this.token = null;
         this.startedAt = null;
         this.publicIp = null;
+        this.reachable = null;
+        this.warning = null;
         this.retryCount = 0;
     }
 }

@@ -278,6 +278,11 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                     className="task-prompt"
                     title={task.prompt}
                 >
+                    {typeof task.taskNumber === 'number' && (
+                        <span className="task-ref" title={`Task #${task.taskNumber} — agents and the CLI accept this short ref anywhere a task id is expected`}>
+                            #{task.taskNumber}
+                        </span>
+                    )}
                     {displayPrompt}
                 </span>
             )}
@@ -1931,8 +1936,42 @@ function WorkspaceSection({
                                         items.push({ type: 'task', task, idx });
                                     });
 
+                                    // Lift spawned children out of their worktree groups and nest
+                                    // them under the task that spawned them. An isolate=true child
+                                    // runs in its own worktree WORKSPACE, so the same-workspace
+                                    // subtaskMap above never saw it — orchestrated fleets rendered
+                                    // as flat unrelated worktree rows instead of a tree. The
+                                    // worktree branch/PR context survives as the subtask's badge.
+                                    const liftSpawnedChildren = (group: WorktreeGroup): WorktreeGroup | null => {
+                                        const kept: Task[] = [];
+                                        for (const t of group.tasks) {
+                                            if (t.parentTaskId && taskIds.has(t.parentTaskId)) {
+                                                const children = subtaskMap.get(t.parentTaskId) ?? [];
+                                                children.push({
+                                                    task: t,
+                                                    worktreeInfo: { branch: group.branch, prInfo: group.workspace.prInfo },
+                                                });
+                                                subtaskMap.set(t.parentTaskId, children);
+                                            } else {
+                                                kept.push(t);
+                                            }
+                                        }
+                                        const liftedSubGroups = (group.subGroups ?? [])
+                                            .map(liftSpawnedChildren)
+                                            .filter((g): g is WorktreeGroup => g !== null);
+                                        if (kept.length === 0 && liftedSubGroups.length === 0) return null;
+                                        return {
+                                            ...group,
+                                            tasks: kept,
+                                            subGroups: liftedSubGroups.length > 0 ? liftedSubGroups : undefined,
+                                        };
+                                    };
+                                    const effectiveWorktreeGroups = worktreeGroups
+                                        .map(liftSpawnedChildren)
+                                        .filter((g): g is WorktreeGroup => g !== null);
+
                                     // Add worktree groups
-                                    for (const group of worktreeGroups) {
+                                    for (const group of effectiveWorktreeGroups) {
                                         if (group.tasks.length === 1) {
                                             items.push({ type: 'worktree-single', group });
                                         } else {

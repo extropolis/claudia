@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { type Request, type Response, type NextFunction, type ErrorRequestHandler } from 'express';
 import { createServer, request as httpRequest } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
@@ -22,6 +22,7 @@ import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
 import { validateConfigUpdate, validateWorkspacePath, isPathInside } from './validation.js';
 import { isVoiceTokenAcceptable, isTunnelHostname } from './voice-auth.js';
+import { evaluateCorsOrigin, CORS_REJECTED } from './cors-policy.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
 import { selectWorkspacesToRefresh } from './pr-refresh.js';
 import { WorktreeManager } from './worktree-manager.js';
@@ -385,31 +386,62 @@ export async function createApp(basePath?: string) {
     // to be proxied to the Vite dev server, not handled by our app's WSS.
     const wss = new WebSocketServer({ noServer: true });
 
-    // Middleware
-    // Restrict CORS to localhost origins only — Claudia is a local-first app
-    app.use(cors({
-        origin: (origin, callback) => {
-            // Allow requests with no origin (same-origin, curl, native apps)
-            if (!origin) return callback(null, true);
-            try {
-                const url = new URL(origin);
-                if (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1') {
-                    return callback(null, true);
-                }
-            } catch { /* invalid origin */ }
-            callback(new Error('CORS: origin not allowed'));
-        },
-    }));
-    app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests
-
-    // TunnelManager for mobile remote access (ngrok-based, created early for middleware use)
+    // TunnelManager for mobile remote access (ngrok-based). Created before the
+    // CORS middleware because that middleware needs to consult the active
+    // tunnel URL to recognise the tunnel page's own origin as same-origin.
     const tunnelManager = new TunnelManager(PORTS.BACKEND);
     logger.info('TunnelManager created (ngrok)');
-    // Auto-recover any orphaned ngrok left by a previous server instance (tsx watch restart).
-    // Fire-and-forget: completes quickly (2 s timeout) well before any client connects.
-    tunnelManager.autoRecover().catch(err =>
-        logger.warn('Tunnel auto-recover failed', { error: err instanceof Error ? err.message : String(err) })
-    );
+    // Auto-recover any orphaned ngrok left by a previous server instance (tsx
+    // watch restart) — but only once we know the port we actually bound, since
+    // adoption is scoped to tunnels forwarding to THIS server. Deferring to
+    // 'listening' is what keeps a second instance (the integration-test
+    // harness on an ephemeral port, a second backend) from adopting the live
+    // server's tunnel and then killing it on teardown.
+    server.once('listening', () => {
+        const addr = server.address();
+        if (addr && typeof addr === 'object') tunnelManager.setPort(addr.port);
+        logger.info('Tunnel auto-recover starting', { port: tunnelManager.getPort() });
+        tunnelManager.autoRecover().catch(err =>
+            logger.warn('Tunnel auto-recover failed', { error: err instanceof Error ? err.message : String(err) })
+        );
+    });
+
+    // Middleware
+    // Restrict CORS to localhost + same-origin — Claudia is a local-first app.
+    // See cors-policy.ts: browsers attach an Origin header to module scripts
+    // and fetches even when they are same-origin, so a localhost-only
+    // allowlist rejected the tunnel page's requests for its own assets.
+    app.use(cors((req, callback) => {
+        const decision = evaluateCorsOrigin(
+            req.headers.origin,
+            req.headers.host,
+            tunnelManager.getStatus().url,
+        );
+        if (decision.allowed) {
+            return callback(null, { origin: true, credentials: true });
+        }
+        logger.warn('CORS: origin not allowed', {
+            origin: req.headers.origin,
+            host: req.headers.host,
+            path: req.url,
+            reason: decision.reason,
+        });
+        const err = new Error(CORS_REJECTED) as Error & { status: number };
+        err.status = 403;
+        callback(err, undefined);
+    }));
+
+    // Turn a CORS rejection into a clean 403. Without this, Express's default
+    // error handler answers 500 and — in development — renders the full stack
+    // trace, leaking absolute filesystem paths to whoever made the request.
+    app.use(((err: Error, _req: Request, res: Response, next: NextFunction) => {
+        if (err && err.message === CORS_REJECTED) {
+            return res.status(403).json({ error: 'Origin not allowed' });
+        }
+        return next(err);
+    }) as ErrorRequestHandler);
+
+    app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests
 
     // ===== Tunnel → React Frontend Proxy =====
     // When accessed through the tunnel, proxy non-API requests to the Vite
@@ -495,6 +527,18 @@ export async function createApp(basePath?: string) {
 
     // Initialize configStore first to determine API mode
     const configStore = new ConfigStore(dataDir);
+
+    // Pin the tunnel to a reserved ngrok domain if one is configured. NGROK_DOMAIN
+    // wins over the stored setting so a deployment can force it without touching
+    // config.json. Empty on both = free tier, ngrok assigns the URL.
+    const resolveNgrokDomain = (): string | null => {
+        const env = process.env.NGROK_DOMAIN?.trim();
+        if (env) return env;
+        const stored = configStore.getConfig().ngrokDomain?.trim();
+        return stored || null;
+    };
+    tunnelManager.setDomain(resolveNgrokDomain());
+    logger.info('Tunnel domain resolved', { domain: tunnelManager.getDomain() || '(ngrok-assigned)' });
 
     // Initialize Plugin System
     logger.info('Initializing plugin system...');
@@ -1621,6 +1665,23 @@ export async function createApp(basePath?: string) {
                 }
 
                 const payload = message.payload || {};
+
+                // Short-ref resolution: any handler that takes a taskId also
+                // accepts the short number ("#48"/"48"). Normalized ONCE here so
+                // the two dozen extraction sites below never see anything but a
+                // canonical id. Unresolvable refs pass through untouched — each
+                // handler's own "task not found" error is the right message, and
+                // task:create's parentTaskId is resolved inside createTask.
+                {
+                    const p = payload as { taskId?: unknown };
+                    if (typeof p.taskId === 'string' && p.taskId) {
+                        const resolved = taskSpawner.resolveTaskRef(p.taskId);
+                        if (resolved && resolved !== p.taskId) {
+                            logger.debug('Resolved short task ref', { ref: p.taskId, taskId: resolved });
+                            p.taskId = resolved;
+                        }
+                    }
+                }
 
                 switch (message.type) {
                     case 'task:create': {
@@ -3212,6 +3273,18 @@ export async function createApp(basePath?: string) {
         res.json({ status: 'ok' });
     });
 
+    // Short-ref resolution for REST: every route with a :taskId param accepts
+    // the short number ("#48"/"48") as well as the full id. Mirrors the WS-side
+    // normalization; unresolvable refs pass through so each route's own
+    // "task not found" fires.
+    app.param('taskId', (req, _res, next, value: string) => {
+        const resolved = taskSpawner.resolveTaskRef(value);
+        if (resolved && resolved !== value) {
+            req.params.taskId = resolved;
+        }
+        next();
+    });
+
     // Byte-range read of a task's history file. Used by the terminal's
     // scroll-up handler to lazy-load earlier output beyond the initial
     // 512KB sent with `task:restore`. Returns { data, startOffset, totalSize,
@@ -3554,9 +3627,21 @@ export async function createApp(basePath?: string) {
     // ===== Tunnel Management Routes =====
     app.post('/api/tunnel/start', async (_req, res) => {
         try {
-            logger.info('Starting tunnel via API');
+            logger.info('Starting tunnel via API', { domain: tunnelManager.getDomain() || '(ngrok-assigned)' });
             const status = await tunnelManager.start();
             res.json(status);
+
+            // Confirm the public URL actually answers, AFTER responding so the
+            // QR code is not held up by a 15 s probe. A tunnel can be "up" —
+            // agent connected, local API healthy — while the hostname is
+            // blocked on the network and every phone gets nothing; this is the
+            // only signal that distinguishes the two.
+            void tunnelManager.checkReachable().then((reachable) => {
+                if (reachable === false) {
+                    logger.warn('Tunnel started but its public URL is unreachable from this machine');
+                }
+                broadcast({ type: 'tunnel:status' as WSMessageType, payload: tunnelManager.getStatus() });
+            }).catch(() => { /* probe is best-effort */ });
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : String(err);
             logger.error('Failed to start tunnel', { error: errorMsg });
@@ -5998,6 +6083,13 @@ export async function createApp(basePath?: string) {
             // Cast is needed because ConfigUpdatePayload's nested objects (hyperspaceProxy,
             // aiCoreCredentials, ...) are all-optional while AppConfig requires their fields.
             const updatedConfig = configStore.updateConfig(configUpdate as Parameters<typeof configStore.updateConfig>[0]);
+
+            // Tunnel domain: applies to the NEXT start(), so a running tunnel keeps
+            // its URL and no already-connected phone is cut off mid-session.
+            if (configUpdate.ngrokDomain !== undefined) {
+                tunnelManager.setDomain(resolveNgrokDomain());
+                broadcast({ type: 'tunnel:status' as WSMessageType, payload: tunnelManager.getStatus() });
+            }
 
             // If backend was changed, switch the task spawner's backend
             if (newBackend && newBackend !== currentBackend) {
