@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { type Request, type Response, type NextFunction, type ErrorRequestHandler } from 'express';
 import { createServer, request as httpRequest } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
@@ -22,6 +22,7 @@ import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
 import { validateConfigUpdate, validateWorkspacePath, isPathInside } from './validation.js';
 import { isVoiceTokenAcceptable, isTunnelHostname } from './voice-auth.js';
+import { evaluateCorsOrigin, CORS_REJECTED } from './cors-policy.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
 import { selectWorkspacesToRefresh } from './pr-refresh.js';
 import { WorktreeManager } from './worktree-manager.js';
@@ -385,31 +386,62 @@ export async function createApp(basePath?: string) {
     // to be proxied to the Vite dev server, not handled by our app's WSS.
     const wss = new WebSocketServer({ noServer: true });
 
-    // Middleware
-    // Restrict CORS to localhost origins only — Claudia is a local-first app
-    app.use(cors({
-        origin: (origin, callback) => {
-            // Allow requests with no origin (same-origin, curl, native apps)
-            if (!origin) return callback(null, true);
-            try {
-                const url = new URL(origin);
-                if (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1') {
-                    return callback(null, true);
-                }
-            } catch { /* invalid origin */ }
-            callback(new Error('CORS: origin not allowed'));
-        },
-    }));
-    app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests
-
-    // TunnelManager for mobile remote access (ngrok-based, created early for middleware use)
+    // TunnelManager for mobile remote access (ngrok-based). Created before the
+    // CORS middleware because that middleware needs to consult the active
+    // tunnel URL to recognise the tunnel page's own origin as same-origin.
     const tunnelManager = new TunnelManager(PORTS.BACKEND);
     logger.info('TunnelManager created (ngrok)');
-    // Auto-recover any orphaned ngrok left by a previous server instance (tsx watch restart).
-    // Fire-and-forget: completes quickly (2 s timeout) well before any client connects.
-    tunnelManager.autoRecover().catch(err =>
-        logger.warn('Tunnel auto-recover failed', { error: err instanceof Error ? err.message : String(err) })
-    );
+    // Auto-recover any orphaned ngrok left by a previous server instance (tsx
+    // watch restart) — but only once we know the port we actually bound, since
+    // adoption is scoped to tunnels forwarding to THIS server. Deferring to
+    // 'listening' is what keeps a second instance (the integration-test
+    // harness on an ephemeral port, a second backend) from adopting the live
+    // server's tunnel and then killing it on teardown.
+    server.once('listening', () => {
+        const addr = server.address();
+        if (addr && typeof addr === 'object') tunnelManager.setPort(addr.port);
+        logger.info('Tunnel auto-recover starting', { port: tunnelManager.getPort() });
+        tunnelManager.autoRecover().catch(err =>
+            logger.warn('Tunnel auto-recover failed', { error: err instanceof Error ? err.message : String(err) })
+        );
+    });
+
+    // Middleware
+    // Restrict CORS to localhost + same-origin — Claudia is a local-first app.
+    // See cors-policy.ts: browsers attach an Origin header to module scripts
+    // and fetches even when they are same-origin, so a localhost-only
+    // allowlist rejected the tunnel page's requests for its own assets.
+    app.use(cors((req, callback) => {
+        const decision = evaluateCorsOrigin(
+            req.headers.origin,
+            req.headers.host,
+            tunnelManager.getStatus().url,
+        );
+        if (decision.allowed) {
+            return callback(null, { origin: true, credentials: true });
+        }
+        logger.warn('CORS: origin not allowed', {
+            origin: req.headers.origin,
+            host: req.headers.host,
+            path: req.url,
+            reason: decision.reason,
+        });
+        const err = new Error(CORS_REJECTED) as Error & { status: number };
+        err.status = 403;
+        callback(err, undefined);
+    }));
+
+    // Turn a CORS rejection into a clean 403. Without this, Express's default
+    // error handler answers 500 and — in development — renders the full stack
+    // trace, leaking absolute filesystem paths to whoever made the request.
+    app.use(((err: Error, _req: Request, res: Response, next: NextFunction) => {
+        if (err && err.message === CORS_REJECTED) {
+            return res.status(403).json({ error: 'Origin not allowed' });
+        }
+        return next(err);
+    }) as ErrorRequestHandler);
+
+    app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests
 
     // ===== Tunnel → React Frontend Proxy =====
     // When accessed through the tunnel, proxy non-API requests to the Vite

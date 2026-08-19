@@ -25,6 +25,26 @@ export interface TunnelStatus {
 
 // No default domain - use random ngrok URL unless user configures one
 
+/** Shape of one entry in ngrok's local `/api/tunnels` response. */
+interface NgrokApiTunnel {
+    public_url: string;
+    proto: string;
+    config?: { addr?: string };
+}
+
+/**
+ * Pull the port out of an ngrok tunnel's forwarding address.
+ * ngrok reports it as a URL ("http://localhost:4001") on modern versions and
+ * as a bare host:port ("localhost:4001") on older ones. Returns null when the
+ * address carries no port we can trust (e.g. a plain "80" shorthand).
+ */
+export function parseNgrokAddrPort(addr: string): number | null {
+    const m = /:(\d{1,5})(?:\/|$)/.exec(addr.trim());
+    if (!m) return null;
+    const port = Number(m[1]);
+    return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+}
+
 /**
  * Injectable side-effecting dependencies.
  *
@@ -77,6 +97,11 @@ export class TunnelManager extends EventEmitter {
      */
     setPort(port: number): void {
         this.port = port;
+    }
+
+    /** The port tunnels are opened against — exposed for logging/diagnostics. */
+    getPort(): number {
+        return this.port;
     }
 
     /**
@@ -268,8 +293,31 @@ export class TunnelManager extends EventEmitter {
      */
     private async fetchNgrokUrl(signal?: AbortSignal): Promise<string | null> {
         const res = await this.deps.fetch('http://127.0.0.1:4040/api/tunnels', signal ? { signal } : undefined);
-        const data = await res.json() as { tunnels: Array<{ public_url: string; proto: string }> };
-        return data.tunnels?.find(t => t.proto === 'https')?.public_url ?? null;
+        const data = await res.json() as { tunnels: Array<NgrokApiTunnel> };
+        const match = data.tunnels?.find(t => t.proto === 'https' && this.tunnelTargetsOurPort(t));
+        return match?.public_url ?? null;
+    }
+
+    /**
+     * Does this ngrok tunnel forward to the port THIS manager is serving?
+     *
+     * Without the check, every extra process that calls createApp() — the
+     * integration-test harness on an ephemeral port, a second backend
+     * instance — adopted whatever ngrok happened to be running, and its
+     * teardown then ran `taskkill /f /im ngrok.exe` and killed the real
+     * tunnel out from under the live server. Running `npm test` took the
+     * user's mobile access down.
+     *
+     * A tunnel whose addr we cannot parse is treated as ours: the field is
+     * advisory, and refusing to adopt on a parse miss would regress the
+     * tsx-watch orphan recovery this whole path exists for.
+     */
+    private tunnelTargetsOurPort(t: NgrokApiTunnel): boolean {
+        const addr = t.config?.addr;
+        if (!addr) return true;
+        const port = parseNgrokAddrPort(addr);
+        if (port === null) return true;
+        return port === this.port;
     }
 
     /**
