@@ -99,6 +99,13 @@ try {
         console.log(`Claude Code UI running on http://localhost:${PORT}`);
         console.log(`WebSocket available at ws://localhost:${PORT}`);
         console.log(`[Index] Server successfully listening`);
+
+        // Only now is it safe to bring interrupted tasks back. Each reconnected
+        // session dials this server's own /mcp endpoint for the claudia tools,
+        // and Claude Code never retries an MCP server that failed to connect at
+        // startup — so reconnecting before the listener was up left every
+        // restored session permanently without claudia_* tools.
+        taskSpawner.startAutoReconnect();
     });
 
     httpServer.on('error', (err: any) => {

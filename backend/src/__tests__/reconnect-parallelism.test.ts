@@ -99,6 +99,59 @@ afterEach(() => {
     rmSync(base, { recursive: true, force: true });
 });
 
+describe('auto-reconnect startup ordering', () => {
+    // Constructing TaskSpawner used to kick off auto-reconnect immediately. The
+    // constructor runs inside createApp(), which is awaited BEFORE
+    // server.listen() — so every reconnected claude process dialed this
+    // backend's own /mcp endpoint while nothing was listening yet. Claude Code
+    // does not retry an MCP server that failed at startup, so those sessions
+    // silently ran with no claudia_* tools while the endpoint looked healthy.
+    it('does not spawn anything until startAutoReconnect() is called', async () => {
+        vi.stubEnv('RECONNECT_CONCURRENCY', '4');
+        vi.stubEnv('RECONNECT_SETTLE_MS', '10');
+        seedInterruptedTasks(6);
+
+        const spawner = new TaskSpawner(join(base, 'tasks.json'), true);
+
+        // Give the event loop the same slack the old constructor kickoff had.
+        await new Promise(r => setTimeout(r, 250));
+        expect(spawnTimes).toHaveLength(0);
+
+        spawner.startAutoReconnect();
+        await spawner.waitForReconnect();
+        expect(spawnTimes).toHaveLength(6);
+
+        spawner.destroy();
+    });
+
+    it('is idempotent — a second call does not double-spawn', async () => {
+        vi.stubEnv('RECONNECT_CONCURRENCY', '4');
+        vi.stubEnv('RECONNECT_SETTLE_MS', '10');
+        seedInterruptedTasks(5);
+
+        const spawner = new TaskSpawner(join(base, 'tasks.json'), true);
+        spawner.startAutoReconnect();
+        spawner.startAutoReconnect();
+        await spawner.waitForReconnect();
+
+        expect(spawnTimes).toHaveLength(5);
+
+        spawner.destroy();
+    });
+
+    it('stays inert when auto-reconnect is disabled', async () => {
+        seedInterruptedTasks(4);
+
+        const spawner = new TaskSpawner(join(base, 'tasks.json'), false);
+        spawner.startAutoReconnect();
+        await spawner.waitForReconnect();
+
+        expect(spawnTimes).toHaveLength(0);
+
+        spawner.destroy();
+    });
+});
+
 describe('auto-reconnect parallelism', () => {
     it('reconnects all eligible tasks in bounded parallel waves, not serially', async () => {
         vi.stubEnv('RECONNECT_CONCURRENCY', '4');
@@ -107,6 +160,7 @@ describe('auto-reconnect parallelism', () => {
 
         const started = Date.now();
         const spawner = new TaskSpawner(join(base, 'tasks.json'), true);
+        spawner.startAutoReconnect();
         await spawner.waitForReconnect();
         const elapsed = Date.now() - started;
 
@@ -126,6 +180,7 @@ describe('auto-reconnect parallelism', () => {
         seedInterruptedTasks(9);
 
         const spawner = new TaskSpawner(join(base, 'tasks.json'), true);
+        spawner.startAutoReconnect();
         await spawner.waitForReconnect();
 
         expect(spawnTimes).toHaveLength(9);
@@ -147,6 +202,7 @@ describe('auto-reconnect parallelism', () => {
         const complete = new Promise<{ total: number; failed: number }>(resolve =>
             spawner.once('reconnectComplete', resolve)
         );
+        spawner.startAutoReconnect();
         await spawner.waitForReconnect();
         const result = await complete;
 
