@@ -60,6 +60,7 @@ start.ps1
 .mcp.json
 
 # Runtime data (persisted state) — never commit per-user data
+backend/mcp-token
 backend/tasks.json
 backend/tasks.json.bak
 backend/tasks.json.*.tmp
