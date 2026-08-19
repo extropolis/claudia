@@ -12,7 +12,7 @@ import { existsSync, lstatSync, appendFileSync, readFileSync, writeFileSync } fr
 import { join, resolve, basename, normalize } from 'path';
 import { WorktreeInfo } from '@claudia/shared';
 import { createLogger } from './logger.js';
-import { getDefaultBranch } from './git-utils.js';
+import { getDefaultBranch, getCurrentBranch } from './git-utils.js';
 
 const execFileAsync = promisify(execFile);
 const logger = createLogger('[WorktreeManager]');
@@ -156,7 +156,9 @@ export class WorktreeManager {
      *
      * @param opts.repoPath - Main repo path (or any worktree of it)
      * @param opts.branch - Branch name to create or checkout
-     * @param opts.baseBranch - Base branch to create from (default: current HEAD)
+     * @param opts.baseBranch - Base to create from. Default: the freshly-fetched
+     *   default branch when the repo is checked out ON its default branch,
+     *   otherwise the current HEAD (mid-feature work builds on the feature).
      * @param opts.createBranch - true = create new branch, false = checkout existing
      * @param opts.targetDir - Override destination directory
      */
@@ -173,14 +175,23 @@ export class WorktreeManager {
         // Resolve to the main worktree root so the .claudia-worktrees dir is always in the repo root
         const mainPath = await this.getMainWorktreePath(repoPath) ?? repoPath;
 
-        // No explicit base for a NEW branch → branch from the head of the
-        // default branch, freshly fetched. Worktrees used to branch from
-        // whatever the workspace HEAD happened to be, which was frequently a
-        // stale checkout or another task's feature branch — every task spawned
-        // on top of it then carried unrelated diffs into its PR. Explicit
-        // baseBranch (the UI's branch picker) still wins unchanged.
+        // No explicit base for a NEW branch → the base depends on where the
+        // repo currently is:
+        //  - Checked out on the DEFAULT branch: branch from its freshly-fetched
+        //    head. This is the stale-checkout fix — an unpulled main used to
+        //    leak its staleness into every task's PR.
+        //  - Checked out on a FEATURE branch: branch from HEAD, the pre-existing
+        //    behavior. The user (or an orchestrator spawning children to work
+        //    on that branch) is mid-feature, and basing children on main would
+        //    hand them a tree where the code they were asked to touch does not
+        //    exist.
+        // Explicit baseBranch (the UI's branch picker) always wins unchanged.
         if (createBranch && !baseBranch) {
-            baseBranch = await this.resolveFreshDefaultBase(mainPath) ?? undefined;
+            const defaultBranch = await getDefaultBranch(mainPath);
+            const currentBranch = await getCurrentBranch(mainPath);
+            if (defaultBranch && currentBranch === defaultBranch) {
+                baseBranch = await this.resolveFreshDefaultBase(mainPath, defaultBranch) ?? undefined;
+            }
         }
 
         // Check if branch is already in use by another worktree
@@ -252,9 +263,7 @@ export class WorktreeManager {
      * Returns null when the repo has no default branch at all (fresh init),
      * which keeps the old branch-from-HEAD behavior as the last resort.
      */
-    private async resolveFreshDefaultBase(mainPath: string): Promise<string | null> {
-        const defaultBranch = await getDefaultBranch(mainPath);
-        if (!defaultBranch) return null;
+    private async resolveFreshDefaultBase(mainPath: string, defaultBranch: string): Promise<string | null> {
 
         const revParse = async (ref: string): Promise<string | null> => {
             try {
@@ -277,12 +286,22 @@ export class WorktreeManager {
         if (remote) {
             const last = WorktreeManager.lastDefaultFetch.get(mainPath) ?? 0;
             if (Date.now() - last >= WorktreeManager.FETCH_TTL_MS) {
+                // Stamp the ATTEMPT, not just success: an auth-failing origin
+                // otherwise re-pays the full 10s stall on every task creation.
+                WorktreeManager.lastDefaultFetch.set(mainPath, Date.now());
                 try {
                     await execFileAsync('git', ['fetch', remote, defaultBranch], {
                         cwd: mainPath,
                         timeout: 10_000,
+                        env: {
+                            ...process.env,
+                            // This runs from the background server: never block on a
+                            // terminal credential prompt or pop a credential-manager
+                            // dialog. Fail fast and fall back to last-known refs.
+                            GIT_TERMINAL_PROMPT: '0',
+                            GCM_INTERACTIVE: 'never',
+                        },
                     });
-                    WorktreeManager.lastDefaultFetch.set(mainPath, Date.now());
                 } catch (err) {
                     logger.warn('resolveFreshDefaultBase: fetch failed, using last-known refs', {
                         mainPath,

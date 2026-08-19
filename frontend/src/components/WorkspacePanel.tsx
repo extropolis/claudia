@@ -472,7 +472,7 @@ function WorktreeCreateModal({ workspace, onClose, onCreated, onCreateWorktree }
                     </div>
                     {createNew && (
                         <div className="worktree-modal-field">
-                            <label htmlFor="wt-base">Base branch <span className="optional">(optional, defaults to HEAD)</span></label>
+                            <label htmlFor="wt-base">Base branch <span className="optional">(optional; defaults to fresh main when on main, else current HEAD)</span></label>
                             <input
                                 id="wt-base"
                                 className="worktree-modal-input"

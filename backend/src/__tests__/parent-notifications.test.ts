@@ -22,7 +22,10 @@ import { TaskSpawner } from '../task-spawner.js';
 interface Ctx { base: string; spawner?: TaskSpawner }
 const active: Ctx[] = [];
 
-/** Minimal shape both queueParentNotification and flushParentNotifications read. */
+/** Minimal shape both queueParentNotification and flushParentNotifications read.
+ * lastActivity is backdated: the flush's quiet check refuses to deliver into a
+ * terminal that produced output in the last 800ms (another injector may have
+ * just typed a prompt), and a just-created Date would trip it in every test. */
 function fakeTask(id: string, state: string, extra: object = {}) {
     return {
         id,
@@ -30,7 +33,7 @@ function fakeTask(id: string, state: string, extra: object = {}) {
         prompt: `task ${id}`,
         workspaceId: join(homedir(), 'ws'),
         createdAt: new Date(),
-        lastActivity: new Date(),
+        lastActivity: new Date(Date.now() - 10_000),
         initialPromptSent: true,
         pendingPrompt: null,
         hasStartedProcessing: true,
@@ -235,6 +238,50 @@ describe('parent notifications', () => {
         // Replaced, not appended: the parent cares about the latest state only.
         expect(queue).toHaveLength(1);
         expect(queue[0].text).toContain('has exited');
+    });
+
+    it('defers delivery while the terminal has fresh output, then retries once it quiets', () => {
+        // Several injectors fire on the same idle transition (cron prompts,
+        // context updates). Fresh output at fire time means someone else just
+        // typed — the notice must wait, then land once the terminal is quiet.
+        vi.useFakeTimers();
+        const parent = fakeTask('task-parent', 'idle', { lastActivity: new Date() });
+        const child = fakeTask('task-child', 'idle', { parentTaskId: 'task-parent', taskNumber: 21 });
+        const s = makeSpawner([parent, child]) as unknown as Internals;
+        const write = vi.spyOn(s, 'writeToTask').mockImplementation(() => {});
+
+        s.queueParentNotification(child, 'idle');
+        vi.advanceTimersByTime(400);
+        expect(write).not.toHaveBeenCalled();
+        expect(s.pendingParentNotifications.get('task-parent')).toHaveLength(1);
+
+        // Quiet window elapses (fake clock advances with the timers) — the
+        // bounded retry delivers.
+        vi.advanceTimersByTime(1100);
+        expect(write).toHaveBeenCalledTimes(1);
+    });
+
+    it('undelivered notices survive a backend restart', () => {
+        // tsx-watch reloads are routine; a completion queued but not yet
+        // delivered must not be eaten by one — the parent was promised it
+        // does not need to poll.
+        const parent = fakeTask('task-parent', 'busy');
+        const child = fakeTask('task-child', 'idle', { parentTaskId: 'task-parent', taskNumber: 31 });
+        const s = makeSpawner([parent, child]) as unknown as Internals & { saveTasks(): void };
+        vi.spyOn(s, 'writeToTask').mockImplementation(() => {});
+
+        s.queueParentNotification(child, 'idle');
+        s.saveTasks();
+
+        const ctx = active[active.length - 1];
+        (s as unknown as TaskSpawner).destroy();
+        const s2 = new TaskSpawner(join(ctx.base, 'tasks.json'), false) as unknown as Internals;
+        active.push({ base: ctx.base, spawner: s2 as unknown as TaskSpawner });
+
+        const queue = s2.pendingParentNotifications.get('task-parent');
+        expect(queue).toHaveLength(1);
+        expect(queue![0].childId).toBe('task-child');
+        expect(queue![0].text).toContain('#31');
     });
 
     it('caps the queue for a long-busy parent at a bounded digest', () => {

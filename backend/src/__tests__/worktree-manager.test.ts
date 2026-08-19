@@ -670,15 +670,27 @@ describe('createWorktree default base ref', () => {
         expect(wtHead).toBe(originHead);
     });
 
-    it('falls back to the local default branch when there is no remote', async () => {
+    it('branches from HEAD when the repo is checked out on a FEATURE branch', async () => {
+        // A user (or orchestrator spawning children to work on their branch)
+        // mid-feature must get worktrees based on that feature, not on main —
+        // main does not contain the code the children were asked to touch.
+        const repo = makeRepo();
+        git(['checkout', '-q', '-b', 'feature-x'], repo);
+        writeFileSync(join(repo, 'feature.txt'), 'wip\n');
+        git(['add', '-A'], repo);
+        git(['commit', '-qm', 'feature work'], repo);
+        const featureHead = git(['rev-parse', 'HEAD'], repo).trim();
+
+        const manager = new WorktreeManager();
+        const wt = await manager.createWorktree({ repoPath: repo, branch: 'feat/child-of-feature' });
+
+        const wtHead = git(['rev-parse', 'HEAD'], wt.path).trim();
+        expect(wtHead).toBe(featureHead);
+    });
+
+    it('on main with no remote, branches from local main', async () => {
         const repo = makeRepo();
         const mainHead = git(['rev-parse', 'main'], repo).trim();
-
-        // Move the working checkout OFF main so branching from HEAD would differ.
-        git(['checkout', '-q', '-b', 'other'], repo);
-        writeFileSync(join(repo, 'other.txt'), 'divergent\n');
-        git(['add', '-A'], repo);
-        git(['commit', '-qm', 'divergent'], repo);
 
         const manager = new WorktreeManager();
         const wt = await manager.createWorktree({ repoPath: repo, branch: 'feat/from-local-main' });

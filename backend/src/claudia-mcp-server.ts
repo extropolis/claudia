@@ -892,7 +892,10 @@ server.tool(
         timeoutSeconds: z.number().optional().describe('How long to wait before returning timedOut (default 60, max 240)'),
     },
     async ({ taskId, timeoutSeconds }) => {
-        const RUNNING_STATES = new Set(['busy', 'starting']);
+        // 'interrupted' is TRANSIENT: it is what a mid-turn task reports in the
+        // window between a backend restart and auto-reconnect resuming the same
+        // turn. Treating it as settled returned a partial output tail as final.
+        const RUNNING_STATES = new Set(['busy', 'starting', 'interrupted']);
         const POLL_MS = 2500;
         const capMs = Math.min(Math.max(timeoutSeconds ?? 60, 5), 240) * 1000;
         const deadline = Date.now() + capMs;
@@ -910,7 +913,20 @@ server.tool(
             }
             const canonicalId = initial.id;
 
+            // Waiting on yourself can never settle — your own task is busy for
+            // the duration of this very call — and used to livelock the agent
+            // through an endless timedOut/"call again" loop.
+            if (SELF_TASK_ID && canonicalId === SELF_TASK_ID) {
+                return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Cannot wait on task '${taskId}' — it is your own session, which is busy for the duration of this call. Wait only on OTHER tasks.` }, null, 2) }] };
+            }
+
             let lastState = 'unknown';
+            // A settled state must be observed on two consecutive polls before
+            // it counts. A single sample can land in the pre-Enter idle gap
+            // right after claudia_continue_task delivers a prompt (500-2500ms
+            // before the TUI accepts it) and report the PREVIOUS turn's output
+            // as the result of work that has not started yet.
+            let settledStreak = 0;
             for (;;) {
                 const response = await backendFetch('/api/tasks');
                 if (response.ok) {
@@ -918,8 +934,10 @@ server.tool(
                     if (!task) {
                         return { content: [{ type: 'text', text: JSON.stringify({ taskId: canonicalId, state: 'deleted', message: 'Task no longer exists.' }, null, 2) }] };
                     }
-                    lastState = task.state ?? 'unknown';
-                    if (!RUNNING_STATES.has(lastState)) {
+                    const observed = task.state ?? 'unknown';
+                    settledStreak = (!RUNNING_STATES.has(observed) && observed === lastState) ? settledStreak + 1 : 0;
+                    lastState = observed;
+                    if (!RUNNING_STATES.has(lastState) && settledStreak >= 1) {
                         // Settled — attach a tail of output so the caller usually
                         // needs no follow-up claudia_get_task_output call.
                         let tail: string | null = null;
@@ -977,6 +995,15 @@ server.tool(
     },
     async ({ taskId, input }) => {
         try {
+            // Canonicalize: the WS response matcher compares broadcast ids,
+            // which are always canonical — a raw "#48" here made every send
+            // report a timeout for input that was actually delivered, and the
+            // retry then typed the text a second time into a busy session.
+            const canonicalId = await resolveRefToCanonicalId(taskId);
+            if (!canonicalId) {
+                return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
+            }
+            taskId = canonicalId;
             log.info(`Sending input to task: ${taskId}`);
 
             const result = await sendWSMessage('task:input', {
@@ -1018,6 +1045,12 @@ server.tool(
     },
     async ({ taskId, prompt }) => {
         try {
+            // Canonicalize for the same reason as claudia_send_input above.
+            const canonicalId = await resolveRefToCanonicalId(taskId);
+            if (!canonicalId) {
+                return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
+            }
+            taskId = canonicalId;
             // Verify task exists and check its state
             const tasksResponse = await backendFetch('/api/tasks');
             if (tasksResponse.ok) {
@@ -1222,6 +1255,14 @@ server.tool(
         displayName: z.string().describe('The new display name for the task (short, descriptive)'),
     },
     async ({ taskId, displayName }) => {
+        {
+            // Canonicalize for the same reason as claudia_send_input above.
+            const canonicalId = await resolveRefToCanonicalId(taskId);
+            if (!canonicalId) {
+                return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
+            }
+            taskId = canonicalId;
+        }
         try {
             // Check if the task title was user-edited before attempting rename
             const tasksResponse = await backendFetch('/api/tasks');
@@ -1431,7 +1472,7 @@ server.tool(
     },
     async ({ taskId }) => {
         try {
-            const url = taskId ? `/api/tasks/${taskId}/cron` : '/api/cron';
+            const url = taskId ? `/api/tasks/${encodeURIComponent(taskId)}/cron` : '/api/cron';
             const response = await backendFetch(url);
 
             if (!response.ok) {
@@ -1861,7 +1902,7 @@ server.tool(
     async ({ taskId }) => {
         const effectiveTaskId = taskId || SELF_TASK_ID;
         try {
-            const url = effectiveTaskId ? `/api/tasks/${effectiveTaskId}/todos` : '/api/todos';
+            const url = effectiveTaskId ? `/api/tasks/${encodeURIComponent(effectiveTaskId)}/todos` : '/api/todos';
             const response = await backendFetch(url);
 
             if (!response.ok) {
@@ -1876,7 +1917,7 @@ server.tool(
 
             let summary: any = null;
             if (effectiveTaskId) {
-                const sres = await backendFetch(`/api/tasks/${effectiveTaskId}/todos/summary`).catch(() => null);
+                const sres = await backendFetch(`/api/tasks/${encodeURIComponent(effectiveTaskId)}/todos/summary`).catch(() => null);
                 if (sres && sres.ok) summary = await sres.json();
             }
 
@@ -1975,7 +2016,7 @@ server.tool(
             return { content: [{ type: 'text', text: 'Error: No task ID configured (CLAUDIA_TASK_ID not set).' }] };
         }
         try {
-            const response = await backendFetch(`/api/tasks/${effectiveTaskId}/todos/reorder`, {
+            const response = await backendFetch(`/api/tasks/${encodeURIComponent(effectiveTaskId)}/todos/reorder`, {
                 method: 'POST',
                 body: JSON.stringify({ orderedIds }),
             });

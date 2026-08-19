@@ -38,8 +38,11 @@ const MAX_RECENT_WORKSPACES = 10;  // Keep only the last 10 recent workspaces
 export class WorkspaceStore {
     private config: WorkspaceConfig;
     private workspaceFile: string;
-    // In-memory PR info cache keyed by workspace id. Not persisted to disk —
-    // it's transient state resolved from `gh` and pushed to the frontend.
+    // In-memory PR info cache keyed by workspace id. The latest value is ALSO
+    // persisted onto the workspace record: the periodic refresh only re-polls
+    // workspaces whose last-known PR is non-terminal, so a restart that lost
+    // prInfo silently dropped every task-less workspace from the refresh loop
+    // and froze its badge at the pre-restart state.
     private prInfoCache = new Map<string, Workspace['prInfo']>();
 
     constructor(basePath?: string) {
@@ -105,9 +108,20 @@ export class WorkspaceStore {
      * Returns true if the value changed (so callers can decide whether to broadcast).
      */
     setPrInfo(id: string, prInfo: Workspace['prInfo']): boolean {
-        const prev = this.prInfoCache.get(id);
+        const prev = this.prInfoCache.has(id)
+            ? this.prInfoCache.get(id)
+            : this.config.workspaces.find(w => w.id === id)?.prInfo;
         const changed = JSON.stringify(prev) !== JSON.stringify(prInfo);
         this.prInfoCache.set(id, prInfo);
+        if (changed) {
+            // Persist the last-known PR state so the refresh loop's
+            // "non-terminal PR ⇒ keep polling" rule survives a backend restart.
+            const w = this.config.workspaces.find(w => w.id === id);
+            if (w) {
+                w.prInfo = prInfo;
+                this.saveConfig();
+            }
+        }
         return changed;
     }
 

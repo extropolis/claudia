@@ -268,6 +268,11 @@ interface TaskPersistence {
     // Next taskNumber to hand out. Persisted so numbers are never reused after
     // a restart, even when the highest-numbered task has been deleted.
     nextTaskNumber?: number;
+    // Undelivered child→parent completion notices, keyed by parent task id.
+    // Persisted because tsx-watch restarts are routine — an orchestrator told
+    // "you do not need to poll" must not lose a child's completion to a reload
+    // that happened before the notice was delivered.
+    pendingParentNotifications?: Record<string, { childId: string; text: string }[]>;
 }
 
 interface InternalTask extends Task {
@@ -680,7 +685,11 @@ export class TaskSpawner extends EventEmitter {
                 task.state = 'exited';
                 this.emit('taskStateChanged', this.toPublicTask(task));
                 // Exit bypasses transitionTaskState — notify the parent here.
-                if (task.parentTaskId && task.hasStartedProcessing) {
+                // Deliberately NOT gated on hasStartedProcessing: a child that
+                // dies during startup (bad auth, missing CLI, broken worktree)
+                // is exactly the one the parent must hear about, or a fan-out
+                // stalls forever on "you do not need to poll".
+                if (task.parentTaskId) {
                     this.queueParentNotification(task, 'exited');
                 }
                 this.scheduleSave();
@@ -1777,7 +1786,7 @@ export class TaskSpawner extends EventEmitter {
      * idle. Otherwise they stay queued and the parent's own next idle
      * transition (or reconnect-then-idle) flushes them.
      */
-    private flushParentNotifications(parentId: string): void {
+    private flushParentNotifications(parentId: string, attempt: number = 0): void {
         const queue = this.pendingParentNotifications.get(parentId);
         if (!queue || queue.length === 0) return;
         const parent = this.tasks.get(parentId);
@@ -1786,7 +1795,7 @@ export class TaskSpawner extends EventEmitter {
         // Same delivery discipline as queued follow-ups: outside the lock,
         // after the TUI settles, marked internal. The queue is NOT consumed
         // here: the parent's state is re-checked at fire time, because within
-        // the 300ms window the user can submit a prompt (busy — the write
+        // the delay window the user can submit a prompt (busy — the write
         // would type into a running session), the task can hit a permission
         // prompt (waiting_input — the trailing \r would answer the dialog),
         // or the reaper can disconnect it (the write path would spawn a full
@@ -1797,11 +1806,23 @@ export class TaskSpawner extends EventEmitter {
             const q = this.pendingParentNotifications.get(parentId);
             if (!q || q.length === 0) return;
             if (!p || p.state !== 'idle' || !p.initialPromptSent || p.pendingPrompt != null) return;
+            // Quiet check: several injectors fire on the same idle transition
+            // (cron prompts, reference/MCP context updates) and polling takes
+            // seconds to flip the state to busy — 'idle' alone cannot prove
+            // nothing was just typed. Fresh output means another injector got
+            // here first; retry shortly (bounded), else wait for next idle.
+            const lastMs = p.lastActivity instanceof Date
+                ? p.lastActivity.getTime()
+                : new Date(p.lastActivity as unknown as string).getTime();
+            if (Number.isFinite(lastMs) && Date.now() - lastMs < 800) {
+                if (attempt < 5) this.flushParentNotifications(parentId, attempt + 1);
+                return;
+            }
             this.pendingParentNotifications.delete(parentId);
             const combined = q.map(n => n.text).join('\n') + '\r';
             console.log(`[TaskSpawner] Delivering ${q.length} child notification(s) to parent ${parentId}`);
             this.writeToTask(parentId, combined, 'internal-followup', true);
-        }, 300);
+        }, attempt === 0 ? 300 : 1000);
     }
 
     /**
@@ -1991,9 +2012,20 @@ export class TaskSpawner extends EventEmitter {
 
                 const data = readFileSync(this.persistencePath, 'utf-8');
                 // Use 'any' for raw persistence to handle migration from old format
-                const persistence = JSON.parse(data) as { tasks: PersistedTask[]; archivedTasks?: any[]; nextTaskNumber?: number };
+                const persistence = JSON.parse(data) as { tasks: PersistedTask[]; archivedTasks?: any[]; nextTaskNumber?: number; pendingParentNotifications?: Record<string, { childId: string; text: string }[]> };
                 if (typeof persistence.nextTaskNumber === 'number' && persistence.nextTaskNumber > 0) {
                     this.nextTaskNumber = persistence.nextTaskNumber;
+                }
+                // Restore undelivered child→parent notices — a tsx-watch reload
+                // must not eat a completion the orchestrator was promised.
+                // Delivery re-arms via the parent's next idle transition or its
+                // reconnect (both call flushParentNotifications).
+                if (persistence.pendingParentNotifications) {
+                    for (const [parentId, queue] of Object.entries(persistence.pendingParentNotifications)) {
+                        if (Array.isArray(queue) && queue.length > 0) {
+                            this.pendingParentNotifications.set(parentId, queue);
+                        }
+                    }
                 }
                 console.log(`[TaskSpawner] ========== LOADING PERSISTED TASKS ==========`);
                 console.log(`[TaskSpawner] Loading ${persistence.tasks.length} active tasks, ${persistence.archivedTasks?.length || 0} archived tasks`);
@@ -2404,6 +2436,9 @@ export class TaskSpawner extends EventEmitter {
                 tasks: tasksToSave,
                 archivedTasks: [],
                 nextTaskNumber: this.nextTaskNumber,
+                ...(this.pendingParentNotifications.size > 0
+                    ? { pendingParentNotifications: Object.fromEntries(this.pendingParentNotifications) }
+                    : {}),
             };
             const dir = dirname(this.persistencePath);
             if (!existsSync(dir)) {
@@ -3672,8 +3707,9 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             }
             task.state = 'exited';
 
-            // Exit bypasses transitionTaskState — notify the parent here.
-            if (task.parentTaskId && task.hasStartedProcessing) {
+            // Exit bypasses transitionTaskState — notify the parent here. Not
+            // gated on hasStartedProcessing: startup deaths must notify too.
+            if (task.parentTaskId) {
                 this.queueParentNotification(task, 'exited');
             }
 
@@ -5292,6 +5328,16 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         }
 
         this.emit('taskStateChanged', this.toPublicTask(task));
+
+        // Reconnect assigns 'idle' directly, without a transitionTaskState —
+        // so the idle-transition flush never fires for notices queued while
+        // this task (as a PARENT) was disconnected. Attempt delivery once the
+        // resumed TUI has settled; the fire-time re-check inside the flush
+        // handles a parent that is actually mid-continuation.
+        if (this.pendingParentNotifications.has(taskId)) {
+            setTimeout(() => this.flushParentNotifications(taskId), 2000);
+        }
+
         return this.toPublicTask(task);
     }
 
