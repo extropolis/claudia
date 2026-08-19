@@ -130,6 +130,18 @@ export interface AppConfig {
     todoEnabled?: boolean;  // Enable per-task TODO list feature (default: false)
     jiraEnabled: boolean;  // Master toggle for the Jira integration (default false)
     jira?: JiraConfig;  // Jira Cloud connection (only set once the user configures it)
+    /**
+     * Reserved ngrok domain to pin the tunnel to, e.g. "claudia.ngrok.app" or a
+     * custom domain on a paid plan. Empty/undefined keeps the free behaviour:
+     * ngrok picks the URL and it can change between sessions.
+     *
+     * This is not only a convenience. ngrok hands free tunnels out on
+     * `*.ngrok-free.dev`, and that domain is blocked outright on some networks
+     * and mobile carriers — the TLS handshake fails before any HTTP happens,
+     * so the tunnel looks dead from the phone while the agent reports healthy.
+     * Pinning a domain on another zone is the way out of that.
+     */
+    ngrokDomain?: string;
 }
 
 /**
@@ -224,7 +236,8 @@ const DEFAULT_CONFIG: AppConfig = {
     modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } },
     worktreeRetentionDays: 30,  // Per the archived-worktree retention spec
     jiraEnabled: false,  // Jira integration off by default
-    jira: undefined
+    jira: undefined,
+    ngrokDomain: undefined  // free tier: let ngrok assign the URL
 };
 
 export class ConfigStore {

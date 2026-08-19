@@ -528,6 +528,18 @@ export async function createApp(basePath?: string) {
     // Initialize configStore first to determine API mode
     const configStore = new ConfigStore(dataDir);
 
+    // Pin the tunnel to a reserved ngrok domain if one is configured. NGROK_DOMAIN
+    // wins over the stored setting so a deployment can force it without touching
+    // config.json. Empty on both = free tier, ngrok assigns the URL.
+    const resolveNgrokDomain = (): string | null => {
+        const env = process.env.NGROK_DOMAIN?.trim();
+        if (env) return env;
+        const stored = configStore.getConfig().ngrokDomain?.trim();
+        return stored || null;
+    };
+    tunnelManager.setDomain(resolveNgrokDomain());
+    logger.info('Tunnel domain resolved', { domain: tunnelManager.getDomain() || '(ngrok-assigned)' });
+
     // Initialize Plugin System
     logger.info('Initializing plugin system...');
     const pluginContext: PluginContext = {
@@ -3615,9 +3627,21 @@ export async function createApp(basePath?: string) {
     // ===== Tunnel Management Routes =====
     app.post('/api/tunnel/start', async (_req, res) => {
         try {
-            logger.info('Starting tunnel via API');
+            logger.info('Starting tunnel via API', { domain: tunnelManager.getDomain() || '(ngrok-assigned)' });
             const status = await tunnelManager.start();
             res.json(status);
+
+            // Confirm the public URL actually answers, AFTER responding so the
+            // QR code is not held up by a 15 s probe. A tunnel can be "up" —
+            // agent connected, local API healthy — while the hostname is
+            // blocked on the network and every phone gets nothing; this is the
+            // only signal that distinguishes the two.
+            void tunnelManager.checkReachable().then((reachable) => {
+                if (reachable === false) {
+                    logger.warn('Tunnel started but its public URL is unreachable from this machine');
+                }
+                broadcast({ type: 'tunnel:status' as WSMessageType, payload: tunnelManager.getStatus() });
+            }).catch(() => { /* probe is best-effort */ });
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : String(err);
             logger.error('Failed to start tunnel', { error: errorMsg });
@@ -6059,6 +6083,13 @@ export async function createApp(basePath?: string) {
             // Cast is needed because ConfigUpdatePayload's nested objects (hyperspaceProxy,
             // aiCoreCredentials, ...) are all-optional while AppConfig requires their fields.
             const updatedConfig = configStore.updateConfig(configUpdate as Parameters<typeof configStore.updateConfig>[0]);
+
+            // Tunnel domain: applies to the NEXT start(), so a running tunnel keeps
+            // its URL and no already-connected phone is cut off mid-session.
+            if (configUpdate.ngrokDomain !== undefined) {
+                tunnelManager.setDomain(resolveNgrokDomain());
+                broadcast({ type: 'tunnel:status' as WSMessageType, payload: tunnelManager.getStatus() });
+            }
 
             // If backend was changed, switch the task spawner's backend
             if (newBackend && newBackend !== currentBackend) {

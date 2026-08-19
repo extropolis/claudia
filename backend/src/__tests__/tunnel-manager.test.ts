@@ -85,6 +85,7 @@ describe('initial state', () => {
         const { deps } = makeDeps();
         expect(new TunnelManager(PORT, undefined, deps).getStatus()).toEqual({
             active: false, url: null, token: null, startedAt: null, error: null, publicIp: null,
+            domain: null, reachable: null, warning: null,
         });
     });
 
@@ -510,6 +511,7 @@ describe('stop', () => {
         }
         expect(tm.getStatus()).toEqual({
             active: false, url: null, token: null, startedAt: null, error: null, publicIp: null,
+            domain: null, reachable: null, warning: null,
         });
         expect(tm.validateToken('x')).toBe(false);
     });

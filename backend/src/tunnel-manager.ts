@@ -21,6 +21,18 @@ export interface TunnelStatus {
     startedAt: string | null;
     error: string | null;
     publicIp: string | null;
+    /** The reserved domain the tunnel is pinned to, or null on ngrok's assigned URL. */
+    domain: string | null;
+    /**
+     * Whether the public URL actually answered when this machine fetched it.
+     * null = not probed yet. false is the interesting one: the agent is happily
+     * connected but the URL is unreachable, which is what a network-level block
+     * of the ngrok domain looks like. Without this the UI shows a healthy green
+     * tunnel while every phone that scans the QR gets nothing.
+     */
+    reachable: boolean | null;
+    /** Human-readable explanation when `reachable` is false. */
+    warning: string | null;
 }
 
 // No default domain - use random ngrok URL unless user configures one
@@ -70,6 +82,8 @@ export class TunnelManager extends EventEmitter {
     private url: string | null = null;
     private startedAt: string | null = null;
     private publicIp: string | null = null;
+    private reachable: boolean | null = null;
+    private warning: string | null = null;
     private retryCount = 0;
     private maxRetries = 3;
     private retryTimeout: NodeJS.Timeout | null = null;
@@ -102,6 +116,23 @@ export class TunnelManager extends EventEmitter {
     /** The port tunnels are opened against — exposed for logging/diagnostics. */
     getPort(): number {
         return this.port;
+    }
+
+    /**
+     * Pin future tunnels to a reserved domain (paid ngrok), or pass an empty
+     * value to go back to ngrok's assigned URL (free). Takes effect on the next
+     * start(); an already-running tunnel is left alone so changing the setting
+     * never yanks a URL out from under a connected phone.
+     */
+    setDomain(domain: string | null | undefined): void {
+        const next = domain && domain.trim() ? domain.trim() : null;
+        if (next === this.domain) return;
+        logger.info('Tunnel domain changed', { from: this.domain || '(assigned)', to: next || '(assigned)' });
+        this.domain = next;
+    }
+
+    getDomain(): string | null {
+        return this.domain;
     }
 
     /**
@@ -158,7 +189,10 @@ export class TunnelManager extends EventEmitter {
                 token: null,
                 startedAt: null,
                 error: errorMsg,
-                publicIp: this.publicIp
+                publicIp: this.publicIp,
+                domain: this.domain,
+                reachable: null,
+                warning: null
             };
         }
     }
@@ -473,8 +507,55 @@ export class TunnelManager extends EventEmitter {
             token: this.token,
             startedAt: this.startedAt,
             error: null,
-            publicIp: this.publicIp
+            publicIp: this.publicIp,
+            domain: this.domain,
+            reachable: this.reachable,
+            warning: this.warning
         };
+    }
+
+    /**
+     * Fetch the tunnel's own public URL from this machine to confirm the edge
+     * is really serving it.
+     *
+     * Diagnoses the failure that is otherwise invisible: the ngrok agent stays
+     * connected and reports the tunnel as up, but the public hostname is
+     * blocked on the network — the TLS handshake is refused before any HTTP is
+     * exchanged, so phones and browsers get "nothing" while every local health
+     * check stays green. Observed with `*.ngrok-free.dev`, which some networks
+     * and mobile carriers drop by SNI while every other ngrok zone works.
+     *
+     * Best-effort and non-fatal: a failure here downgrades status, never the
+     * tunnel itself.
+     */
+    async checkReachable(): Promise<boolean | null> {
+        if (!this.url) {
+            this.reachable = null;
+            this.warning = null;
+            return null;
+        }
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15000);
+        try {
+            await this.deps.fetch(this.url, { signal: controller.signal });
+            this.reachable = true;
+            this.warning = null;
+            logger.info('Tunnel URL is reachable', { url: this.url });
+        } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            this.reachable = false;
+            const host = (() => { try { return new URL(this.url!).hostname; } catch { return this.url!; } })();
+            const zone = host.split('.').slice(-2).join('.');
+            this.warning =
+                `The tunnel is running but ${host} could not be reached from this machine (${detail}). ` +
+                `This usually means the network is blocking the ${zone} domain rather than anything being wrong ` +
+                `with Claudia — phones on such a network get a blank page. Set a reserved ngrok domain on another ` +
+                `zone (Settings -> ngrok domain) to work around it.`;
+            logger.warn('Tunnel URL is NOT reachable from this machine', { url: this.url, error: detail });
+        } finally {
+            clearTimeout(timer);
+        }
+        return this.reachable;
     }
 
     /**
@@ -518,6 +599,8 @@ export class TunnelManager extends EventEmitter {
         this.token = null;
         this.startedAt = null;
         this.publicIp = null;
+        this.reachable = null;
+        this.warning = null;
         this.retryCount = 0;
     }
 }
