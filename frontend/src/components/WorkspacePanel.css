@@ -699,13 +699,39 @@
     overflow: hidden;
 }
 
-/* Short task ref (#48) — the id agents and developers reference tasks by. */
+/* Short task ref (48) — the id agents and developers reference tasks by.
+ * Rendered as a small pill so the number reads as an identifier, not as the
+ * first word of the prompt: solid contrast, tabular digits, subtle ground. */
 .workspace-panel .task-item .task-ref {
-    margin-right: 5px;
+    display: inline-block;
+    margin-right: 6px;
+    padding: 0 4px;
     font-size: 10px;
+    font-weight: 600;
+    line-height: 1.5;
     font-family: var(--font-mono, monospace);
-    color: var(--text-tertiary, var(--text-secondary));
-    opacity: 0.85;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary, rgba(128, 128, 128, 0.18));
+    border-radius: 4px;
+}
+
+/* "Fully integrated" hint — PR merged into main; recommends archiving. */
+.workspace-panel .task-item .task-integrated-hint {
+    flex-shrink: 0;
+    padding: 1px 5px;
+    font-size: 9px;
+    line-height: 1.4;
+    border: 1px solid var(--accent-success, #2ea043);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--accent-success, #2ea043);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.workspace-panel .task-item .task-integrated-hint:hover {
+    background: var(--accent-success, #2ea043);
+    color: var(--bg-primary, #fff);
 }
 
 /* Scheduled task (cron) badge */

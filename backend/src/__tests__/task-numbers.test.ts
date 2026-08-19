@@ -171,3 +171,64 @@ describe('resolveTaskRef', () => {
         expect(s.resolveTaskRef('abc')).toBeNull();
     });
 });
+
+describe('archive round-trip', () => {
+    // Archived tasks are never referenced, so they carry no number. Archiving
+    // retires the task's number forever; restoring assigns a fresh one. What
+    // survives the round-trip is the HIERARCHY link, not the number.
+    it('archiving drops the number (retired), restore assigns a fresh one, parent link survives', () => {
+        const ctx = seed([
+            persisted('task-a', '2026-08-01T12:00:00.000Z', { taskNumber: 48, parentTaskId: 'task-p' }),
+        ], { nextTaskNumber: 49 });
+        const s = start(ctx);
+
+        s.archiveTask('task-a');
+        const archived = s.getArchivedTasks().find(t => t.id === 'task-a')!;
+        expect(archived.taskNumber).toBeUndefined();
+        expect(archived.parentTaskId).toBe('task-p');
+
+        const restored = s.restoreArchivedTask('task-a')!;
+        // Fresh number from the counter — never 48 again.
+        expect(restored.taskNumber).toBe(49);
+        expect(restored.parentTaskId).toBe('task-p');
+        expect(s.resolveTaskRef('#49')).toBe('task-a');
+        expect(s.resolveTaskRef('#48')).toBeNull();
+    });
+
+    it('REPAIR: strips numbers off archived tasks and renumbers actives compactly from 1', () => {
+        // The first cut numbered the archive too, so a long-lived install's
+        // live tasks started in the hundreds. Loading a file in that state
+        // must strip the archived numbers and renumber actives from 1 — the
+        // one deliberate exception to number stability.
+        const base = mkdtempSync(join(homedir(), '.claudia-tasknum-test-'));
+        const tasksFile = join(base, 'tasks.json');
+        writeFileSync(tasksFile, JSON.stringify({
+            tasks: [
+                persisted('task-live-1', '2026-08-10T12:00:00.000Z', { taskNumber: 402 }),
+                persisted('task-live-2', '2026-08-11T12:00:00.000Z', { taskNumber: 403 }),
+            ],
+            archivedTasks: [
+                { id: 'task-old', prompt: 'old', workspaceId: join(homedir(), 'nonexistent-ws'),
+                  createdAt: '2026-01-01T12:00:00.000Z', lastActivity: '2026-01-01T12:00:00.000Z',
+                  sessionId: null, taskNumber: 1 },
+            ],
+            nextTaskNumber: 404,
+        }));
+        const ctx: Ctx = { base, tasksFile };
+        active.push(ctx);
+        const s = start(ctx);
+
+        const byId = new Map(s.getAllTasks().map(t => [t.id, t.taskNumber]));
+        expect(byId.get('task-live-1')).toBe(1);
+        expect(byId.get('task-live-2')).toBe(2);
+        expect(s.getArchivedTasks().find(t => t.id === 'task-old')!.taskNumber).toBeUndefined();
+
+        // Repair is one-time: a reload keeps the compact numbering.
+        (s as unknown as { saveTasks(): void }).saveTasks();
+        s.destroy();
+        const s2 = start(ctx);
+        const byId2 = new Map(s2.getAllTasks().map(t => [t.id, t.taskNumber]));
+        expect(byId2.get('task-live-1')).toBe(1);
+        expect(byId2.get('task-live-2')).toBe(2);
+    });
+});

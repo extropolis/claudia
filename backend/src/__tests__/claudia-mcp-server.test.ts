@@ -322,6 +322,34 @@ describe('short refs and hierarchy', () => {
     });
 });
 
+describe('short-ref hardening', () => {
+    it('the stop-self guard catches the caller own short ref, not just its full id', async () => {
+        // '#N' for SELF slipped past `taskId === SELF_TASK_ID` and the backend
+        // ESC-interrupted the orchestrating session itself.
+        const { json: listing } = await callTool('claudia_list_tasks');
+        const self = listing.find((t: any) => t.id === SELF_TASK);
+        expect(self.ref).toMatch(/^#\d+$/);
+
+        const { json } = await callTool('claudia_stop_task', { taskId: self.ref });
+        expect(json.success).toBe(false);
+        expect(json.message).toMatch(/currently running session/i);
+    });
+
+    it('claudia_get_task_output treats a short ref exactly like the full id (the # must not become a URL fragment)', async () => {
+        // Un-encoded, '#77' truncated the fetch path at the fragment and the
+        // request silently hit /api/tasks — returning an empty-output SUCCESS
+        // while the full id took the real per-task route. The two refs must
+        // produce byte-identical tool responses.
+        const short = await callTool('claudia_get_task_output', { taskId: '#77' });
+        const full = await callTool('claudia_get_task_output', { taskId: 'task-child-1' });
+        expect(short.text).toBe(full.text);
+        // Never the silent empty-output success the truncated URL fabricated.
+        if (short.json) {
+            expect(short.json.taskId).toBeDefined();
+        }
+    });
+});
+
 describe('claudia_wait_for_task', () => {
     it('returns immediately for a task that is not running', async () => {
         const started = Date.now();

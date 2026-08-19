@@ -61,6 +61,7 @@ function matchTaskRef(tasks: { id: string; taskNumber?: number }[], ref: string)
     return tasks.find(t => t.taskNumber === num);
 }
 
+
 /**
  * Format a duration in milliseconds to a human-readable string
  */
@@ -431,6 +432,25 @@ export function createClaudiaMcpServer(scope: ClaudiaMcpScope): McpServer {
     // calls these by name, so scoping them here keeps the call sites untouched.
     const backendFetch = (path: string, options: RequestInit = {}) =>
         backendFetchAt(BASE_URL, path, options);
+
+    /**
+     * Resolve a possibly-short ref to the canonical task id.
+     * Full ids pass through untouched; short refs ("#48"/"48") are looked up
+     * via the backend. Returns null when a short ref matches nothing. Needed
+     * wherever the raw ref would otherwise be compared against a canonical id
+     * (the stop/delete self-guards, the delete approval matcher).
+     */
+    const resolveRefToCanonicalId = async (ref: string): Promise<string | null> => {
+        if (!/^#?\d{1,9}$/.test(ref.trim())) return ref;
+        try {
+            const res = await backendFetch('/api/tasks');
+            if (!res.ok) return null;
+            const task = matchTaskRef(await res.json(), ref);
+            return task?.id ?? null;
+        } catch {
+            return null;
+        }
+    };
     const sendWSMessage = (type: string, payload: Record<string, unknown>) =>
         sendWSMessageAt(BASE_URL, type, payload);
     const sendWSMessageWithMultiResponse = <T>(
@@ -555,7 +575,7 @@ server.tool(
             // Fetch both task list (for full metadata) and recent output in parallel
             const [tasksResponse, outputResponse] = await Promise.all([
                 backendFetch('/api/tasks'),
-                backendFetch(`/api/tasks/${taskId}/output?maxBytes=2048`),
+                backendFetch(`/api/tasks/${encodeURIComponent(taskId)}/output?maxBytes=2048`),
             ]);
 
             if (!tasksResponse.ok) {
@@ -622,8 +642,15 @@ server.tool(
     },
     async ({ taskId, maxBytes }) => {
         try {
+            // Canonicalize short refs so the fetch, and every message below,
+            // behave byte-identically to a full-id call.
+            const canonicalId = await resolveRefToCanonicalId(taskId);
+            if (!canonicalId) {
+                return { content: [{ type: 'text', text: `Error: Task '${taskId}' not found.` }] };
+            }
+            taskId = canonicalId;
             const limit = Math.min(maxBytes || 16384, 32768);
-            const response = await backendFetch(`/api/tasks/${taskId}/output?maxBytes=${limit}`);
+            const response = await backendFetch(`/api/tasks/${encodeURIComponent(taskId)}/output?maxBytes=${limit}`);
             if (!response.ok) {
                 if (response.status === 404) {
                     return { content: [{ type: 'text', text: `Error: Task '${taskId}' not found.` }] };
@@ -1061,6 +1088,14 @@ server.tool(
         taskId: z.string().describe('The task ID to stop. ' + TASK_REF_HINT),
     },
     async ({ taskId }) => {
+        // Resolve short refs FIRST: the self-guard compares against the
+        // canonical id, and a task's own "#77" must not slip past it and let
+        // the backend ESC-interrupt the orchestrating session itself.
+        const canonicalId = await resolveRefToCanonicalId(taskId);
+        if (!canonicalId) {
+            return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
+        }
+        taskId = canonicalId;
         // Prevent a task from stopping itself — would kill the orchestrating Claude session
         if (SELF_TASK_ID && taskId === SELF_TASK_ID) {
             return {
@@ -1247,6 +1282,15 @@ server.tool(
         taskId: z.string().describe('The task ID to delete. ' + TASK_REF_HINT),
     },
     async ({ taskId }) => {
+        // Resolve short refs FIRST: the self-guard must catch "#77" for the
+        // caller's own task, and the task:destroyed approval matcher below
+        // compares against the broadcast's CANONICAL id — with a raw short ref
+        // it never matched, and an approved deletion reported as a timeout.
+        const canonicalId = await resolveRefToCanonicalId(taskId);
+        if (!canonicalId) {
+            return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
+        }
+        taskId = canonicalId;
         if (SELF_TASK_ID && taskId === SELF_TASK_ID) {
             return {
                 content: [{
@@ -1343,7 +1387,7 @@ server.tool(
         try {
             log.info(`Creating scheduled task for: ${taskId}, cron: ${cronExpression}`);
 
-            const response = await backendFetch(`/api/tasks/${taskId}/cron`, {
+            const response = await backendFetch(`/api/tasks/${encodeURIComponent(taskId)}/cron`, {
                 method: 'POST',
                 body: JSON.stringify({ cronExpression, prompt, isRecurring: isRecurring ?? true }),
             });
@@ -1775,7 +1819,7 @@ Order items in execution sequence ('order', lower = earlier) and set 'priority'.
 
         try {
             log.info(`Creating TODO for task ${taskId}: ${title}`);
-            const response = await backendFetch(`/api/tasks/${taskId}/todos`, {
+            const response = await backendFetch(`/api/tasks/${encodeURIComponent(taskId)}/todos`, {
                 method: 'POST',
                 body: JSON.stringify({ title, description, status, priority, source, kind, url, externalRef, parentId, order }),
             });

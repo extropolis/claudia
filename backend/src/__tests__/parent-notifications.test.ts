@@ -53,7 +53,8 @@ function makeSpawner(tasks: ReturnType<typeof fakeTask>[]) {
 type Internals = {
     queueParentNotification(child: unknown, state: string): void;
     flushParentNotifications(parentId: string): void;
-    pendingParentNotifications: Map<string, string[]>;
+    retractParentNotificationsFor(childId: string): void;
+    pendingParentNotifications: Map<string, { childId: string; text: string }[]>;
     writeToTask(taskId: string, data: string, source?: string, internal?: boolean): void;
 };
 
@@ -167,6 +168,73 @@ describe('parent notifications', () => {
 
         expect(write).not.toHaveBeenCalled();
         expect(s.pendingParentNotifications.size).toBe(0);
+    });
+
+    it('re-checks the parent at fire time — a prompt submitted inside the 300ms window keeps the notices queued', () => {
+        // The old flush deleted the queue up front and delivered blindly: the
+        // injected text could be typed into a now-busy session, answer a
+        // permission prompt, or trigger a full reconnect — and a failed
+        // delivery lost the notices forever.
+        vi.useFakeTimers();
+        const parent = fakeTask('task-parent', 'idle');
+        const child = fakeTask('task-child', 'idle', { parentTaskId: 'task-parent', taskNumber: 12 });
+        const s = makeSpawner([parent, child]) as unknown as Internals;
+        const write = vi.spyOn(s, 'writeToTask').mockImplementation(() => {});
+
+        s.queueParentNotification(child, 'idle');
+        // User submits a prompt before the delivery timer fires.
+        (parent as { state: string }).state = 'busy';
+        vi.advanceTimersByTime(400);
+
+        expect(write).not.toHaveBeenCalled();
+        expect(s.pendingParentNotifications.get('task-parent')).toHaveLength(1);
+
+        // Next idle delivers it.
+        (parent as { state: string }).state = 'idle';
+        s.flushParentNotifications('task-parent');
+        vi.advanceTimersByTime(400);
+        expect(write).toHaveBeenCalledTimes(1);
+    });
+
+    it('retracts undelivered notices when the child comes back to life (sleep/wake)', () => {
+        vi.useFakeTimers();
+        const parent = fakeTask('task-parent', 'busy');
+        const child = fakeTask('task-child', 'exited', { parentTaskId: 'task-parent', taskNumber: 13 });
+        const s = makeSpawner([parent, child]) as unknown as Internals;
+        const write = vi.spyOn(s, 'writeToTask').mockImplementation(() => {});
+
+        s.queueParentNotification(child, 'exited');
+        expect(s.pendingParentNotifications.get('task-parent')).toHaveLength(1);
+
+        // reconnectAfterSleep resurrects the child via reconnectTask, which retracts.
+        s.retractParentNotificationsFor('task-child');
+        (parent as { state: string }).state = 'idle';
+        s.flushParentNotifications('task-parent');
+        vi.advanceTimersByTime(400);
+
+        expect(write).not.toHaveBeenCalled();
+        expect(s.pendingParentNotifications.has('task-parent')).toBe(false);
+    });
+
+    it('notifies once per run — settle-then-exit does not double-notify', () => {
+        vi.useFakeTimers();
+        const parent = fakeTask('task-parent', 'busy');
+        const child = fakeTask('task-child', 'idle', { parentTaskId: 'task-parent', taskNumber: 14 });
+        const s = makeSpawner([parent, child]) as unknown as Internals;
+        vi.spyOn(s, 'writeToTask').mockImplementation(() => {});
+
+        s.queueParentNotification(child, 'idle');
+        // The same run's process dies later — must not add a second notice.
+        s.queueParentNotification(child, 'exited');
+        expect(s.pendingParentNotifications.get('task-parent')).toHaveLength(1);
+
+        // A NEW run (busy transition clears the flag) may notify again.
+        (child as { parentNotifiedThisRun?: boolean }).parentNotifiedThisRun = false;
+        s.queueParentNotification(child, 'exited');
+        const queue = s.pendingParentNotifications.get('task-parent')!;
+        // Replaced, not appended: the parent cares about the latest state only.
+        expect(queue).toHaveLength(1);
+        expect(queue[0].text).toContain('has exited');
     });
 
     it('caps the queue for a long-busy parent at a bounded digest', () => {

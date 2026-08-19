@@ -280,7 +280,7 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                 >
                     {typeof task.taskNumber === 'number' && (
                         <span className="task-ref" title={`Task #${task.taskNumber} — agents and the CLI accept this short ref anywhere a task id is expected`}>
-                            #{task.taskNumber}
+                            {task.taskNumber}
                         </span>
                     )}
                     {displayPrompt}
@@ -302,6 +302,20 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                 </span>
             )}
             {worktreeInfo?.prInfo && <PrBadge prInfo={worktreeInfo.prInfo} />}
+            {worktreeInfo?.prInfo?.state === 'merged' && (
+                // Fully integrated: the task's PR is merged into the default
+                // branch, so its changes live on main and the task (plus its
+                // worktree) is safe to retire. Recommend — never auto-archive:
+                // the worktree may still hold uncommitted follow-up work only
+                // the user knows about.
+                <button
+                    className="task-integrated-hint"
+                    title="PR merged — all changes are integrated into main. Click to archive this task."
+                    onClick={(e) => { e.stopPropagation(); onArchiveTask(task.id); }}
+                >
+                    ✓ integrated
+                </button>
+            )}
             {subtaskCount !== undefined && subtaskCount > 0 && onToggleSubtasks && (
                 <button
                     className="task-subtask-toggle"
@@ -1916,16 +1930,33 @@ function WorkspaceSection({
 
                                     const items: RenderItem[] = [];
 
-                                    // Build subtask map: parentTaskId → child entries (only for parents in this workspace)
-                                    const taskIds = new Set(tasks.map(t => t.id));
+                                    // Build subtask map: parentTaskId → child entries (only for parents in this workspace).
+                                    // Nesting is ONE level: a task nests only under a parent that
+                                    // itself renders top-level. Anything deeper (a grandchild whose
+                                    // parent is already a subtask) renders top-level/flat instead —
+                                    // subtaskMap entries are only read for top-level rows, so filing
+                                    // a grandchild under a subtask made it vanish from the sidebar
+                                    // entirely: unselectable, unstoppable, invisible.
+                                    const byId = new Map(tasks.map(t => [t.id, t]));
+                                    const topCache = new Map<string, boolean>();
+                                    const isTopLevel = (t: Task, seen: Set<string> = new Set()): boolean => {
+                                        const cached = topCache.get(t.id);
+                                        if (cached !== undefined) return cached;
+                                        if (seen.has(t.id)) { topCache.set(t.id, true); return true; } // cyclic parent links: render flat
+                                        seen.add(t.id);
+                                        const parent = t.parentTaskId ? byId.get(t.parentTaskId) : undefined;
+                                        const result = !(parent && isTopLevel(parent, seen));
+                                        topCache.set(t.id, result);
+                                        return result;
+                                    };
                                     const subtaskMap = new Map<string, SubtaskEntry[]>();
                                     const topLevelTasks: Task[] = [];
                                     tasks.forEach(task => {
-                                        if (task.parentTaskId && taskIds.has(task.parentTaskId)) {
-                                            const children = subtaskMap.get(task.parentTaskId) ?? [];
+                                        if (!isTopLevel(task)) {
+                                            const children = subtaskMap.get(task.parentTaskId!) ?? [];
                                             // Same-workspace subtasks: use sessionWorktreeBranch only (no separate workspace obj)
                                             children.push({ task });
-                                            subtaskMap.set(task.parentTaskId, children);
+                                            subtaskMap.set(task.parentTaskId!, children);
                                         } else {
                                             topLevelTasks.push(task);
                                         }
@@ -1945,13 +1976,18 @@ function WorkspaceSection({
                                     const liftSpawnedChildren = (group: WorktreeGroup): WorktreeGroup | null => {
                                         const kept: Task[] = [];
                                         for (const t of group.tasks) {
-                                            if (t.parentTaskId && taskIds.has(t.parentTaskId)) {
-                                                const children = subtaskMap.get(t.parentTaskId) ?? [];
+                                            // Lift only under a TOP-LEVEL parent: subtaskMap entries
+                                            // for non-top-level parents are never rendered, so lifting
+                                            // a child under a parent that is itself a subtask would
+                                            // remove its worktree row AND never draw it anywhere.
+                                            const parent = t.parentTaskId ? byId.get(t.parentTaskId) : undefined;
+                                            if (parent && isTopLevel(parent)) {
+                                                const children = subtaskMap.get(parent.id) ?? [];
                                                 children.push({
                                                     task: t,
                                                     worktreeInfo: { branch: group.branch, prInfo: group.workspace.prInfo },
                                                 });
-                                                subtaskMap.set(t.parentTaskId, children);
+                                                subtaskMap.set(parent.id, children);
                                             } else {
                                                 kept.push(t);
                                             }

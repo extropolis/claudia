@@ -226,37 +226,86 @@ export class WorktreeManager {
         return { path: targetDir, branch };
     }
 
+    /** Last successful default-branch fetch per repo, for the TTL below. */
+    private static lastDefaultFetch: Map<string, number> = new Map();
+    /** How long a fetched default-branch ref is considered fresh. Bounds the
+     * cost of fan-out: a claudia_create_tasks batch of 10 isolated children
+     * does one network fetch, not ten identical ones. */
+    private static readonly FETCH_TTL_MS = 60_000;
+
     /**
-     * Resolve the freshest available ref for the repo's default branch.
+     * Resolve the freshest available base for a new branch: the head of the
+     * repo's default branch, as a COMMIT SHA.
      *
-     * Best-effort `git fetch origin <default>` first (10s cap — task creation
-     * must not hang on a dead network), then prefer `origin/<default>` and fall
-     * back to the local branch. Returns null when the repo has no default
-     * branch at all (fresh init), which keeps the old branch-from-HEAD
-     * behavior as the last resort.
+     * - Best-effort `git fetch <remote> <default>` first (10s cap — task
+     *   creation must not hang on a dead network), TTL-cached per repo.
+     * - The remote is whatever the repo actually has ('origin' preferred, else
+     *   the first remote); a remote-less repo skips the fetch entirely.
+     * - Prefers the newer of remote-default vs local-default: when the local
+     *   branch is ahead (unpushed commits) or the fetch failed offline, the
+     *   local head wins — otherwise a worktree would silently omit commits the
+     *   task was asked to build on.
+     * - Returns a SHA, not a ref name: `worktree add -b <branch> <dir>
+     *   origin/main` would set the new branch's upstream to origin/main,
+     *   breaking bare `git push` (non-matching upstream) in every worktree.
+     *
+     * Returns null when the repo has no default branch at all (fresh init),
+     * which keeps the old branch-from-HEAD behavior as the last resort.
      */
     private async resolveFreshDefaultBase(mainPath: string): Promise<string | null> {
         const defaultBranch = await getDefaultBranch(mainPath);
         if (!defaultBranch) return null;
 
+        const revParse = async (ref: string): Promise<string | null> => {
+            try {
+                const { stdout } = await execFileAsync('git', ['rev-parse', '--verify', `${ref}^{commit}`], { cwd: mainPath });
+                return stdout.trim() || null;
+            } catch {
+                return null;
+            }
+        };
+
+        // Which remote does this repo actually have? Hardcoding 'origin'
+        // silently skipped the fetch forever on upstream-only repos.
+        let remote: string | null = null;
         try {
-            await execFileAsync('git', ['fetch', 'origin', defaultBranch], {
-                cwd: mainPath,
-                timeout: 10_000,
-            });
-        } catch (err) {
-            logger.warn('resolveFreshDefaultBase: fetch failed, using last-known refs', {
-                mainPath,
-                error: err instanceof Error ? err.message : String(err),
-            });
+            const { stdout } = await execFileAsync('git', ['remote'], { cwd: mainPath });
+            const remotes = stdout.split('\n').map(r => r.trim()).filter(Boolean);
+            remote = remotes.includes('origin') ? 'origin' : (remotes[0] ?? null);
+        } catch { /* treat as remote-less */ }
+
+        if (remote) {
+            const last = WorktreeManager.lastDefaultFetch.get(mainPath) ?? 0;
+            if (Date.now() - last >= WorktreeManager.FETCH_TTL_MS) {
+                try {
+                    await execFileAsync('git', ['fetch', remote, defaultBranch], {
+                        cwd: mainPath,
+                        timeout: 10_000,
+                    });
+                    WorktreeManager.lastDefaultFetch.set(mainPath, Date.now());
+                } catch (err) {
+                    logger.warn('resolveFreshDefaultBase: fetch failed, using last-known refs', {
+                        mainPath,
+                        remote,
+                        error: err instanceof Error ? err.message : String(err),
+                    });
+                }
+            }
         }
 
-        // origin/<default> if it exists (fetched or last-known), else local.
+        const remoteSha = remote ? await revParse(`${remote}/${defaultBranch}`) : null;
+        const localSha = await revParse(defaultBranch);
+        if (!remoteSha) return localSha;
+        if (!localSha || localSha === remoteSha) return remoteSha;
+
+        // Both exist and differ — take local only when it strictly contains the
+        // remote head (i.e. it is AHEAD: unpushed commits). Diverged or behind,
+        // the freshly-fetched remote wins.
         try {
-            await execFileAsync('git', ['rev-parse', '--verify', `origin/${defaultBranch}`], { cwd: mainPath });
-            return `origin/${defaultBranch}`;
+            await execFileAsync('git', ['merge-base', '--is-ancestor', remoteSha, localSha], { cwd: mainPath });
+            return localSha;
         } catch {
-            return defaultBranch;
+            return remoteSha;
         }
     }
 

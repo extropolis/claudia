@@ -703,3 +703,41 @@ describe('createWorktree default base ref', () => {
         expect(wtHead).toBe(releaseHead);
     });
 });
+
+describe('createWorktree base-ref regressions', () => {
+    it('does NOT set an upstream on the new branch — bare `git push` must not break', async () => {
+        // Passing 'origin/main' as the worktree-add base made git set the new
+        // feature branch's upstream to origin/main; with push.default=simple,
+        // every `git push` inside the worktree then failed with a
+        // non-matching-upstream error. The base is resolved to a SHA instead.
+        const origin = makeRepo();
+        const clone = join(base, `clone-nt-${++repoCounter}`);
+        git(['clone', '-q', origin, clone], base);
+        git(['config', 'user.email', 'test@test.com'], clone);
+        git(['config', 'user.name', 'Test User'], clone);
+
+        const manager = new WorktreeManager();
+        const wt = await manager.createWorktree({ repoPath: clone, branch: 'feat/no-upstream' });
+
+        expect(() => git(['rev-parse', '--abbrev-ref', 'feat/no-upstream@{upstream}'], wt.path)).toThrow();
+    });
+
+    it('prefers the LOCAL default branch when it is ahead of origin (unpushed commits)', async () => {
+        const origin = makeRepo();
+        const clone = join(base, `clone-ahead-${++repoCounter}`);
+        git(['clone', '-q', origin, clone], base);
+        git(['config', 'user.email', 'test@test.com'], clone);
+        git(['config', 'user.name', 'Test User'], clone);
+        git(['config', 'commit.gpgsign', 'false'], clone);
+        // Unpushed local commit on main — the very thing the task is asked to build on.
+        writeFileSync(join(clone, 'local-only.txt'), 'unpushed\n');
+        git(['add', '-A'], clone);
+        git(['commit', '-qm', 'local ahead'], clone);
+        const localHead = git(['rev-parse', 'main'], clone).trim();
+
+        const manager = new WorktreeManager();
+        const wt = await manager.createWorktree({ repoPath: clone, branch: 'feat/from-local-ahead' });
+
+        expect(git(['rev-parse', 'HEAD'], wt.path).trim()).toBe(localHead);
+    });
+});
