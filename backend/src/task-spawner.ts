@@ -833,10 +833,17 @@ export class TaskSpawner extends EventEmitter {
      * @param workspaceIds - List of workspace directory paths to sync. All must exist on disk.
      */
     syncWorkspaceMcpConfigs(workspaceIds: string[]): void {
-        // The Claudia project root — skip writing .mcp.json to our own directory
-        // to avoid triggering tsx watch restarts. settings.local.json is safe
-        // (it's inside .claude/ which tsx doesn't watch).
-        const selfRoot = resolve(join(__dirname, '..', '..'));
+        // NOTE: Claudia's own project root used to be excluded here, to keep the
+        // .mcp.json write from triggering a tsx watch restart loop. That guard
+        // is obsolete and was actively harmful: the dev script watches
+        // `--watch-path=src`, so a file at the repo ROOT is outside the watch
+        // set entirely, and writeMcpConfigIfChanged below no-ops once the
+        // content settles. Meanwhile the exclusion left Claudia's own workspace
+        // pinned to whatever stale .mcp.json happened to be on disk — in
+        // practice the old stdio form, which starts the MCP server with no
+        // workspace scope at all ("Workspace: (not scoped)"). Sessions running
+        // in the Claudia repo were the only ones getting a different, worse
+        // config than every other workspace.
 
         // When skip-permissions is enabled (either via the dedicated toggle or via
         // permissionMode=bypassPermissions), allow ALL tools in project settings
@@ -854,8 +861,6 @@ export class TaskSpawner extends EventEmitter {
                 logger.warn('Workspace does not exist, skipping MCP sync', { workspaceId });
                 continue;
             }
-            const isSelfWorkspace = resolve(workspaceId) === selfRoot;
-
             // Build per-workspace config with CLAUDIA_WORKSPACE_ID so the claudia
             // MCP server works on resumed sessions (where --mcp-config doesn't load).
             // No taskId — per-task --mcp-config supplies that for new sessions.
@@ -872,17 +877,7 @@ export class TaskSpawner extends EventEmitter {
             const mcpConfigJson = JSON.stringify({ mcpServers: mcpConfig }, null, 2);
             const serverNames = enabledMcpServers.map(s => s.name);
 
-            // Write .mcp.json (skip for Claudia's own workspace to prevent tsx watch restart)
-            if (!isSelfWorkspace) {
-                const workspaceMcpFile = `${workspaceId}/.mcp.json`;
-                try {
-                    atomicWriteFileSync(workspaceMcpFile, mcpConfigJson);
-                } catch (err) {
-                    logger.error('Failed to write .mcp.json', { workspaceId, error: err });
-                }
-            } else {
-                logger.info('Skipping .mcp.json for Claudia\'s own workspace (prevents tsx watch restart)');
-            }
+            this.writeMcpConfigIfChanged(`${workspaceId}/.mcp.json`, mcpConfigJson, workspaceId);
 
             // Write .claude/settings.local.json (safe for all workspaces including self)
             this.writeSettingsLocalJson(workspaceId, skipPermsSync, serverNames);
@@ -890,6 +885,28 @@ export class TaskSpawner extends EventEmitter {
         }
 
         logger.info(`Synced MCP config to ${syncCount} workspace(s)`, { servers: ['playwright', ...(this.configStore?.getClaudioMcpServerEnabled() ? ['claudia'] : [])] });
+    }
+
+    /**
+     * Write a workspace's .mcp.json only when the content actually changed.
+     *
+     * Every sync used to rewrite all 30-odd workspace configs unconditionally,
+     * touching mtime each time. That churn is what made writing into Claudia's
+     * own repo look dangerous in watch mode. It is only avoidable now that the
+     * bearer token survives restarts (see mcp-auth.ts) — while the token was
+     * per-boot, the content differed on every single boot by construction.
+     */
+    private writeMcpConfigIfChanged(file: string, content: string, workspaceId: string): void {
+        try {
+            if (existsSync(file) && readFileSync(file, 'utf-8') === content) return;
+        } catch {
+            // Unreadable — fall through and replace it.
+        }
+        try {
+            atomicWriteFileSync(file, content);
+        } catch (err) {
+            logger.error('Failed to write .mcp.json', { workspaceId, error: err });
+        }
     }
 
     /**
