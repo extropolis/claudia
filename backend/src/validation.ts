@@ -158,7 +158,7 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
             if (!/^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(trimmed)) {
                 return {
                     valid: false,
-                    error: 'ngrokDomain must be a bare hostname such as "claudia.ngrok.app" (no https://, port, or path)',
+                    error: 'ngrokDomain must be a bare hostname such as "your-name.ngrok.app" (no https://, port, or path)',
                 };
             }
         }

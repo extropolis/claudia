@@ -58,6 +58,36 @@ export function parseNgrokAddrPort(addr: string): number | null {
 }
 
 /**
+ * Turn a configured reserved domain into the full URL `--url` expects.
+ * The setting is stored as a bare hostname ("example.ngrok.app"), while
+ * `--url` wants a scheme. An operator who pastes a full URL anyway is
+ * accommodated rather than rejected.
+ */
+export function ngrokDomainToUrl(domain: string): string {
+    const d = domain.trim();
+    return /^[a-z][a-z0-9+.-]*:\/\//i.test(d) ? d : `https://${d}`;
+}
+
+/**
+ * Read execSync output as text.
+ *
+ * `String(buf)` is not enough: under vitest's `vmThreads` pool a Buffer built
+ * in the test realm is a different class from the module realm's Buffer, and
+ * the coercion yields "[object Object]" rather than the bytes -- which turned
+ * the capability probe below into a silent always-false. Decode explicitly so
+ * the answer does not depend on which realm allocated the buffer.
+ */
+export function decodeExecOutput(out: unknown): string {
+    if (typeof out === 'string') return out;
+    if (out == null) return '';
+    if (ArrayBuffer.isView(out as ArrayBufferView)) {
+        const v = out as ArrayBufferView;
+        return Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString('utf8');
+    }
+    return String(out);
+}
+
+/**
  * Injectable side-effecting dependencies.
  *
  * Production always uses the node defaults below; the seam exists purely so
@@ -96,6 +126,8 @@ export class TunnelManager extends EventEmitter {
      * Its presence is the single source of truth for "adopted mode".
      */
     private adoptedMonitor: NodeJS.Timeout | null = null;
+    /** Cached answer from the agent's own --help; null until first probed. */
+    private urlFlagSupported: boolean | null = null;
     private deps: TunnelManagerDeps;
 
     constructor(port: number, domain?: string, deps?: Partial<TunnelManagerDeps>) {
@@ -224,9 +256,19 @@ export class TunnelManager extends EventEmitter {
             // ignore
         }
 
-        const ngrokArgs = this.domain
-            ? ['http', '--domain', this.domain, String(this.port)]
-            : ['http', String(this.port)];
+        let ngrokArgs: string[];
+        if (this.domain) {
+            // ngrok deprecated --domain ("Flag --domain has been deprecated, use
+            // --url instead") and prints that warning on every start. Older
+            // agents, though, do not know --url at all, so switching outright
+            // would break anyone who has not upgraded. Ask the installed binary
+            // which flag it speaks rather than guessing.
+            ngrokArgs = this.supportsUrlFlag(ngrokExe)
+                ? ['http', '--url', ngrokDomainToUrl(this.domain), String(this.port)]
+                : ['http', '--domain', this.domain, String(this.port)];
+        } else {
+            ngrokArgs = ['http', String(this.port)];
+        }
         logger.info('Spawning ngrok', { args: ngrokArgs });
 
         const ngrok = this.deps.spawn(ngrokExe, ngrokArgs, {
@@ -325,6 +367,28 @@ export class TunnelManager extends EventEmitter {
      * Single HTTP call to the ngrok local API.
      * Shared by checkNgrokRunning() and pollNgrokApi() to avoid duplicate parse logic.
      */
+    /**
+     * Does the installed ngrok agent accept `--url`?
+     *
+     * Probed from `ngrok http --help` and cached: it costs one process spawn,
+     * and only when a reserved domain is actually configured. A probe failure
+     * answers "no", which lands on the older `--domain` flag — the safe side,
+     * since that one still works (with a deprecation warning) on every agent
+     * that has not yet removed it.
+     */
+    private supportsUrlFlag(exe: string): boolean {
+        if (this.urlFlagSupported === null) {
+            try {
+                const help = decodeExecOutput(this.deps.execSync(`${exe} http --help`, { stdio: 'pipe' }));
+                this.urlFlagSupported = help.includes('--url');
+            } catch {
+                this.urlFlagSupported = false;
+            }
+            logger.info('ngrok flag probe', { supportsUrl: this.urlFlagSupported });
+        }
+        return this.urlFlagSupported;
+    }
+
     private async fetchNgrokUrl(signal?: AbortSignal): Promise<string | null> {
         const res = await this.deps.fetch('http://127.0.0.1:4040/api/tunnels', signal ? { signal } : undefined);
         const data = await res.json() as { tunnels: Array<NgrokApiTunnel> };
@@ -548,9 +612,12 @@ export class TunnelManager extends EventEmitter {
             const zone = host.split('.').slice(-2).join('.');
             this.warning =
                 `The tunnel is running but ${host} could not be reached from this machine (${detail}). ` +
-                `This usually means the network is blocking the ${zone} domain rather than anything being wrong ` +
-                `with Claudia — phones on such a network get a blank page. Set a reserved ngrok domain on another ` +
-                `zone (Settings -> ngrok domain) to work around it.`;
+                `Something on THIS network — a DNS filter, firewall, or router "safe browsing" feature — is ` +
+                `almost certainly blocking the ${zone} hostname; nothing is wrong with Claudia, and the check ` +
+                `says nothing about other networks. Devices on this network get a block page or a failed ` +
+                `connection, while a phone on cellular is on a different network and may work fine. To fix it ` +
+                `here: reserve a domain on another zone in your ngrok dashboard, then set it under ` +
+                `Settings -> ngrok domain.`;
             logger.warn('Tunnel URL is NOT reachable from this machine', { url: this.url, error: detail });
         } finally {
             clearTimeout(timer);

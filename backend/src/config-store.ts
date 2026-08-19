@@ -131,9 +131,16 @@ export interface AppConfig {
     jiraEnabled: boolean;  // Master toggle for the Jira integration (default false)
     jira?: JiraConfig;  // Jira Cloud connection (only set once the user configures it)
     /**
-     * Reserved ngrok domain to pin the tunnel to, e.g. "claudia.ngrok.app" or a
-     * custom domain on a paid plan. Empty/undefined keeps the free behaviour:
-     * ngrok picks the URL and it can change between sessions.
+     * Reserved ngrok domain to pin the tunnel to, e.g. "your-name.ngrok.app"
+     * or a custom domain on a paid plan. Empty/undefined keeps the free
+     * behaviour: ngrok picks the URL and it can change between sessions.
+     *
+     * The domain must already be reserved on YOUR ngrok account — Claudia
+     * cannot create it, and a name someone else reserved will never bind.
+     * Reserve it under Universal Gateway -> Domains. Do NOT create a Cloud
+     * Endpoint for the same name: a Cloud Endpoint serves the URL itself and
+     * permanently occupies it, so the agent is refused with ERR_NGROK_334
+     * ("the endpoint is already online").
      *
      * This is not only a convenience. ngrok hands free tunnels out on
      * `*.ngrok-free.dev`, and that domain is blocked outright on some networks

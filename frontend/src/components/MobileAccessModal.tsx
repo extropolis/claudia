@@ -198,7 +198,7 @@ export function MobileAccessModal({ isOpen, onClose, error, tunnelLoading, onSto
                 <div className="tunnel-url-area">
                     <label>Mobile URL</label>
                     <div className="tunnel-url-row">
-                        <input type="text" readOnly value={mobileUrl || ''} placeholder="Not connected" />
+                        <input type="text" aria-label="Mobile URL" readOnly value={mobileUrl || ''} placeholder="Not connected" />
                         <button onClick={copyUrl} title="Copy URL" disabled={!mobileUrl}>
                             {copied ? <Check size={14} /> : <Copy size={14} />}
                             {copied ? 'Copied!' : 'Copy'}
@@ -223,6 +223,7 @@ export function MobileAccessModal({ isOpen, onClose, error, tunnelLoading, onSto
                     <div className="tunnel-url-row">
                         <input
                             type="text"
+                            aria-label="ngrok domain"
                             value={domainInput}
                             onChange={(e) => setDomainInput(e.target.value)}
                             placeholder="blank = free tier, ngrok assigns the URL"
@@ -236,9 +237,13 @@ export function MobileAccessModal({ isOpen, onClose, error, tunnelLoading, onSto
                         </button>
                     </div>
                     <small>
-                        Paid plans can pin a reserved domain (e.g. <code>claudia.ngrok.app</code>) so the URL
-                        never changes. It also gets you off <code>ngrok-free.dev</code>, which some networks
-                        and mobile carriers block outright. Applies on the next tunnel start.
+                        Pin a domain you have reserved on your own ngrok account (e.g.{' '}
+                        <code>your-name.ngrok.app</code>) so the URL never changes. It also gets you off{' '}
+                        <code>ngrok-free.dev</code>, which some networks and mobile carriers block outright.
+                        Reserve it under <strong>Universal Gateway &rarr; Domains</strong> in the ngrok
+                        dashboard &mdash; do <em>not</em> create a Cloud Endpoint for the same name, as that
+                        serves the URL itself and blocks the agent from binding it. Applies on the next
+                        tunnel start.
                     </small>
                     {domainError && <div className="tunnel-error">{domainError}</div>}
                 </div>
