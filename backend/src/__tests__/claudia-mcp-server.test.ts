@@ -147,10 +147,18 @@ afterAll(async () => {
     if (shutdown) await shutdown();
     // Detach the worktree before deleting, so no stale admin dir is left behind.
     try { git(repo, 'worktree', 'remove', '--force', worktree); } catch { /* best effort */ }
-    // maxRetries: on Windows the just-removed worktree's handles can still be
-    // open when rmdir runs, and an EBUSY here fails the whole suite even though
-    // every test passed. Matches the retry guard the other suites use.
-    rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 });
+    // Best-effort with generous retries: on Windows the just-removed worktree's
+    // handles can outlive the git process, and even 5×150ms retries lose that
+    // race sometimes (observed on both local runs and the windows-latest CI
+    // leg). An orphaned temp dir is harmless — CI runners are ephemeral and
+    // local dirs get cleaned by the next run's mkdtemp churn — but a THROW
+    // here fails the whole suite after every test passed. Never let teardown
+    // hygiene fail the suite.
+    try {
+        rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+    } catch (e) {
+        console.warn(`[claudia-mcp-server.test] temp dir left behind (Windows handle race): ${base}`, e);
+    }
     delete process.env.CLAUDIA_BACKEND_URL;
     delete process.env.CLAUDIA_WORKSPACE_ID;
     delete process.env.CLAUDIA_TASK_ID;
