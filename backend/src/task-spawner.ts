@@ -4469,16 +4469,18 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             return;
         }
 
-        // Terminal protocol responses that xterm auto-sends in reply to TUI queries
-        // (cursor-position reports \x1b[r;cR, device-attributes \x1b[?...c, etc.) are
-        // pure noise — and a TUI stuck in a cursor-query loop can flood them. They're
-        // still written normally; we just don't log each one. A real message/keystroke
-        // never looks like a bare terminal-response escape.
-        const isTerminalResponse = /^\x1b\[[\d;?]*[A-Za-z~]$/.test(data);
-        // Only log non-trivial writes (messages, not individual keystrokes or protocol
-        // responses) to avoid I/O overhead and log spam.
+        // Terminal protocol traffic that xterm auto-sends — cursor-position reports
+        // (\x1b[r;cR), device attributes (\x1b[?...c) and SGR mouse reports
+        // (\x1b[<b;x;yM) — is pure noise. Mouse reports in particular arrive on every
+        // move and click over a focused terminal, each one an 11-13 char write, and
+        // they buried the log in "Writing to PTY" lines. They are still written
+        // normally; they just never deserved a log line of their own.
+        const isTerminalResponse = /^\x1b\[[\d;?]*[A-Za-z~]$/.test(data)
+            || /^\x1b\[<[\d;]*[Mm]$/.test(data);
+        // Debug level: one line per write earns its keep when tracing input delivery
+        // and is spam the rest of the time. Run the backend with DEBUG=1 to see them.
         if (data.length > 1 && !isTerminalResponse) {
-            console.log(`[TaskSpawner] Writing to PTY for task ${taskId} (${data.length} chars) source=${source}`);
+            logger.debug('Writing to PTY', { taskId, chars: data.length, source });
         }
 
         // Claude Code PTY-based input handling
