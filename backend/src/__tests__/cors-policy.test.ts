@@ -31,6 +31,43 @@ describe('evaluateCorsOrigin', () => {
         expect(evaluateCorsOrigin(origin, 'localhost:4001').allowed).toBe(true);
     });
 
+    // The prefix test `hostname.startsWith('127.')` treated these as loopback.
+    // "127" is a legal DNS label, so anyone who owns a domain can serve a page
+    // from one of these, and the middleware answers allowed origins with
+    // credentials:true - which would have made GET /api/config (API keys and
+    // workspace paths) readable cross-origin, and PUT /api/config callable.
+    it.each([
+        'http://127.attacker.com',
+        'https://127.0.0.1.attacker.com',
+        'http://127.evil.test:8080',
+        'http://127x0x0x1',
+        'http://notlocalhost.com',
+    ])('rejects lookalike loopback origin %s', (origin) => {
+        expect(evaluateCorsOrigin(origin, 'localhost:4001')).toEqual({
+            allowed: false, reason: 'cross-origin',
+        });
+    });
+
+    it('rejects an origin the URL parser itself will not accept', () => {
+        // 1270.0.0.1 is neither a valid IPv4 literal nor a valid host.
+        expect(evaluateCorsOrigin('http://1270.0.0.1', 'localhost:4001')).toEqual({
+            allowed: false, reason: 'malformed',
+        });
+    });
+
+    it.each([
+        'http://127.0.0.1:4001',
+        'http://127.0.0.2:4001',
+        'http://127.255.255.254:4001',
+        'http://app.localhost:5173',
+        // Trailing-dot FQDN form: the URL parser normalizes it to 127.0.0.1.
+        'http://127.0.0.1.:4001',
+    ])('still allows genuine loopback origin %s', (origin) => {
+        expect(evaluateCorsOrigin(origin, 'localhost:4001')).toEqual({
+            allowed: true, reason: 'loopback',
+        });
+    });
+
     it('allows the tunnel page requesting its own assets (Origin === Host)', () => {
         const d = evaluateCorsOrigin(TUNNEL, TUNNEL_HOST);
         expect(d).toEqual({ allowed: true, reason: 'same-origin' });

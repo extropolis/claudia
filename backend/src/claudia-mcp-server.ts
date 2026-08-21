@@ -789,9 +789,16 @@ async function handleCreateTask(args: { prompt: string; displayName?: string; co
                         success: true,
                         taskId: task.id,
                         ref: typeof task.taskNumber === 'number' ? `#${task.taskNumber}` : null,
-                        parentTaskId: effectiveParentTaskId || null,
-                        ...(effectiveParentTaskId ? {} : {
-                            warning: 'Created at the TOP LEVEL — it is not nested under you, because this session has no task identity. Re-send with parentTaskId set to your own task id (your system prompt states "YOUR TASK ID IS: ...") on the next call so the sidebar groups your children under you.',
+                        // The parent the backend actually STORED, not the one we
+                        // asked for. A short ref that resolves to nothing (a stale
+                        // number, a ref from another install, a typo) is kept
+                        // verbatim and renders top-level, so echoing the request
+                        // would report a linkage that does not exist.
+                        parentTaskId: task.parentTaskId ?? null,
+                        ...(task.parentTaskId ? {} : {
+                            warning: effectiveParentTaskId
+                                ? `Created at the TOP LEVEL: parentTaskId '${effectiveParentTaskId}' did not resolve to a task, so the new task is NOT nested under it. Check the id with claudia_list_tasks and use the full "task-..." id.`
+                                : 'Created at the TOP LEVEL — it is not nested under you, because this session has no task identity. Re-send with parentTaskId set to your own task id (your system prompt states "YOUR TASK ID IS: ...") on the next call so the sidebar groups your children under you.',
                         }),
                         displayName: displayName || null,
                         state: task.state,

@@ -63,11 +63,18 @@ beforeAll(async () => {
             if (msg.type !== 'task:create') return;
             created.push(msg.payload);
             const n = nextNumber++;
+            // Mirrors createTask: a ref that resolves to no known task is not
+            // stored as a parent, so the reply reports the linkage as it IS.
+            const requested: string | undefined = msg.payload.parentTaskId;
+            const stored = requested && /^task-[a-z0-9-]+$/i.test(requested) ? requested : undefined;
             ws.send(JSON.stringify({
                 type: 'task:created',
                 payload: {
                     source: 'mcp',
-                    task: { id: `task-new-${n}`, taskNumber: n, state: 'starting', prompt: msg.payload.prompt },
+                    task: {
+                        id: `task-new-${n}`, taskNumber: n, state: 'starting',
+                        prompt: msg.payload.prompt, parentTaskId: stored,
+                    },
                 },
             }));
         });
@@ -166,6 +173,19 @@ describe('claudia_create_task parent linkage', () => {
             expect(tool, name).toBeDefined();
             expect(Object.keys((tool!.inputSchema as any).properties), name).toContain('parentTaskId');
         }
+        await client.close();
+    });
+
+    it('reports the parent the backend actually stored, not the one requested', async () => {
+        created = [];
+        const client = await makeClient(SELF_TASK);
+        // A stale short ref resolves to nothing: the child really is top-level,
+        // and saying otherwise recreates the exact bug this param exists to fix.
+        const { json } = await callTool(client, 'claudia_create_task', { prompt: 'x', parentTaskId: '#9999' });
+
+        expect(created[0].parentTaskId).toBe('#9999');
+        expect(json.parentTaskId).toBeNull();
+        expect(json.warning).toMatch(/did not resolve/);
         await client.close();
     });
 });

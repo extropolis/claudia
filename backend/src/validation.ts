@@ -55,6 +55,7 @@ interface MCPServerConfig {
 export interface ConfigUpdatePayload {
     rules?: string;
     ngrokDomain?: string;
+    todoEnabled?: boolean;
     worktreeRetentionDays?: number;
     mcpServers?: MCPServerConfig[];
     skipPermissions?: boolean;
@@ -163,6 +164,16 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
             }
         }
         result.ngrokDomain = trimmed;
+    }
+
+    // Validate todoEnabled (optional boolean). Without this the store's
+    // updateConfig branch for it was unreachable: this validator rebuilds the
+    // payload from a whitelist, so an unlisted key never reaches the store.
+    if (payload.todoEnabled !== undefined) {
+        if (typeof payload.todoEnabled !== 'boolean') {
+            return { valid: false, error: 'todoEnabled must be a boolean' };
+        }
+        result.todoEnabled = payload.todoEnabled;
     }
 
     // Validate worktreeRetentionDays (optional non-negative integer; 0 = sweep disabled)

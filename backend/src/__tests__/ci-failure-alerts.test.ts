@@ -15,7 +15,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import { TaskSpawner } from '../task-spawner.js';
+import { TaskSpawner, chooseParentLink } from '../task-spawner.js';
 import type { WorkspacePrInfo } from '@claudia/shared';
 
 interface Ctx { base: string; spawner?: TaskSpawner }
@@ -60,10 +60,22 @@ function pr(overrides: Partial<WorkspacePrInfo> = {}): WorkspacePrInfo {
 }
 
 type Internals = {
-    notePrCiState(taskId: string, branch: string | undefined, prInfo?: WorkspacePrInfo | null): void;
+    notePrCiState(taskId: string, branch: string | undefined, prInfo?: WorkspacePrInfo | null): boolean;
+    setWorkStatus(taskId: string, status: unknown): boolean;
+    resolveTaskRef(ref: string): string | null;
     pendingParentNotifications: Map<string, { childId: string; text: string }[]>;
     writeToTask(taskId: string, data: string, source?: string, internal?: boolean): void;
 };
+
+const workStatus = (over: Record<string, unknown> = {}) => ({
+    branch: 'claudia/task-abc',
+    dirtyFiles: 0,
+    outstandingCommits: 2,
+    landedCommits: 0,
+    baseRef: 'origin/main',
+    checkedAt: new Date().toISOString(),
+    ...over,
+});
 
 afterEach(() => {
     vi.useRealTimers();
@@ -193,15 +205,98 @@ describe('CI failure alerts', () => {
         expect(s.pendingParentNotifications.get('task-a')).toHaveLength(1);
     });
 
-    it('ignores tasks that are no longer live', () => {
+    it('ignores tasks that are no longer live, and says so to the caller', () => {
         vi.useFakeTimers();
         const s = makeSpawner([]) as unknown as Internals;
         const write = vi.spyOn(s, 'writeToTask').mockImplementation(() => {});
 
-        s.notePrCiState('task-gone', 'feature', pr());
+        // false lets the caller move on to the next candidate rather than
+        // dropping the alert on a task that can never receive it.
+        expect(s.notePrCiState('task-gone', 'feature', pr())).toBe(false);
         vi.advanceTimersByTime(400);
 
         expect(write).not.toHaveBeenCalled();
         expect(s.pendingParentNotifications.has('task-gone')).toBe(false);
+    });
+
+    it('reports handled for a live task in every branch of the decision', () => {
+        vi.useFakeTimers();
+        const s = makeSpawner([fakeTask('task-a', 'idle')]) as unknown as Internals;
+        vi.spyOn(s, 'writeToTask').mockImplementation(() => {});
+
+        expect(s.notePrCiState('task-a', 'feature', pr())).toBe(true);                        // queued
+        expect(s.notePrCiState('task-a', 'feature', pr())).toBe(true);                        // deduped
+        expect(s.notePrCiState('task-a', 'feature', pr({ ci: 'passed' }))).toBe(true);        // re-armed
+        expect(s.notePrCiState('task-a', 'feature', pr({ state: 'merged' }))).toBe(true);     // terminal
+        expect(s.notePrCiState('task-a', 'feature', null)).toBe(true);                        // unknown
+    });
+
+    it('drops persisted CI alerts on restart instead of injecting a stale one', () => {
+        // The queue is persisted but the once-per-run dedupe is in memory, so a
+        // CI alert restored days later could land long after the run was fixed.
+        // Child-completion notices are facts and must still survive.
+        const base = mkdtempSync(join(homedir(), '.claudia-cialert-restore-'));
+        writeFileSync(join(base, 'tasks.json'), JSON.stringify({
+            tasks: [], archivedTasks: [],
+            pendingParentNotifications: {
+                'task-a': [
+                    { childId: 'ci-pr-42', text: '[CLAUDIA CI ALERT: stale]' },
+                    { childId: 'task-child', text: '[CLAUDIA TASK UPDATE: real]' },
+                ],
+                'task-b': [{ childId: 'ci-pr-7', text: '[CLAUDIA CI ALERT: stale]' }],
+            },
+        }));
+        const s = new TaskSpawner(join(base, 'tasks.json'), false);
+        active.push({ base, spawner: s });
+        const queues = (s as unknown as Internals).pendingParentNotifications;
+
+        expect(queues.get('task-a')?.map(n => n.childId)).toEqual(['task-child']);
+        expect(queues.has('task-b')).toBe(false);
+    });
+});
+
+describe('work status change detection', () => {
+    it('does not report a change when only the check timestamp moved', () => {
+        const s = makeSpawner([fakeTask('task-a', 'idle')]) as unknown as Internals;
+
+        expect(s.setWorkStatus('task-a', workStatus({ checkedAt: '2026-01-01T00:00:00.000Z' }))).toBe(true);
+        // Same verdict, fresh stamp: every poll re-stamps checkedAt, and a plain
+        // deep-equal here meant a broadcast per worktree task every 45s.
+        expect(s.setWorkStatus('task-a', workStatus({ checkedAt: '2026-01-01T00:00:45.000Z' }))).toBe(false);
+        expect(s.setWorkStatus('task-a', workStatus({ checkedAt: '2026-01-01T00:01:30.000Z' }))).toBe(false);
+    });
+
+    it('reports a change when the verdict actually moves', () => {
+        const s = makeSpawner([fakeTask('task-a', 'idle')]) as unknown as Internals;
+        s.setWorkStatus('task-a', workStatus());
+
+        expect(s.setWorkStatus('task-a', workStatus({ dirtyFiles: 1 }))).toBe(true);
+        expect(s.setWorkStatus('task-a', workStatus({ dirtyFiles: 1, outstandingCommits: 0, landedCommits: 2 }))).toBe(true);
+        expect(s.setWorkStatus('task-a', null)).toBe(true);
+        expect(s.setWorkStatus('task-a', null)).toBe(false);
+    });
+});
+
+describe('chooseParentLink', () => {
+    const known = (ref: string) => (ref === '#48' || ref === 'task-known' ? 'task-known' : null);
+
+    it('uses the canonical id a short ref resolves to', () => {
+        expect(chooseParentLink('#48', known)).toEqual({ parentTaskId: 'task-known', resolved: true });
+    });
+
+    it('keeps an unknown but canonical-looking id, so an archived parent can come back', () => {
+        expect(chooseParentLink('task-1787094145880-7c70daa5cc', known))
+            .toEqual({ parentTaskId: 'task-1787094145880-7c70daa5cc', resolved: false });
+    });
+
+    it('drops a ref that can never become valid rather than faking a link', () => {
+        // Storing these verbatim reported success while the child rendered flat.
+        for (const ref of ['#9999', '9999', 'not-a-task', '', '   ']) {
+            expect(chooseParentLink(ref, known), ref).toEqual({ parentTaskId: null, resolved: false });
+        }
+    });
+
+    it('trims before deciding', () => {
+        expect(chooseParentLink('  task-known  ', known)).toEqual({ parentTaskId: 'task-known', resolved: true });
     });
 });

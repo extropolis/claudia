@@ -395,13 +395,25 @@ export async function revertTaskChanges(
  * looking permanently unmerged. Commits with no equivalent upstream come back
  * prefixed '+', ones already upstream '-'.
  *
+ * Returns undefined when the check could not be completed at all (git missing,
+ * a command timing out on a huge repo, the worktree deleted under us). That is
+ * "unknown", not "nothing": callers keep the previous verdict rather than
+ * blanking a badge that was accurate a minute ago.
+ *
  * Returns null when there is nothing worth showing: not a repo, no branch, the
  * branch IS the default branch, or the task never produced a commit or an edit.
  * Callers render nothing in that case — a task that only answered a question
  * must not grow a git badge.
  */
-export async function getTaskWorkStatus(worktreeDir: string, repoPath?: string): Promise<TaskWorkStatus | null> {
+export async function getTaskWorkStatus(worktreeDir: string, repoPath?: string): Promise<TaskWorkStatus | null | undefined> {
     try {
+        // A worktree that vanished (removed, renamed, on a disconnected drive) is
+        // UNKNOWN, not "nothing to show" - every git call below would fail the
+        // same way a detached HEAD does, and blanking the badge would look like
+        // "all clear" on work that may still be sitting there.
+        const { existsSync } = await import('fs');
+        if (!existsSync(worktreeDir)) return undefined;
+
         const branch = await getCurrentBranch(worktreeDir);
         if (!branch || !isValidBranchName(branch)) return null;
 
@@ -418,12 +430,22 @@ export async function getTaskWorkStatus(worktreeDir: string, repoPath?: string):
             // No remote-tracking default branch — compare against the local one.
         }
 
-        const { stdout: cherryOut } = await execFileAsync('git', ['cherry', baseRef, 'HEAD'], { cwd: worktreeDir, timeout: 15000 });
+        // Cheap gate before the expensive one. `git cherry` computes patch ids for
+        // BOTH sides of the symmetric difference, which on a branch cut days ago
+        // from a busy main means thousands of diffs on every poll - enough to blow
+        // the timeout and blank the badge. `rev-list --count` is a graph walk with
+        // no diffing, and when it says zero there is nothing for cherry to classify.
         let outstandingCommits = 0;
         let landedCommits = 0;
-        for (const line of cherryOut.split('\n')) {
-            if (line.startsWith('+')) outstandingCommits++;
-            else if (line.startsWith('-')) landedCommits++;
+        const { stdout: aheadOut } = await execFileAsync(
+            'git', ['rev-list', '--count', `${baseRef}..HEAD`], { cwd: worktreeDir, timeout: 15000 }
+        );
+        if (parseInt(aheadOut.trim(), 10) > 0) {
+            const { stdout: cherryOut } = await execFileAsync('git', ['cherry', baseRef, 'HEAD'], { cwd: worktreeDir, timeout: 20000 });
+            for (const line of cherryOut.split('\n')) {
+                if (line.startsWith('+')) outstandingCommits++;
+                else if (line.startsWith('-')) landedCommits++;
+            }
         }
 
         const { stdout: statusOut } = await execFileAsync('git', ['status', '--porcelain'], { cwd: worktreeDir, timeout: 15000 });
@@ -459,7 +481,7 @@ export async function getTaskWorkStatus(worktreeDir: string, repoPath?: string):
         };
     } catch {
         // Missing git, detached HEAD, deleted worktree — no badge.
-        return null;
+        return undefined;
     }
 }
 

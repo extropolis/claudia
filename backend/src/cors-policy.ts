@@ -29,10 +29,21 @@ export interface CorsOriginDecision {
     reason: 'no-origin' | 'loopback' | 'same-origin' | 'tunnel-origin' | 'malformed' | 'cross-origin';
 }
 
+/** 127.0.0.0/8 — the whole IPv4 loopback block, and ONLY dotted-quad forms. */
+const IPV4_LOOPBACK = /^127(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+
 function hostnameIsLoopback(hostname: string): boolean {
     // URL parsing yields IPv6 hosts wrapped in brackets: [::1]
-    const bare = hostname.replace(/^\[|\]$/g, '');
-    return bare === 'localhost' || bare === '127.0.0.1' || bare === '::1' || bare.startsWith('127.');
+    const bare = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    // NOT startsWith('127.'): "127" is a legal DNS label, so `127.attacker.com`
+    // is a hostname anyone can register under a domain they own. With that
+    // prefix test it was accepted as loopback, and since the middleware answers
+    // allowed origins with credentials:true, a page there could read
+    // /api/config — API keys and all — straight out of the browser.
+    return bare === 'localhost'
+        || bare.endsWith('.localhost')   // RFC 6761 reserves the whole zone for loopback
+        || bare === '::1'
+        || IPV4_LOOPBACK.test(bare);
 }
 
 /**

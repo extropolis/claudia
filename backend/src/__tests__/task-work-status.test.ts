@@ -154,6 +154,23 @@ describe('getTaskWorkStatus', () => {
         }
     });
 
+    it('reports unknown (undefined), not "nothing", when the check cannot run', async () => {
+        if (!gitAvailable) return;
+        // A worktree that vanished under us: the caller must keep the verdict it
+        // already had rather than blanking an accurate badge.
+        const gone = join(homedir(), `.claudia-workstatus-gone-${Date.now()}`);
+        expect(await getTaskWorkStatus(gone)).toBeUndefined();
+    });
+
+    it('skips the expensive patch-id walk when the branch is not ahead', async () => {
+        if (!gitAvailable) return;
+        // Branch tip == base: rev-list says 0, so `git cherry` never runs and the
+        // verdict comes from the reflog path instead.
+        await git('checkout -b feature/level');
+        const status = await getTaskWorkStatus(repo);
+        expect(status).toBeNull(); // no commits of its own, nothing dirty
+    });
+
     it('returns null rather than throwing outside a git repo', async () => {
         if (!gitAvailable) return;
         const plain = join(homedir(), `.claudia-workstatus-plain-${Date.now()}`);

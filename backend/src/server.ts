@@ -988,10 +988,18 @@ export async function createApp(basePath?: string) {
             // must not all pile onto the same failing run — and tasks that moved
             // onto their own session branch are handled by the per-task pass
             // below, against their own PR.
-            const ciOwner = taskSpawner.getAllTasks()
+            //
+            // Walk candidates newest-first until one is actually live: the list
+            // includes disconnected and exited tasks, and the most recently
+            // active task in a workspace is very often exactly that (the agent
+            // that opened the PR then finished, or a server restart). Handing
+            // the alert to one of those dropped it silently.
+            const ciCandidates = taskSpawner.getAllTasks()
                 .filter(t => t.workspaceId === workspaceId && !t.sessionWorktreeBranch)
-                .sort((a, b) => new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime())[0];
-            if (ciOwner) taskSpawner.notePrCiState(ciOwner.id, branch ?? undefined, prInfo);
+                .sort((a, b) => new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime());
+            for (const candidate of ciCandidates) {
+                if (taskSpawner.notePrCiState(candidate.id, branch ?? undefined, prInfo)) break;
+            }
         } catch (err) {
             logger.debug('refreshPrInfoFor failed', { workspaceId, error: err instanceof Error ? err.message : String(err) });
         } finally {
@@ -1074,7 +1082,7 @@ export async function createApp(basePath?: string) {
             // One verdict per worktree, not per task: a fan-out puts several
             // tasks in the same worktree, and each check is half a dozen git
             // spawns — the dominant cost of this pass on Windows.
-            const byDir = new Map<string, Promise<TaskWorkStatus | null>>();
+            const byDir = new Map<string, Promise<TaskWorkStatus | null | undefined>>();
             for (const task of taskSpawner.getAllTasks()) {
                 // Only tasks that own a worktree get a verdict. In a shared
                 // workspace the dirty tree belongs to whoever touched it last,
@@ -1103,7 +1111,11 @@ export async function createApp(basePath?: string) {
                         check = getTaskWorkStatus(dir, repoPath);
                         byDir.set(dir, check);
                     }
-                    taskSpawner.setWorkStatus(task.id, await check);
+                    const status = await check;
+                    // undefined = the check could not run (timeout, git gone).
+                    // Keep the last known verdict instead of blanking a badge
+                    // that was accurate on the previous pass.
+                    if (status !== undefined) taskSpawner.setWorkStatus(task.id, status);
                 } catch (err) {
                     logger.debug('work status check failed', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
                 }

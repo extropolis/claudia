@@ -340,6 +340,35 @@ interface InternalTask extends Task {
  * - 'reconnectStart': When auto-reconnection begins
  * - 'reconnectComplete': When auto-reconnection finishes
  */
+/**
+ * Decide what a requested parent ref should actually link to.
+ *
+ * A ref that resolves to nothing used to be stored verbatim, which reads as
+ * "linked" everywhere (the MCP create response said so) while the sidebar
+ * renders the child flat, because no such parent exists — the very failure the
+ * explicit parentTaskId was added to prevent, now silent.
+ *
+ * A canonical-looking id we do not know YET is still worth keeping: the parent
+ * may be archived, or not reconnected from persistence yet, and the hierarchy
+ * should reappear when it comes back. A stale short ref ("#9999") or a typo can
+ * never become valid, so it is dropped and logged instead.
+ */
+export function chooseParentLink(
+    ref: string,
+    resolve: (ref: string) => string | null,
+): { parentTaskId: string | null; resolved: boolean } {
+    const trimmed = ref.trim();
+    if (!trimmed) return { parentTaskId: null, resolved: false };
+
+    const resolved = resolve(trimmed);
+    if (resolved) return { parentTaskId: resolved, resolved: true };
+
+    const canonicalLooking = /^task-[a-z0-9-]+$/i.test(trimmed);
+    return canonicalLooking
+        ? { parentTaskId: trimmed, resolved: false }
+        : { parentTaskId: null, resolved: false };
+}
+
 export class TaskSpawner extends EventEmitter {
     private tasks: Map<string, InternalTask> = new Map();
     private disconnectedTasks: Map<string, PersistedTask> = new Map();
@@ -2029,9 +2058,15 @@ export class TaskSpawner extends EventEmitter {
                 // reconnect (both call flushParentNotifications).
                 if (persistence.pendingParentNotifications) {
                     for (const [parentId, queue] of Object.entries(persistence.pendingParentNotifications)) {
-                        if (Array.isArray(queue) && queue.length > 0) {
-                            this.pendingParentNotifications.set(parentId, queue);
-                        }
+                        if (!Array.isArray(queue) || queue.length === 0) continue;
+                        // Child-completion notices are facts and survive a restart.
+                        // CI alerts are a live state ("your PR is red RIGHT NOW"),
+                        // and the once-per-run dedupe that guards them is in-memory
+                        // — so a persisted one could be injected days later, long
+                        // after the run was fixed. Drop them: the PR poller re-alerts
+                        // within a tick if the run is genuinely still red.
+                        const fresh = queue.filter(n => !n.childId?.startsWith('ci-pr-'));
+                        if (fresh.length > 0) this.pendingParentNotifications.set(parentId, fresh);
                     }
                 }
                 console.log(`[TaskSpawner] ========== LOADING PERSISTED TASKS ==========`);
@@ -3257,11 +3292,18 @@ export class TaskSpawner extends EventEmitter {
         // The parent may be given as a short ref ("#48") — resolve it so the
         // stored link is always the canonical id.
         if (parentTaskId) {
-            const resolvedParent = this.resolveTaskRef(parentTaskId) ?? parentTaskId;
-            task.parentTaskId = resolvedParent;
-            const internalForParent = this.tasks.get(task.id);
-            if (internalForParent) internalForParent.parentTaskId = resolvedParent;
-            logger.info('Task spawned by parent', { taskId: task.id, parentTaskId: resolvedParent });
+            const link = chooseParentLink(parentTaskId, ref => this.resolveTaskRef(ref));
+            if (link.parentTaskId) {
+                task.parentTaskId = link.parentTaskId;
+                const internalForParent = this.tasks.get(task.id);
+                if (internalForParent) internalForParent.parentTaskId = link.parentTaskId;
+                if (!link.resolved) {
+                    logger.warn('Parent task id is not a known task (archived, or not reconnected yet)', { taskId: task.id, parentTaskId: link.parentTaskId });
+                }
+                logger.info('Task spawned by parent', { taskId: task.id, parentTaskId: link.parentTaskId });
+            } else {
+                logger.warn('Ignoring unresolvable parentTaskId - task created at the top level', { taskId: task.id, parentTaskId });
+            }
         }
 
         // Assign the short sequential id (#48). Done here rather than in the
@@ -3775,7 +3817,19 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
     setWorkStatus(taskId: string, workStatus: import('@claudia/shared').TaskWorkStatus | null): boolean {
         const task = this.tasks.get(taskId);
         if (!task) return false;
-        if (JSON.stringify(task.workStatus ?? null) === JSON.stringify(workStatus ?? null)) return false;
+        // Compare the VERDICT, not the whole record: checkedAt is stamped fresh
+        // on every poll, so a straight deep-equal never matched and every task
+        // with a worktree emitted a state change (and a client broadcast, and a
+        // PR refresh) every 45s whether or not anything had moved.
+        const verdict = (s?: import('@claudia/shared').TaskWorkStatus | null) => s
+            ? `${s.branch}|${s.dirtyFiles}|${s.outstandingCommits}|${s.landedCommits}|${s.baseRef}`
+            : '';
+        if (verdict(task.workStatus) === verdict(workStatus)) {
+            // Keep the freshest timestamp even when the verdict is unchanged, so
+            // "when was this last checked" stays honest without a broadcast.
+            if (task.workStatus && workStatus) task.workStatus.checkedAt = workStatus.checkedAt;
+            return false;
+        }
         task.workStatus = workStatus;
         this.emit('taskStateChanged', this.toPublicTask(task));
         return true;
@@ -3810,28 +3864,33 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
      *
      * One notice per failing run: the alert re-arms only after the PR reports
      * green or a fresh run starts, which is exactly the push that follows a fix.
+     *
+     * @returns false when the task is not live (disconnected tasks never reach
+     * this map, so nothing could be delivered to it). Callers picking one owner
+     * out of a workspace use that to move on to the next candidate instead of
+     * dropping the alert on a task that will never receive it.
      */
-    notePrCiState(taskId: string, branch: string | undefined, prInfo?: import('@claudia/shared').WorkspacePrInfo | null): void {
+    notePrCiState(taskId: string, branch: string | undefined, prInfo?: import('@claudia/shared').WorkspacePrInfo | null): boolean {
         const task = this.tasks.get(taskId);
-        if (!task) return;
+        if (!task) return false;
 
         // A null lookup is "unknown", not "no PR": `gh` rate limits, drops
         // offline and times out, and clearing the armed state on those blips
         // would re-alert the same red run on the next successful poll.
-        if (!prInfo) return;
+        if (!prInfo) return true;
         // A PR nobody can act on any more: forget the armed state.
         if (prInfo.state === 'merged' || prInfo.state === 'closed') {
             this.ciAlertsSent.delete(taskId);
-            return;
+            return true;
         }
         if (prInfo.ci !== 'failed') {
             // 'passed'/'running' both mean the red run is history — re-arm.
             if (prInfo.ci === 'passed' || prInfo.ci === 'running') this.ciAlertsSent.delete(taskId);
-            return;
+            return true;
         }
 
         const alertKey = `ci-pr-${prInfo.number}`;
-        if (this.ciAlertsSent.get(taskId) === alertKey) return;
+        if (this.ciAlertsSent.get(taskId) === alertKey) return true;
         this.ciAlertsSent.set(taskId, alertKey);
 
         const branchNote = branch ? ` on branch \`${branch}\`` : '';
@@ -3846,6 +3905,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         this.pendingParentNotifications.set(taskId, withoutCi);
         console.log(`[TaskSpawner] Queued CI failure alert for ${taskId} (PR #${prInfo.number})`);
         this.flushParentNotifications(taskId);
+        return true;
     }
 
     async captureGitStateAfterTask(taskId: string): Promise<void> {

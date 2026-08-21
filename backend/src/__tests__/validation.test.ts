@@ -73,6 +73,20 @@ describe('validateConfigUpdate', () => {
         expect(result.error).toBe('ngrokDomain must be 253 characters or fewer');
     });
 
+    it('accepts todoEnabled, which the store could not receive before', () => {
+        // validateConfigUpdate rebuilds the payload from a whitelist, so an
+        // unlisted key never reaches updateConfig — the store's todoEnabled
+        // branch was dead code until this case existed.
+        expect(validateConfigUpdate({ todoEnabled: true }).data?.todoEnabled).toBe(true);
+        expect(validateConfigUpdate({ todoEnabled: false }).data?.todoEnabled).toBe(false);
+    });
+
+    it('rejects a non-boolean todoEnabled', () => {
+        const result = validateConfigUpdate({ todoEnabled: 'yes' });
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe('todoEnabled must be a boolean');
+    });
+
     it('should validate mcpServers array', () => {
         // Valid server config
         const validServers = [{
