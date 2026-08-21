@@ -238,6 +238,7 @@ interface PersistedTask {
     order?: number;            // Display order within workspace (lower = higher in list)
     tokenUsage?: TaskTokenUsage; // Aggregated token usage for this task
     parentTaskId?: string;     // Task that spawned this one via MCP claudia_create_task
+    workStatus?: import('@claudia/shared').TaskWorkStatus | null; // Landed vs outstanding code changes
     taskNumber?: number;       // Short sequential id, rendered "#48" (see shared Task)
 }
 
@@ -355,6 +356,12 @@ export class TaskSpawner extends EventEmitter {
     // life (sleep/wake resurrection, reconnect) can be retracted before the
     // parent ever sees a stale "has exited".
     private pendingParentNotifications: Map<string, { childId: string; text: string }[]> = new Map();
+    /**
+     * Tasks already nudged about a red CI run, keyed taskId → alert key.
+     * Cleared when the same PR goes green or starts a new run, so the next
+     * failure after a push is treated as new news rather than a repeat.
+     */
+    private ciAlertsSent: Map<string, string> = new Map();
     private archivedTasks: Map<string, ArchivedTaskMetadata> = new Map();
     private persistencePath: string;
     private saveDebounceTimer: NodeJS.Timeout | null = null;
@@ -3432,6 +3439,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 5. Review — use \`claudia_get_task_output\` to read results from completed tasks
 6. Integrate — review the combined changes for conflicts or integration issues, then fix any problems yourself
 
+**Keeping the hierarchy intact:**
+- Every task you spawn should record YOU as its parent so the sidebar nests it under you. Pass \`parentTaskId: "${id}"\` on every \`claudia_create_task\` / \`claudia_create_tasks\` call — do not rely on the tool inferring it.
+- If a create response comes back with \`parentTaskId: null\` or a \`warning\` about top-level creation, your session had no identity: re-send the id explicitly on the next call so the rest of the fleet still groups correctly.
+
 **Task naming:**
 - When creating tasks, always provide a short \`displayName\` (e.g., "Build API endpoint", "Write unit tests") so tasks are easy to identify in the sidebar
 - If your work evolves, call \`claudia_rename_task\` with \`taskId="${id}"\` and a new \`displayName\` (the parameter is named \`displayName\`, NOT \`title\`)
@@ -3752,13 +3763,31 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             sessionWorktreePrInfo: task.sessionWorktreePrInfo,
             parentTaskId: task.parentTaskId,
             taskNumber: task.taskNumber,
+            workStatus: task.workStatus,
         };
+    }
+
+    /**
+     * Record whether this task's code changes are landed or still outstanding.
+     * Recomputed by the PR refresh pass, so it is deliberately NOT persisted —
+     * a stale "safe to clean up" badge is worse than no badge after a restart.
+     */
+    setWorkStatus(taskId: string, workStatus: import('@claudia/shared').TaskWorkStatus | null): boolean {
+        const task = this.tasks.get(taskId);
+        if (!task) return false;
+        if (JSON.stringify(task.workStatus ?? null) === JSON.stringify(workStatus ?? null)) return false;
+        task.workStatus = workStatus;
+        this.emit('taskStateChanged', this.toPublicTask(task));
+        return true;
     }
 
     /** Annotate a task with the worktree branch its session moved onto. */
     setSessionWorktree(taskId: string, branch: string | undefined, prInfo?: import('@claudia/shared').WorkspacePrInfo | null): boolean {
         const task = this.tasks.get(taskId);
         if (!task) return false;
+        // Evaluated on every poll, not only on change: re-arming after a green
+        // run has to happen even when nothing else about the PR moved.
+        this.notePrCiState(taskId, branch, prInfo);
         if (task.sessionWorktreeBranch === branch &&
             JSON.stringify(task.sessionWorktreePrInfo) === JSON.stringify(prInfo)) {
             return false;
@@ -3767,6 +3796,56 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         task.sessionWorktreePrInfo = prInfo;
         this.emit('taskStateChanged', this.toPublicTask(task));
         return true;
+    }
+
+    /**
+     * Watch a task's PR and, the moment its CI goes red, tell the task to fix
+     * it — without waiting for the user to notice and ask.
+     *
+     * The agent that opened the PR is the one holding all the context about
+     * why the branch looks the way it does, so a failing run is work it should
+     * pick up on its own. The notice rides the same queue as child-completion
+     * notices, which only delivers to a live, idle task and re-tries on its
+     * next idle otherwise — so this never types into a running session.
+     *
+     * One notice per failing run: the alert re-arms only after the PR reports
+     * green or a fresh run starts, which is exactly the push that follows a fix.
+     */
+    notePrCiState(taskId: string, branch: string | undefined, prInfo?: import('@claudia/shared').WorkspacePrInfo | null): void {
+        const task = this.tasks.get(taskId);
+        if (!task) return;
+
+        // A null lookup is "unknown", not "no PR": `gh` rate limits, drops
+        // offline and times out, and clearing the armed state on those blips
+        // would re-alert the same red run on the next successful poll.
+        if (!prInfo) return;
+        // A PR nobody can act on any more: forget the armed state.
+        if (prInfo.state === 'merged' || prInfo.state === 'closed') {
+            this.ciAlertsSent.delete(taskId);
+            return;
+        }
+        if (prInfo.ci !== 'failed') {
+            // 'passed'/'running' both mean the red run is history — re-arm.
+            if (prInfo.ci === 'passed' || prInfo.ci === 'running') this.ciAlertsSent.delete(taskId);
+            return;
+        }
+
+        const alertKey = `ci-pr-${prInfo.number}`;
+        if (this.ciAlertsSent.get(taskId) === alertKey) return;
+        this.ciAlertsSent.set(taskId, alertKey);
+
+        const branchNote = branch ? ` on branch \`${branch}\`` : '';
+        const text = `[CLAUDIA CI ALERT: CI is FAILING on your PR #${prInfo.number}${branchNote} (${prInfo.url}). Fix it now — do not wait to be asked. Run \`gh pr checks ${prInfo.number}\` to see which checks are red and \`gh run view --log-failed\` for the failing job's log, fix the cause on this branch, then commit and push. If the failure is genuinely unrelated to your changes (a flake or a broken main), say so explicitly and stop rather than pushing a workaround.]`;
+
+        const queue = this.pendingParentNotifications.get(taskId) ?? [];
+        // Same slot every time, so a task that stays busy through several polls
+        // gets one alert on its next idle rather than a stack of them.
+        const withoutCi = queue.filter(n => n.childId !== alertKey);
+        withoutCi.push({ childId: alertKey, text });
+        if (withoutCi.length > 10) withoutCi.splice(0, withoutCi.length - 10);
+        this.pendingParentNotifications.set(taskId, withoutCi);
+        console.log(`[TaskSpawner] Queued CI failure alert for ${taskId} (PR #${prInfo.number})`);
+        this.flushParentNotifications(taskId);
     }
 
     async captureGitStateAfterTask(taskId: string): Promise<void> {
@@ -4612,6 +4691,9 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
         // Clean up MCP temp config files
         this.cleanupMcpTempFiles(taskId);
+        // A destroyed task can no longer act on its PR. (Disconnect deliberately
+        // keeps this, so a reconnect doesn't re-alert the same failing run.)
+        this.ciAlertsSent.delete(taskId);
 
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);

@@ -32,6 +32,47 @@ describe('validateConfigUpdate', () => {
         expect(validateConfigUpdate({ rules: 123 }).error).toBe('rules must be a string');
     });
 
+    // ngrokDomain lands on an `ngrok http --domain <x>` argv, so the validator
+    // is the boundary that keeps argv separators and URLs out of it.
+    it('accepts a bare reserved hostname and trims it', () => {
+        const result = validateConfigUpdate({ ngrokDomain: '  claudia.ngrok.app  ' });
+        expect(result.valid).toBe(true);
+        expect(result.data?.ngrokDomain).toBe('claudia.ngrok.app');
+    });
+
+    it('accepts an empty domain as "let ngrok assign the URL"', () => {
+        const result = validateConfigUpdate({ ngrokDomain: '   ' });
+        expect(result.valid).toBe(true);
+        expect(result.data?.ngrokDomain).toBe('');
+    });
+
+    it('rejects a non-string domain', () => {
+        const result = validateConfigUpdate({ ngrokDomain: 42 });
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe('ngrokDomain must be a string');
+    });
+
+    it('rejects anything that is not a bare hostname', () => {
+        for (const bad of [
+            'https://claudia.ngrok.app',   // scheme
+            'claudia.ngrok.app/path',      // path
+            'claudia.ngrok.app:443',       // port
+            'claudia.ngrok.app --region eu', // argv separator
+            'localhost',                   // single label, no dot
+            '-leading.ngrok.app',          // label starts with a hyphen
+        ]) {
+            const result = validateConfigUpdate({ ngrokDomain: bad });
+            expect(result.valid, bad).toBe(false);
+            expect(result.error, bad).toMatch(/bare hostname/);
+        }
+    });
+
+    it('rejects a domain longer than 253 characters', () => {
+        const result = validateConfigUpdate({ ngrokDomain: `${'a'.repeat(250)}.ngrok.app` });
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe('ngrokDomain must be 253 characters or fewer');
+    });
+
     it('should validate mcpServers array', () => {
         // Valid server config
         const validServers = [{

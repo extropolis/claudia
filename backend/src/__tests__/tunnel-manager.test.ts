@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
-import { TunnelManager, type TunnelManagerDeps } from '../tunnel-manager.js';
+import { TunnelManager, parseNgrokAddrPort, type TunnelManagerDeps } from '../tunnel-manager.js';
 
 const PORT = 45231; // never 4001/5173 — nothing binds anyway, this is argv only
 
@@ -85,6 +85,7 @@ describe('initial state', () => {
         const { deps } = makeDeps();
         expect(new TunnelManager(PORT, undefined, deps).getStatus()).toEqual({
             active: false, url: null, token: null, startedAt: null, error: null, publicIp: null,
+            domain: null, reachable: null, warning: null,
         });
     });
 
@@ -510,6 +511,7 @@ describe('stop', () => {
         }
         expect(tm.getStatus()).toEqual({
             active: false, url: null, token: null, startedAt: null, error: null, publicIp: null,
+            domain: null, reachable: null, warning: null,
         });
         expect(tm.validateToken('x')).toBe(false);
     });
@@ -573,5 +575,96 @@ describe('stop', () => {
         await vi.advanceTimersByTimeAsync(1200);
         await expect(stopping).resolves.toBeUndefined();
         expect(tm.getStatus().active).toBe(false);
+    });
+});
+
+/**
+ * Adoption must be scoped to OUR port. Before this guard, every extra process
+ * that constructed a TunnelManager — the integration-test harness on an
+ * ephemeral port, a second backend instance — adopted whatever ngrok happened
+ * to be running, and its teardown then ran `taskkill /f /im ngrok.exe`,
+ * killing the live server's tunnel. Running `npm test` took mobile access
+ * down until the user re-enabled the tunnel.
+ */
+describe('adoption is scoped to the port we serve', () => {
+    /** deps whose /api/tunnels always reports one https tunnel with `addr`. */
+    function depsWithAddr(addr: string | undefined) {
+        const spawnCalls: string[][] = [];
+        const deps: Partial<TunnelManagerDeps> = {
+            spawn: ((cmd: string, args: string[]) => {
+                spawnCalls.push(args);
+                return new FakeChild();
+            }) as unknown as TunnelManagerDeps['spawn'],
+            execSync: (() => Buffer.from('')) as unknown as TunnelManagerDeps['execSync'],
+            fetch: async (url: string) => {
+                if (url.includes('ipify')) throw new Error('offline');
+                return {
+                    json: async () => ({
+                        tunnels: [{
+                            public_url: 'https://someone-elses.ngrok-free.dev',
+                            proto: 'https',
+                            ...(addr === undefined ? {} : { config: { addr } }),
+                        }],
+                    }),
+                };
+            },
+        };
+        return { deps, spawnCalls };
+    }
+
+    it('does NOT adopt a tunnel pointing at a different port', async () => {
+        const { deps } = depsWithAddr('http://localhost:4001');
+        const tm = new TunnelManager(PORT, undefined, deps);
+        await tm.autoRecover();
+        expect(tm.getStatus().active).toBe(false);
+        expect(tm.getStatus().url).toBeNull();
+    });
+
+    it('DOES adopt a tunnel pointing at our port', async () => {
+        const { deps } = depsWithAddr(`http://localhost:${PORT}`);
+        const tm = new TunnelManager(PORT, undefined, deps);
+        await tm.autoRecover();
+        expect(tm.getStatus().url).toBe('https://someone-elses.ngrok-free.dev');
+        await tm.stop();
+    });
+
+    it('accepts the bare host:port form older ngrok reports', async () => {
+        const { deps } = depsWithAddr(`localhost:${PORT}`);
+        const tm = new TunnelManager(PORT, undefined, deps);
+        await tm.autoRecover();
+        expect(tm.getStatus().active).toBe(true);
+        await tm.stop();
+    });
+
+    it('still adopts when the API omits addr (older ngrok) — parse miss must not regress orphan recovery', async () => {
+        const { deps } = depsWithAddr(undefined);
+        const tm = new TunnelManager(PORT, undefined, deps);
+        await tm.autoRecover();
+        expect(tm.getStatus().active).toBe(true);
+        await tm.stop();
+    });
+
+    it('honours setPort() when deciding what to adopt', async () => {
+        const { deps } = depsWithAddr('http://localhost:4001');
+        const tm = new TunnelManager(PORT, undefined, deps);
+        tm.setPort(4001);
+        await tm.autoRecover();
+        expect(tm.getStatus().active).toBe(true);
+        await tm.stop();
+    });
+});
+
+describe('parseNgrokAddrPort', () => {
+    it.each([
+        ['http://localhost:4001', 4001],
+        ['https://127.0.0.1:8080/', 8080],
+        ['localhost:5173', 5173],
+        ['0.0.0.0:65535', 65535],
+    ])('parses %s as %i', (addr, expected) => {
+        expect(parseNgrokAddrPort(addr as string)).toBe(expected);
+    });
+
+    it.each(['80', 'file:///tmp/sock', '', 'localhost:99999'])('returns null for %s', (addr) => {
+        expect(parseNgrokAddrPort(addr)).toBeNull();
     });
 });
