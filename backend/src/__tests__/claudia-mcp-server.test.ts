@@ -101,6 +101,8 @@ beforeAll(async () => {
             mkTask(SELF_TASK, worktree),
             // Title hand-edited by the user — agents must not be able to rename it.
             mkTask('task-locked', repo, { displayName: 'User Chosen Name', displayNameEditedByUser: true }),
+            // Spawned child with a fixed short number — exercises refs + hierarchy.
+            mkTask('task-child-1', worktree, { parentTaskId: SELF_TASK, taskNumber: 77 }),
             mkTask('task-other-1', other),
         ],
         archivedTasks: [],
@@ -145,10 +147,18 @@ afterAll(async () => {
     if (shutdown) await shutdown();
     // Detach the worktree before deleting, so no stale admin dir is left behind.
     try { git(repo, 'worktree', 'remove', '--force', worktree); } catch { /* best effort */ }
-    // maxRetries: on Windows the just-removed worktree's handles can still be
-    // open when rmdir runs, and an EBUSY here fails the whole suite even though
-    // every test passed. Matches the retry guard the other suites use.
-    rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 });
+    // Best-effort with generous retries: on Windows the just-removed worktree's
+    // handles can outlive the git process, and even 5×150ms retries lose that
+    // race sometimes (observed on both local runs and the windows-latest CI
+    // leg). An orphaned temp dir is harmless — CI runners are ephemeral and
+    // local dirs get cleaned by the next run's mkdtemp churn — but a THROW
+    // here fails the whole suite after every test passed. Never let teardown
+    // hygiene fail the suite.
+    try {
+        rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+    } catch (e) {
+        console.warn(`[claudia-mcp-server.test] temp dir left behind (Windows handle race): ${base}`, e);
+    }
     delete process.env.CLAUDIA_BACKEND_URL;
     delete process.env.CLAUDIA_WORKSPACE_ID;
     delete process.env.CLAUDIA_TASK_ID;
@@ -160,7 +170,8 @@ afterAll(async () => {
 describe('tool schema integrity', () => {
     const EXPECTED_TOOLS = [
         'claudia_list_tasks', 'claudia_get_task_status', 'claudia_get_task_output',
-        'claudia_create_task', 'claudia_send_input', 'claudia_continue_task',
+        'claudia_create_task', 'claudia_create_tasks', 'claudia_wait_for_task',
+        'claudia_send_input', 'claudia_continue_task',
         'claudia_stop_task', 'claudia_stop_all_tasks', 'claudia_rename_task',
         'claudia_delete_task', 'claudia_cron_create', 'claudia_cron_list',
         'claudia_cron_delete', 'claudia_cron_pause',
@@ -197,6 +208,8 @@ describe('tool schema integrity', () => {
             claudia_get_task_status: ['taskId'],
             claudia_get_task_output: ['taskId'],
             claudia_create_task: ['prompt'],
+            claudia_create_tasks: ['tasks'],
+            claudia_wait_for_task: ['taskId'],
             claudia_send_input: ['taskId', 'input'],
             claudia_continue_task: ['taskId', 'prompt'],
             claudia_stop_task: ['taskId'],
@@ -286,6 +299,86 @@ describe('claudia_list_tasks cross-worktree scope', () => {
         const locked = json.find((t: any) => t.id === 'task-locked');
         expect(locked.prompt).toBe('User Chosen Name');
         expect(locked.canResume).toBe(true); // idle → resumable
+    });
+});
+
+// ============================================================================
+// Short refs (#48), hierarchy fields, and claudia_wait_for_task
+// ============================================================================
+describe('short refs and hierarchy', () => {
+    it('list_tasks gives every task a short ref and exposes parent links', async () => {
+        const { json } = await callTool('claudia_list_tasks');
+        for (const t of json) {
+            expect(t.ref, `${t.id} must carry a ref`).toMatch(/^#\d+$/);
+        }
+        const child = json.find((t: any) => t.id === 'task-child-1');
+        expect(child.ref).toBe('#77');
+        // The hierarchy the sidebar renders comes from exactly this field.
+        expect(child.parent).toBe(SELF_TASK);
+    });
+
+    it('resolves a short ref anywhere a taskId is accepted', async () => {
+        const { json } = await callTool('claudia_get_task_status', { taskId: '#77' });
+        expect(json.id).toBe('task-child-1');
+        const bare = await callTool('claudia_get_task_status', { taskId: '77' });
+        expect(bare.json.id).toBe('task-child-1');
+    });
+
+    it('an unknown short ref is an error, not a guess', async () => {
+        const { text } = await callTool('claudia_get_task_status', { taskId: '#99999' });
+        expect(text).toMatch(/not found/i);
+    });
+});
+
+describe('short-ref hardening', () => {
+    it('the stop-self guard catches the caller own short ref, not just its full id', async () => {
+        // '#N' for SELF slipped past `taskId === SELF_TASK_ID` and the backend
+        // ESC-interrupted the orchestrating session itself.
+        const { json: listing } = await callTool('claudia_list_tasks');
+        const self = listing.find((t: any) => t.id === SELF_TASK);
+        expect(self.ref).toMatch(/^#\d+$/);
+
+        const { json } = await callTool('claudia_stop_task', { taskId: self.ref });
+        expect(json.success).toBe(false);
+        expect(json.message).toMatch(/currently running session/i);
+    });
+
+    it('claudia_get_task_output treats a short ref exactly like the full id (the # must not become a URL fragment)', async () => {
+        // Un-encoded, '#77' truncated the fetch path at the fragment and the
+        // request silently hit /api/tasks — returning an empty-output SUCCESS
+        // while the full id took the real per-task route. The two refs must
+        // produce byte-identical tool responses.
+        const short = await callTool('claudia_get_task_output', { taskId: '#77' });
+        const full = await callTool('claudia_get_task_output', { taskId: 'task-child-1' });
+        expect(short.text).toBe(full.text);
+        // Never the silent empty-output success the truncated URL fabricated.
+        if (short.json) {
+            expect(short.json.taskId).toBeDefined();
+        }
+    });
+});
+
+describe('claudia_wait_for_task', () => {
+    it('returns immediately for a task that is not running', async () => {
+        const started = Date.now();
+        const { json } = await callTool('claudia_wait_for_task', { taskId: 'task-root-1' });
+        expect(json.taskId).toBe('task-root-1');
+        expect(json.timedOut).toBe(false);
+        // idle-on-disk loads as a lazy disconnected task — the point is that a
+        // settled state comes back without burning the wait window.
+        expect(['idle', 'disconnected', 'exited', 'waiting_input']).toContain(json.state);
+        expect(Date.now() - started).toBeLessThan(10_000);
+    });
+
+    it('accepts a short ref and reports the canonical id back', async () => {
+        const { json } = await callTool('claudia_wait_for_task', { taskId: '#77' });
+        expect(json.taskId).toBe('task-child-1');
+        expect(json.timedOut).toBe(false);
+    });
+
+    it('errors cleanly on an unknown task', async () => {
+        const { text } = await callTool('claudia_wait_for_task', { taskId: 'task-nope' });
+        expect(text).toMatch(/not found/i);
     });
 });
 

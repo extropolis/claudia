@@ -699,36 +699,107 @@
     overflow: hidden;
 }
 
-/* Scheduled task (cron) badge */
-.workspace-panel .task-item .task-cron-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    padding: 1px 4px;
-    border-radius: 8px;
-    border: none;
-    background: rgba(0, 212, 255, 0.1);
-    color: var(--accent-secondary);
-    font-size: 0.625rem;
-    flex-shrink: 0;
-    margin-left: 4px;
-    opacity: 0.8;
-    cursor: pointer;
-    transition: all 0.15s ease;
+/* Short task ref (48) — the id agents and developers reference tasks by.
+ * Rendered as a small pill so the number reads as an identifier, not as the
+ * first word of the prompt: solid contrast, tabular digits, subtle ground. */
+.workspace-panel .task-item .task-ref {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 0 4px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.5;
+    font-family: var(--font-mono, monospace);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary, rgba(128, 128, 128, 0.18));
+    border-radius: 4px;
 }
 
-.workspace-panel .task-item .task-cron-badge:hover {
+/* "Fully integrated" hint — PR merged into main; recommends archiving. */
+.workspace-panel .task-item .task-integrated-hint {
+    flex-shrink: 0;
+    padding: 1px 5px;
+    font-size: 9px;
+    line-height: 1.4;
+    border: 1px solid var(--accent-success, #2ea043);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--accent-success, #2ea043);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.workspace-panel .task-item .task-integrated-hint:hover {
+    background: var(--accent-success, #2ea043);
+    color: var(--bg-primary, #fff);
+}
+
+/* Scheduled tasks no longer take a badge in the name row — the schedule action
+ * button carries the signal instead (see .task-action-button.has-schedules), so
+ * the row keeps its width for the task name and the subtask toggle. */
+
+/* Scheduled (cron) indicator — icon only, immediately left of the worktree
+ * badge, and only rendered when the task actually has schedules. */
+.workspace-panel .task-item .task-schedule-indicator {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    margin-left: 4px;
+    padding: 1px 4px;
+    border: none;
+    border-radius: 8px;
+    background: rgba(0, 212, 255, 0.1);
+    color: var(--accent-secondary);
+    opacity: 0.8;
+    cursor: pointer;
+    transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.workspace-panel .task-item .task-schedule-indicator:hover {
     opacity: 1;
     background: rgba(0, 212, 255, 0.18);
 }
 
-.workspace-panel .task-item .task-cron-badge.paused {
+.workspace-panel .task-item .task-schedule-indicator.paused {
     background: rgba(255, 171, 64, 0.12);
     color: #ffab40;
 }
 
-.workspace-panel .task-item .task-cron-badge.paused:hover {
+.workspace-panel .task-item .task-schedule-indicator.paused:hover {
     background: rgba(255, 171, 64, 0.22);
+}
+
+/* Landed vs outstanding work. Amber = this task still holds changes; green =
+ * everything is on the default branch and the worktree is clean. Tasks that
+ * never touched code render neither. */
+.workspace-panel .task-item .task-work-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+    margin-left: 4px;
+    padding: 1px 4px;
+    border-radius: 8px;
+    font-size: 0.625rem;
+    line-height: 1.4;
+    font-variant-numeric: tabular-nums;
+}
+
+.workspace-panel .task-item .task-work-status.outstanding {
+    background: rgba(210, 153, 34, 0.15);
+    color: #d29922;
+}
+
+.workspace-panel .task-item .task-work-status.landed {
+    background: rgba(63, 185, 80, 0.15);
+    color: #3fb950;
+}
+
+.workspace-panel .task-item .task-work-status-counts {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-weight: 600;
 }
 
 /* Inline worktree badge on a single-task worktree (icon only, branch in tooltip) */
@@ -786,11 +857,6 @@
 .pr-badge-ci.running { color: #d29922; }
 .pr-badge-ci-spin { animation: pr-badge-spin 1s linear infinite; }
 @keyframes pr-badge-spin { to { transform: rotate(360deg); } }
-
-.workspace-panel .task-item .task-cron-badge .task-cron-count {
-    font-variant-numeric: tabular-nums;
-    line-height: 1;
-}
 
 .workspace-panel .task-item .task-actions {
     display: flex;
@@ -964,6 +1030,7 @@
 .workspace-panel .task-item:hover .task-action-button {
     display: flex;
 }
+
 
 .task-action-button:hover {
     background: var(--bg-primary);
@@ -2368,18 +2435,98 @@
     border-color: rgba(88, 166, 255, 0.45);
 }
 
+/* Collapsed reads as "there is more here", not as a neutral count. */
+.workspace-panel .task-item.subtasks-collapsed .task-subtask-toggle {
+    background: rgba(88, 166, 255, 0.2);
+    border-color: rgba(88, 166, 255, 0.4);
+}
+
+/* Deliberately no left-border or text recolour on the parent row: that border
+ * is the state channel (unread green, question amber, selection, last-selected)
+ * and a hierarchy hint has no business outranking it. The rail below the row
+ * and the toggle in it carry the grouping instead. */
+
+/* ── The hierarchy rail ──────────────────────────────────────────────────────
+ * Children used to sit behind a flat indent with a faint border that read as a
+ * divider rather than as "these belong to the row above".
+ *
+ * The rail is aligned to the CENTRE of the parent row's status icon, so it
+ * drops out of the circle itself instead of running past it at an offset.
+ * 41px is measured, not derived: every state icon (circle, alert, "!", archive
+ * checkbox, spinner) centres there regardless of its own width.
+ * Each child takes a rounded elbow off that rail into its own status icon.
+ */
+.workspace-panel {
+    /* Centre of a task row's status icon — the rail's x for every level. */
+    --task-rail-x: 41px;
+}
+
+.task-group {
+    position: relative;
+}
+
 .subtask-list {
-    padding-left: 12px;
-    border-left: 2px solid rgba(88, 166, 255, 0.18);
-    margin-left: 10px;
-    margin-bottom: 2px;
+    position: relative;
+    /* Child rows sit 24px right of the rail: their own icons centre at 65px,
+     * and the elbow (41 → 55px) stops just short of them. */
+    margin: 0 0 3px 0;
+    padding-left: 46px;
+}
+
+/* Vertical rail, ending level with the last child's elbow (rows are a single
+ * clamped line, so their height is stable) rather than running past it. */
+.subtask-list::before {
+    content: '';
+    position: absolute;
+    left: var(--task-rail-x);
+    top: -4px;
+    bottom: 15px;
+    width: 1px;
+    border-radius: 1px;
+    background: rgba(88, 166, 255, 0.32);
+    transition: background 0.15s ease;
+}
+
+.task-group:hover .subtask-list::before {
+    background: rgba(88, 166, 255, 0.5);
 }
 
 .subtask-list .task-item {
-    opacity: 0.9;
+    position: relative;
+    opacity: 0.92;
+}
+
+/* Subtasks cannot be reordered by dragging (the list passes no drag handlers),
+ * so the grip is dead weight — and hiding it keeps the elbow clear of it. */
+.subtask-list .task-item .task-drag-handle {
+    display: none;
+}
+
+/* Rounded elbow: down the rail, round the corner, into the child's icon. */
+.subtask-list .task-item::before {
+    content: '';
+    position: absolute;
+    left: var(--task-rail-x);
+    top: calc(50% - 11px);
+    width: 14px;
+    height: 11px;
+    border-left: 1px solid rgba(88, 166, 255, 0.32);
+    border-bottom: 1px solid rgba(88, 166, 255, 0.32);
+    border-bottom-left-radius: 7px;
+    transition: border-color 0.15s ease;
 }
 
 .subtask-list .task-item:hover {
+    opacity: 1;
+}
+
+.subtask-list .task-item:hover::before,
+.subtask-list .task-item.selected::before {
+    border-left-color: rgba(88, 166, 255, 0.75);
+    border-bottom-color: rgba(88, 166, 255, 0.75);
+}
+
+.subtask-list .task-item.selected {
     opacity: 1;
 }
 

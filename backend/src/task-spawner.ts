@@ -238,6 +238,8 @@ interface PersistedTask {
     order?: number;            // Display order within workspace (lower = higher in list)
     tokenUsage?: TaskTokenUsage; // Aggregated token usage for this task
     parentTaskId?: string;     // Task that spawned this one via MCP claudia_create_task
+    workStatus?: import('@claudia/shared').TaskWorkStatus | null; // Landed vs outstanding code changes
+    taskNumber?: number;       // Short sequential id, rendered "#48" (see shared Task)
 }
 
 // Lightweight metadata for archived tasks (no outputHistory - loaded lazily from disk)
@@ -254,12 +256,24 @@ interface ArchivedTaskMetadata {
     historySize?: number;
     displayName?: string;      // User-editable display name
     displayNameEditedByUser?: boolean; // True if the user manually edited the display name
+    // LEGACY: archived tasks are no longer numbered (they are never referenced);
+    // the field remains only so the load-time repair can strip old values.
+    taskNumber?: number;
+    parentTaskId?: string;     // Spawning task, kept so restore rebuilds the hierarchy
 }
 
 interface TaskPersistence {
     tasks: PersistedTask[];
     // Archived tasks now only contain metadata (history stored separately)
     archivedTasks?: ArchivedTaskMetadata[];
+    // Next taskNumber to hand out. Persisted so numbers are never reused after
+    // a restart, even when the highest-numbered task has been deleted.
+    nextTaskNumber?: number;
+    // Undelivered child→parent completion notices, keyed by parent task id.
+    // Persisted because tsx-watch restarts are routine — an orchestrator told
+    // "you do not need to poll" must not lose a child's completion to a reload
+    // that happened before the notice was delivered.
+    pendingParentNotifications?: Record<string, { childId: string; text: string }[]>;
 }
 
 interface InternalTask extends Task {
@@ -296,6 +310,7 @@ interface InternalTask extends Task {
     readyFallbackTimer?: ReturnType<typeof setTimeout>; // Fallback timer to send prompt if ready signal is never detected
     titleInstructionInjected?: boolean; // True if auto-title instruction has been injected into this session
     titleInstructionCount?: number; // Number of follow-up messages sent (for periodic title-update reminders)
+    parentNotifiedThisRun?: boolean; // True once the parent has been notified for the current run (cleared on busy)
 }
 
 /**
@@ -325,9 +340,57 @@ interface InternalTask extends Task {
  * - 'reconnectStart': When auto-reconnection begins
  * - 'reconnectComplete': When auto-reconnection finishes
  */
+/**
+ * Decide what a requested parent ref should actually link to.
+ *
+ * A ref that resolves to nothing used to be stored verbatim, which reads as
+ * "linked" everywhere (the MCP create response said so) while the sidebar
+ * renders the child flat, because no such parent exists — the very failure the
+ * explicit parentTaskId was added to prevent, now silent.
+ *
+ * A canonical-looking id we do not know YET is still worth keeping: the parent
+ * may be archived, or not reconnected from persistence yet, and the hierarchy
+ * should reappear when it comes back. A stale short ref ("#9999") or a typo can
+ * never become valid, so it is dropped and logged instead.
+ */
+export function chooseParentLink(
+    ref: string,
+    resolve: (ref: string) => string | null,
+): { parentTaskId: string | null; resolved: boolean } {
+    const trimmed = ref.trim();
+    if (!trimmed) return { parentTaskId: null, resolved: false };
+
+    const resolved = resolve(trimmed);
+    if (resolved) return { parentTaskId: resolved, resolved: true };
+
+    const canonicalLooking = /^task-[a-z0-9-]+$/i.test(trimmed);
+    return canonicalLooking
+        ? { parentTaskId: trimmed, resolved: false }
+        : { parentTaskId: null, resolved: false };
+}
+
 export class TaskSpawner extends EventEmitter {
     private tasks: Map<string, InternalTask> = new Map();
     private disconnectedTasks: Map<string, PersistedTask> = new Map();
+    // Next short task number to assign (see Task.taskNumber). Loaded from
+    // persistence and monotonically increasing — numbers are never reused, so
+    // "#48" stays unambiguous in conversation even after the task is deleted.
+    private nextTaskNumber = 1;
+    // Completion notices queued for parent (spawning) tasks, keyed by parent
+    // task id. When a child settles, its parent gets a short injected update —
+    // immediately if the parent is idle, or on the parent's next idle
+    // transition otherwise. This is what lets an orchestrator stop burning
+    // turns polling claudia_get_task_status: children report back on their own.
+    // Entries carry the child id so notices for a child that comes back to
+    // life (sleep/wake resurrection, reconnect) can be retracted before the
+    // parent ever sees a stale "has exited".
+    private pendingParentNotifications: Map<string, { childId: string; text: string }[]> = new Map();
+    /**
+     * Tasks already nudged about a red CI run, keyed taskId → alert key.
+     * Cleared when the same PR goes green or starts a new run, so the next
+     * failure after a push is treated as new news rather than a repeat.
+     */
+    private ciAlertsSent: Map<string, string> = new Map();
     private archivedTasks: Map<string, ArchivedTaskMetadata> = new Map();
     private persistencePath: string;
     private saveDebounceTimer: NodeJS.Timeout | null = null;
@@ -657,6 +720,14 @@ export class TaskSpawner extends EventEmitter {
             if (task) {
                 task.state = 'exited';
                 this.emit('taskStateChanged', this.toPublicTask(task));
+                // Exit bypasses transitionTaskState — notify the parent here.
+                // Deliberately NOT gated on hasStartedProcessing: a child that
+                // dies during startup (bad auth, missing CLI, broken worktree)
+                // is exactly the one the parent must hear about, or a fan-out
+                // stalls forever on "you do not need to poll".
+                if (task.parentTaskId) {
+                    this.queueParentNotification(task, 'exited');
+                }
                 this.scheduleSave();
             }
         });
@@ -1632,6 +1703,8 @@ export class TaskSpawner extends EventEmitter {
             // Reset processStartedAt when transitioning into busy/starting from a non-active state
             if ((newState === 'busy' || newState === 'starting') && oldState !== 'busy' && oldState !== 'starting') {
                 task.processStartedAt = new Date();
+                // New run — the parent should hear about how THIS run settles.
+                task.parentNotifiedThisRun = false;
                 console.log(`[TaskSpawner] Reset processStartedAt for task ${task.id} to ${task.processStartedAt.toISOString()} (transition: ${oldState} → ${newState})`);
             }
 
@@ -1667,11 +1740,125 @@ export class TaskSpawner extends EventEmitter {
                 // settle after idle. Mark as an internal re-delivery so the destructive-
                 // input guard doesn't double-count input already accepted upstream.
                 setTimeout(() => this.writeToTask(task.id, toSend, 'internal-followup', true), 300);
+            } else if (newState === 'idle' && task.initialPromptSent && task.pendingPrompt == null) {
+                // Parent settled with nothing queued ahead — deliver any child
+                // completion notices now. Skipped when a follow-up input was just
+                // dispatched above (the input makes the task busy again; notices
+                // go out on the next idle instead of colliding with it).
+                this.flushParentNotifications(task.id);
+            }
+
+            // The task that settled may itself be someone's child — tell the
+            // parent. Only real completions count: a transition out of an
+            // actively-working state, after the initial prompt actually ran.
+            if ((oldState === 'busy' || oldState === 'starting')
+                && (newState === 'idle' || newState === 'waiting_input' || newState === 'exited')
+                && task.parentTaskId
+                && task.hasStartedProcessing) {
+                this.queueParentNotification(task, newState);
             }
         } finally {
             // Release lock
             task.stateTransitionLock = false;
         }
+    }
+
+    /**
+     * Queue a completion notice for a settled child's parent and try to
+     * deliver it. The notice names the child by short ref so the parent can
+     * feed it straight back into the claudia_* tools.
+     */
+    private queueParentNotification(child: InternalTask, newState: TaskState): void {
+        const parentId = child.parentTaskId;
+        if (!parentId || parentId === child.id) return;
+
+        // One notice per run: a task that settled to idle and whose process
+        // later dies must not notify twice ("is idle" then "has exited").
+        // The flag clears when the child goes busy again (a new run).
+        if (child.parentNotifiedThisRun) return;
+        child.parentNotifiedThisRun = true;
+
+        const ref = typeof child.taskNumber === 'number' ? `#${child.taskNumber}` : child.id;
+        const label = child.displayName ? ` ("${child.displayName}")` : '';
+        const detail = newState === 'waiting_input'
+            ? 'is WAITING FOR INPUT — answer it with claudia_send_input'
+            : newState === 'exited'
+                ? 'has exited'
+                : 'has finished and is idle';
+        const msg = `[CLAUDIA TASK UPDATE: spawned task ${ref}${label} ${detail}. Review it with claudia_get_task_output("${ref}") and continue orchestrating.]`;
+
+        const queue = this.pendingParentNotifications.get(parentId) ?? [];
+        // Replace any earlier undelivered notice about the same child — the
+        // parent only cares about its latest state.
+        const withoutChild = queue.filter(n => n.childId !== child.id);
+        withoutChild.push({ childId: child.id, text: msg });
+        // Cap the queue: a parent that stays busy while a large fan-out settles
+        // should get a bounded digest, not an unbounded backlog of injections.
+        if (withoutChild.length > 10) withoutChild.splice(0, withoutChild.length - 10);
+        this.pendingParentNotifications.set(parentId, withoutChild);
+        console.log(`[TaskSpawner] Queued parent notification: ${parentId} ← ${child.id} (${newState})`);
+        this.flushParentNotifications(parentId);
+    }
+
+    /**
+     * Retract undelivered notices about a child that came back to life
+     * (reconnect, sleep/wake resurrection). Without this, a laptop waking from
+     * sleep queued a "has exited" per dead-PTY child, then resurrected them
+     * all — and the parent's next idle delivered a digest of exit notices for
+     * tasks that were alive and busy again.
+     */
+    private retractParentNotificationsFor(childId: string): void {
+        for (const [parentId, queue] of this.pendingParentNotifications) {
+            const remaining = queue.filter(n => n.childId !== childId);
+            if (remaining.length === queue.length) continue;
+            if (remaining.length === 0) this.pendingParentNotifications.delete(parentId);
+            else this.pendingParentNotifications.set(parentId, remaining);
+            console.log(`[TaskSpawner] Retracted stale parent notification: ${parentId} ← ${childId} (child resurrected)`);
+        }
+    }
+
+    /**
+     * Deliver queued child notices to a parent, if the parent is live and
+     * idle. Otherwise they stay queued and the parent's own next idle
+     * transition (or reconnect-then-idle) flushes them.
+     */
+    private flushParentNotifications(parentId: string, attempt: number = 0): void {
+        const queue = this.pendingParentNotifications.get(parentId);
+        if (!queue || queue.length === 0) return;
+        const parent = this.tasks.get(parentId);
+        if (!parent || parent.state !== 'idle' || !parent.initialPromptSent || parent.pendingPrompt != null) return;
+
+        // Same delivery discipline as queued follow-ups: outside the lock,
+        // after the TUI settles, marked internal. The queue is NOT consumed
+        // here: the parent's state is re-checked at fire time, because within
+        // the delay window the user can submit a prompt (busy — the write
+        // would type into a running session), the task can hit a permission
+        // prompt (waiting_input — the trailing \r would answer the dialog),
+        // or the reaper can disconnect it (the write path would spawn a full
+        // reconnect just to inject a notice). If the parent is no longer
+        // deliverable, the notices stay queued for its next idle transition.
+        setTimeout(() => {
+            const p = this.tasks.get(parentId);
+            const q = this.pendingParentNotifications.get(parentId);
+            if (!q || q.length === 0) return;
+            if (!p || p.state !== 'idle' || !p.initialPromptSent || p.pendingPrompt != null) return;
+            // Quiet check: several injectors fire on the same idle transition
+            // (cron prompts, reference/MCP context updates) and polling takes
+            // seconds to flip the state to busy — 'idle' alone cannot prove
+            // nothing was just typed. Fresh output means another injector got
+            // here first; retry shortly (bounded), else wait for next idle.
+            const lastMs = p.lastActivity instanceof Date
+                ? p.lastActivity.getTime()
+                : new Date(p.lastActivity as unknown as string).getTime();
+            if (Number.isFinite(lastMs) && Date.now() - lastMs < 800) {
+                if (attempt < 5) this.flushParentNotifications(parentId, attempt + 1);
+                return;
+            }
+            this.pendingParentNotifications.delete(parentId);
+            const combined = q.map(n => n.text).join('\n') + '\r';
+            console.log(`[TaskSpawner] Delivering ${q.length} child notification(s) to parent ${parentId}`);
+            this.writeToTask(parentId, combined, 'internal-followup', true);
+        }, attempt === 0 ? 300 : 1000);
     }
 
     /**
@@ -1861,7 +2048,27 @@ export class TaskSpawner extends EventEmitter {
 
                 const data = readFileSync(this.persistencePath, 'utf-8');
                 // Use 'any' for raw persistence to handle migration from old format
-                const persistence = JSON.parse(data) as { tasks: PersistedTask[]; archivedTasks?: any[] };
+                const persistence = JSON.parse(data) as { tasks: PersistedTask[]; archivedTasks?: any[]; nextTaskNumber?: number; pendingParentNotifications?: Record<string, { childId: string; text: string }[]> };
+                if (typeof persistence.nextTaskNumber === 'number' && persistence.nextTaskNumber > 0) {
+                    this.nextTaskNumber = persistence.nextTaskNumber;
+                }
+                // Restore undelivered child→parent notices — a tsx-watch reload
+                // must not eat a completion the orchestrator was promised.
+                // Delivery re-arms via the parent's next idle transition or its
+                // reconnect (both call flushParentNotifications).
+                if (persistence.pendingParentNotifications) {
+                    for (const [parentId, queue] of Object.entries(persistence.pendingParentNotifications)) {
+                        if (!Array.isArray(queue) || queue.length === 0) continue;
+                        // Child-completion notices are facts and survive a restart.
+                        // CI alerts are a live state ("your PR is red RIGHT NOW"),
+                        // and the once-per-run dedupe that guards them is in-memory
+                        // — so a persisted one could be injected days later, long
+                        // after the run was fixed. Drop them: the PR poller re-alerts
+                        // within a tick if the run is genuinely still red.
+                        const fresh = queue.filter(n => !n.childId?.startsWith('ci-pr-'));
+                        if (fresh.length > 0) this.pendingParentNotifications.set(parentId, fresh);
+                    }
+                }
                 console.log(`[TaskSpawner] ========== LOADING PERSISTED TASKS ==========`);
                 console.log(`[TaskSpawner] Loading ${persistence.tasks.length} active tasks, ${persistence.archivedTasks?.length || 0} archived tasks`);
 
@@ -1966,6 +2173,8 @@ export class TaskSpawner extends EventEmitter {
                                 : archived.historySize || 0,
                             displayName: archived.displayName,
                             displayNameEditedByUser: archived.displayNameEditedByUser,
+                            taskNumber: archived.taskNumber, // legacy value; stripped by the numbering repair
+                            parentTaskId: archived.parentTaskId,
                         };
                         this.archivedTasks.set(archived.id, metadata);
                     }
@@ -1978,11 +2187,94 @@ export class TaskSpawner extends EventEmitter {
                 }
             }
 
+            // MIGRATION: number any pre-existing tasks that predate short ids.
+            // Oldest first, so numbers read chronologically like they would have
+            // if the feature had existed from the start. Runs once — numbered
+            // tasks keep their number forever.
+            this.assignMissingTaskNumbers();
+
             // Repair any tasks whose sessionId was orphaned by a bad reconnect.
             this.applySessionRecoveryMap();
         } catch (error) {
             console.error('[TaskSpawner] Failed to load persisted tasks:', error);
         }
+    }
+
+    /**
+     * One-time migration: give every known task a short number, oldest first,
+     * and advance the counter past both the migrated numbers and any numbers
+     * already present (so a partially-migrated file can't cause reuse).
+     */
+    private assignMissingTaskNumbers(): void {
+        // ACTIVE tasks only. Archived tasks are never referenced — numbering
+        // them meant an install with a long archive history started its live
+        // tasks in the hundreds. An archived task that gets restored is
+        // assigned a fresh number at restore time instead.
+        //
+        // One-time repair for installs the archive-inclusive first cut ran on:
+        // archived entries carrying a number identify them; strip those and
+        // renumber the active set compactly from 1. This is the single
+        // deliberate exception to "numbers never change".
+        let polluted = false;
+        for (const archived of this.archivedTasks.values()) {
+            if (typeof archived.taskNumber === 'number') {
+                delete archived.taskNumber;
+                polluted = true;
+            }
+        }
+
+        const active = [...this.disconnectedTasks.values()] as { taskNumber?: number; createdAt: string }[];
+        if (polluted) {
+            for (const t of active) delete t.taskNumber;
+            this.nextTaskNumber = 1;
+        }
+
+        let highest = 0;
+        for (const t of active) {
+            if (typeof t.taskNumber === 'number' && t.taskNumber > highest) highest = t.taskNumber;
+        }
+        if (highest >= this.nextTaskNumber) this.nextTaskNumber = highest + 1;
+
+        const missing = active
+            .filter(t => typeof t.taskNumber !== 'number')
+            .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+        if (missing.length === 0 && !polluted) return;
+        for (const t of missing) {
+            t.taskNumber = this.nextTaskNumber++;
+        }
+        console.log(`[TaskSpawner] ${polluted ? 'Repaired archive-polluted numbering; renumbered' : 'Assigned short numbers to'} ${missing.length} task(s); next is #${this.nextTaskNumber}`);
+        if (polluted) this.archivedDirty = true;
+        this.scheduleSave();
+    }
+
+    /**
+     * Resolve a task reference to a live-or-disconnected task id.
+     *
+     * Accepts the full id ("task-1787…-a3f2"), the short number with or
+     * without the hash ("#48" / "48"), and is what lets both agents and
+     * developers say "48" instead of pasting a 30-character id. Returns null
+     * when nothing matches — never guesses.
+     */
+    resolveTaskRef(ref: string): string | null {
+        const trimmed = ref.trim();
+        if (!trimmed) return null;
+
+        // Full id — exact match only.
+        if (this.tasks.has(trimmed) || this.disconnectedTasks.has(trimmed)) return trimmed;
+
+        // Short number, with or without '#'.
+        const numMatch = /^#?(\d{1,9})$/.exec(trimmed);
+        if (!numMatch) return null;
+        const num = parseInt(numMatch[1], 10);
+
+        for (const task of this.tasks.values()) {
+            if (task.taskNumber === num) return task.id;
+        }
+        for (const task of this.disconnectedTasks.values()) {
+            if (task.taskNumber === num) return task.id;
+        }
+        return null;
     }
 
     private scheduleSave(): void {
@@ -2169,6 +2461,7 @@ export class TaskSpawner extends EventEmitter {
                     order: task.order,
                     tokenUsage: task.tokenUsage,
                     parentTaskId: task.parentTaskId,
+                    taskNumber: task.taskNumber,
                 });
             }
 
@@ -2183,7 +2476,11 @@ export class TaskSpawner extends EventEmitter {
 
             const persistence: TaskPersistence = {
                 tasks: tasksToSave,
-                archivedTasks: []
+                archivedTasks: [],
+                nextTaskNumber: this.nextTaskNumber,
+                ...(this.pendingParentNotifications.size > 0
+                    ? { pendingParentNotifications: Object.fromEntries(this.pendingParentNotifications) }
+                    : {}),
             };
             const dir = dirname(this.persistencePath);
             if (!existsSync(dir)) {
@@ -2991,12 +3288,32 @@ export class TaskSpawner extends EventEmitter {
             task = await this.createTaskWithClaudeCode(sanitizedPrompt, workspaceId, sanitizedSystemPrompt, gitStatePromise, initialCols, initialRows, modelOverride);
         }
 
-        // Attach parentTaskId if this task was spawned by another via MCP
+        // Attach parentTaskId if this task was spawned by another via MCP.
+        // The parent may be given as a short ref ("#48") — resolve it so the
+        // stored link is always the canonical id.
         if (parentTaskId) {
-            task.parentTaskId = parentTaskId;
+            const link = chooseParentLink(parentTaskId, ref => this.resolveTaskRef(ref));
+            if (link.parentTaskId) {
+                task.parentTaskId = link.parentTaskId;
+                const internalForParent = this.tasks.get(task.id);
+                if (internalForParent) internalForParent.parentTaskId = link.parentTaskId;
+                if (!link.resolved) {
+                    logger.warn('Parent task id is not a known task (archived, or not reconnected yet)', { taskId: task.id, parentTaskId: link.parentTaskId });
+                }
+                logger.info('Task spawned by parent', { taskId: task.id, parentTaskId: link.parentTaskId });
+            } else {
+                logger.warn('Ignoring unresolvable parentTaskId - task created at the top level', { taskId: task.id, parentTaskId });
+            }
+        }
+
+        // Assign the short sequential id (#48). Done here rather than in the
+        // backend-specific creators so both PTY and OpenCode tasks get one.
+        {
             const internalTask = this.tasks.get(task.id);
-            if (internalTask) internalTask.parentTaskId = parentTaskId;
-            logger.info('Task spawned by parent', { taskId: task.id, parentTaskId });
+            const num = this.nextTaskNumber++;
+            task.taskNumber = num;
+            if (internalTask) internalTask.taskNumber = num;
+            this.scheduleSave();
         }
 
         // Resolve learnings and inject into system prompt / track after task is created
@@ -3163,6 +3480,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 4. Wait and monitor — poll \`claudia_get_task_status\` periodically (every 30-60s) until tasks complete. Handle any that need input via \`claudia_send_input\`
 5. Review — use \`claudia_get_task_output\` to read results from completed tasks
 6. Integrate — review the combined changes for conflicts or integration issues, then fix any problems yourself
+
+**Keeping the hierarchy intact:**
+- Every task you spawn should record YOU as its parent so the sidebar nests it under you. Pass \`parentTaskId: "${id}"\` on every \`claudia_create_task\` / \`claudia_create_tasks\` call — do not rely on the tool inferring it.
+- If a create response comes back with \`parentTaskId: null\` or a \`warning\` about top-level creation, your session had no identity: re-send the id explicitly on the next call so the rest of the fleet still groups correctly.
 
 **Task naming:**
 - When creating tasks, always provide a short \`displayName\` (e.g., "Build API endpoint", "Write unit tests") so tasks are easy to identify in the sidebar
@@ -3439,6 +3760,12 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             }
             task.state = 'exited';
 
+            // Exit bypasses transitionTaskState — notify the parent here. Not
+            // gated on hasStartedProcessing: startup deaths must notify too.
+            if (task.parentTaskId) {
+                this.queueParentNotification(task, 'exited');
+            }
+
             // Capture token usage before saving so the persisted record has costs.
             // Run async but schedule save only after it resolves.
             this.captureTokenUsage(task.id)
@@ -3477,13 +3804,44 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             sessionWorktreeBranch: task.sessionWorktreeBranch,
             sessionWorktreePrInfo: task.sessionWorktreePrInfo,
             parentTaskId: task.parentTaskId,
+            taskNumber: task.taskNumber,
+            workStatus: task.workStatus,
         };
+    }
+
+    /**
+     * Record whether this task's code changes are landed or still outstanding.
+     * Recomputed by the PR refresh pass, so it is deliberately NOT persisted —
+     * a stale "safe to clean up" badge is worse than no badge after a restart.
+     */
+    setWorkStatus(taskId: string, workStatus: import('@claudia/shared').TaskWorkStatus | null): boolean {
+        const task = this.tasks.get(taskId);
+        if (!task) return false;
+        // Compare the VERDICT, not the whole record: checkedAt is stamped fresh
+        // on every poll, so a straight deep-equal never matched and every task
+        // with a worktree emitted a state change (and a client broadcast, and a
+        // PR refresh) every 45s whether or not anything had moved.
+        const verdict = (s?: import('@claudia/shared').TaskWorkStatus | null) => s
+            ? `${s.branch}|${s.dirtyFiles}|${s.outstandingCommits}|${s.landedCommits}|${s.baseRef}`
+            : '';
+        if (verdict(task.workStatus) === verdict(workStatus)) {
+            // Keep the freshest timestamp even when the verdict is unchanged, so
+            // "when was this last checked" stays honest without a broadcast.
+            if (task.workStatus && workStatus) task.workStatus.checkedAt = workStatus.checkedAt;
+            return false;
+        }
+        task.workStatus = workStatus;
+        this.emit('taskStateChanged', this.toPublicTask(task));
+        return true;
     }
 
     /** Annotate a task with the worktree branch its session moved onto. */
     setSessionWorktree(taskId: string, branch: string | undefined, prInfo?: import('@claudia/shared').WorkspacePrInfo | null): boolean {
         const task = this.tasks.get(taskId);
         if (!task) return false;
+        // Evaluated on every poll, not only on change: re-arming after a green
+        // run has to happen even when nothing else about the PR moved.
+        this.notePrCiState(taskId, branch, prInfo);
         if (task.sessionWorktreeBranch === branch &&
             JSON.stringify(task.sessionWorktreePrInfo) === JSON.stringify(prInfo)) {
             return false;
@@ -3491,6 +3849,62 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         task.sessionWorktreeBranch = branch;
         task.sessionWorktreePrInfo = prInfo;
         this.emit('taskStateChanged', this.toPublicTask(task));
+        return true;
+    }
+
+    /**
+     * Watch a task's PR and, the moment its CI goes red, tell the task to fix
+     * it — without waiting for the user to notice and ask.
+     *
+     * The agent that opened the PR is the one holding all the context about
+     * why the branch looks the way it does, so a failing run is work it should
+     * pick up on its own. The notice rides the same queue as child-completion
+     * notices, which only delivers to a live, idle task and re-tries on its
+     * next idle otherwise — so this never types into a running session.
+     *
+     * One notice per failing run: the alert re-arms only after the PR reports
+     * green or a fresh run starts, which is exactly the push that follows a fix.
+     *
+     * @returns false when the task is not live (disconnected tasks never reach
+     * this map, so nothing could be delivered to it). Callers picking one owner
+     * out of a workspace use that to move on to the next candidate instead of
+     * dropping the alert on a task that will never receive it.
+     */
+    notePrCiState(taskId: string, branch: string | undefined, prInfo?: import('@claudia/shared').WorkspacePrInfo | null): boolean {
+        const task = this.tasks.get(taskId);
+        if (!task) return false;
+
+        // A null lookup is "unknown", not "no PR": `gh` rate limits, drops
+        // offline and times out, and clearing the armed state on those blips
+        // would re-alert the same red run on the next successful poll.
+        if (!prInfo) return true;
+        // A PR nobody can act on any more: forget the armed state.
+        if (prInfo.state === 'merged' || prInfo.state === 'closed') {
+            this.ciAlertsSent.delete(taskId);
+            return true;
+        }
+        if (prInfo.ci !== 'failed') {
+            // 'passed'/'running' both mean the red run is history — re-arm.
+            if (prInfo.ci === 'passed' || prInfo.ci === 'running') this.ciAlertsSent.delete(taskId);
+            return true;
+        }
+
+        const alertKey = `ci-pr-${prInfo.number}`;
+        if (this.ciAlertsSent.get(taskId) === alertKey) return true;
+        this.ciAlertsSent.set(taskId, alertKey);
+
+        const branchNote = branch ? ` on branch \`${branch}\`` : '';
+        const text = `[CLAUDIA CI ALERT: CI is FAILING on your PR #${prInfo.number}${branchNote} (${prInfo.url}). Fix it now — do not wait to be asked. Run \`gh pr checks ${prInfo.number}\` to see which checks are red and \`gh run view --log-failed\` for the failing job's log, fix the cause on this branch, then commit and push. If the failure is genuinely unrelated to your changes (a flake or a broken main), say so explicitly and stop rather than pushing a workaround.]`;
+
+        const queue = this.pendingParentNotifications.get(taskId) ?? [];
+        // Same slot every time, so a task that stays busy through several polls
+        // gets one alert on its next idle rather than a stack of them.
+        const withoutCi = queue.filter(n => n.childId !== alertKey);
+        withoutCi.push({ childId: alertKey, text });
+        if (withoutCi.length > 10) withoutCi.splice(0, withoutCi.length - 10);
+        this.pendingParentNotifications.set(taskId, withoutCi);
+        console.log(`[TaskSpawner] Queued CI failure alert for ${taskId} (PR #${prInfo.number})`);
+        this.flushParentNotifications(taskId);
         return true;
     }
 
@@ -4115,16 +4529,18 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             return;
         }
 
-        // Terminal protocol responses that xterm auto-sends in reply to TUI queries
-        // (cursor-position reports \x1b[r;cR, device-attributes \x1b[?...c, etc.) are
-        // pure noise — and a TUI stuck in a cursor-query loop can flood them. They're
-        // still written normally; we just don't log each one. A real message/keystroke
-        // never looks like a bare terminal-response escape.
-        const isTerminalResponse = /^\x1b\[[\d;?]*[A-Za-z~]$/.test(data);
-        // Only log non-trivial writes (messages, not individual keystrokes or protocol
-        // responses) to avoid I/O overhead and log spam.
+        // Terminal protocol traffic that xterm auto-sends — cursor-position reports
+        // (\x1b[r;cR), device attributes (\x1b[?...c) and SGR mouse reports
+        // (\x1b[<b;x;yM) — is pure noise. Mouse reports in particular arrive on every
+        // move and click over a focused terminal, each one an 11-13 char write, and
+        // they buried the log in "Writing to PTY" lines. They are still written
+        // normally; they just never deserved a log line of their own.
+        const isTerminalResponse = /^\x1b\[[\d;?]*[A-Za-z~]$/.test(data)
+            || /^\x1b\[<[\d;]*[Mm]$/.test(data);
+        // Debug level: one line per write earns its keep when tracing input delivery
+        // and is spam the rest of the time. Run the backend with DEBUG=1 to see them.
         if (data.length > 1 && !isTerminalResponse) {
-            console.log(`[TaskSpawner] Writing to PTY for task ${taskId} (${data.length} chars) source=${source}`);
+            logger.debug('Writing to PTY', { taskId, chars: data.length, source });
         }
 
         // Claude Code PTY-based input handling
@@ -4337,6 +4753,9 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
         // Clean up MCP temp config files
         this.cleanupMcpTempFiles(taskId);
+        // A destroyed task can no longer act on its PR. (Disconnect deliberately
+        // keeps this, so a reconnect doesn't re-alert the same failing run.)
+        this.ciAlertsSent.delete(taskId);
 
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
@@ -4456,6 +4875,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                 historySize,
                 displayName: task.displayName,
                 displayNameEditedByUser: task.displayNameEditedByUser,
+                parentTaskId: task.parentTaskId,
             };
             this.archivedTasks.set(taskId, archivedMetadata);
             this.archivedDirty = true;
@@ -4512,6 +4932,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                 historySize: disconnected.outputHistory ? Math.floor(disconnected.outputHistory.length * 0.75) : 0,
                 displayName: disconnected.displayName,
                 displayNameEditedByUser: disconnected.displayNameEditedByUser,
+                parentTaskId: disconnected.parentTaskId,
             };
             this.archivedTasks.set(taskId, archivedMetadata);
             this.archivedDirty = true;
@@ -4542,6 +4963,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             gitState: persisted.gitState,
             systemPrompt: persisted.systemPrompt,
             displayName: persisted.displayName,
+            parentTaskId: persisted.parentTaskId,
         }));
     }
 
@@ -4580,6 +5002,10 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             gitState: archived.gitState,
             systemPrompt: archived.systemPrompt,
             displayName: archived.displayName,
+            // Fresh number: archived tasks are unnumbered, and the number it
+            // held before archiving is retired, never reused.
+            taskNumber: this.nextTaskNumber++,
+            parentTaskId: archived.parentTaskId,
         };
 
         // Move from archived to disconnected
@@ -4612,6 +5038,8 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             systemPrompt: archived.systemPrompt,
             displayName: archived.displayName,
             sessionId: archived.sessionId || undefined,
+            taskNumber: persistedTask.taskNumber,
+            parentTaskId: archived.parentTaskId,
         };
     }
 
@@ -4688,12 +5116,17 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             order: persisted.order,
             tokenUsage: persisted.tokenUsage,
             parentTaskId: persisted.parentTaskId,
+            taskNumber: persisted.taskNumber,
         }));
 
         return [...liveTasks, ...disconnectedTasks];
     }
 
     reconnectTask(taskId: string, pendingInput?: string): Task | null {
+        // This task is coming back to life — any undelivered "has exited"
+        // notice queued for its parent is now stale and must not be delivered.
+        this.retractParentNotificationsFor(taskId);
+
         // Guard: if the task is already live, return it without spawning a second process
         if (this.tasks.has(taskId)) {
             const existing = this.tasks.get(taskId)!;
@@ -4720,6 +5153,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                 order: existing.order,
                 tokenUsage: existing.tokenUsage,
                 parentTaskId: existing.parentTaskId,
+                taskNumber: existing.taskNumber,
             };
             this.disconnectedTasks.set(taskId, persisted);
             this.tasks.delete(taskId);
@@ -4985,6 +5419,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             gitStateBefore: persisted.gitState ? persisted.gitState : undefined,  // Preserve git state
             tokenUsage: persisted.tokenUsage,  // Preserve token usage across reconnection
             parentTaskId: persisted.parentTaskId,  // Preserve spawner relationship across reconnection
+            taskNumber: persisted.taskNumber,  // Preserve short id across reconnection
         };
 
         // Remove from disconnectedTasks FIRST before registering handlers or emitting events.
@@ -5037,6 +5472,16 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         }
 
         this.emit('taskStateChanged', this.toPublicTask(task));
+
+        // Reconnect assigns 'idle' directly, without a transitionTaskState —
+        // so the idle-transition flush never fires for notices queued while
+        // this task (as a PARENT) was disconnected. Attempt delivery once the
+        // resumed TUI has settled; the fire-time re-check inside the flush
+        // handles a parent that is actually mid-continuation.
+        if (this.pendingParentNotifications.has(taskId)) {
+            setTimeout(() => this.flushParentNotifications(taskId), 2000);
+        }
+
         return this.toPublicTask(task);
     }
 
@@ -5128,6 +5573,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             wasInterrupted: true, // Mark as interrupted so it shows correct state on resume
             shouldContinue: false,
             parentTaskId: task.parentTaskId,
+            taskNumber: task.taskNumber,
         };
 
         this.disconnectedTasks.set(taskId, persisted);

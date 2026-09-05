@@ -51,6 +51,35 @@ export interface Task {
     sessionWorktreeBranch?: string;
     sessionWorktreePrInfo?: WorkspacePrInfo | null; // PR for that branch (if any)
     parentTaskId?: string;  // Task that spawned this one via claudia_create_task (MCP)
+    // Whether this task's code changes are landed on the default branch or still
+    // outstanding on its worktree branch. Undefined/null = nothing to indicate.
+    workStatus?: TaskWorkStatus | null;
+    // Short sequential identifier (1, 2, 3…) unique per install, rendered as
+    // "#48". Stable for the task's lifetime, never reused. Both agents (MCP
+    // tools accept "#48"/"48" wherever they take a taskId) and developers
+    // ("restart 48") reference tasks by it; the long id stays the primary key.
+    taskNumber?: number;
+}
+
+/**
+ * Where a task's code changes currently live: still on its branch/worktree, or
+ * already in the default branch.
+ *
+ * The sidebar fills up with idle tasks from previous days and nothing says
+ * which of them still hold work. Counting is deliberately patch-based
+ * (`git cherry`) rather than sha-based, so a rebased or cherry-picked branch
+ * still reads as landed instead of looking outstanding forever.
+ *
+ * Absent/null means "nothing to say" — the task never touched code, or it is
+ * not working in a worktree — and the UI shows no indicator at all.
+ */
+export interface TaskWorkStatus {
+    branch: string;              // Branch the work lives on
+    dirtyFiles: number;          // Uncommitted files (modified, staged or untracked)
+    outstandingCommits: number;  // Commits on the branch with no equivalent in the default branch
+    landedCommits: number;       // Commits whose patch is already in the default branch
+    baseRef: string;             // What it was compared against (e.g. "origin/main")
+    checkedAt: string;           // ISO timestamp of the check
 }
 
 export interface WorkspaceReference {

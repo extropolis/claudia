@@ -967,4 +967,73 @@ describe('WorkspacePanel', () => {
 
         expect(screen.getByTitle(/1 scheduled task.*click to manage/i)).toBeInTheDocument();
     });
+
+    it('shows no scheduled indicator for a task with no schedules', () => {
+        renderWorkspacePanel({ tasks: [makeTask('t1', '/repos/alpha', { prompt: 'plain task' })] });
+
+        expect(screen.queryByTitle(/scheduled task.*click to manage/i)).not.toBeInTheDocument();
+    });
+
+    // ── spawned subtasks ────────────────────────────────────────────────────
+
+    it('nests a spawned task under its parent and collapses the group', () => {
+        renderWorkspacePanel({
+            tasks: [
+                makeTask('t-parent', '/repos/alpha', { prompt: 'orchestrator' }),
+                makeTask('t-child', '/repos/alpha', { prompt: 'child work', parentTaskId: 't-parent' }),
+            ],
+        });
+
+        expect(screen.getByText('child work')).toBeInTheDocument();
+
+        // fireEvent, not userEvent: the row runs a 1s elapsed-time interval, and
+        // userEvent's pointer sequence waits on that timer loop.
+        fireEvent.click(screen.getByTitle('Hide subtasks'));
+        expect(screen.queryByText('child work')).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByTitle('Show subtasks'));
+        expect(screen.getByText('child work')).toBeInTheDocument();
+    });
+
+    // ── landed vs outstanding work ──────────────────────────────────────────
+
+    const workStatus = (overrides: Record<string, unknown> = {}) => ({
+        branch: 'claudia/task-abc',
+        dirtyFiles: 0,
+        outstandingCommits: 0,
+        landedCommits: 0,
+        baseRef: 'origin/main',
+        checkedAt: T0.toISOString(),
+        ...overrides,
+    });
+
+    it('flags a task that still holds unmerged commits and uncommitted edits', () => {
+        renderWorkspacePanel({
+            tasks: [makeTask('t1', '/repos/alpha', {
+                workStatus: workStatus({ outstandingCommits: 2, dirtyFiles: 3 }),
+            } as Partial<Task>)],
+        });
+
+        const badge = screen.getByTitle(/Unfinished work on claudia\/task-abc/);
+        expect(badge).toBeInTheDocument();
+        expect(badge.getAttribute('title')).toMatch(/2 commits not in origin\/main/);
+        expect(badge.getAttribute('title')).toMatch(/3 uncommitted files/);
+    });
+
+    it('marks a task whose work is all on the base branch as safe to archive', () => {
+        renderWorkspacePanel({
+            tasks: [makeTask('t1', '/repos/alpha', {
+                workStatus: workStatus({ landedCommits: 4 }),
+            } as Partial<Task>)],
+        });
+
+        expect(screen.getByTitle(/All 4 commits .* are in origin\/main .* safe to archive/)).toBeInTheDocument();
+    });
+
+    it('shows no work indicator at all for a task that never touched code', () => {
+        renderWorkspacePanel({ tasks: [makeTask('t1', '/repos/alpha', { prompt: 'just a question' })] });
+
+        expect(screen.queryByTitle(/safe to archive/)).not.toBeInTheDocument();
+        expect(screen.queryByTitle(/Unfinished work/)).not.toBeInTheDocument();
+    });
 });

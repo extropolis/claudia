@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
-import { Task, Workspace, WorkspacePrInfo } from '@claudia/shared';
+import { Task, Workspace, WorkspacePrInfo, TaskWorkStatus } from '@claudia/shared';
 import {
     Loader2, Circle, ChevronRight, ChevronDown, ChevronLeft,
     Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp, Sparkles
@@ -159,6 +159,49 @@ function formatTimeAgo(date: Date | string): string {
     return `${days}d`;
 }
 
+/**
+ * Landed vs outstanding code changes for a task that owns a worktree.
+ *
+ * The sidebar fills with idle tasks from previous days and nothing said which
+ * of them still held work. Amber = there is something here (uncommitted edits
+ * or commits that never reached the default branch). Green = every commit is on
+ * the default branch and the tree is clean, so the task is safe to archive.
+ * Tasks that never touched code get no status at all and render nothing.
+ */
+function WorkStatusBadge({ status }: { status: TaskWorkStatus }) {
+    const { dirtyFiles, outstandingCommits, landedCommits, baseRef, branch } = status;
+    const outstanding = dirtyFiles > 0 || outstandingCommits > 0;
+
+    if (!outstanding) {
+        // Nothing left on the branch — every commit is in the base ref.
+        return (
+            <span
+                className="task-work-status landed"
+                title={`All ${landedCommits} commit${landedCommits === 1 ? '' : 's'} on ${branch} are in ${baseRef} and the worktree is clean — safe to archive.`}
+            >
+                <Check size={10} />
+            </span>
+        );
+    }
+
+    const parts: string[] = [];
+    if (outstandingCommits > 0) parts.push(`${outstandingCommits} commit${outstandingCommits === 1 ? '' : 's'} not in ${baseRef}`);
+    if (dirtyFiles > 0) parts.push(`${dirtyFiles} uncommitted file${dirtyFiles === 1 ? '' : 's'}`);
+
+    return (
+        <span
+            className="task-work-status outstanding"
+            title={`Unfinished work on ${branch}: ${parts.join(', ')}.`}
+        >
+            <GitBranch size={10} />
+            <span className="task-work-status-counts">
+                {outstandingCommits > 0 && <span className="commits">↑{outstandingCommits}</span>}
+                {dirtyFiles > 0 && <span className="dirty">✎{dirtyFiles}</span>}
+            </span>
+        </span>
+    );
+}
+
 function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, onOpenScheduledTasks, isSelected, isLastSelected, hasActiveQuestion, hasUnreadActivity, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd, worktreeInfo, subtaskCount, subtasksCollapsed, onToggleSubtasks, onHoverPr }: TaskItemProps) {
     const [stopClicked, setStopClicked] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
@@ -243,7 +286,7 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
     return (
         <div
             ref={taskItemRef}
-            className={`task-item ${isSelected ? 'selected' : ''} ${isLastSelected && !isSelected ? 'last-selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${hasUnreadActivity && !isSelected ? 'unread' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
+            className={`task-item ${isSelected ? 'selected' : ''} ${isLastSelected && !isSelected ? 'last-selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${hasUnreadActivity && !isSelected ? 'unread' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''} ${subtaskCount ? 'has-subtasks' : ''} ${subtaskCount && subtasksCollapsed ? 'subtasks-collapsed' : ''}`}
             draggable={!isEditing && !worktreeInfo}
             onClick={() => !isEditing && onSelectTask(task.id)}
             onMouseEnter={onHoverPr}
@@ -278,17 +321,21 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                     className="task-prompt"
                     title={task.prompt}
                 >
+                    {typeof task.taskNumber === 'number' && (
+                        <span className="task-ref" title={`Task #${task.taskNumber} — agents and the CLI accept this short ref anywhere a task id is expected`}>
+                            {task.taskNumber}
+                        </span>
+                    )}
                     {displayPrompt}
                 </span>
             )}
             {scheduledTaskCount > 0 && (
                 <button
-                    className={`task-cron-badge${allScheduledPaused ? ' paused' : ''}`}
+                    className={`task-schedule-indicator${allScheduledPaused ? ' paused' : ''}`}
                     title={`${scheduledTaskCount} scheduled task${scheduledTaskCount > 1 ? 's' : ''}${allScheduledPaused ? ' (paused)' : ''} - click to manage`}
                     onClick={(e) => { e.stopPropagation(); onOpenScheduledTasks?.(task.id); }}
                 >
                     <Clock size={10} />
-                    <span className="task-cron-count">{scheduledTaskCount}</span>
                 </button>
             )}
             {worktreeInfo && (
@@ -296,7 +343,22 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                     <GitBranch size={10} />
                 </span>
             )}
+            {task.workStatus && <WorkStatusBadge status={task.workStatus} />}
             {worktreeInfo?.prInfo && <PrBadge prInfo={worktreeInfo.prInfo} />}
+            {worktreeInfo?.prInfo?.state === 'merged' && (
+                // Fully integrated: the task's PR is merged into the default
+                // branch, so its changes live on main and the task (plus its
+                // worktree) is safe to retire. Recommend — never auto-archive:
+                // the worktree may still hold uncommitted follow-up work only
+                // the user knows about.
+                <button
+                    className="task-integrated-hint"
+                    title="PR merged — all changes are integrated into main. Click to archive this task."
+                    onClick={(e) => { e.stopPropagation(); onArchiveTask(task.id); }}
+                >
+                    ✓ integrated
+                </button>
+            )}
             {subtaskCount !== undefined && subtaskCount > 0 && onToggleSubtasks && (
                 <button
                     className="task-subtask-toggle"
@@ -453,7 +515,7 @@ function WorktreeCreateModal({ workspace, onClose, onCreated, onCreateWorktree }
                     </div>
                     {createNew && (
                         <div className="worktree-modal-field">
-                            <label htmlFor="wt-base">Base branch <span className="optional">(optional, defaults to HEAD)</span></label>
+                            <label htmlFor="wt-base">Base branch <span className="optional">(optional; defaults to fresh main when on main, else current HEAD)</span></label>
                             <input
                                 id="wt-base"
                                 className="worktree-modal-input"
@@ -661,7 +723,7 @@ function TaskWithSubtasks({ task, taskIndex, subtasks, worktreeInfo, isDragging,
     const [collapsed, setCollapsed] = useState(false);
     const toggleCollapsed = (e: React.MouseEvent) => { e.stopPropagation(); setCollapsed(c => !c); };
     return (
-        <div>
+        <div className={`task-group${collapsed ? ' collapsed' : ''}`}>
             <TaskItem
                 task={task}
                 index={taskIndex}
@@ -1911,16 +1973,33 @@ function WorkspaceSection({
 
                                     const items: RenderItem[] = [];
 
-                                    // Build subtask map: parentTaskId → child entries (only for parents in this workspace)
-                                    const taskIds = new Set(tasks.map(t => t.id));
+                                    // Build subtask map: parentTaskId → child entries (only for parents in this workspace).
+                                    // Nesting is ONE level: a task nests only under a parent that
+                                    // itself renders top-level. Anything deeper (a grandchild whose
+                                    // parent is already a subtask) renders top-level/flat instead —
+                                    // subtaskMap entries are only read for top-level rows, so filing
+                                    // a grandchild under a subtask made it vanish from the sidebar
+                                    // entirely: unselectable, unstoppable, invisible.
+                                    const byId = new Map(tasks.map(t => [t.id, t]));
+                                    const topCache = new Map<string, boolean>();
+                                    const isTopLevel = (t: Task, seen: Set<string> = new Set()): boolean => {
+                                        const cached = topCache.get(t.id);
+                                        if (cached !== undefined) return cached;
+                                        if (seen.has(t.id)) { topCache.set(t.id, true); return true; } // cyclic parent links: render flat
+                                        seen.add(t.id);
+                                        const parent = t.parentTaskId ? byId.get(t.parentTaskId) : undefined;
+                                        const result = !(parent && isTopLevel(parent, seen));
+                                        topCache.set(t.id, result);
+                                        return result;
+                                    };
                                     const subtaskMap = new Map<string, SubtaskEntry[]>();
                                     const topLevelTasks: Task[] = [];
                                     tasks.forEach(task => {
-                                        if (task.parentTaskId && taskIds.has(task.parentTaskId)) {
-                                            const children = subtaskMap.get(task.parentTaskId) ?? [];
+                                        if (!isTopLevel(task)) {
+                                            const children = subtaskMap.get(task.parentTaskId!) ?? [];
                                             // Same-workspace subtasks: use sessionWorktreeBranch only (no separate workspace obj)
                                             children.push({ task });
-                                            subtaskMap.set(task.parentTaskId, children);
+                                            subtaskMap.set(task.parentTaskId!, children);
                                         } else {
                                             topLevelTasks.push(task);
                                         }
@@ -1931,8 +2010,47 @@ function WorkspaceSection({
                                         items.push({ type: 'task', task, idx });
                                     });
 
+                                    // Lift spawned children out of their worktree groups and nest
+                                    // them under the task that spawned them. An isolate=true child
+                                    // runs in its own worktree WORKSPACE, so the same-workspace
+                                    // subtaskMap above never saw it — orchestrated fleets rendered
+                                    // as flat unrelated worktree rows instead of a tree. The
+                                    // worktree branch/PR context survives as the subtask's badge.
+                                    const liftSpawnedChildren = (group: WorktreeGroup): WorktreeGroup | null => {
+                                        const kept: Task[] = [];
+                                        for (const t of group.tasks) {
+                                            // Lift only under a TOP-LEVEL parent: subtaskMap entries
+                                            // for non-top-level parents are never rendered, so lifting
+                                            // a child under a parent that is itself a subtask would
+                                            // remove its worktree row AND never draw it anywhere.
+                                            const parent = t.parentTaskId ? byId.get(t.parentTaskId) : undefined;
+                                            if (parent && isTopLevel(parent)) {
+                                                const children = subtaskMap.get(parent.id) ?? [];
+                                                children.push({
+                                                    task: t,
+                                                    worktreeInfo: { branch: group.branch, prInfo: group.workspace.prInfo },
+                                                });
+                                                subtaskMap.set(parent.id, children);
+                                            } else {
+                                                kept.push(t);
+                                            }
+                                        }
+                                        const liftedSubGroups = (group.subGroups ?? [])
+                                            .map(liftSpawnedChildren)
+                                            .filter((g): g is WorktreeGroup => g !== null);
+                                        if (kept.length === 0 && liftedSubGroups.length === 0) return null;
+                                        return {
+                                            ...group,
+                                            tasks: kept,
+                                            subGroups: liftedSubGroups.length > 0 ? liftedSubGroups : undefined,
+                                        };
+                                    };
+                                    const effectiveWorktreeGroups = worktreeGroups
+                                        .map(liftSpawnedChildren)
+                                        .filter((g): g is WorktreeGroup => g !== null);
+
                                     // Add worktree groups
-                                    for (const group of worktreeGroups) {
+                                    for (const group of effectiveWorktreeGroups) {
                                         if (group.tasks.length === 1) {
                                             items.push({ type: 'worktree-single', group });
                                         } else {

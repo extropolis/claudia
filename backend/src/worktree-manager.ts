@@ -12,6 +12,7 @@ import { existsSync, lstatSync, appendFileSync, readFileSync, writeFileSync } fr
 import { join, resolve, basename, normalize } from 'path';
 import { WorktreeInfo } from '@claudia/shared';
 import { createLogger } from './logger.js';
+import { getDefaultBranch, getCurrentBranch } from './git-utils.js';
 
 const execFileAsync = promisify(execFile);
 const logger = createLogger('[WorktreeManager]');
@@ -155,7 +156,9 @@ export class WorktreeManager {
      *
      * @param opts.repoPath - Main repo path (or any worktree of it)
      * @param opts.branch - Branch name to create or checkout
-     * @param opts.baseBranch - Base branch to create from (default: current HEAD)
+     * @param opts.baseBranch - Base to create from. Default: the freshly-fetched
+     *   default branch when the repo is checked out ON its default branch,
+     *   otherwise the current HEAD (mid-feature work builds on the feature).
      * @param opts.createBranch - true = create new branch, false = checkout existing
      * @param opts.targetDir - Override destination directory
      */
@@ -166,10 +169,30 @@ export class WorktreeManager {
         createBranch?: boolean;
         targetDir?: string;
     }): Promise<{ path: string; branch: string }> {
-        const { repoPath, branch, baseBranch, createBranch = true } = opts;
+        const { repoPath, branch, createBranch = true } = opts;
+        let { baseBranch } = opts;
 
         // Resolve to the main worktree root so the .claudia-worktrees dir is always in the repo root
         const mainPath = await this.getMainWorktreePath(repoPath) ?? repoPath;
+
+        // No explicit base for a NEW branch → the base depends on where the
+        // repo currently is:
+        //  - Checked out on the DEFAULT branch: branch from its freshly-fetched
+        //    head. This is the stale-checkout fix — an unpulled main used to
+        //    leak its staleness into every task's PR.
+        //  - Checked out on a FEATURE branch: branch from HEAD, the pre-existing
+        //    behavior. The user (or an orchestrator spawning children to work
+        //    on that branch) is mid-feature, and basing children on main would
+        //    hand them a tree where the code they were asked to touch does not
+        //    exist.
+        // Explicit baseBranch (the UI's branch picker) always wins unchanged.
+        if (createBranch && !baseBranch) {
+            const defaultBranch = await getDefaultBranch(mainPath);
+            const currentBranch = await getCurrentBranch(mainPath);
+            if (defaultBranch && currentBranch === defaultBranch) {
+                baseBranch = await this.resolveFreshDefaultBase(mainPath, defaultBranch) ?? undefined;
+            }
+        }
 
         // Check if branch is already in use by another worktree
         const existingWorktreePath = await this.isBranchInWorktree(mainPath, branch);
@@ -212,6 +235,97 @@ export class WorktreeManager {
         this.initSubmodulesAsync(targetDir);
 
         return { path: targetDir, branch };
+    }
+
+    /** Last successful default-branch fetch per repo, for the TTL below. */
+    private static lastDefaultFetch: Map<string, number> = new Map();
+    /** How long a fetched default-branch ref is considered fresh. Bounds the
+     * cost of fan-out: a claudia_create_tasks batch of 10 isolated children
+     * does one network fetch, not ten identical ones. */
+    private static readonly FETCH_TTL_MS = 60_000;
+
+    /**
+     * Resolve the freshest available base for a new branch: the head of the
+     * repo's default branch, as a COMMIT SHA.
+     *
+     * - Best-effort `git fetch <remote> <default>` first (10s cap — task
+     *   creation must not hang on a dead network), TTL-cached per repo.
+     * - The remote is whatever the repo actually has ('origin' preferred, else
+     *   the first remote); a remote-less repo skips the fetch entirely.
+     * - Prefers the newer of remote-default vs local-default: when the local
+     *   branch is ahead (unpushed commits) or the fetch failed offline, the
+     *   local head wins — otherwise a worktree would silently omit commits the
+     *   task was asked to build on.
+     * - Returns a SHA, not a ref name: `worktree add -b <branch> <dir>
+     *   origin/main` would set the new branch's upstream to origin/main,
+     *   breaking bare `git push` (non-matching upstream) in every worktree.
+     *
+     * Returns null when the repo has no default branch at all (fresh init),
+     * which keeps the old branch-from-HEAD behavior as the last resort.
+     */
+    private async resolveFreshDefaultBase(mainPath: string, defaultBranch: string): Promise<string | null> {
+
+        const revParse = async (ref: string): Promise<string | null> => {
+            try {
+                const { stdout } = await execFileAsync('git', ['rev-parse', '--verify', `${ref}^{commit}`], { cwd: mainPath });
+                return stdout.trim() || null;
+            } catch {
+                return null;
+            }
+        };
+
+        // Which remote does this repo actually have? Hardcoding 'origin'
+        // silently skipped the fetch forever on upstream-only repos.
+        let remote: string | null = null;
+        try {
+            const { stdout } = await execFileAsync('git', ['remote'], { cwd: mainPath });
+            const remotes = stdout.split('\n').map(r => r.trim()).filter(Boolean);
+            remote = remotes.includes('origin') ? 'origin' : (remotes[0] ?? null);
+        } catch { /* treat as remote-less */ }
+
+        if (remote) {
+            const last = WorktreeManager.lastDefaultFetch.get(mainPath) ?? 0;
+            if (Date.now() - last >= WorktreeManager.FETCH_TTL_MS) {
+                // Stamp the ATTEMPT, not just success: an auth-failing origin
+                // otherwise re-pays the full 10s stall on every task creation.
+                WorktreeManager.lastDefaultFetch.set(mainPath, Date.now());
+                try {
+                    await execFileAsync('git', ['fetch', remote, defaultBranch], {
+                        cwd: mainPath,
+                        timeout: 10_000,
+                        env: {
+                            ...process.env,
+                            // This runs from the background server: never block on a
+                            // terminal credential prompt or pop a credential-manager
+                            // dialog. Fail fast and fall back to last-known refs.
+                            GIT_TERMINAL_PROMPT: '0',
+                            GCM_INTERACTIVE: 'never',
+                        },
+                    });
+                } catch (err) {
+                    logger.warn('resolveFreshDefaultBase: fetch failed, using last-known refs', {
+                        mainPath,
+                        remote,
+                        error: err instanceof Error ? err.message : String(err),
+                    });
+                }
+            }
+        }
+
+        const remoteSha = remote ? await revParse(`${remote}/${defaultBranch}`) : null;
+        const localSha = await revParse(defaultBranch);
+        if (!remoteSha) return localSha;
+        if (!localSha || localSha === remoteSha) return remoteSha;
+
+        // Both exist and differ — take local only when it strictly contains the
+        // remote head (i.e. it is AHEAD: unpushed commits). Diverged or behind,
+        // the freshly-fetched remote wins.
+        try {
+            await execFileAsync('git', ['merge-base', '--is-ancestor', remoteSha, localSha], { cwd: mainPath });
+            return localSha;
+        } catch {
+            return remoteSha;
+        }
     }
 
     /**
