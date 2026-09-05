@@ -50,6 +50,20 @@ interface MCPServerConfig {
 }
 
 /**
+ * A bare hostname suitable for `ngrok http --url <x>`: labels and dots only.
+ *
+ * Exported so the NGROK_DOMAIN environment variable is held to the same rule
+ * as the stored setting. The value lands on an argv (no shell), so this is not
+ * the last line of defence against injection — but an unvalidated `https://x`
+ * or `x:8080` from the env silently produced a tunnel that never came up, with
+ * no error pointing at the typo.
+ */
+export function isValidNgrokDomain(value: string): boolean {
+    if (value.length > 253) return false;
+    return /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(value);
+}
+
+/**
  * Config update payload validation
  */
 export interface ConfigUpdatePayload {
@@ -143,25 +157,20 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
     }
 
     // Validate ngrokDomain (optional hostname; empty string clears it back to
-    // ngrok's assigned URL). Goes straight onto an `ngrok http --domain <x>`
-    // argv, so anything shell-ish or space-separated is refused outright.
+    // ngrok's assigned URL).
     if (payload.ngrokDomain !== undefined) {
         const d = payload.ngrokDomain;
         if (typeof d !== 'string') {
             return { valid: false, error: 'ngrokDomain must be a string' };
         }
         const trimmed = d.trim();
-        if (trimmed !== '') {
-            if (trimmed.length > 253) {
-                return { valid: false, error: 'ngrokDomain must be 253 characters or fewer' };
-            }
-            // Hostname only — no scheme, port, path, or argv separators.
-            if (!/^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(trimmed)) {
-                return {
-                    valid: false,
-                    error: 'ngrokDomain must be a bare hostname such as "claudia.ngrok.app" (no https://, port, or path)',
-                };
-            }
+        if (trimmed !== '' && !isValidNgrokDomain(trimmed)) {
+            return {
+                valid: false,
+                error: trimmed.length > 253
+                    ? 'ngrokDomain must be 253 characters or fewer'
+                    : 'ngrokDomain must be a bare hostname such as "claudia.ngrok.app" (no https://, port, or path)',
+            };
         }
         result.ngrokDomain = trimmed;
     }
