@@ -681,7 +681,15 @@ server.tool(
 // ============================================================================
 // Tool: claudia_create_task
 // ============================================================================
-const createTaskBaseDescription = `Create a new task in Claudia. The task will be assigned to a Claude Code agent in the current workspace (${WORKSPACE_ID || 'unknown'}). Use this to delegate work to other agents running in parallel. PREFER this over launching your own internal subagent (the built-in Agent/Task tool) for any delegatable work — Claudia tasks are user-visible, monitorable, resumable, and isolated. Only use your own subagent for a quick throwaway lookup you need inline, or when a Claudia task would clearly give a worse result. The new task records YOU as its parent (grouped under you in the sidebar), and when it settles you receive a [CLAUDIA TASK UPDATE] message automatically — you do not need to poll it. To block on it explicitly, use claudia_wait_for_task. The response includes a short ref like "#48" that every claudia_* tool accepts in place of the long id.`;
+const createTaskBaseDescription = `Create a new task in Claudia. The task will be assigned to a Claude Code agent in the current workspace (${WORKSPACE_ID || 'unknown'}). Use this to delegate work to other agents running in parallel. PREFER this over launching your own internal subagent (the built-in Agent/Task tool) for any delegatable work — Claudia tasks are user-visible, monitorable, resumable, and isolated. Only use your own subagent for a quick throwaway lookup you need inline, or when a Claudia task would clearly give a worse result. The new task records YOU as its parent (grouped under you in the sidebar) — if your system prompt states your own task id, pass it as \`parentTaskId\` so the nesting is guaranteed rather than inferred — and when it settles you receive a [CLAUDIA TASK UPDATE] message automatically — you do not need to poll it. To block on it explicitly, use claudia_wait_for_task. The response includes a short ref like "#48" that every claudia_* tool accepts in place of the long id.`;
+
+// Explicit parent linkage. SELF_TASK_ID covers the common case; this covers the
+// sessions where the MCP scope carries no task identity at all.
+const parentTaskIdParam = {
+    parentTaskId: z.string().optional().describe(
+        'Task to nest the new task under in the Claudia sidebar. Defaults to your own task when this session knows its id. If your system prompt states "YOUR TASK ID IS: <id>", pass that id here — otherwise the new task is created at the top level instead of as your subtask. Accepts the full id or a short ref like "#48".'
+    ),
+};
 
 const createTaskTieringSuffix = `
 
@@ -692,8 +700,16 @@ You can pass an optional \`complexity\` hint to control the cost of the spawned 
 
 Be conservative — pick \`low\` when the work is genuinely simple. Omit the parameter to use the workspace's default model.`;
 
-async function handleCreateTask(args: { prompt: string; displayName?: string; complexity?: 'low' | 'medium' | 'high'; isolate?: boolean }) {
+async function handleCreateTask(args: { prompt: string; displayName?: string; complexity?: 'low' | 'medium' | 'high'; isolate?: boolean; parentTaskId?: string }) {
     const { prompt, displayName, complexity, isolate } = args;
+    // Parent linkage must not depend on SELF_TASK_ID alone. That id arrives in
+    // the X-Claudia-Task-Id header, which is only present when the session
+    // loaded its per-task --mcp-config; a session that resolved the claudia
+    // server from the workspace .mcp.json instead (resumed sessions, sessions
+    // started by hand in the workspace) has no identity, and every task it
+    // spawned silently landed at the top level. The agent knows its own id from
+    // its system prompt ("YOUR TASK ID IS"), so let it say so explicitly.
+    const effectiveParentTaskId = (args.parentTaskId || '').trim() || SELF_TASK_ID;
     if (!WORKSPACE_ID) {
         return {
             content: [{
@@ -745,7 +761,7 @@ async function handleCreateTask(args: { prompt: string; displayName?: string; co
             // Record the spawning task so the UI can group children under it.
             // This was the missing link in the hierarchy: the field existed
             // end-to-end but nothing ever sent it.
-            ...(SELF_TASK_ID ? { parentTaskId: SELF_TASK_ID } : {}),
+            ...(effectiveParentTaskId ? { parentTaskId: effectiveParentTaskId } : {}),
         };
         if (MODEL_TIERING_ENABLED && complexity) {
             payload.complexity = complexity;
@@ -773,7 +789,17 @@ async function handleCreateTask(args: { prompt: string; displayName?: string; co
                         success: true,
                         taskId: task.id,
                         ref: typeof task.taskNumber === 'number' ? `#${task.taskNumber}` : null,
-                        parentTaskId: SELF_TASK_ID || null,
+                        // The parent the backend actually STORED, not the one we
+                        // asked for. A short ref that resolves to nothing (a stale
+                        // number, a ref from another install, a typo) is kept
+                        // verbatim and renders top-level, so echoing the request
+                        // would report a linkage that does not exist.
+                        parentTaskId: task.parentTaskId ?? null,
+                        ...(task.parentTaskId ? {} : {
+                            warning: effectiveParentTaskId
+                                ? `Created at the TOP LEVEL: parentTaskId '${effectiveParentTaskId}' did not resolve to a task, so the new task is NOT nested under it. Check the id with claudia_list_tasks and use the full "task-..." id.`
+                                : 'Created at the TOP LEVEL — it is not nested under you, because this session has no task identity. Re-send with parentTaskId set to your own task id (your system prompt states "YOUR TASK ID IS: ...") on the next call so the sidebar groups your children under you.',
+                        }),
                         displayName: displayName || null,
                         state: task.state,
                         workspace: effectiveWorkspaceId,
@@ -826,6 +852,7 @@ if (MODEL_TIERING_ENABLED) {
                 'Cost/capability tier for the spawned task. Use "low" for trivial work, "medium" for normal coding, "high" for hard reasoning. Omit to use the workspace default model.'
             ),
             ...isolateParam,
+            ...parentTaskIdParam,
         },
         async (args) => handleCreateTask(args)
     );
@@ -837,6 +864,7 @@ if (MODEL_TIERING_ENABLED) {
             prompt: z.string().describe('The prompt/instructions for the new task'),
             displayName: z.string().optional().describe('Optional short display name for the task in the Claudia sidebar (e.g., "Build API endpoint", "Write tests")'),
             ...isolateParam,
+            ...parentTaskIdParam,
         },
         async (args) => handleCreateTask(args)
     );
@@ -847,7 +875,7 @@ if (MODEL_TIERING_ENABLED) {
 // ============================================================================
 server.tool(
     'claudia_create_tasks',
-    `Create SEVERAL tasks in one call — the fan-out form of claudia_create_task. All children record this task as their parent, so the Claudia sidebar groups them under you. Returns one entry per child with its id and short ref. Prefer this over repeated claudia_create_task calls when decomposing work into parallel pieces.`,
+    `Create SEVERAL tasks in one call — the fan-out form of claudia_create_task. All children record this task as their parent, so the Claudia sidebar groups them under you; pass \`parentTaskId\` (your own task id, as stated in your system prompt) to make that linkage explicit rather than inferred. Returns one entry per child with its id and short ref. Prefer this over repeated claudia_create_task calls when decomposing work into parallel pieces.`,
     {
         tasks: z.array(z.object({
             prompt: z.string().describe('The prompt/instructions for this task'),
@@ -857,13 +885,14 @@ server.tool(
             } : {}),
             ...isolateParam,
         })).min(1).max(10).describe('The tasks to create, in order (max 10 per call)'),
+        ...parentTaskIdParam,
     },
-    async ({ tasks }) => {
+    async ({ tasks, parentTaskId }) => {
         const results: unknown[] = [];
         for (const spec of tasks) {
             // Sequential on purpose: each isolate=true child creates a worktree,
             // and parallel `git worktree add` calls contend on the same repo lock.
-            const res = await handleCreateTask(spec as { prompt: string; displayName?: string; complexity?: 'low' | 'medium' | 'high'; isolate?: boolean });
+            const res = await handleCreateTask({ ...(spec as { prompt: string; displayName?: string; complexity?: 'low' | 'medium' | 'high'; isolate?: boolean }), parentTaskId });
             const text = (res as { content?: { text?: string }[] }).content?.[0]?.text ?? '';
             try {
                 results.push(JSON.parse(text));

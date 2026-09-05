@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { type Request, type Response, type NextFunction, type ErrorRequestHandler } from 'express';
 import { createServer, request as httpRequest } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
@@ -16,13 +16,14 @@ import { ConfigStore, type AppConfig } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, Checkpoint, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
+import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, Checkpoint, PORTS, TaskTokenUsage, UsageDashboardData, TaskWorkStatus } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
 import { validateConfigUpdate, validateWorkspacePath, isPathInside } from './validation.js';
 import { isVoiceTokenAcceptable, isTunnelHostname } from './voice-auth.js';
-import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
+import { evaluateCorsOrigin, CORS_REJECTED } from './cors-policy.js';
+import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch, getTaskWorkStatus } from './git-utils.js';
 import { selectWorkspacesToRefresh } from './pr-refresh.js';
 import { WorktreeManager } from './worktree-manager.js';
 import { classifyWorktree, removeWorktreeWithUnlockRetry } from './worktree-reaper.js';
@@ -385,31 +386,62 @@ export async function createApp(basePath?: string) {
     // to be proxied to the Vite dev server, not handled by our app's WSS.
     const wss = new WebSocketServer({ noServer: true });
 
-    // Middleware
-    // Restrict CORS to localhost origins only — Claudia is a local-first app
-    app.use(cors({
-        origin: (origin, callback) => {
-            // Allow requests with no origin (same-origin, curl, native apps)
-            if (!origin) return callback(null, true);
-            try {
-                const url = new URL(origin);
-                if (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1') {
-                    return callback(null, true);
-                }
-            } catch { /* invalid origin */ }
-            callback(new Error('CORS: origin not allowed'));
-        },
-    }));
-    app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests
-
-    // TunnelManager for mobile remote access (ngrok-based, created early for middleware use)
+    // TunnelManager for mobile remote access (ngrok-based). Created before the
+    // CORS middleware because that middleware needs to consult the active
+    // tunnel URL to recognise the tunnel page's own origin as same-origin.
     const tunnelManager = new TunnelManager(PORTS.BACKEND);
     logger.info('TunnelManager created (ngrok)');
-    // Auto-recover any orphaned ngrok left by a previous server instance (tsx watch restart).
-    // Fire-and-forget: completes quickly (2 s timeout) well before any client connects.
-    tunnelManager.autoRecover().catch(err =>
-        logger.warn('Tunnel auto-recover failed', { error: err instanceof Error ? err.message : String(err) })
-    );
+    // Auto-recover any orphaned ngrok left by a previous server instance (tsx
+    // watch restart) — but only once we know the port we actually bound, since
+    // adoption is scoped to tunnels forwarding to THIS server. Deferring to
+    // 'listening' is what keeps a second instance (the integration-test
+    // harness on an ephemeral port, a second backend) from adopting the live
+    // server's tunnel and then killing it on teardown.
+    server.once('listening', () => {
+        const addr = server.address();
+        if (addr && typeof addr === 'object') tunnelManager.setPort(addr.port);
+        logger.info('Tunnel auto-recover starting', { port: tunnelManager.getPort() });
+        tunnelManager.autoRecover().catch(err =>
+            logger.warn('Tunnel auto-recover failed', { error: err instanceof Error ? err.message : String(err) })
+        );
+    });
+
+    // Middleware
+    // Restrict CORS to localhost + same-origin — Claudia is a local-first app.
+    // See cors-policy.ts: browsers attach an Origin header to module scripts
+    // and fetches even when they are same-origin, so a localhost-only
+    // allowlist rejected the tunnel page's requests for its own assets.
+    app.use(cors((req, callback) => {
+        const decision = evaluateCorsOrigin(
+            req.headers.origin,
+            req.headers.host,
+            tunnelManager.getStatus().url,
+        );
+        if (decision.allowed) {
+            return callback(null, { origin: true, credentials: true });
+        }
+        logger.warn('CORS: origin not allowed', {
+            origin: req.headers.origin,
+            host: req.headers.host,
+            path: req.url,
+            reason: decision.reason,
+        });
+        const err = new Error(CORS_REJECTED) as Error & { status: number };
+        err.status = 403;
+        callback(err, undefined);
+    }));
+
+    // Turn a CORS rejection into a clean 403. Without this, Express's default
+    // error handler answers 500 and — in development — renders the full stack
+    // trace, leaking absolute filesystem paths to whoever made the request.
+    app.use(((err: Error, _req: Request, res: Response, next: NextFunction) => {
+        if (err && err.message === CORS_REJECTED) {
+            return res.status(403).json({ error: 'Origin not allowed' });
+        }
+        return next(err);
+    }) as ErrorRequestHandler);
+
+    app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests
 
     // ===== Tunnel → React Frontend Proxy =====
     // When accessed through the tunnel, proxy non-API requests to the Vite
@@ -495,6 +527,18 @@ export async function createApp(basePath?: string) {
 
     // Initialize configStore first to determine API mode
     const configStore = new ConfigStore(dataDir);
+
+    // Pin the tunnel to a reserved ngrok domain if one is configured. NGROK_DOMAIN
+    // wins over the stored setting so a deployment can force it without touching
+    // config.json. Empty on both = free tier, ngrok assigns the URL.
+    const resolveNgrokDomain = (): string | null => {
+        const env = process.env.NGROK_DOMAIN?.trim();
+        if (env) return env;
+        const stored = configStore.getConfig().ngrokDomain?.trim();
+        return stored || null;
+    };
+    tunnelManager.setDomain(resolveNgrokDomain());
+    logger.info('Tunnel domain resolved', { domain: tunnelManager.getDomain() || '(ngrok-assigned)' });
 
     // Initialize Plugin System
     logger.info('Initializing plugin system...');
@@ -937,6 +981,25 @@ export async function createApp(basePath?: string) {
                 const updated = workspaceStore.getWorkspace(workspaceId);
                 if (updated) broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updated } });
             }
+
+            // A red PR is work for whoever is running in that workspace, so hand
+            // it straight to them instead of waiting for the user to spot the
+            // badge. Exactly one task is nudged — a fleet sharing a worktree
+            // must not all pile onto the same failing run — and tasks that moved
+            // onto their own session branch are handled by the per-task pass
+            // below, against their own PR.
+            //
+            // Walk candidates newest-first until one is actually live: the list
+            // includes disconnected and exited tasks, and the most recently
+            // active task in a workspace is very often exactly that (the agent
+            // that opened the PR then finished, or a server restart). Handing
+            // the alert to one of those dropped it silently.
+            const ciCandidates = taskSpawner.getAllTasks()
+                .filter(t => t.workspaceId === workspaceId && !t.sessionWorktreeBranch)
+                .sort((a, b) => new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime());
+            for (const candidate of ciCandidates) {
+                if (taskSpawner.notePrCiState(candidate.id, branch ?? undefined, prInfo)) break;
+            }
         } catch (err) {
             logger.debug('refreshPrInfoFor failed', { workspaceId, error: err instanceof Error ? err.message : String(err) });
         } finally {
@@ -1005,14 +1068,77 @@ export async function createApp(basePath?: string) {
         }
     }
 
+    // Whether each task's code changes are landed or still outstanding. Separate
+    // from the PR pass on purpose: that one returns early without `gh`, while
+    // this is pure local git and must keep working on a machine that has never
+    // seen the GitHub CLI.
+    let workStatusPassInFlight = false;
+
+    async function refreshTaskWorkStatus(): Promise<void> {
+        if (workStatusPassInFlight) return;
+        workStatusPassInFlight = true;
+        try {
+            const workspaces = workspaceStore.getWorkspaces();
+            // One verdict per worktree, not per task: a fan-out puts several
+            // tasks in the same worktree, and each check is half a dozen git
+            // spawns — the dominant cost of this pass on Windows.
+            const byDir = new Map<string, Promise<TaskWorkStatus | null | undefined>>();
+            for (const task of taskSpawner.getAllTasks()) {
+                // Only tasks that own a worktree get a verdict. In a shared
+                // workspace the dirty tree belongs to whoever touched it last,
+                // and pinning that on every idle task would be exactly the
+                // noise this indicator exists to cut through.
+                const ws = workspaces.find(w => w.id === task.workspaceId);
+                let dir: string | undefined;
+                let repoPath: string | undefined;
+                if (ws?.worktreeParentId) {
+                    dir = ws.id;
+                    repoPath = ws.worktreeParentId;
+                } else if (task.sessionWorktreeBranch) {
+                    const wt = workspaces.find(w => w.worktreeBranch === task.sessionWorktreeBranch && !!w.worktreeParentId);
+                    if (wt) {
+                        dir = wt.id;
+                        repoPath = wt.worktreeParentId;
+                    }
+                }
+                if (!dir) {
+                    taskSpawner.setWorkStatus(task.id, null);
+                    continue;
+                }
+                try {
+                    let check = byDir.get(dir);
+                    if (!check) {
+                        check = getTaskWorkStatus(dir, repoPath);
+                        byDir.set(dir, check);
+                    }
+                    const status = await check;
+                    // undefined = the check could not run (timeout, git gone).
+                    // Keep the last known verdict instead of blanking a badge
+                    // that was accurate on the previous pass.
+                    if (status !== undefined) taskSpawner.setWorkStatus(task.id, status);
+                } catch (err) {
+                    logger.debug('work status check failed', { taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+                }
+            }
+        } finally {
+            workStatusPassInFlight = false;
+        }
+    }
+
     // Poll on an interval. 45s rather than the older 30s: selection is now bounded
     // to workspaces whose PR can still change (terminal merged/closed ones are
     // skipped), and the pass additionally walks session-worktree tasks, so a
     // shorter tick would cost more `gh` calls without fresher badges.
     const PR_INFO_INTERVAL_MS = 45_000;
-    const prInfoInterval = setInterval(() => { void refreshActiveWorkspacePrInfo(); }, PR_INFO_INTERVAL_MS);
+    const prInfoInterval = setInterval(() => {
+        void refreshActiveWorkspacePrInfo();
+        void refreshTaskWorkStatus();
+    }, PR_INFO_INTERVAL_MS);
     // Kick off an initial pass shortly after startup.
-    setTimeout(() => { void refreshActiveWorkspacePrInfo(); }, 5_000);
+    setTimeout(() => {
+        void refreshActiveWorkspacePrInfo();
+        void refreshTaskWorkStatus();
+    }, 5_000);
 
     // Immediately refresh PR info for a single task (workspace + session worktree).
     // Called on task:select and task:refreshPr (hover) — fire-and-forget, no await needed.
@@ -1727,6 +1853,15 @@ export async function createApp(basePath?: string) {
                             }
                         } else if (modelOverride) {
                             logger.info('complexity → model resolved', { complexity, model: modelOverride, workspaceId: validatedPath });
+                        }
+
+                        // A task spawned through MCP always has a spawning agent, so a
+                        // missing parentTaskId means that agent's session had no task
+                        // identity and the child is about to land at the top level
+                        // instead of under its parent. The hierarchy used to break
+                        // silently here; make it visible in the logs.
+                        if (source === 'mcp' && !parentTaskId) {
+                            logger.warn('MCP task:create carries no parentTaskId — child will not be nested under its spawner', { workspaceId: validatedPath });
                         }
 
                         // Pass initial dimensions if provided
@@ -3583,9 +3718,21 @@ export async function createApp(basePath?: string) {
     // ===== Tunnel Management Routes =====
     app.post('/api/tunnel/start', async (_req, res) => {
         try {
-            logger.info('Starting tunnel via API');
+            logger.info('Starting tunnel via API', { domain: tunnelManager.getDomain() || '(ngrok-assigned)' });
             const status = await tunnelManager.start();
             res.json(status);
+
+            // Confirm the public URL actually answers, AFTER responding so the
+            // QR code is not held up by a 15 s probe. A tunnel can be "up" —
+            // agent connected, local API healthy — while the hostname is
+            // blocked on the network and every phone gets nothing; this is the
+            // only signal that distinguishes the two.
+            void tunnelManager.checkReachable().then((reachable) => {
+                if (reachable === false) {
+                    logger.warn('Tunnel started but its public URL is unreachable from this machine');
+                }
+                broadcast({ type: 'tunnel:status' as WSMessageType, payload: tunnelManager.getStatus() });
+            }).catch(() => { /* probe is best-effort */ });
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : String(err);
             logger.error('Failed to start tunnel', { error: errorMsg });
@@ -6027,6 +6174,13 @@ export async function createApp(basePath?: string) {
             // Cast is needed because ConfigUpdatePayload's nested objects (hyperspaceProxy,
             // aiCoreCredentials, ...) are all-optional while AppConfig requires their fields.
             const updatedConfig = configStore.updateConfig(configUpdate as Parameters<typeof configStore.updateConfig>[0]);
+
+            // Tunnel domain: applies to the NEXT start(), so a running tunnel keeps
+            // its URL and no already-connected phone is cut off mid-session.
+            if (configUpdate.ngrokDomain !== undefined) {
+                tunnelManager.setDomain(resolveNgrokDomain());
+                broadcast({ type: 'tunnel:status' as WSMessageType, payload: tunnelManager.getStatus() });
+            }
 
             // If backend was changed, switch the task spawner's backend
             if (newBackend && newBackend !== currentBackend) {

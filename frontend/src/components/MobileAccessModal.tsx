@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Smartphone, Copy, Check, StopCircle, Play } from 'lucide-react';
+import { X, Smartphone, Copy, Check, StopCircle, Play, AlertTriangle } from 'lucide-react';
 import QRCode from 'qrcode';
 import { getApiBaseUrl } from '../config/api-config';
 import './MobileAccessModal.css';
@@ -11,6 +11,11 @@ interface TunnelStatus {
     startedAt: string | null;
     error: string | null;
     publicIp: string | null;
+    /** Reserved ngrok domain the tunnel is pinned to, null = ngrok assigns it. */
+    domain?: string | null;
+    /** null = not probed. false = the URL did not answer from the host machine. */
+    reachable?: boolean | null;
+    warning?: string | null;
 }
 
 interface MobileAccessModalProps {
@@ -26,6 +31,9 @@ interface MobileAccessModalProps {
 export function MobileAccessModal({ isOpen, onClose, error, tunnelLoading, onStopTunnel, onStartTunnel }: MobileAccessModalProps) {
     const [status, setStatus] = useState<TunnelStatus | null>(null);
     const [copied, setCopied] = useState(false);
+    const [domainInput, setDomainInput] = useState('');
+    const [domainSaved, setDomainSaved] = useState(false);
+    const [domainError, setDomainError] = useState<string | null>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
 
     const apiBase = getApiBaseUrl();
@@ -42,6 +50,43 @@ export function MobileAccessModal({ isOpen, onClose, error, tunnelLoading, onSto
             return null;
         }
     }, [apiBase]);
+
+    // Seed the domain field from saved config each time the modal opens.
+    useEffect(() => {
+        if (!isOpen) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`${apiBase}/api/config`);
+                const cfg = await res.json();
+                if (!cancelled) setDomainInput(cfg?.ngrokDomain || '');
+            } catch (err) {
+                console.error('[MobileAccess] Failed to load ngrokDomain:', err);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [isOpen, apiBase]);
+
+    const saveDomain = useCallback(async () => {
+        setDomainError(null);
+        try {
+            const res = await fetch(`${apiBase}/api/config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ngrokDomain: domainInput.trim() }),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                setDomainError(body?.error || `Save failed (HTTP ${res.status})`);
+                return;
+            }
+            console.log('[MobileAccess] ngrokDomain saved:', domainInput.trim() || '(ngrok-assigned)');
+            setDomainSaved(true);
+            setTimeout(() => setDomainSaved(false), 2000);
+        } catch (err) {
+            setDomainError(err instanceof Error ? err.message : String(err));
+        }
+    }, [apiBase, domainInput]);
 
     // Poll for tunnel status when modal is open (tunnel may still be starting)
     useEffect(() => {
@@ -159,6 +204,43 @@ export function MobileAccessModal({ isOpen, onClose, error, tunnelLoading, onSto
                             {copied ? 'Copied!' : 'Copy'}
                         </button>
                     </div>
+                </div>
+
+                {/* Unreachable-URL warning. A tunnel can be "active" while its
+                    hostname is blocked on the network, in which case phones get
+                    a blank page and nothing else in the UI would say so. */}
+                {status?.active && status?.reachable === false && (
+                    <div className="tunnel-error" role="alert">
+                        <AlertTriangle size={14} style={{ verticalAlign: 'text-bottom', marginRight: 6 }} />
+                        {status.warning || 'The tunnel URL could not be reached from this machine.'}
+                    </div>
+                )}
+
+                {/* Reserved domain (paid ngrok). Blank = free tier, ngrok picks
+                    the URL and it changes between sessions. */}
+                <div className="tunnel-url-area">
+                    <label>ngrok domain (optional)</label>
+                    <div className="tunnel-url-row">
+                        <input
+                            type="text"
+                            value={domainInput}
+                            onChange={(e) => setDomainInput(e.target.value)}
+                            placeholder="blank = free tier, ngrok assigns the URL"
+                            spellCheck={false}
+                            autoCapitalize="none"
+                            autoCorrect="off"
+                        />
+                        <button onClick={saveDomain} title="Save reserved domain">
+                            {domainSaved ? <Check size={14} /> : null}
+                            {domainSaved ? 'Saved' : 'Save'}
+                        </button>
+                    </div>
+                    <small>
+                        Paid plans can pin a reserved domain (e.g. <code>claudia.ngrok.app</code>) so the URL
+                        never changes. It also gets you off <code>ngrok-free.dev</code>, which some networks
+                        and mobile carriers block outright. Applies on the next tunnel start.
+                    </small>
+                    {domainError && <div className="tunnel-error">{domainError}</div>}
                 </div>
 
                 {/* Instructions */}

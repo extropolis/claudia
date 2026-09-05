@@ -238,6 +238,7 @@ interface PersistedTask {
     order?: number;            // Display order within workspace (lower = higher in list)
     tokenUsage?: TaskTokenUsage; // Aggregated token usage for this task
     parentTaskId?: string;     // Task that spawned this one via MCP claudia_create_task
+    workStatus?: import('@claudia/shared').TaskWorkStatus | null; // Landed vs outstanding code changes
     taskNumber?: number;       // Short sequential id, rendered "#48" (see shared Task)
 }
 
@@ -339,6 +340,35 @@ interface InternalTask extends Task {
  * - 'reconnectStart': When auto-reconnection begins
  * - 'reconnectComplete': When auto-reconnection finishes
  */
+/**
+ * Decide what a requested parent ref should actually link to.
+ *
+ * A ref that resolves to nothing used to be stored verbatim, which reads as
+ * "linked" everywhere (the MCP create response said so) while the sidebar
+ * renders the child flat, because no such parent exists — the very failure the
+ * explicit parentTaskId was added to prevent, now silent.
+ *
+ * A canonical-looking id we do not know YET is still worth keeping: the parent
+ * may be archived, or not reconnected from persistence yet, and the hierarchy
+ * should reappear when it comes back. A stale short ref ("#9999") or a typo can
+ * never become valid, so it is dropped and logged instead.
+ */
+export function chooseParentLink(
+    ref: string,
+    resolve: (ref: string) => string | null,
+): { parentTaskId: string | null; resolved: boolean } {
+    const trimmed = ref.trim();
+    if (!trimmed) return { parentTaskId: null, resolved: false };
+
+    const resolved = resolve(trimmed);
+    if (resolved) return { parentTaskId: resolved, resolved: true };
+
+    const canonicalLooking = /^task-[a-z0-9-]+$/i.test(trimmed);
+    return canonicalLooking
+        ? { parentTaskId: trimmed, resolved: false }
+        : { parentTaskId: null, resolved: false };
+}
+
 export class TaskSpawner extends EventEmitter {
     private tasks: Map<string, InternalTask> = new Map();
     private disconnectedTasks: Map<string, PersistedTask> = new Map();
@@ -355,6 +385,12 @@ export class TaskSpawner extends EventEmitter {
     // life (sleep/wake resurrection, reconnect) can be retracted before the
     // parent ever sees a stale "has exited".
     private pendingParentNotifications: Map<string, { childId: string; text: string }[]> = new Map();
+    /**
+     * Tasks already nudged about a red CI run, keyed taskId → alert key.
+     * Cleared when the same PR goes green or starts a new run, so the next
+     * failure after a push is treated as new news rather than a repeat.
+     */
+    private ciAlertsSent: Map<string, string> = new Map();
     private archivedTasks: Map<string, ArchivedTaskMetadata> = new Map();
     private persistencePath: string;
     private saveDebounceTimer: NodeJS.Timeout | null = null;
@@ -2022,9 +2058,15 @@ export class TaskSpawner extends EventEmitter {
                 // reconnect (both call flushParentNotifications).
                 if (persistence.pendingParentNotifications) {
                     for (const [parentId, queue] of Object.entries(persistence.pendingParentNotifications)) {
-                        if (Array.isArray(queue) && queue.length > 0) {
-                            this.pendingParentNotifications.set(parentId, queue);
-                        }
+                        if (!Array.isArray(queue) || queue.length === 0) continue;
+                        // Child-completion notices are facts and survive a restart.
+                        // CI alerts are a live state ("your PR is red RIGHT NOW"),
+                        // and the once-per-run dedupe that guards them is in-memory
+                        // — so a persisted one could be injected days later, long
+                        // after the run was fixed. Drop them: the PR poller re-alerts
+                        // within a tick if the run is genuinely still red.
+                        const fresh = queue.filter(n => !n.childId?.startsWith('ci-pr-'));
+                        if (fresh.length > 0) this.pendingParentNotifications.set(parentId, fresh);
                     }
                 }
                 console.log(`[TaskSpawner] ========== LOADING PERSISTED TASKS ==========`);
@@ -3250,11 +3292,18 @@ export class TaskSpawner extends EventEmitter {
         // The parent may be given as a short ref ("#48") — resolve it so the
         // stored link is always the canonical id.
         if (parentTaskId) {
-            const resolvedParent = this.resolveTaskRef(parentTaskId) ?? parentTaskId;
-            task.parentTaskId = resolvedParent;
-            const internalForParent = this.tasks.get(task.id);
-            if (internalForParent) internalForParent.parentTaskId = resolvedParent;
-            logger.info('Task spawned by parent', { taskId: task.id, parentTaskId: resolvedParent });
+            const link = chooseParentLink(parentTaskId, ref => this.resolveTaskRef(ref));
+            if (link.parentTaskId) {
+                task.parentTaskId = link.parentTaskId;
+                const internalForParent = this.tasks.get(task.id);
+                if (internalForParent) internalForParent.parentTaskId = link.parentTaskId;
+                if (!link.resolved) {
+                    logger.warn('Parent task id is not a known task (archived, or not reconnected yet)', { taskId: task.id, parentTaskId: link.parentTaskId });
+                }
+                logger.info('Task spawned by parent', { taskId: task.id, parentTaskId: link.parentTaskId });
+            } else {
+                logger.warn('Ignoring unresolvable parentTaskId - task created at the top level', { taskId: task.id, parentTaskId });
+            }
         }
 
         // Assign the short sequential id (#48). Done here rather than in the
@@ -3431,6 +3480,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 4. Wait and monitor — poll \`claudia_get_task_status\` periodically (every 30-60s) until tasks complete. Handle any that need input via \`claudia_send_input\`
 5. Review — use \`claudia_get_task_output\` to read results from completed tasks
 6. Integrate — review the combined changes for conflicts or integration issues, then fix any problems yourself
+
+**Keeping the hierarchy intact:**
+- Every task you spawn should record YOU as its parent so the sidebar nests it under you. Pass \`parentTaskId: "${id}"\` on every \`claudia_create_task\` / \`claudia_create_tasks\` call — do not rely on the tool inferring it.
+- If a create response comes back with \`parentTaskId: null\` or a \`warning\` about top-level creation, your session had no identity: re-send the id explicitly on the next call so the rest of the fleet still groups correctly.
 
 **Task naming:**
 - When creating tasks, always provide a short \`displayName\` (e.g., "Build API endpoint", "Write unit tests") so tasks are easy to identify in the sidebar
@@ -3752,13 +3805,43 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             sessionWorktreePrInfo: task.sessionWorktreePrInfo,
             parentTaskId: task.parentTaskId,
             taskNumber: task.taskNumber,
+            workStatus: task.workStatus,
         };
+    }
+
+    /**
+     * Record whether this task's code changes are landed or still outstanding.
+     * Recomputed by the PR refresh pass, so it is deliberately NOT persisted —
+     * a stale "safe to clean up" badge is worse than no badge after a restart.
+     */
+    setWorkStatus(taskId: string, workStatus: import('@claudia/shared').TaskWorkStatus | null): boolean {
+        const task = this.tasks.get(taskId);
+        if (!task) return false;
+        // Compare the VERDICT, not the whole record: checkedAt is stamped fresh
+        // on every poll, so a straight deep-equal never matched and every task
+        // with a worktree emitted a state change (and a client broadcast, and a
+        // PR refresh) every 45s whether or not anything had moved.
+        const verdict = (s?: import('@claudia/shared').TaskWorkStatus | null) => s
+            ? `${s.branch}|${s.dirtyFiles}|${s.outstandingCommits}|${s.landedCommits}|${s.baseRef}`
+            : '';
+        if (verdict(task.workStatus) === verdict(workStatus)) {
+            // Keep the freshest timestamp even when the verdict is unchanged, so
+            // "when was this last checked" stays honest without a broadcast.
+            if (task.workStatus && workStatus) task.workStatus.checkedAt = workStatus.checkedAt;
+            return false;
+        }
+        task.workStatus = workStatus;
+        this.emit('taskStateChanged', this.toPublicTask(task));
+        return true;
     }
 
     /** Annotate a task with the worktree branch its session moved onto. */
     setSessionWorktree(taskId: string, branch: string | undefined, prInfo?: import('@claudia/shared').WorkspacePrInfo | null): boolean {
         const task = this.tasks.get(taskId);
         if (!task) return false;
+        // Evaluated on every poll, not only on change: re-arming after a green
+        // run has to happen even when nothing else about the PR moved.
+        this.notePrCiState(taskId, branch, prInfo);
         if (task.sessionWorktreeBranch === branch &&
             JSON.stringify(task.sessionWorktreePrInfo) === JSON.stringify(prInfo)) {
             return false;
@@ -3766,6 +3849,62 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         task.sessionWorktreeBranch = branch;
         task.sessionWorktreePrInfo = prInfo;
         this.emit('taskStateChanged', this.toPublicTask(task));
+        return true;
+    }
+
+    /**
+     * Watch a task's PR and, the moment its CI goes red, tell the task to fix
+     * it — without waiting for the user to notice and ask.
+     *
+     * The agent that opened the PR is the one holding all the context about
+     * why the branch looks the way it does, so a failing run is work it should
+     * pick up on its own. The notice rides the same queue as child-completion
+     * notices, which only delivers to a live, idle task and re-tries on its
+     * next idle otherwise — so this never types into a running session.
+     *
+     * One notice per failing run: the alert re-arms only after the PR reports
+     * green or a fresh run starts, which is exactly the push that follows a fix.
+     *
+     * @returns false when the task is not live (disconnected tasks never reach
+     * this map, so nothing could be delivered to it). Callers picking one owner
+     * out of a workspace use that to move on to the next candidate instead of
+     * dropping the alert on a task that will never receive it.
+     */
+    notePrCiState(taskId: string, branch: string | undefined, prInfo?: import('@claudia/shared').WorkspacePrInfo | null): boolean {
+        const task = this.tasks.get(taskId);
+        if (!task) return false;
+
+        // A null lookup is "unknown", not "no PR": `gh` rate limits, drops
+        // offline and times out, and clearing the armed state on those blips
+        // would re-alert the same red run on the next successful poll.
+        if (!prInfo) return true;
+        // A PR nobody can act on any more: forget the armed state.
+        if (prInfo.state === 'merged' || prInfo.state === 'closed') {
+            this.ciAlertsSent.delete(taskId);
+            return true;
+        }
+        if (prInfo.ci !== 'failed') {
+            // 'passed'/'running' both mean the red run is history — re-arm.
+            if (prInfo.ci === 'passed' || prInfo.ci === 'running') this.ciAlertsSent.delete(taskId);
+            return true;
+        }
+
+        const alertKey = `ci-pr-${prInfo.number}`;
+        if (this.ciAlertsSent.get(taskId) === alertKey) return true;
+        this.ciAlertsSent.set(taskId, alertKey);
+
+        const branchNote = branch ? ` on branch \`${branch}\`` : '';
+        const text = `[CLAUDIA CI ALERT: CI is FAILING on your PR #${prInfo.number}${branchNote} (${prInfo.url}). Fix it now — do not wait to be asked. Run \`gh pr checks ${prInfo.number}\` to see which checks are red and \`gh run view --log-failed\` for the failing job's log, fix the cause on this branch, then commit and push. If the failure is genuinely unrelated to your changes (a flake or a broken main), say so explicitly and stop rather than pushing a workaround.]`;
+
+        const queue = this.pendingParentNotifications.get(taskId) ?? [];
+        // Same slot every time, so a task that stays busy through several polls
+        // gets one alert on its next idle rather than a stack of them.
+        const withoutCi = queue.filter(n => n.childId !== alertKey);
+        withoutCi.push({ childId: alertKey, text });
+        if (withoutCi.length > 10) withoutCi.splice(0, withoutCi.length - 10);
+        this.pendingParentNotifications.set(taskId, withoutCi);
+        console.log(`[TaskSpawner] Queued CI failure alert for ${taskId} (PR #${prInfo.number})`);
+        this.flushParentNotifications(taskId);
         return true;
     }
 
@@ -4390,16 +4529,18 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             return;
         }
 
-        // Terminal protocol responses that xterm auto-sends in reply to TUI queries
-        // (cursor-position reports \x1b[r;cR, device-attributes \x1b[?...c, etc.) are
-        // pure noise — and a TUI stuck in a cursor-query loop can flood them. They're
-        // still written normally; we just don't log each one. A real message/keystroke
-        // never looks like a bare terminal-response escape.
-        const isTerminalResponse = /^\x1b\[[\d;?]*[A-Za-z~]$/.test(data);
-        // Only log non-trivial writes (messages, not individual keystrokes or protocol
-        // responses) to avoid I/O overhead and log spam.
+        // Terminal protocol traffic that xterm auto-sends — cursor-position reports
+        // (\x1b[r;cR), device attributes (\x1b[?...c) and SGR mouse reports
+        // (\x1b[<b;x;yM) — is pure noise. Mouse reports in particular arrive on every
+        // move and click over a focused terminal, each one an 11-13 char write, and
+        // they buried the log in "Writing to PTY" lines. They are still written
+        // normally; they just never deserved a log line of their own.
+        const isTerminalResponse = /^\x1b\[[\d;?]*[A-Za-z~]$/.test(data)
+            || /^\x1b\[<[\d;]*[Mm]$/.test(data);
+        // Debug level: one line per write earns its keep when tracing input delivery
+        // and is spam the rest of the time. Run the backend with DEBUG=1 to see them.
         if (data.length > 1 && !isTerminalResponse) {
-            console.log(`[TaskSpawner] Writing to PTY for task ${taskId} (${data.length} chars) source=${source}`);
+            logger.debug('Writing to PTY', { taskId, chars: data.length, source });
         }
 
         // Claude Code PTY-based input handling
@@ -4612,6 +4753,9 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
         // Clean up MCP temp config files
         this.cleanupMcpTempFiles(taskId);
+        // A destroyed task can no longer act on its PR. (Disconnect deliberately
+        // keeps this, so a reconnect doesn't re-alert the same failing run.)
+        this.ciAlertsSent.delete(taskId);
 
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);

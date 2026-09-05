@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
-import { Task, Workspace, WorkspacePrInfo } from '@claudia/shared';
+import { Task, Workspace, WorkspacePrInfo, TaskWorkStatus } from '@claudia/shared';
 import {
     Loader2, Circle, ChevronRight, ChevronDown, ChevronLeft,
     Trash2, FolderOpen, Plus, Briefcase, Send, AlertCircle, StopCircle, Undo2, GripVertical, Archive, RotateCcw, Play, MoreVertical, Terminal, Search, GitBranch, ImagePlus, X, FileText, GripHorizontal, Copy, Pencil, Link2, Check, CheckCircle, FolderPlus, Clipboard, Columns2, Clock, Settings, ArrowDownAZ, ArrowDownUp, Sparkles
@@ -159,6 +159,49 @@ function formatTimeAgo(date: Date | string): string {
     return `${days}d`;
 }
 
+/**
+ * Landed vs outstanding code changes for a task that owns a worktree.
+ *
+ * The sidebar fills with idle tasks from previous days and nothing said which
+ * of them still held work. Amber = there is something here (uncommitted edits
+ * or commits that never reached the default branch). Green = every commit is on
+ * the default branch and the tree is clean, so the task is safe to archive.
+ * Tasks that never touched code get no status at all and render nothing.
+ */
+function WorkStatusBadge({ status }: { status: TaskWorkStatus }) {
+    const { dirtyFiles, outstandingCommits, landedCommits, baseRef, branch } = status;
+    const outstanding = dirtyFiles > 0 || outstandingCommits > 0;
+
+    if (!outstanding) {
+        // Nothing left on the branch — every commit is in the base ref.
+        return (
+            <span
+                className="task-work-status landed"
+                title={`All ${landedCommits} commit${landedCommits === 1 ? '' : 's'} on ${branch} are in ${baseRef} and the worktree is clean — safe to archive.`}
+            >
+                <Check size={10} />
+            </span>
+        );
+    }
+
+    const parts: string[] = [];
+    if (outstandingCommits > 0) parts.push(`${outstandingCommits} commit${outstandingCommits === 1 ? '' : 's'} not in ${baseRef}`);
+    if (dirtyFiles > 0) parts.push(`${dirtyFiles} uncommitted file${dirtyFiles === 1 ? '' : 's'}`);
+
+    return (
+        <span
+            className="task-work-status outstanding"
+            title={`Unfinished work on ${branch}: ${parts.join(', ')}.`}
+        >
+            <GitBranch size={10} />
+            <span className="task-work-status-counts">
+                {outstandingCommits > 0 && <span className="commits">↑{outstandingCommits}</span>}
+                {dirtyFiles > 0 && <span className="dirty">✎{dirtyFiles}</span>}
+            </span>
+        </span>
+    );
+}
+
 function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, onRevertTask, onSelectTask, onRenameTask, onOpenScheduledTasks, isSelected, isLastSelected, hasActiveQuestion, hasUnreadActivity, isDragging, dragIndex, dragOverIndex, onDragStart, onDragEnter, onDragEnd, worktreeInfo, subtaskCount, subtasksCollapsed, onToggleSubtasks, onHoverPr }: TaskItemProps) {
     const [stopClicked, setStopClicked] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
@@ -243,7 +286,7 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
     return (
         <div
             ref={taskItemRef}
-            className={`task-item ${isSelected ? 'selected' : ''} ${isLastSelected && !isSelected ? 'last-selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${hasUnreadActivity && !isSelected ? 'unread' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
+            className={`task-item ${isSelected ? 'selected' : ''} ${isLastSelected && !isSelected ? 'last-selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${hasUnreadActivity && !isSelected ? 'unread' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''} ${subtaskCount ? 'has-subtasks' : ''} ${subtaskCount && subtasksCollapsed ? 'subtasks-collapsed' : ''}`}
             draggable={!isEditing && !worktreeInfo}
             onClick={() => !isEditing && onSelectTask(task.id)}
             onMouseEnter={onHoverPr}
@@ -288,12 +331,11 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
             )}
             {scheduledTaskCount > 0 && (
                 <button
-                    className={`task-cron-badge${allScheduledPaused ? ' paused' : ''}`}
+                    className={`task-schedule-indicator${allScheduledPaused ? ' paused' : ''}`}
                     title={`${scheduledTaskCount} scheduled task${scheduledTaskCount > 1 ? 's' : ''}${allScheduledPaused ? ' (paused)' : ''} - click to manage`}
                     onClick={(e) => { e.stopPropagation(); onOpenScheduledTasks?.(task.id); }}
                 >
                     <Clock size={10} />
-                    <span className="task-cron-count">{scheduledTaskCount}</span>
                 </button>
             )}
             {worktreeInfo && (
@@ -301,6 +343,7 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                     <GitBranch size={10} />
                 </span>
             )}
+            {task.workStatus && <WorkStatusBadge status={task.workStatus} />}
             {worktreeInfo?.prInfo && <PrBadge prInfo={worktreeInfo.prInfo} />}
             {worktreeInfo?.prInfo?.state === 'merged' && (
                 // Fully integrated: the task's PR is merged into the default
@@ -680,7 +723,7 @@ function TaskWithSubtasks({ task, taskIndex, subtasks, worktreeInfo, isDragging,
     const [collapsed, setCollapsed] = useState(false);
     const toggleCollapsed = (e: React.MouseEvent) => { e.stopPropagation(); setCollapsed(c => !c); };
     return (
-        <div>
+        <div className={`task-group${collapsed ? ' collapsed' : ''}`}>
             <TaskItem
                 task={task}
                 index={taskIndex}

@@ -1,6 +1,6 @@
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
-import { TaskGitState, FileDiff, WorkspacePrInfo } from '@claudia/shared';
+import { TaskGitState, FileDiff, WorkspacePrInfo, TaskWorkStatus } from '@claudia/shared';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -383,6 +383,105 @@ export async function revertTaskChanges(
             error: message,
             filesReverted: []
         };
+    }
+}
+
+/**
+ * Work out whether a task's changes are still outstanding on its branch or have
+ * already landed on the default branch.
+ *
+ * `git cherry` rather than `rev-list main..HEAD`: it compares patch ids, so a
+ * branch that was rebased or cherry-picked into main reads as landed instead of
+ * looking permanently unmerged. Commits with no equivalent upstream come back
+ * prefixed '+', ones already upstream '-'.
+ *
+ * Returns undefined when the check could not be completed at all (git missing,
+ * a command timing out on a huge repo, the worktree deleted under us). That is
+ * "unknown", not "nothing": callers keep the previous verdict rather than
+ * blanking a badge that was accurate a minute ago.
+ *
+ * Returns null when there is nothing worth showing: not a repo, no branch, the
+ * branch IS the default branch, or the task never produced a commit or an edit.
+ * Callers render nothing in that case — a task that only answered a question
+ * must not grow a git badge.
+ */
+export async function getTaskWorkStatus(worktreeDir: string, repoPath?: string): Promise<TaskWorkStatus | null | undefined> {
+    try {
+        // A worktree that vanished (removed, renamed, on a disconnected drive) is
+        // UNKNOWN, not "nothing to show" - every git call below would fail the
+        // same way a detached HEAD does, and blanking the badge would look like
+        // "all clear" on work that may still be sitting there.
+        const { existsSync } = await import('fs');
+        if (!existsSync(worktreeDir)) return undefined;
+
+        const branch = await getCurrentBranch(worktreeDir);
+        if (!branch || !isValidBranchName(branch)) return null;
+
+        const defaultBranch = await getDefaultBranch(repoPath || worktreeDir);
+        if (!defaultBranch || branch === defaultBranch) return null;
+
+        // Prefer the pushed default branch: "is it on main" means the main
+        // everyone else sees, not a local main that may be days behind.
+        let baseRef = defaultBranch;
+        try {
+            await execFileAsync('git', ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${defaultBranch}`], { cwd: worktreeDir });
+            baseRef = `origin/${defaultBranch}`;
+        } catch {
+            // No remote-tracking default branch — compare against the local one.
+        }
+
+        // Cheap gate before the expensive one. `git cherry` computes patch ids for
+        // BOTH sides of the symmetric difference, which on a branch cut days ago
+        // from a busy main means thousands of diffs on every poll - enough to blow
+        // the timeout and blank the badge. `rev-list --count` is a graph walk with
+        // no diffing, and when it says zero there is nothing for cherry to classify.
+        let outstandingCommits = 0;
+        let landedCommits = 0;
+        const { stdout: aheadOut } = await execFileAsync(
+            'git', ['rev-list', '--count', `${baseRef}..HEAD`], { cwd: worktreeDir, timeout: 15000 }
+        );
+        if (parseInt(aheadOut.trim(), 10) > 0) {
+            const { stdout: cherryOut } = await execFileAsync('git', ['cherry', baseRef, 'HEAD'], { cwd: worktreeDir, timeout: 20000 });
+            for (const line of cherryOut.split('\n')) {
+                if (line.startsWith('+')) outstandingCommits++;
+                else if (line.startsWith('-')) landedCommits++;
+            }
+        }
+
+        const { stdout: statusOut } = await execFileAsync('git', ['status', '--porcelain'], { cwd: worktreeDir, timeout: 15000 });
+        const dirtyFiles = statusOut.split('\n').filter(l => l.trim().length > 0).length;
+
+        // `git cherry` only reports commits NOT reachable from the base ref, so a
+        // branch that was merged with a merge commit (or fast-forwarded) reports
+        // nothing at all — its commits are now part of the base ref's history.
+        // That is the most common "safe to archive" case, and it looks identical
+        // to a task that never touched code. The branch's own reflog separates
+        // them: it records the commits that were made on this branch.
+        if (outstandingCommits === 0 && landedCommits === 0 && dirtyFiles === 0) {
+            try {
+                await execFileAsync('git', ['merge-base', '--is-ancestor', 'HEAD', baseRef], { cwd: worktreeDir, timeout: 15000 });
+            } catch {
+                return null; // Not contained in the base ref, nothing outstanding: nothing to say.
+            }
+            const { stdout: reflogOut } = await execFileAsync(
+                'git', ['reflog', 'show', '--format=%gs', branch], { cwd: worktreeDir, timeout: 15000 }
+            );
+            const committedHere = reflogOut.split('\n').filter(l => l.startsWith('commit')).length;
+            if (committedHere === 0) return null; // Branch never carried a commit of its own.
+            landedCommits = committedHere;
+        }
+
+        return {
+            branch,
+            dirtyFiles,
+            outstandingCommits,
+            landedCommits,
+            baseRef,
+            checkedAt: new Date().toISOString(),
+        };
+    } catch {
+        // Missing git, detached HEAD, deleted worktree — no badge.
+        return undefined;
     }
 }
 
