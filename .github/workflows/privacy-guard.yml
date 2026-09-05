@@ -35,10 +35,15 @@ jobs:
             'backend/task-histories/'
             'backend/archived-histories/'
             'backend/tasks.json'
+            'backend/archived-tasks.json'
+            'backend/checkpoints.json'
+            'backend/session-recovery.json'
+            'backend/learnings.json'
             'backend/scheduled-tasks.json'
             'backend/config.json'
             'backend/workspace-config.json'
             'backend/chat-history.json'
+            'backend/todos.json'
             'backend/data/conversations.json'
           )
 
