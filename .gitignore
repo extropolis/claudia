@@ -68,6 +68,14 @@ backend/archived-tasks.json
 backend/archived-tasks.json.bak
 backend/archived-tasks.json.*.tmp
 backend/checkpoints.json
+backend/checkpoints.json.bak
+backend/checkpoints.json.*.tmp
+backend/session-recovery.json
+backend/session-recovery.json.bak
+backend/session-recovery.json.*.tmp
+backend/learnings.json
+backend/learnings.json.bak
+backend/learnings.json.*.tmp
 backend/scheduled-tasks.json
 backend/config.json
 backend/workspace-config.json
