@@ -45,10 +45,6 @@ vi.mock('node-pty', () => ({
 
 import { TaskSpawner } from '../task-spawner.js';
 
-// Keep background intervals from firing mid-assertion.
-process.env.STATE_POLLING_MS = '3600000';
-process.env.IDLE_TASK_REAP_INTERVAL_MS = '3600000';
-
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeffff0001';
 const encodeWorkspace = (p: string) => p.replace(/[^a-zA-Z0-9-]/g, '-');
@@ -117,6 +113,15 @@ function makeLiveTask(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
     spawnCalls.length = 0;
+    // Keep this suite's background intervals from firing mid-assertion - but
+    // SCOPED, never by assigning process.env at module scope. vitest runs this
+    // package with pool:'vmThreads', so test files share one worker process and
+    // one process.env: a module-scope write leaks into every OTHER suite that
+    // constructs a TaskSpawner afterwards. Disabling the state poller that way
+    // wedges any suite whose task must transition busy -> idle, since only the
+    // poller performs that transition. vi.unstubAllEnvs() in afterEach restores.
+    vi.stubEnv('STATE_POLLING_MS', '3600000');
+    vi.stubEnv('IDLE_TASK_REAP_INTERVAL_MS', '3600000');
     base = mkdtempSync(join(homedir(), '.claudia-busyinput-test-'));
     workspace = join(base, 'ws');
     mkdirSync(workspace, { recursive: true });

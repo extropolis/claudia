@@ -11,10 +11,6 @@ import {
     TaskSpawner,
 } from '../task-spawner.js';
 
-// Keep the polling/reaper intervals from firing during these tests.
-process.env.STATE_POLLING_MS = '3600000';
-process.env.IDLE_TASK_REAP_INTERVAL_MS = '3600000';
-
 // ---------------------------------------------------------------------------
 // Major 1 — an interrupted (shouldContinue) task that also has a typed message
 // must deliver BOTH: 'continue' first, then re-deliver the user's message.
@@ -125,6 +121,15 @@ describe('TaskSpawner input routing (integration)', () => {
     }
 
     beforeEach(() => {
+        // Keep the polling/reaper intervals from firing during these tests - but
+        // SCOPED. This package runs on pool:'vmThreads', so every test file shares
+        // one worker process and one process.env. Setting these at module scope
+        // leaked a disabled state poller into whatever suite constructed a
+        // TaskSpawner next; since busy -> idle happens ONLY in the poller, that
+        // wedged a real spawned task in 'busy' forever and failed an unrelated
+        // file. vi.unstubAllEnvs() in afterEach puts them back.
+        vi.stubEnv('STATE_POLLING_MS', '3600000');
+        vi.stubEnv('IDLE_TASK_REAP_INTERVAL_MS', '3600000');
         tmpDir = mkdtempSync(join(tmpdir(), 'claudia-reconnect-test-'));
         spawner = new TaskSpawner(join(tmpDir, 'tasks.json'), false);
     });
@@ -136,6 +141,7 @@ describe('TaskSpawner input routing (integration)', () => {
         try {
             rmSync(tmpDir, { recursive: true, force: true });
         } catch { /* ignore */ }
+        vi.unstubAllEnvs();
         vi.useRealTimers();
     });
 
