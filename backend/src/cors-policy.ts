@@ -80,9 +80,13 @@ export function evaluateCorsOrigin(
     }
 
     // The active tunnel's own origin, even if Host was rewritten en route.
+    // Compared as full origins (scheme included), not bare hosts: ngrok serves
+    // the tunnel over https, so an `http://<same-host>` Origin is a downgraded
+    // or MITM-injected page rather than the real tunnel, and a host-only match
+    // would have waved it through.
     if (tunnelUrl) {
         try {
-            if (new URL(tunnelUrl).host.toLowerCase() === originUrl.host.toLowerCase()) {
+            if (new URL(tunnelUrl).origin.toLowerCase() === originUrl.origin.toLowerCase()) {
                 return { allowed: true, reason: 'tunnel-origin' };
             }
         } catch { /* malformed tunnel URL — fall through to reject */ }

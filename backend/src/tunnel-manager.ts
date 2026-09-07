@@ -64,10 +64,22 @@ export function parseNgrokAddrPort(addr: string): number | null {
  * tests can drive the state machine (adopt / spawn / retry / stop) without
  * touching the network or launching a real ngrok process.
  */
+/**
+ * The subset of a `Response` this module actually reads. `status` and
+ * `headers` are optional so the many existing fakes that return only `json()`
+ * keep compiling; the reachability probe treats an absent header lookup as
+ * "no ngrok error", which is the same verdict it reached before.
+ */
+export interface TunnelFetchResponse {
+    json(): Promise<unknown>;
+    status?: number;
+    headers?: { get(name: string): string | null };
+}
+
 export interface TunnelManagerDeps {
     spawn: typeof spawn;
     execSync: typeof execSync;
-    fetch: (input: string, init?: { signal?: AbortSignal }) => Promise<{ json(): Promise<unknown> }>;
+    fetch: (input: string, init?: { signal?: AbortSignal }) => Promise<TunnelFetchResponse>;
 }
 
 const defaultDeps: TunnelManagerDeps = {
@@ -79,11 +91,27 @@ const defaultDeps: TunnelManagerDeps = {
 export class TunnelManager extends EventEmitter {
     private ngrokProcess: ChildProcess | null = null;
     private token: string | null = null;
-    private url: string | null = null;
+    private _url: string | null = null;
+    /**
+     * The tunnel's public URL. Wrapped in an accessor purely so that every
+     * assignment — start, stop, retry, adopt, auto-recover — bumps
+     * `tunnelGeneration` without each call site having to remember to.
+     */
+    private get url(): string | null { return this._url; }
+    private set url(next: string | null) {
+        if (next !== this._url) this.tunnelGeneration++;
+        this._url = next;
+    }
     private startedAt: string | null = null;
     private publicIp: string | null = null;
     private reachable: boolean | null = null;
     private warning: string | null = null;
+    /**
+     * Bumped every time `url` changes. An in-flight reachability probe captures
+     * it and refuses to publish its verdict if the tunnel moved on meanwhile,
+     * so a slow probe from a torn-down tunnel cannot mark a fresh one dead.
+     */
+    private tunnelGeneration = 0;
     private retryCount = 0;
     private maxRetries = 3;
     private retryTimeout: NodeJS.Timeout | null = null;
@@ -224,8 +252,11 @@ export class TunnelManager extends EventEmitter {
             // ignore
         }
 
+        // `--url`, not `--domain`: ngrok 3.x still accepts --domain but logs
+        // "Flag --domain has been deprecated, use --url instead" (verified on
+        // ngrok 3.37.1), and it will eventually be removed.
         const ngrokArgs = this.domain
-            ? ['http', '--domain', this.domain, String(this.port)]
+            ? ['http', '--url', this.domain, String(this.port)]
             : ['http', String(this.port)];
         logger.info('Spawning ngrok', { args: ngrokArgs });
 
@@ -529,33 +560,71 @@ export class TunnelManager extends EventEmitter {
      * tunnel itself.
      */
     async checkReachable(): Promise<boolean | null> {
-        if (!this.url) {
+        // Pin the URL and the tunnel generation for the whole probe. The fetch
+        // below runs for up to 15s, and the tunnel can be stopped or restarted
+        // underneath it: re-reading `this.url` in the catch used to throw a
+        // TypeError when it had become null, and on a restart it would write a
+        // stale "unreachable" verdict over a healthy new tunnel.
+        const probedUrl = this.url;
+        const generation = this.tunnelGeneration;
+        if (!probedUrl) {
             this.reachable = null;
             this.warning = null;
             return null;
         }
+
+        // Applies a probe result only if this generation is still the live one.
+        const commit = (reachable: boolean, warning: string | null): boolean | null => {
+            if (generation !== this.tunnelGeneration) {
+                logger.info('Discarding stale tunnel reachability result', { probedUrl });
+                return this.reachable;
+            }
+            this.reachable = reachable;
+            this.warning = warning;
+            return this.reachable;
+        };
+
+        const host = (() => {
+            try { return new URL(probedUrl).hostname; } catch { return probedUrl; }
+        })();
+        const zone = host.split('.').slice(-2).join('.');
+        const blockedAdvice =
+            `This usually means the network is blocking the ${zone} domain rather than anything being wrong ` +
+            `with Claudia — phones on such a network get a blank page. Set a reserved ngrok domain on another ` +
+            `zone (Settings -> ngrok domain) to work around it.`;
+
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 15000);
         try {
-            await this.deps.fetch(this.url, { signal: controller.signal });
-            this.reachable = true;
-            this.warning = null;
-            logger.info('Tunnel URL is reachable', { url: this.url });
+            const res = await this.deps.fetch(probedUrl, { signal: controller.signal });
+
+            // A response from ngrok's own edge error page (agent offline, tunnel
+            // not found, ...) proves the hostname resolves but NOT that our
+            // server is behind it — which is exactly the state this probe
+            // exists to surface. ngrok stamps those with `ngrok-error-code`.
+            const ngrokError = res.headers?.get?.('ngrok-error-code');
+            if (ngrokError) {
+                logger.warn('Tunnel host served an ngrok error page', { url: probedUrl, ngrokError });
+                return commit(
+                    false,
+                    `The tunnel hostname ${host} is reachable but ngrok is not forwarding to Claudia ` +
+                    `(${ngrokError}). The agent may have disconnected — try turning the tunnel off and on again.`,
+                );
+            }
+
+            logger.info('Tunnel URL is reachable', { url: probedUrl, status: res.status });
+            return commit(true, null);
         } catch (err) {
             const detail = err instanceof Error ? err.message : String(err);
-            this.reachable = false;
-            const host = (() => { try { return new URL(this.url!).hostname; } catch { return this.url!; } })();
-            const zone = host.split('.').slice(-2).join('.');
-            this.warning =
+            logger.warn('Tunnel URL is NOT reachable from this machine', { url: probedUrl, error: detail });
+            return commit(
+                false,
                 `The tunnel is running but ${host} could not be reached from this machine (${detail}). ` +
-                `This usually means the network is blocking the ${zone} domain rather than anything being wrong ` +
-                `with Claudia — phones on such a network get a blank page. Set a reserved ngrok domain on another ` +
-                `zone (Settings -> ngrok domain) to work around it.`;
-            logger.warn('Tunnel URL is NOT reachable from this machine', { url: this.url, error: detail });
+                blockedAdvice,
+            );
         } finally {
             clearTimeout(timer);
         }
-        return this.reachable;
     }
 
     /**

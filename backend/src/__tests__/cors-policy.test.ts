@@ -87,6 +87,14 @@ describe('evaluateCorsOrigin', () => {
         expect(d).toEqual({ allowed: false, reason: 'cross-origin' });
     });
 
+    it('rejects an http:// origin on the tunnel host — ngrok serves https only', () => {
+        // The tunnel-origin branch used to compare bare hosts, so a downgraded
+        // or MITM-injected plaintext page on the very same hostname matched and
+        // was handed the credentialed CORS headers meant for the real tunnel.
+        const d = evaluateCorsOrigin(`http://${TUNNEL_HOST}`, 'localhost:4001', TUNNEL);
+        expect(d).toEqual({ allowed: false, reason: 'cross-origin' });
+    });
+
     it('rejects an unrelated cross-origin site', () => {
         expect(evaluateCorsOrigin('https://evil.example', 'localhost:4001').allowed).toBe(false);
     });

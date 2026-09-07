@@ -113,10 +113,13 @@ describe('argv construction', () => {
         expect(spawnCalls[0].args).toEqual(['http', String(PORT)]);
     });
 
-    it('inserts --domain when one is configured', async () => {
+    it('inserts --url when a domain is configured (not the deprecated --domain)', async () => {
         const { deps, spawnCalls } = makeDeps({ tunnels: [null, 'https://custom.ngrok.app'] });
         await new TunnelManager(PORT, 'custom.ngrok.app', deps).start();
-        expect(spawnCalls[0].args).toEqual(['http', '--domain', 'custom.ngrok.app', String(PORT)]);
+        // ngrok 3.x logs "Flag --domain has been deprecated, use --url instead"
+        // (verified against 3.37.1) and will drop it eventually.
+        expect(spawnCalls[0].args).toEqual(['http', '--url', 'custom.ngrok.app', String(PORT)]);
+        expect(spawnCalls[0].args).not.toContain('--domain');
     });
 
     it('setPort changes the port used for the next spawn', async () => {
@@ -666,5 +669,111 @@ describe('parseNgrokAddrPort', () => {
 
     it.each(['80', 'file:///tmp/sock', '', 'localhost:99999'])('returns null for %s', (addr) => {
         expect(parseNgrokAddrPort(addr)).toBeNull();
+    });
+});
+
+// ---------------------------------------------------------------------------
+describe('checkReachable', () => {
+    const TUNNEL_URL = 'https://custom.ngrok.app';
+
+    /**
+     * Deps whose probe fetch (anything that is not ipify or the 4040 API) is
+     * held open until the test resolves it, so the tunnel can be mutated while
+     * the probe is genuinely in flight.
+     */
+    function makeProbeDeps(probe: { headers?: Record<string, string>; reject?: Error }) {
+        let release!: () => void;
+        const gate = new Promise<void>((r) => { release = r; });
+        let probeStarted!: () => void;
+        const started = new Promise<void>((r) => { probeStarted = r; });
+
+        const deps: Partial<TunnelManagerDeps> = {
+            spawn: ((..._a: unknown[]) => new FakeChild()) as unknown as TunnelManagerDeps['spawn'],
+            execSync: (() => Buffer.from('')) as unknown as TunnelManagerDeps['execSync'],
+            fetch: async (url: string) => {
+                if (url.includes('ipify')) throw new Error('offline');
+                if (url.includes('4040')) {
+                    return { json: async () => ({ tunnels: [{ public_url: TUNNEL_URL, proto: 'https' }] }) };
+                }
+                probeStarted();
+                await gate;
+                if (probe.reject) throw probe.reject;
+                return {
+                    json: async () => ({}),
+                    status: 200,
+                    headers: { get: (n: string) => probe.headers?.[n.toLowerCase()] ?? null },
+                };
+            },
+        };
+        return { deps, release, started };
+    }
+
+    it('does not crash when the tunnel is stopped while a probe is in flight', async () => {
+        // The catch block used to re-read `this.url`, which stop() had set to
+        // null — `host.split('.')` then threw a TypeError out of checkReachable.
+        const { deps, release, started } = makeProbeDeps({ reject: new Error('ECONNREFUSED') });
+        const tm = new TunnelManager(PORT, 'custom.ngrok.app', deps as TunnelManagerDeps);
+        await tm.start();
+
+        const probe = tm.checkReachable();
+        await started;
+        await tm.stop();
+        release();
+
+        await expect(probe).resolves.not.toThrow();
+        expect(tm.getStatus().url).toBeNull();
+    });
+
+    it('discards a stale verdict instead of marking a restarted tunnel dead', async () => {
+        const { deps, release, started } = makeProbeDeps({ reject: new Error('ECONNREFUSED') });
+        const tm = new TunnelManager(PORT, 'custom.ngrok.app', deps as TunnelManagerDeps);
+        await tm.start();
+
+        const probe = tm.checkReachable();
+        await started;
+        await tm.stop();
+        await tm.start();      // a new, healthy generation
+        release();
+        await probe;
+
+        // The old probe failed, but it belongs to a tunnel that no longer
+        // exists; the live one must not inherit its "unreachable" warning.
+        expect(tm.getStatus().reachable).not.toBe(false);
+        expect(tm.getStatus().warning).toBeNull();
+    });
+
+    it('treats an ngrok edge error page as unreachable, not as success', async () => {
+        // Any resolved fetch used to count as reachable, so ngrok's own
+        // "agent offline" page — the exact failure the probe exists to catch —
+        // read as green.
+        const { deps, release, started } = makeProbeDeps({ headers: { 'ngrok-error-code': 'ERR_NGROK_3200' } });
+        const tm = new TunnelManager(PORT, 'custom.ngrok.app', deps as TunnelManagerDeps);
+        await tm.start();
+
+        const probe = tm.checkReachable();
+        await started;
+        release();
+
+        expect(await probe).toBe(false);
+        expect(tm.getStatus().warning).toContain('ERR_NGROK_3200');
+    });
+
+    it('reports a normal response as reachable', async () => {
+        const { deps, release, started } = makeProbeDeps({});
+        const tm = new TunnelManager(PORT, 'custom.ngrok.app', deps as TunnelManagerDeps);
+        await tm.start();
+
+        const probe = tm.checkReachable();
+        await started;
+        release();
+
+        expect(await probe).toBe(true);
+        expect(tm.getStatus().warning).toBeNull();
+    });
+
+    it('returns null with no tunnel running', async () => {
+        const { deps } = makeProbeDeps({});
+        const tm = new TunnelManager(PORT, undefined, deps as TunnelManagerDeps);
+        expect(await tm.checkReachable()).toBeNull();
     });
 });

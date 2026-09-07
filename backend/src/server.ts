@@ -20,7 +20,7 @@ import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorP
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
-import { validateConfigUpdate, validateWorkspacePath, isPathInside } from './validation.js';
+import { validateConfigUpdate, validateWorkspacePath, isPathInside, isValidNgrokDomain } from './validation.js';
 import { isVoiceTokenAcceptable, isTunnelHostname } from './voice-auth.js';
 import { evaluateCorsOrigin, CORS_REJECTED } from './cors-policy.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch, getTaskWorkStatus } from './git-utils.js';
@@ -531,9 +531,20 @@ export async function createApp(basePath?: string) {
     // Pin the tunnel to a reserved ngrok domain if one is configured. NGROK_DOMAIN
     // wins over the stored setting so a deployment can force it without touching
     // config.json. Empty on both = free tier, ngrok assigns the URL.
+    // The stored setting is validated on the way in by validateConfigUpdate;
+    // the env var bypassed that entirely, so a typo like `https://x.ngrok.app`
+    // or `x.ngrok.app:443` reached ngrok's argv and produced a tunnel that
+    // silently never came up. Hold both to the same rule and say so loudly.
     const resolveNgrokDomain = (): string | null => {
         const env = process.env.NGROK_DOMAIN?.trim();
-        if (env) return env;
+        if (env) {
+            if (isValidNgrokDomain(env)) return env;
+            logger.error(
+                'NGROK_DOMAIN is not a bare hostname and is being ignored — expected something like ' +
+                '"claudia.ngrok.app", with no scheme, port or path',
+                { value: env },
+            );
+        }
         const stored = configStore.getConfig().ngrokDomain?.trim();
         return stored || null;
     };

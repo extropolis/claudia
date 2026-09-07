@@ -8,6 +8,7 @@ import {
     validateWorkspacePath,
     sanitizePrompt,
     decodeHtmlEntities,
+    isValidNgrokDomain,
 } from '../validation.js';
 
 describe('validateConfigUpdate', () => {
@@ -32,7 +33,7 @@ describe('validateConfigUpdate', () => {
         expect(validateConfigUpdate({ rules: 123 }).error).toBe('rules must be a string');
     });
 
-    // ngrokDomain lands on an `ngrok http --domain <x>` argv, so the validator
+    // ngrokDomain lands on an `ngrok http --url <x>` argv, so the validator
     // is the boundary that keeps argv separators and URLs out of it.
     it('accepts a bare reserved hostname and trims it', () => {
         const result = validateConfigUpdate({ ngrokDomain: '  claudia.ngrok.app  ' });
@@ -805,5 +806,41 @@ describe('isPathInside (workspace containment)', () => {
 
     it('normalizes before comparing, so .. that stays inside is still inside', () => {
         expect(isPathInside('/home/u/repo', '/home/u/repo/src/../lib/a.ts')).toBe(true);
+    });
+});
+
+/**
+ * `isValidNgrokDomain` is exported so the NGROK_DOMAIN environment variable is
+ * held to the same rule as the stored setting. Before it was shared, the env
+ * path skipped validation entirely and a typo'd value reached ngrok's argv,
+ * producing a tunnel that silently never came up.
+ */
+describe('isValidNgrokDomain', () => {
+    it.each([
+        'claudia.ngrok.app',
+        'my-tunnel.ngrok-free.dev',
+        'a.b.c.example.com',
+        'x1.y2.dev',
+    ])('accepts the bare hostname %s', (host) => {
+        expect(isValidNgrokDomain(host)).toBe(true);
+    });
+
+    it.each([
+        ['https://claudia.ngrok.app', 'a scheme'],
+        ['claudia.ngrok.app:443', 'a port'],
+        ['claudia.ngrok.app/path', 'a path'],
+        ['claudia ngrok.app', 'a space (argv separator)'],
+        ['--config', 'an ngrok flag'],
+        ['a.b;rm -rf /', 'a shell metacharacter'],
+        ['a.b`id`', 'a backtick'],
+        ['-leading.dash.app', 'a leading dash'],
+        ['nodots', 'no dot — not a FQDN'],
+        ['', 'the empty string'],
+    ])('rejects %s (%s)', (value) => {
+        expect(isValidNgrokDomain(value)).toBe(false);
+    });
+
+    it('rejects a hostname longer than 253 characters', () => {
+        expect(isValidNgrokDomain(`${'a'.repeat(250)}.com`)).toBe(false);
     });
 });
