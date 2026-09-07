@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, Zap, Bell, Palette } from 'lucide-react';
+import { X, Settings, Volume2, Server, ChevronDown, ChevronRight, Plus, Trash2, Shield, FileText, Bot, MousePointer, CheckCircle, AlertCircle, Loader2, Key, Code, Eye, Terminal, Brain, Zap, Bell, Palette, RefreshCw, Download } from 'lucide-react';
 import { VoiceSettingsContent } from './VoiceSettingsContent';
+import { ConfirmModal } from './ConfirmModal';
 import { getApiBaseUrl } from '../config/api-config';
 import { hasBrowserNotifications, getNotificationPermission, requestNotificationPermission, sendBrowserNotification } from '../utils/browserCapabilities';
 import { useTaskStore } from '../stores/taskStore';
@@ -74,11 +75,98 @@ function CollapsiblePanel({ title, icon, isExpanded, onToggle, children }: Colla
     );
 }
 
+const CLAUDIA_RELEASES_URL = 'https://github.com/extropolis/claudia/releases';
+
+/** "3 minutes ago" / "never" — used for the updater's Last checked line. */
+function formatRelativeTime(iso: string | null | undefined): string {
+    if (!iso) return 'never';
+    const then = new Date(iso).getTime();
+    if (Number.isNaN(then)) return 'never';
+    const diffMs = Date.now() - then;
+    if (diffMs < 60_000) return 'just now';
+    const minutes = Math.floor(diffMs / 60_000);
+    if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`;
+    return new Date(then).toLocaleDateString();
+}
+
+/** Human-readable download rate, e.g. "1.4 MB/s". Empty when unknown. */
+function formatBytesPerSecond(bytesPerSecond: number | null | undefined): string {
+    if (bytesPerSecond == null || !Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return '';
+    const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+    let value = bytesPerSecond;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+    }
+    return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function formatReleaseDate(iso: string): string {
+    const time = new Date(iso).getTime();
+    return Number.isNaN(time) ? '' : new Date(time).toLocaleDateString();
+}
+
+/**
+ * Rough semver ordering, only good enough to tell "this is a downgrade" from
+ * "this is an upgrade". Release > prerelease at the same numeric version.
+ */
+function compareVersions(a: string, b: string): number {
+    const parse = (version: string) => {
+        const [core = '', pre = ''] = version.replace(/^v/, '').split('-');
+        return { nums: core.split('.').map(part => parseInt(part, 10) || 0), pre };
+    };
+    const left = parse(a);
+    const right = parse(b);
+    for (let i = 0; i < 3; i++) {
+        const delta = (left.nums[i] || 0) - (right.nums[i] || 0);
+        if (delta !== 0) return delta > 0 ? 1 : -1;
+    }
+    if (left.pre === right.pre) return 0;
+    if (!left.pre) return 1;
+    if (!right.pre) return -1;
+    return left.pre > right.pre ? 1 : -1;
+}
+
+/** One-line inline status for the Updates panel. */
+function describeUpdaterPhase(status: UpdaterStatus | null): string {
+    if (!status) return '';
+    switch (status.phase) {
+        case 'checking':
+            return 'Checking for updates\u2026';
+        case 'available':
+            return status.availableVersion
+                ? `Version ${status.availableVersion} is available.`
+                : 'An update is available.';
+        case 'downloading':
+            return status.availableVersion
+                ? `Downloading v${status.availableVersion}\u2026`
+                : 'Downloading update\u2026';
+        case 'downloaded':
+            return status.availableVersion
+                ? `Version ${status.availableVersion} is downloaded and ready to install.`
+                : 'An update is downloaded and ready to install.';
+        case 'up-to-date':
+            return 'You are up to date.';
+        case 'error':
+            return status.error || 'The update check failed.';
+        case 'unsupported':
+            return status.unsupportedReason || 'This build cannot update itself.';
+        default:
+            return '';
+    }
+}
+
 export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProps) {
     const { showSystemStats, setShowSystemStats, browserNotificationsEnabled, setBrowserNotificationsEnabled, notifyOnCompletion, setNotifyOnCompletion, notifyOnWaitingInput, setNotifyOnWaitingInput, themePreference, setThemePreference } = useTaskStore();
     const { showWarning } = useNotification();
     const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
         appearance: false,
+        updates: false,
         sound: false,
         notifications: false,
         behavior: false,
@@ -96,6 +184,176 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
     });
 
     const [notificationTestStatus, setNotificationTestStatus] = useState<'idle' | 'sent' | 'failed'>('idle');
+
+    // ---------------------------------------------------------------------
+    // Updates (Electron auto-updater). `window.electronAPI?.updater` is absent
+    // in a browser session and on older preload builds — every read below goes
+    // through optional chaining and the UI degrades to a read-only notice.
+    // ---------------------------------------------------------------------
+    const [updaterPrefs, setUpdaterPrefs] = useState<UpdaterPrefs | null>(null);
+    const [updaterStatus, setUpdaterStatus] = useState<UpdaterStatus | null>(null);
+    const [updaterLoadError, setUpdaterLoadError] = useState<string | null>(null);
+    const [updaterActionError, setUpdaterActionError] = useState<string | null>(null);
+    const [updaterBusyAction, setUpdaterBusyAction] = useState<string | null>(null);
+    const updaterLoadedRef = useRef(false);
+    const [releases, setReleases] = useState<ReleaseSummary[] | null>(null);
+    const [releasesLoading, setReleasesLoading] = useState(false);
+    const [releasesError, setReleasesError] = useState<string | null>(null);
+    const [showVersionHistory, setShowVersionHistory] = useState(false);
+    const [pendingInstallVersion, setPendingInstallVersion] = useState<ReleaseSummary | null>(null);
+    const [confirmForceRestart, setConfirmForceRestart] = useState(false);
+
+    // Load prefs + status the FIRST time the Updates panel is expanded. Never
+    // on mount: opening Settings must not poke the updater.
+    useEffect(() => {
+        if (!expandedPanels.updates) return;
+        const api = window.electronAPI?.updater;
+        if (!api || updaterLoadedRef.current) return;
+        updaterLoadedRef.current = true;
+        let cancelled = false;
+        (async () => {
+            try {
+                const [prefs, status] = await Promise.all([api.getPrefs(), api.getStatus()]);
+                if (cancelled) return;
+                setUpdaterPrefs(prefs);
+                setUpdaterStatus(status);
+                setUpdaterLoadError(null);
+            } catch (error) {
+                if (cancelled) return;
+                // Allow a retry the next time the panel is opened.
+                updaterLoadedRef.current = false;
+                setUpdaterLoadError(error instanceof Error ? error.message : String(error));
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [expandedPanels.updates]);
+
+    // Live status pushes from Electron main while the panel is open.
+    // onEvent() returns its own unsubscribe — hand it straight back to React.
+    useEffect(() => {
+        if (!expandedPanels.updates) return;
+        const api = window.electronAPI?.updater;
+        if (!api) return;
+        return api.onEvent(status => setUpdaterStatus(status));
+    }, [expandedPanels.updates]);
+
+    const runUpdaterAction = useCallback(async <T,>(
+        name: string,
+        fn: (api: UpdaterAPI) => Promise<T>
+    ): Promise<T | undefined> => {
+        const api = window.electronAPI?.updater;
+        if (!api) return undefined;
+        setUpdaterBusyAction(name);
+        setUpdaterActionError(null);
+        try {
+            return await fn(api);
+        } catch (error) {
+            setUpdaterActionError(error instanceof Error ? error.message : String(error));
+            return undefined;
+        } finally {
+            setUpdaterBusyAction(null);
+        }
+    }, []);
+
+    const handleUpdaterPrefChange = useCallback(async (patch: Partial<UpdaterPrefs>) => {
+        const next = await runUpdaterAction('prefs', api => api.setPrefs(patch));
+        if (next) setUpdaterPrefs(next);
+    }, [runUpdaterAction]);
+
+    const handleCheckForUpdates = useCallback(async () => {
+        const status = await runUpdaterAction('check', api => api.check());
+        if (status) setUpdaterStatus(status);
+    }, [runUpdaterAction]);
+
+    const handleDownloadUpdate = useCallback(async () => {
+        const status = await runUpdaterAction('download', api => api.download());
+        if (status) setUpdaterStatus(status);
+    }, [runUpdaterAction]);
+
+    const handleSkipVersion = useCallback(async (version: string) => {
+        const prefs = await runUpdaterAction('skip', api => api.skipVersion(version));
+        if (prefs) setUpdaterPrefs(prefs);
+    }, [runUpdaterAction]);
+
+    const handleClearPin = useCallback(async () => {
+        const prefs = await runUpdaterAction('clear-pin', api => api.clearPin());
+        if (prefs) setUpdaterPrefs(prefs);
+        const status = await runUpdaterAction('refresh', api => api.getStatus());
+        if (status) setUpdaterStatus(status);
+    }, [runUpdaterAction]);
+
+    const handleInstallNow = useCallback(async (force = false) => {
+        setConfirmForceRestart(false);
+        const result = await runUpdaterAction('install', api => api.installNow(force));
+        if (result && !result.ok) {
+            setUpdaterActionError(result.reason || 'The update could not be installed right now.');
+        }
+    }, [runUpdaterAction]);
+
+    // Hits the GitHub releases API (60 req/h unauthenticated), so this only
+    // ever runs from an explicit user action — never on mount or on expand.
+    const handleLoadReleases = useCallback(async () => {
+        const api = window.electronAPI?.updater;
+        if (!api) return;
+        setReleasesLoading(true);
+        setReleasesError(null);
+        try {
+            setReleases(await api.listReleases());
+        } catch (error) {
+            setReleasesError(error instanceof Error ? error.message : String(error));
+        } finally {
+            setReleasesLoading(false);
+        }
+    }, []);
+
+    const toggleVersionHistory = useCallback(() => {
+        const next = !showVersionHistory;
+        setShowVersionHistory(next);
+        if (next && releases === null && !releasesLoading) void handleLoadReleases();
+    }, [showVersionHistory, releases, releasesLoading, handleLoadReleases]);
+
+    const handleInstallVersion = useCallback(async (release: ReleaseSummary) => {
+        setPendingInstallVersion(null);
+        const status = await runUpdaterAction('install-version', api => api.installVersion(release.version));
+        if (status) setUpdaterStatus(status);
+        const prefs = await runUpdaterAction('refresh-prefs', api => api.getPrefs());
+        if (prefs) setUpdaterPrefs(prefs);
+    }, [runUpdaterAction]);
+
+    const updaterApiAvailable = typeof window !== 'undefined' && !!window.electronAPI?.updater;
+    const updaterPhase: UpdaterPhase = updaterStatus?.phase ?? 'idle';
+    const updaterUnsupported = updaterPhase === 'unsupported';
+    /** Install/download actions are only ever offered on a self-updatable build. */
+    const updaterInstallAllowed = updaterApiAvailable && !updaterUnsupported;
+    const updaterBusy = updaterBusyAction !== null;
+    const updaterBusyTaskCount = updaterStatus?.busyTaskCount ?? 0;
+    const updaterStatusText = describeUpdaterPhase(updaterStatus);
+    /** The offered version is one the user explicitly skipped. */
+    const updaterSkippedOffered = !!updaterPrefs?.skippedVersion
+        && updaterPrefs.skippedVersion === updaterStatus?.availableVersion;
+    /**
+     * Prefs and status both carry the pin. Take either, so a pin set outside
+     * this panel still shows up; both are re-read after clearing one.
+     */
+    const updaterPinnedVersion = (updaterPrefs?.pinnedVersion ?? null) || (updaterStatus?.pinnedVersion ?? null);
+    const updaterDownloadRate = formatBytesPerSecond(updaterStatus?.bytesPerSecond);
+    const updaterPercent = Math.max(0, Math.min(100, Math.round(updaterStatus?.percent ?? 0)));
+    const pendingIsDowngrade = !!pendingInstallVersion && !!updaterStatus
+        && compareVersions(pendingInstallVersion.version, updaterStatus.currentVersion) < 0;
+
+    /**
+     * In Electron a bare <a target="_blank"> would navigate the app window, so
+     * hand off to the main process when the bridge is there and fall back to
+     * normal link behaviour in a browser session.
+     */
+    const handleOpenReleasesPage = useCallback((event: React.MouseEvent) => {
+        const api = window.electronAPI?.updater;
+        if (api?.openReleasesPage) {
+            event.preventDefault();
+            void api.openReleasesPage();
+        }
+    }, []);
+
 
     // Handle initial panel expansion when settings opens
     useEffect(() => {
@@ -2885,6 +3143,406 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 Requires server restart for running tasks to pick up the change.
                             </p>
                         </div>
+                    </CollapsiblePanel>
+
+                    <CollapsiblePanel
+                        title="Updates"
+                        icon={<RefreshCw size={18} />}
+                        isExpanded={expandedPanels.updates}
+                        onToggle={() => togglePanel('updates')}
+                    >
+                        <div className="permissions-content">
+                            {!updaterApiAvailable ? (
+                                /* Browser session (or a preload without the bridge). */
+                                <div className="updates-notice">
+                                    <span className="permission-label">Updates are managed outside the app</span>
+                                    <span className="permission-description">
+                                        This session is not running in the Claudia desktop app, so it cannot
+                                        update itself from here. Install a new version from the releases page,
+                                        or update an npm install with <code>npm i -g @extropolis/claudia</code>.
+                                    </span>
+                                    <a
+                                        className="updates-releases-link"
+                                        href={CLAUDIA_RELEASES_URL}
+                                        target="_blank"
+                                        rel="noreferrer noopener"
+                                        onClick={handleOpenReleasesPage}
+                                    >
+                                        View releases on GitHub
+                                    </a>
+                                </div>
+                            ) : (
+                                <>
+                                    <div className="updates-header">
+                                        <div className="updates-header-main">
+                                            <span className="updates-version">
+                                                Claudia {updaterStatus ? `v${updaterStatus.currentVersion}` : '…'}
+                                            </span>
+                                            <span className="updates-channel-badge">
+                                                {(updaterPrefs?.channel ?? 'stable') === 'prerelease' ? 'prerelease' : 'stable'}
+                                            </span>
+                                        </div>
+                                        <span className="updates-last-checked">
+                                            Last checked: {formatRelativeTime(updaterStatus?.lastCheckedAt ?? updaterPrefs?.lastCheckedAt)}
+                                        </span>
+                                    </div>
+
+                                    {updaterLoadError && (
+                                        <div className="updates-message updates-message--error">
+                                            Could not read updater settings: {updaterLoadError}
+                                        </div>
+                                    )}
+
+                                    {updaterPinnedVersion && (
+                                        <div className="updates-pin-banner">
+                                            <div className="permission-info">
+                                                <span className="permission-label">
+                                                    Pinned to v{updaterPinnedVersion} &mdash; automatic updates are paused
+                                                </span>
+                                                <span className="permission-description">
+                                                    You rolled back to this version, so Claudia will not move off it until
+                                                    you resume automatic updates.
+                                                </span>
+                                            </div>
+                                            <button
+                                                className="mcp-save-btn"
+                                                onClick={handleClearPin}
+                                                disabled={updaterBusy}
+                                            >
+                                                Resume automatic updates
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {updaterUnsupported && (
+                                        <div className="updates-message updates-message--warning">
+                                            <span className="permission-label">This build cannot update itself</span>
+                                            <span className="permission-description">
+                                                {updaterStatus?.unsupportedReason
+                                                    || 'Automatic updates are not available for this installation.'}
+                                            </span>
+                                            <a
+                                                className="updates-releases-link"
+                                                href={CLAUDIA_RELEASES_URL}
+                                                target="_blank"
+                                                rel="noreferrer noopener"
+                                                onClick={handleOpenReleasesPage}
+                                            >
+                                                View releases on GitHub
+                                            </a>
+                                        </div>
+                                    )}
+
+                                    <div className="permission-item">
+                                        <div className="permission-info">
+                                            <span className="permission-label">Automatic updates</span>
+                                            <span className="permission-description">
+                                                When this is off Claudia never contacts the update server on its own
+                                                &mdash; no background checks, no downloads, no prompts. You can still
+                                                check by hand with the button below.
+                                            </span>
+                                        </div>
+                                        <label className="toggle-switch">
+                                            <input
+                                                type="checkbox"
+                                                checked={updaterPrefs?.enabled ?? false}
+                                                disabled={!updaterPrefs || updaterBusy}
+                                                onChange={e => handleUpdaterPrefChange({ enabled: e.target.checked })}
+                                            />
+                                            <span className="toggle-slider"></span>
+                                        </label>
+                                    </div>
+
+                                    <div className="permission-item">
+                                        <div className="permission-info">
+                                            <span className="permission-label">Update behaviour</span>
+                                            <span className="permission-description">
+                                                What happens once an update is found. Claudia never quits on its own
+                                                &mdash; &ldquo;install on next quit&rdquo; applies the update the next
+                                                time <em>you</em> quit the app.
+                                            </span>
+                                        </div>
+                                        <select
+                                            className="cli-switch-select"
+                                            value={updaterPrefs?.behaviour ?? 'notify'}
+                                            disabled={!updaterPrefs || updaterBusy}
+                                            onChange={e => handleUpdaterPrefChange({ behaviour: e.target.value as UpdateBehaviour })}
+                                        >
+                                            <option value="notify">Notify only &mdash; download nothing</option>
+                                            <option value="download">Download, then ask before installing</option>
+                                            <option value="install-on-quit">Download and install on next quit</option>
+                                        </select>
+                                    </div>
+
+                                    <div className="permission-item">
+                                        <div className="permission-info">
+                                            <span className="permission-label">Channel</span>
+                                            <span className="permission-description">
+                                                Stable follows tagged releases only. Prerelease also offers beta builds
+                                                such as <code>0.4.0-beta.1</code>.
+                                            </span>
+                                        </div>
+                                        <select
+                                            className="cli-switch-select"
+                                            value={updaterPrefs?.channel ?? 'stable'}
+                                            disabled={!updaterPrefs || updaterBusy}
+                                            onChange={e => handleUpdaterPrefChange({ channel: e.target.value as UpdateChannel })}
+                                        >
+                                            <option value="stable">Stable</option>
+                                            <option value="prerelease">Prerelease</option>
+                                        </select>
+                                    </div>
+
+                                    <div className="updates-action-row">
+                                        <button
+                                            className="mcp-add-btn updates-check-btn"
+                                            onClick={handleCheckForUpdates}
+                                            disabled={updaterBusy || updaterUnsupported || updaterPhase === 'checking' || updaterPhase === 'downloading'}
+                                        >
+                                            <RefreshCw size={16} className={updaterPhase === 'checking' ? 'animate-spin' : undefined} />
+                                            Check for updates now
+                                        </button>
+                                        {/* The unsupported reason already has its own banner above. */}
+                                        {updaterStatusText && updaterPhase !== 'unsupported' && (
+                                            <div className={`updates-status-line${updaterPhase === 'error' ? ' updates-status-line--error' : ''}`}>
+                                                {updaterStatusText}
+                                            </div>
+                                        )}
+                                        {updaterActionError && (
+                                            <div className="updates-status-line updates-status-line--error">
+                                                {updaterActionError}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {updaterPhase === 'available' && updaterSkippedOffered && (
+                                        <div className="updates-message">
+                                            <span>
+                                                Version {updaterStatus?.availableVersion} is available, but you chose to
+                                                skip it.
+                                            </span>
+                                            <button
+                                                className="mcp-cancel-btn"
+                                                style={{ alignSelf: 'flex-start' }}
+                                                onClick={() => handleUpdaterPrefChange({ skippedVersion: null })}
+                                                disabled={updaterBusy}
+                                            >
+                                                Stop skipping this version
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {updaterPhase === 'available' && !updaterSkippedOffered && (
+                                        <div className="updates-release">
+                                            <div className="updates-release-title">
+                                                {updaterStatus?.releaseName
+                                                    || `Version ${updaterStatus?.availableVersion ?? ''}`}
+                                            </div>
+                                            {updaterStatus?.releaseNotes && (
+                                                <div className="updates-release-notes">{updaterStatus.releaseNotes}</div>
+                                            )}
+                                            <div className="updates-actions">
+                                                <button
+                                                    className="mcp-save-btn"
+                                                    onClick={handleDownloadUpdate}
+                                                    disabled={!updaterInstallAllowed || updaterBusy}
+                                                    title={updaterInstallAllowed ? undefined : 'This build cannot install updates.'}
+                                                >
+                                                    <Download size={14} />
+                                                    Download
+                                                </button>
+                                                {updaterStatus?.availableVersion && (
+                                                    <button
+                                                        className="mcp-cancel-btn"
+                                                        onClick={() => handleSkipVersion(updaterStatus.availableVersion as string)}
+                                                        disabled={updaterBusy}
+                                                    >
+                                                        Skip this version
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {updaterPhase === 'downloading' && (
+                                        <div className="updates-progress">
+                                            <div
+                                                className="updates-progress-track"
+                                                role="progressbar"
+                                                aria-valuemin={0}
+                                                aria-valuemax={100}
+                                                aria-valuenow={updaterPercent}
+                                            >
+                                                <div className="updates-progress-fill" style={{ width: `${updaterPercent}%` }} />
+                                            </div>
+                                            <div className="updates-progress-meta">
+                                                <span>{updaterPercent}%</span>
+                                                {updaterDownloadRate && <span>{updaterDownloadRate}</span>}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {updaterPhase === 'downloaded' && (
+                                        <div className="updates-ready">
+                                            {updaterStatus?.canInstallNow ? (
+                                                <>
+                                                    <span className="permission-description">
+                                                        Claudia will restart to finish installing
+                                                        {updaterStatus?.availableVersion ? ` v${updaterStatus.availableVersion}` : ' the update'}.
+                                                    </span>
+                                                    <button
+                                                        className="mcp-save-btn"
+                                                        onClick={() => handleInstallNow(false)}
+                                                        disabled={updaterBusy}
+                                                    >
+                                                        Restart now
+                                                    </button>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <span className="permission-label">
+                                                        Update ready &mdash; will install when you next quit
+                                                    </span>
+                                                    <span className="permission-description">
+                                                        {updaterBusyTaskCount} task{updaterBusyTaskCount === 1 ? ' is' : 's are'} running
+                                                        or waiting for input, so Claudia will not restart on its own. The update
+                                                        applies automatically the next time you quit the app.
+                                                    </span>
+                                                    <button
+                                                        className="mcp-cancel-btn updates-danger-btn"
+                                                        onClick={() => setConfirmForceRestart(true)}
+                                                        disabled={updaterBusy}
+                                                    >
+                                                        Restart now and interrupt {updaterBusyTaskCount} task{updaterBusyTaskCount === 1 ? '' : 's'}
+                                                    </button>
+                                                </>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    <div className="updates-history">
+                                        <button className="updates-history-toggle" onClick={toggleVersionHistory}>
+                                            {showVersionHistory ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                                            Version history &amp; rollback
+                                        </button>
+                                        {showVersionHistory && (
+                                            <div className="updates-history-body">
+                                                <p className="permission-description">
+                                                    Releases are fetched from GitHub only when you ask for them &mdash; the
+                                                    public API allows 60 requests an hour.
+                                                </p>
+                                                {releasesLoading && <div className="updates-message">Loading releases&hellip;</div>}
+                                                {releasesError && (
+                                                    <div className="updates-message updates-message--error">
+                                                        <span>Could not load the release list: {releasesError}</span>
+                                                        <button className="mcp-cancel-btn" onClick={handleLoadReleases}>Retry</button>
+                                                    </div>
+                                                )}
+                                                {!releasesLoading && !releasesError && releases?.length === 0 && (
+                                                    <div className="updates-message">No releases found.</div>
+                                                )}
+                                                {!!releases?.length && (
+                                                    <ul className="updates-release-list">
+                                                        {releases.map(release => {
+                                                            const blockedReason = release.current
+                                                                ? 'This is the version you are running.'
+                                                                : !release.installable
+                                                                    ? 'This release has no installable asset for your platform.'
+                                                                    : !updaterInstallAllowed
+                                                                        ? (updaterStatus?.unsupportedReason || 'This build cannot install updates.')
+                                                                        : null;
+                                                            return (
+                                                                <li
+                                                                    key={release.tag}
+                                                                    className={`updates-release-item${release.current ? ' updates-release-item--current' : ''}`}
+                                                                >
+                                                                    <div className="updates-release-item-info">
+                                                                        <span className="updates-release-item-version">
+                                                                            v{release.version}
+                                                                            {release.current && (
+                                                                                <span className="updates-badge updates-badge--current">current</span>
+                                                                            )}
+                                                                            {release.prerelease && (
+                                                                                <span className="updates-badge updates-badge--prerelease">prerelease</span>
+                                                                            )}
+                                                                        </span>
+                                                                        <span className="updates-release-item-meta">
+                                                                            {release.name && release.name !== release.tag ? `${release.name} · ` : ''}
+                                                                            {formatReleaseDate(release.publishedAt)}
+                                                                        </span>
+                                                                    </div>
+                                                                    <button
+                                                                        className="mcp-cancel-btn updates-install-btn"
+                                                                        title={blockedReason ?? `Install v${release.version}`}
+                                                                        disabled={blockedReason !== null || updaterBusy}
+                                                                        onClick={() => setPendingInstallVersion(release)}
+                                                                    >
+                                                                        Install this version
+                                                                    </button>
+                                                                </li>
+                                                            );
+                                                        })}
+                                                    </ul>
+                                                )}
+                                                {!releasesLoading && (
+                                                    <button className="mcp-add-btn" onClick={handleLoadReleases}>
+                                                        <RefreshCw size={14} />
+                                                        {releases === null ? 'Load release list' : 'Refresh release list'}
+                                                    </button>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+
+                        {confirmForceRestart && (
+                            <ConfirmModal
+                                title="Interrupt running tasks and restart?"
+                                variant="danger"
+                                confirmLabel={`Interrupt ${updaterBusyTaskCount} task${updaterBusyTaskCount === 1 ? '' : 's'} and restart`}
+                                cancelLabel="Keep running"
+                                onCancel={() => setConfirmForceRestart(false)}
+                                onConfirm={() => handleInstallNow(true)}
+                            >
+                                <p>
+                                    {updaterBusyTaskCount} task{updaterBusyTaskCount === 1 ? ' is' : 's are'} still running or
+                                    waiting for input. Restarting now terminates {updaterBusyTaskCount === 1 ? 'it' : 'them'} mid-run,
+                                    and anything not yet written to disk is lost.
+                                </p>
+                                <p>
+                                    You do not have to do this: the update installs by itself the next time you quit Claudia.
+                                </p>
+                            </ConfirmModal>
+                        )}
+
+                        {pendingInstallVersion && (
+                            <ConfirmModal
+                                title={pendingIsDowngrade
+                                    ? `Downgrade to v${pendingInstallVersion.version}?`
+                                    : `Install v${pendingInstallVersion.version}?`}
+                                variant={pendingIsDowngrade ? 'danger' : 'warning'}
+                                confirmLabel={pendingIsDowngrade
+                                    ? `Downgrade to v${pendingInstallVersion.version}`
+                                    : `Install v${pendingInstallVersion.version}`}
+                                onCancel={() => setPendingInstallVersion(null)}
+                                onConfirm={() => handleInstallVersion(pendingInstallVersion)}
+                            >
+                                <p>
+                                    Claudia will download v{pendingInstallVersion.version} and pin to it. Automatic updates
+                                    stay paused until you clear the pin from this panel.
+                                </p>
+                                {pendingIsDowngrade && (
+                                    <p>
+                                        <strong>This is a downgrade from v{updaterStatus?.currentVersion}.</strong>{' '}
+                                        Settings and task state written by the newer version may not be readable by
+                                        v{pendingInstallVersion.version} &mdash; config migrations only ever run forward.
+                                        Your configuration is backed up first, but newer settings may be dropped.
+                                    </p>
+                                )}
+                            </ConfirmModal>
+                        )}
                     </CollapsiblePanel>
 
                 </div>

@@ -47,6 +47,16 @@ const PACKAGES = [
     { name: 'backend', dir: 'backend', script: 'test:coverage' },
     { name: 'frontend', dir: 'frontend', script: 'test:coverage' },
     { name: 'shared', dir: 'shared', script: 'test:coverage', optional: true },
+    // electron/ is not an npm workspace (it has no package.json — adding one
+    // would change how electron-builder treats the directory), so it runs
+    // vitest directly instead of via `npm run -w`.
+    {
+        name: 'electron',
+        dir: 'electron',
+        script: 'test:electron',
+        optional: true,
+        cmd: ['npx', 'vitest', 'run', '--config', 'electron/vitest.config.ts', '--coverage'],
+    },
 ];
 
 /** Minimum line coverage required of a source file added in this branch. */
@@ -64,6 +74,13 @@ const NEW_FILE_EXEMPT = [
     /[\\/]test[\\/]setup\.ts$/,
     /\.config\.(ts|mts|js|mjs)$/,
     /[\\/]types?\.ts$/,          // pure type declarations carry no statements
+    // The updater's Electron shell: it is almost entirely `electron` and
+    // `electron-updater` wiring, which vitest cannot exercise without mocking
+    // both runtimes into meaninglessness. Its decision logic was deliberately
+    // extracted into electron/updater-policy.ts, which IS gated (90%+), and
+    // the shell itself is covered end-to-end by `npm run test:updater-sim`,
+    // which drives a real Electron process against a fake update feed.
+    /^electron[\\/]updater\.ts$/,
 ];
 
 const args = process.argv.slice(2);
@@ -152,10 +169,12 @@ const fmt = (n) => `${n.toFixed(2)}%`;
 
 function runPackageCoverage(pkg) {
     process.stderr.write(`\n▶ running coverage: ${pkg.name}\n`);
-    const res = spawnSync('npm', ['run', pkg.script, '-w', pkg.dir], {
+    const [bin, ...rest] = pkg.cmd ?? ['npm', 'run', pkg.script, '-w', pkg.dir];
+    const res = spawnSync(bin, rest, {
         cwd: ROOT,
         stdio: OPTS.json ? 'ignore' : 'inherit',
         env: process.env,
+        shell: process.platform === 'win32',   // npm/npx are .cmd shims on Windows
     });
     // A failing per-file threshold still writes coverage-final.json, so we
     // record the failure and keep going rather than aborting the aggregate —
@@ -347,11 +366,15 @@ function checkNewFiles(files, baseRef) {
     if (!base) return { ok: true, base: null, checked: [], violations: [] };
 
     const notExempt = (p) => !NEW_FILE_EXEMPT.some((re) => re.test(p));
-    const sources = added.filter((p) => /^(backend|frontend|shared)\/src\/.*\.(ts|tsx)$/.test(p) && notExempt(p));
+    const sources = added.filter(
+        (p) =>
+            (/^(backend|frontend|shared)\/src\/.*\.(ts|tsx)$/.test(p) || /^electron\/.*\.(ts|tsx)$/.test(p)) &&
+            notExempt(p)
+    );
 
-    // electron/ still has no test setup, so its new files can neither be
-    // gated nor reported. Surface them rather than silently passing.
-    const ungatable = added.filter((p) => /^electron\/.*\.(ts|tsx)$/.test(p) && notExempt(p));
+    // Nothing is ungatable any more: electron/ gained a vitest setup alongside
+    // the auto-updater, so its new files go through the same floor as the rest.
+    const ungatable = [];
 
     const checked = [];
     const violations = [];

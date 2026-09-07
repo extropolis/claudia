@@ -112,6 +112,21 @@ jobs:
       - name: Run frontend unit tests (with coverage gate)
         run: npm run test:coverage -w frontend
 
+      # electron/ is not an npm workspace, so vitest is invoked directly. This
+      # covers the updater's pure policy layer; the Electron shell around it is
+      # covered by the simulation step below.
+      - name: Run Electron unit tests (with coverage gate)
+        run: npx vitest run --config electron/vitest.config.ts --coverage
+
+      # Drives the REAL updater through check -> update-available -> download ->
+      # update-downloaded against a local fake feed on an ephemeral port, and
+      # asserts that a disabled or pinned updater makes zero feed requests.
+      # Windows only: it is a shipped auto-update target that needs no virtual
+      # display, and macOS in-app updates stay disabled until signing lands (#10).
+      - name: Updater end-to-end simulation (Windows)
+        if: runner.os == 'Windows'
+        run: npm run test:updater-sim
+
       # Repo-wide gate. The per-file thresholds above only cover modules
       # someone remembered to list; this aggregates every package into one
       # number that may never regress, and fails any NEW source file that
