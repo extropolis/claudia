@@ -1,5 +1,8 @@
 # Dependencies
-node_modules/
+# No trailing slash: in a git worktree `node_modules` is often a SYMLINK to the
+# primary checkout's copy, and `node_modules/` only matches directories — so the
+# symlink would show up as untracked and could be committed by `git add -A`.
+node_modules
 
 # pid file for the shared Playwright MCP server (see shared-mcp-manager.ts)
 backend/.shared-playwright-mcp-*.pid
@@ -95,3 +98,12 @@ vite
 
 # Claudia task worktrees (created at runtime by the orchestrator)
 .claudia-worktrees/
+# Playwright browser E2E
+/playwright-report/
+/test-results/
+/blob-report/
+/playwright/.cache/
+# Sandboxed E2E state. Normally lives at ~/.claudia-e2e (outside the repo), but
+# ignored here too so a CLAUDIA_E2E_* override pointing inside the checkout can
+# never be committed.
+.claudia-e2e/

@@ -59,12 +59,19 @@ interface CollapsiblePanelProps {
     isExpanded: boolean;
     onToggle: () => void;
     children: React.ReactNode;
+    /** Stable hook for tests, e.g. "permissions" -> data-testid="settings-panel-permissions". */
+    panelId?: string;
 }
 
-function CollapsiblePanel({ title, icon, isExpanded, onToggle, children }: CollapsiblePanelProps) {
+function CollapsiblePanel({ title, icon, isExpanded, onToggle, children, panelId }: CollapsiblePanelProps) {
     return (
         <div className="collapsible-panel">
-            <button className="collapsible-panel-header" onClick={onToggle}>
+            <button
+                className="collapsible-panel-header"
+                data-testid={panelId ? `settings-panel-${panelId}` : undefined}
+                data-expanded={isExpanded ? 'true' : 'false'}
+                onClick={onToggle}
+            >
                 <span className="collapsible-panel-icon">{icon}</span>
                 <span className="collapsible-panel-title">{title}</span>
                 <span className="collapsible-panel-chevron">
@@ -1698,7 +1705,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
             onMouseDown={(e) => { if (e.target === e.currentTarget) (e.currentTarget as HTMLElement).dataset.closeOnMouseup = '1'; }}
             onMouseUp={(e) => { if ((e.currentTarget as HTMLElement).dataset.closeOnMouseup === '1' && e.target === e.currentTarget) onClose(); delete (e.currentTarget as HTMLElement).dataset.closeOnMouseup; }}
         >
-            <div className="settings-menu" onClick={(e) => e.stopPropagation()}>
+            <div className="settings-menu" data-testid="settings-menu" onClick={(e) => e.stopPropagation()}>
                 <div className="settings-menu-header">
                     <div className="settings-menu-title">
                         <Settings size={20} />
@@ -1712,6 +1719,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                 <div className="settings-menu-content">
                     <CollapsiblePanel
                         title="Appearance"
+                        panelId="appearance"
                         icon={<Palette size={16} />}
                         isExpanded={expandedPanels.appearance}
                         onToggle={() => togglePanel('appearance')}
@@ -2698,6 +2706,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
 
                     <CollapsiblePanel
                         title="Permissions"
+                        panelId="permissions"
                         icon={<Shield size={18} />}
                         isExpanded={expandedPanels.permissions}
                         onToggle={() => togglePanel('permissions')}
@@ -2714,6 +2723,7 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 <label className="toggle-switch">
                                     <input
                                         type="checkbox"
+                                        data-testid="skip-permissions-toggle"
                                         checked={skipPermissions}
                                         onChange={(e) => saveSkipPermissions(e.target.checked)}
                                     />
