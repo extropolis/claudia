@@ -8,6 +8,20 @@ import WebSocket from 'ws';
 import { WSMessage, ChatMessage, Task } from './src/types.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { httpBaseFromWsUrl } from './src/utils/backend-url.js';
+
+const DEFAULT_BACKEND_URL = 'ws://localhost:4001';
+
+/**
+ * Read `--url` straight from argv for subcommands that run before parseArgs()
+ * (Jira, tunnel). Returns the HTTP base so those handlers hit the same host
+ * and port as the WebSocket client would.
+ */
+function httpBaseFromArgv(argv: string[]): string {
+    const i = argv.indexOf('--url');
+    const wsUrl = i >= 0 && argv[i + 1] ? argv[i + 1] : DEFAULT_BACKEND_URL;
+    return httpBaseFromWsUrl(wsUrl);
+}
 
 interface TestConfig {
     backendUrl: string;
@@ -266,7 +280,10 @@ class TestCLI {
             });
 
             this.ws.on('error', (error: Error) => {
-                console.error('❌ WebSocket error:', error.message);
+                // ws reports ECONNREFUSED with an empty message; name the URL so
+                // a wrong --url host/port is obvious from the output.
+                const code = (error as NodeJS.ErrnoException).code;
+                console.error(`❌ WebSocket error connecting to ${this.config.backendUrl}: ${error.message || code || String(error)}`);
                 clearTimeout(timeout);
                 reject(error);
             });
@@ -857,7 +874,7 @@ class TestCLI {
     }
 
     private async viewTaskFiles(taskId: string): Promise<void> {
-        const httpUrl = this.config.backendUrl.replace('ws://', 'http://').replace('ws', '3000');
+        const httpUrl = httpBaseFromWsUrl(this.config.backendUrl);
         const url = `${httpUrl}/api/tasks/${taskId}/files`;
 
         console.log(`📄 Fetching files for task ${taskId}...`);
@@ -900,7 +917,7 @@ class TestCLI {
     }
 
     private async getConfig(): Promise<void> {
-        const httpUrl = this.config.backendUrl.replace('ws://', 'http://').replace('ws', '3000');
+        const httpUrl = httpBaseFromWsUrl(this.config.backendUrl);
         const url = `${httpUrl}/api/config`;
 
         console.log('⚙️  Fetching orchestrator configuration...');
@@ -1336,7 +1353,7 @@ class TestCLI {
 function parseArgs(): TestConfig {
     const args = process.argv.slice(2);
 
-    let backendUrl = 'ws://localhost:4001';
+    let backendUrl = DEFAULT_BACKEND_URL;
     let testMessage = 'echo hello world';
     let timeoutMs = 120000; // 120 seconds
     let testClear = false;
@@ -2148,7 +2165,7 @@ async function getBackendStatus(baseHttpUrl: string): Promise<void> {
         }
         console.log('');
     } catch (error) {
-        console.error('Failed to get backend status:', error);
+        console.error(`Failed to get backend status from ${baseHttpUrl}:`, error);
     }
 }
 
@@ -2379,10 +2396,10 @@ async function checkApiConfig(baseHttpUrl: string): Promise<void> {
         console.log('🌍 ENVIRONMENT VARIABLES FOR TASKS');
         console.log('-'.repeat(80));
         if (config.apiMode === 'sap-ai-core') {
-            console.log(`  ANTHROPIC_BASE_URL: http://localhost:4001/anthropic`);
+            console.log(`  ANTHROPIC_BASE_URL: ${baseHttpUrl}/anthropic`);
             console.log(`  ANTHROPIC_API_KEY:  sap-ai-core-proxy (placeholder)`);
         } else if (config.apiMode === 'hyperspace-proxy') {
-            console.log(`  ANTHROPIC_BASE_URL: http://localhost:4001/anthropic`);
+            console.log(`  ANTHROPIC_BASE_URL: ${baseHttpUrl}/anthropic`);
             console.log(`  ANTHROPIC_API_KEY:  hyperspace-proxy (placeholder)`);
         } else if (config.apiMode === 'custom-anthropic') {
             console.log(`  ANTHROPIC_API_KEY:  [CUSTOM KEY]`);
@@ -2500,7 +2517,7 @@ async function toggleAutoWorktreeCmd(baseHttpUrl: string, workspaceId: string, e
 //   --jira-security-check                      run the S1/token-leak checks
 // ============================================================================
 async function handleJiraCommand(argv: string[]): Promise<boolean> {
-    const base = 'http://localhost:4001';
+    const base = httpBaseFromArgv(argv);
     const idx = (flag: string) => argv.indexOf(flag);
     const val = (flag: string) => { const i = idx(flag); return i >= 0 ? argv[i + 1] : undefined; };
 
@@ -2582,7 +2599,7 @@ async function handleJiraCommand(argv: string[]): Promise<boolean> {
 //   --tunnel-diagnose               probe which ngrok zones this network allows
 // ============================================================================
 async function handleTunnelCommand(argv: string[]): Promise<boolean> {
-    const base = 'http://localhost:4001';
+    const base = httpBaseFromArgv(argv);
     const idx = (flag: string) => argv.indexOf(flag);
     const val = (flag: string) => { const i = idx(flag); return i >= 0 ? argv[i + 1] : undefined; };
 
@@ -2633,8 +2650,7 @@ async function handleTunnelCommand(argv: string[]): Promise<boolean> {
         show(status);
         if (status.active && status.url) {
             // The server probes asynchronously; give it a beat, then re-read.
-            console.log('
-Probing reachability...');
+            console.log('\nProbing reachability...');
             await new Promise(r => setTimeout(r, 16000));
             show(await (await fetch(`${base}/api/tunnel/status`)).json());
         }
@@ -2646,8 +2662,7 @@ Probing reachability...');
         // drops one zone by SNI makes a perfectly healthy tunnel unreachable,
         // and nothing else in the stack can tell you that.
         const zones = ['ngrok.com', 'probe.ngrok.app', 'probe.ngrok.io', 'probe.ngrok-free.app', 'probe.ngrok-free.dev'];
-        console.log('Probing ngrok domains from this machine (404 = reachable, ngrok just has no such endpoint):
-');
+        console.log('Probing ngrok domains from this machine (404 = reachable, ngrok just has no such endpoint):\n');
         for (const host of zones) {
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), 12000);
@@ -2660,8 +2675,7 @@ Probing reachability...');
                 clearTimeout(timer);
             }
         }
-        console.log('
-If one zone is BLOCKED while others are OK, this network filters that domain.');
+        console.log('\nIf one zone is BLOCKED while others are OK, this network filters that domain.');
         console.log('Pin a reserved domain on a working zone:  --tunnel-domain <your>.ngrok.app');
         return true;
     }
@@ -2683,10 +2697,7 @@ async function main() {
     const config = parseArgs() as any;
 
     // Derive HTTP URL from WebSocket URL for API calls
-    const baseHttpUrl = config.backendUrl
-        .replace('ws://', 'http://')
-        .replace('wss://', 'https://')
-        .replace(/:\d+$/, ':4001');  // Ensure correct port
+    const baseHttpUrl = httpBaseFromWsUrl(config.backendUrl);
 
     // Handle backend commands that don't need WebSocket
     if (config.backendStatus) {
