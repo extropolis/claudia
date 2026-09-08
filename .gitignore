@@ -103,7 +103,12 @@ vite
 /test-results/
 /blob-report/
 /playwright/.cache/
-# Sandboxed E2E state. Normally lives at ~/.claudia-e2e (outside the repo), but
-# ignored here too so a CLAUDIA_E2E_* override pointing inside the checkout can
-# never be committed.
+# The E2E frontend bundle. Built with the sandbox backend port compiled in and
+# kept OUT of frontend/dist, which is a real production artifact (served by the
+# backend on the tunnel route, loaded by the packaged Electron app).
+frontend/dist-e2e/
+# Sandboxed E2E state. Normally lives at ~/.claudia-e2e-<port> (outside the
+# repo), but ignored here too so a CLAUDIA_E2E_* override pointing inside the
+# checkout can never be committed.
+.claudia-e2e-*/
 .claudia-e2e/

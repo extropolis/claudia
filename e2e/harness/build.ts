@@ -10,7 +10,7 @@
 import { execSync } from 'child_process';
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { BACKEND_PORT, REPO_ROOT } from './env.js';
+import { BACKEND_PORT, FRONTEND_DIST, REPO_ROOT } from './env.js';
 
 function run(label: string, cmd: string, env: NodeJS.ProcessEnv = {}, cwd: string = REPO_ROOT): void {
     const started = Date.now();
@@ -41,9 +41,9 @@ function run(label: string, cmd: string, env: NodeJS.ProcessEnv = {}, cwd: strin
  * refuse to run unless the port is actually baked into the bundle.
  */
 function assertBundleTargetsSandbox(): void {
-    const assetsDir = join(REPO_ROOT, 'frontend', 'dist', 'assets');
+    const assetsDir = join(REPO_ROOT, 'frontend', FRONTEND_DIST, 'assets');
     if (!existsSync(assetsDir)) {
-        throw new Error('[e2e] frontend/dist/assets missing — build the frontend first');
+        throw new Error(`[e2e] frontend/${FRONTEND_DIST}/assets missing — build the frontend first`);
     }
     const bundles = readdirSync(assetsDir).filter((f) => f.endsWith('.js'));
     const hit = bundles.some((f) => readFileSync(join(assetsDir, f), 'utf8').includes(String(BACKEND_PORT)));
@@ -78,8 +78,15 @@ export function buildStack(): void {
     //
     // MUST run with cwd=frontend/. Vite's project root is process.cwd(), not the
     // directory of --config, so building from REPO_ROOT silently treats the repo
-    // root as the app and emits to <repo>/dist instead of frontend/dist.
-    run('frontend', 'npx vite build', {
+    // root as the app and emits to <repo>/dist instead of frontend/<outDir>.
+    //
+    // Emitted to `dist-e2e`, NOT `dist`. `frontend/dist` is a real production
+    // artifact: server.ts serves it over the tunnel/mobile path and
+    // electron/main.ts loads it in a packaged build. Overwriting it with a
+    // bundle whose backend port is hard-wired to the sandbox would silently
+    // break the developer's tunnel — and ship in an Electron build made from
+    // that tree — with nothing to show for it, since dist/ is gitignored.
+    run('frontend', `npx vite build --outDir ${FRONTEND_DIST} --emptyOutDir`, {
         VITE_CLAUDIA_BACKEND_PORT: String(BACKEND_PORT),
     }, join(REPO_ROOT, 'frontend'));
     assertBundleTargetsSandbox();

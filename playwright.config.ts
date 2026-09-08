@@ -8,8 +8,8 @@
  */
 import { defineConfig, devices } from '@playwright/test';
 import {
-    BACKEND_PORT, FRONTEND_PORT, FRONTEND_URL, REPO_ROOT, VIEWPORT,
-    assertPortFree, backendEnv, prepareHarness,
+    BACKEND_PORT, FRONTEND_DIST, FRONTEND_PORT, FRONTEND_URL, REPO_ROOT, VIEWPORT,
+    assertPortFree, assertSafePort, backendEnv, prepareHarness,
 } from './e2e/harness/env.js';
 import { buildStack } from './e2e/harness/build.js';
 
@@ -21,6 +21,12 @@ import { buildStack } from './e2e/harness/build.js';
 // dir out from under the live backend, and assertPortFree would trip over our
 // own servers. TEST_WORKER_INDEX is only set in worker processes.
 if (process.env.TEST_WORKER_INDEX === undefined) {
+    // Safe-port check FIRST. prepareHarness() repeats it, but by then
+    // assertPortFree has already run — and with CLAUDIA_E2E_BACKEND_PORT=4001
+    // and the developer's server up, that reports the misleading "port already
+    // in use" instead of naming the actual mistake.
+    assertSafePort(BACKEND_PORT, 'backend');
+    assertSafePort(FRONTEND_PORT, 'frontend');
     assertPortFree(BACKEND_PORT, 'e2e backend');
     assertPortFree(FRONTEND_PORT, 'e2e frontend');
     prepareHarness();
@@ -76,7 +82,9 @@ export default defineConfig({
             env: backendEnv(),
         },
         {
-            command: `npx vite preview --port ${FRONTEND_PORT} --strictPort --host 127.0.0.1`,
+            // --outDir must match build.ts: the suite serves its own bundle from
+            // frontend/dist-e2e and never touches the production frontend/dist.
+            command: `npx vite preview --outDir ${FRONTEND_DIST} --port ${FRONTEND_PORT} --strictPort --host 127.0.0.1`,
             cwd: `${REPO_ROOT}/frontend`,
             url: FRONTEND_URL,
             reuseExistingServer: false,

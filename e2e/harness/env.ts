@@ -35,6 +35,17 @@ function readPort(envVar: string, fallback: number): number {
 export const BACKEND_PORT = readPort('CLAUDIA_E2E_BACKEND_PORT', 4801);
 export const FRONTEND_PORT = readPort('CLAUDIA_E2E_FRONTEND_PORT', 5801);
 
+/**
+ * Frontend build output the suite serves, relative to `frontend/`.
+ *
+ * NOT `dist`. That path is a real production artifact — server.ts serves it on
+ * the tunnel/mobile route and electron/main.ts loads it in a packaged app — and
+ * the E2E bundle has the sandbox backend port compiled into it. Writing over
+ * `frontend/dist` would leave the developer's tunnel pointing at a dead port,
+ * silently, because dist/ is gitignored and nothing would show the damage.
+ */
+export const FRONTEND_DIST = 'dist-e2e';
+
 export const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 export const FRONTEND_URL = `http://127.0.0.1:${FRONTEND_PORT}`;
 
@@ -44,8 +55,15 @@ export const FRONTEND_URL = `http://127.0.0.1:${FRONTEND_PORT}`;
  * Deliberately under $HOME and NOT os.tmpdir(): on macOS tmpdir resolves under
  * /var, which `validateWorkspacePath` blocklists — workspace creation would be
  * rejected by the backend and every workspace test would fail.
+ *
+ * Keyed by the backend port so the CLAUDIA_E2E_* overrides actually buy
+ * isolation. prepareHarness() wipes this tree at config load; with one fixed
+ * path, a second run started on different ports — the documented way to run two
+ * suites at once, and routine in a repo whose own orchestrator drives many
+ * worktrees in parallel — would delete the first run's state dir out from under
+ * its live backend. On the default port this is `~/.claudia-e2e-4801`.
  */
-export const RUN_ROOT = join(homedir(), '.claudia-e2e');
+export const RUN_ROOT = join(homedir(), `.claudia-e2e-${BACKEND_PORT}`);
 
 export const STATE_DIR = join(RUN_ROOT, 'state');   // config.json / tasks.json / workspace-config.json
 export const FAKE_HOME = join(RUN_ROOT, 'home');    // backend's $HOME → ~/.claude session files land here
@@ -150,14 +168,30 @@ export function prepareHarness(): void {
 /**
  * Where the backend writes its state when CLAUDIA_DATA_DIR is *absent*.
  *
- * WorkspaceStore/ConfigStore fall back to `backend/<file>` (i.e. `__dirname/..`
- * from backend/dist). If the sandboxed server ever ignored our env, its writes
- * would land here instead — so the isolation spec asserts these stay untouched.
+ * Every store with a `basePath?` seam falls back to `backend/<file>` (i.e.
+ * `__dirname/..` from backend/dist) when it is not given one. If the sandboxed
+ * server ever ignores our env — or a new store is wired up without a data
+ * directory — its writes land here instead, INSIDE the developer's checkout, on
+ * top of their live instance's state. So the isolation spec asserts these stay
+ * untouched.
+ *
+ * This list must name every such file, not a sample: a fallback file that is
+ * missing from it is a leak the isolation spec passes straight over. That is
+ * not hypothetical — `checkpoints.json` and `todos.json` were both being
+ * written into the repo on every run while this spec reported green.
+ *
+ * Cross-check when adding a store:
+ *   grep -rn "join(__dirname, '\.\.'" backend/src/*.ts
  */
 export const DEFAULT_STATE_FILES = [
     join(REPO_ROOT, 'backend', 'workspace-config.json'),
     join(REPO_ROOT, 'backend', 'config.json'),
     join(REPO_ROOT, 'backend', 'tasks.json'),
+    join(REPO_ROOT, 'backend', 'checkpoints.json'),
+    join(REPO_ROOT, 'backend', 'todos.json'),
+    join(REPO_ROOT, 'backend', 'learnings.json'),
+    join(REPO_ROOT, 'backend', 'scheduled-tasks.json'),
+    join(REPO_ROOT, 'backend', 'chat-history.json'),
     // Written only if the backend spawned a shared Playwright MCP server, which
     // backendEnv() disables (CLAUDIA_SHARED_MCP=0). Its presence would mean the
     // sandbox started a detached process that outlives the run.
