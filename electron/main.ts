@@ -250,8 +250,17 @@ async function startApp(): Promise<void> {
         serverInfo = info;
 
         if (attached) {
-            const version = serverInfo.version ? ` (version ${serverInfo.version})` : '';
-            console.log(`🔗 Attached to running backend at ${serverInfo.url}${version} — not spawning a local one`);
+            // /api/server-info names the backend; /api/health cannot, so an
+            // attach via the fallback path says only that it attached.
+            const identity = serverInfo.instanceId
+                ? ` (instance ${serverInfo.instanceId}, version ${serverInfo.version ?? 'unknown'})`
+                : '';
+            console.log(`🔗 Attached to running backend at ${serverInfo.url}${identity} — not spawning a local one`);
+            if (serverInfo.dataDir) {
+                // The data dir is the whole point: a mismatch here is exactly
+                // the bug that made the desktop app show an empty Claudia.
+                console.log(`   Attached backend data dir: ${serverInfo.dataDir}`);
+            }
         }
         console.log(`   Backend URL: ${serverInfo.url}`);
 

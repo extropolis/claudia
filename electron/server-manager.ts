@@ -16,8 +16,86 @@ export interface ServerInfo {
     child: UtilityProcess | null;
     port: number;
     url: string;
-    /** Version reported by `/api/health`, when the payload carries one. */
+    /** Instance id from `/api/server-info`; absent when only `/api/health` answered. */
+    instanceId?: string;
+    /** Version reported by `/api/server-info`. */
     version?: string;
+    /** Data directory the attached backend holds, per `/api/server-info`. */
+    dataDir?: string | null;
+}
+
+/** Identity a probe can learn about a backend that is already running. */
+interface BackendIdentity {
+    instanceId?: string;
+    version?: string;
+    dataDir?: string | null;
+}
+
+/**
+ * Ask `/api/server-info` who the backend is.
+ *
+ * This is the preferred probe: it answers with an identity we can log and, in
+ * time, reason about (see the instance-lock work). It is deliberately
+ * unauthenticated on the backend side, because the question is asked before any
+ * credential exists. Returns null when the route is absent (older backend) or
+ * the payload is not recognisably Claudia's, so the caller can fall back.
+ */
+async function probeServerInfo(base: string, signal: AbortSignal): Promise<BackendIdentity | null> {
+    try {
+        const res = await fetch(`${base}/api/server-info`, {
+            signal,
+            headers: { accept: 'application/json' }
+        });
+        if (!res.ok) {
+            console.log(`[Backend probe] /api/server-info -> HTTP ${res.status}, falling back to /api/health`);
+            return null;
+        }
+
+        const body = (await res.json()) as Record<string, unknown> | null;
+        // The identity guard: a bare 200 proves only that *something* listens on
+        // this port. A Claudia backend names itself.
+        if (!body || typeof body.instanceId !== 'string' || body.instanceId.length === 0) {
+            console.log('[Backend probe] /api/server-info answered without an instanceId, falling back to /api/health');
+            return null;
+        }
+
+        return {
+            instanceId: body.instanceId,
+            version: typeof body.version === 'string' ? body.version : undefined,
+            dataDir: typeof body.dataDir === 'string' ? body.dataDir : null
+        };
+    } catch {
+        // Route missing, payload not JSON, or the connection died. Either the
+        // health probe picks it up or the whole probe fails there.
+        return null;
+    }
+}
+
+/**
+ * Fall back to `/api/health` for backends predating `/api/server-info`.
+ *
+ * Learns no identity, so an attach via this path logs only that it attached.
+ */
+async function probeHealth(base: string, signal: AbortSignal): Promise<BackendIdentity | null> {
+    try {
+        const res = await fetch(`${base}/api/health`, {
+            signal,
+            headers: { accept: 'application/json' }
+        });
+        if (!res.ok) {
+            console.log(`[Backend probe] /api/health -> HTTP ${res.status}, not attaching`);
+            return null;
+        }
+
+        const body = (await res.json()) as Record<string, unknown> | null;
+        if (!body || body.status !== 'ok') {
+            console.log('[Backend probe] /api/health answered 200 but not with Claudia\'s payload, not attaching');
+            return null;
+        }
+        return {};
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -25,56 +103,53 @@ export interface ServerInfo {
  *
  * This is what keeps a packaged/dev Electron window from booting a *second*
  * Claudia against a different data dir while the user's `./start.sh` backend
- * is already serving all their workspaces on 4001. Localhost only, no auth:
- * anything reachable at this URL is by definition already trusted by the user.
+ * is already serving all their workspaces on 4001.
+ *
+ * Tries `/api/server-info` first and falls back to `/api/health`, so it attaches
+ * to backends both with and without the instance-lock work. Both probes require
+ * the body to look like Claudia's, not merely a 200 — otherwise any unrelated
+ * service holding the port would be attached to. That guard is sized for a
+ * localhost default and needs real authentication before attach goes remote.
  *
  * @param url - Backend origin, e.g. `http://localhost:4001`
- * @param timeoutMs - Abort the probe after this long (default 1.5s)
- * @returns ServerInfo with `child: null` when a backend answered 200, else null
+ * @param timeoutMs - Abort the whole probe, both requests, after this long
+ * @returns ServerInfo with `child: null` when a Claudia backend answered, else null
  */
 export async function findRunningBackend(
     url: string,
     timeoutMs = 1500
 ): Promise<ServerInfo | null> {
     const base = url.replace(/\/+$/, '');
+
+    let port: number;
+    try {
+        const parsed = new URL(base);
+        port = Number(parsed.port) || (parsed.protocol === 'https:' ? 443 : 80);
+    } catch {
+        console.log(`[Backend probe] ${base} is not a valid URL, not attaching`);
+        return null;
+    }
+
+    // One budget covers both requests, so a hung backend cannot double the
+    // startup delay by stalling each probe in turn.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-        const res = await fetch(`${base}/api/health`, {
-            signal: controller.signal,
-            headers: { accept: 'application/json' }
-        });
-        if (!res.ok) {
-            console.log(`[Backend probe] ${base}/api/health -> HTTP ${res.status}, not attaching`);
+        let identity = await probeServerInfo(base, controller.signal);
+        if (!identity && !controller.signal.aborted) {
+            identity = await probeHealth(base, controller.signal);
+        }
+
+        if (!identity) {
+            const why = controller.signal.aborted
+                ? `no response within ${timeoutMs}ms`
+                : 'no Claudia backend answered';
+            console.log(`[Backend probe] ${base}: ${why}, will spawn our own`);
             return null;
         }
 
-        let version: string | undefined;
-        try {
-            const body: unknown = await res.json();
-            const v = (body as { version?: unknown } | null)?.version;
-            if (typeof v === 'string' && v.length > 0) version = v;
-        } catch {
-            // Health payload is not JSON (or empty). A 200 is enough to attach.
-        }
-
-        let port: number;
-        try {
-            const parsed = new URL(base);
-            port = Number(parsed.port) || (parsed.protocol === 'https:' ? 443 : 80);
-        } catch {
-            console.log(`[Backend probe] ${base} is not a valid URL, not attaching`);
-            return null;
-        }
-
-        return { child: null, port, url: base, version };
-    } catch (err) {
-        const reason = (err as Error)?.name === 'AbortError'
-            ? `no response within ${timeoutMs}ms`
-            : (err as Error)?.message ?? String(err);
-        console.log(`[Backend probe] ${base}/api/health unreachable (${reason}), will spawn our own`);
-        return null;
+        return { child: null, port, url: base, ...identity };
     } finally {
         clearTimeout(timer);
     }

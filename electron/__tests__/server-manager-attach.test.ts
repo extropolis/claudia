@@ -31,14 +31,38 @@ function fakeChild() {
     };
 }
 
+const json = (body: unknown, status = 200) =>
+    ({ ok: status >= 200 && status < 300, status, json: async () => body }) as unknown as Response;
+
+const notFound = () => json({ error: 'Not found' }, 404);
+
+/**
+ * Route the mocked fetch by endpoint. `undefined` means "route absent" (404),
+ * an Error is thrown as a transport failure.
+ */
+function routeFetch(routes: { serverInfo?: Response | Error; health?: Response | Error }) {
+    fetchMock.mockImplementation(async (url: string) => {
+        const hit = url.endsWith('/api/server-info') ? routes.serverInfo
+            : url.endsWith('/api/health') ? routes.health
+            : undefined;
+        if (hit instanceof Error) throw hit;
+        return hit ?? notFound();
+    });
+}
+
+const SERVER_INFO = {
+    instanceId: 'inst-abc123',
+    version: '0.4.0',
+    protocolVersion: 1,
+    dataDir: '/Users/dev/.claudia',
+    startedAt: '2026-09-08T02:00:00.000Z'
+};
+
 /**
  * startServer registers its listeners only after `await getPort(...)`, so a
  * test must let that microtask land before driving the fake child's events.
  */
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
-
-const okResponse = (body: unknown = { status: 'ok' }) =>
-    ({ ok: true, status: 200, json: async () => body }) as unknown as Response;
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -55,77 +79,131 @@ afterEach(() => {
     vi.useRealTimers();
 });
 
-describe('findRunningBackend', () => {
-    it('returns attach info when the health endpoint answers 200', async () => {
-        fetchMock.mockResolvedValue(okResponse());
+describe('findRunningBackend via /api/server-info', () => {
+    it('prefers server-info and carries the backend identity through', async () => {
+        routeFetch({ serverInfo: json(SERVER_INFO) });
 
         const info = await findRunningBackend('http://localhost:4001');
 
-        expect(info).toEqual({ child: null, port: 4001, url: 'http://localhost:4001', version: undefined });
+        expect(info).toEqual({
+            child: null,
+            port: 4001,
+            url: 'http://localhost:4001',
+            instanceId: 'inst-abc123',
+            version: '0.4.0',
+            dataDir: '/Users/dev/.claudia'
+        });
+        // health is never consulted when server-info answers
         expect(fetchMock).toHaveBeenCalledOnce();
-        expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:4001/api/health');
+        expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:4001/api/server-info');
     });
 
     // A null child is the whole point: it tells stopServer this process is not
     // ours, so quitting the app must not kill the user's `./start.sh` backend.
     it('marks the attached backend as externally owned', async () => {
-        fetchMock.mockResolvedValue(okResponse());
+        routeFetch({ serverInfo: json(SERVER_INFO) });
         const info = await findRunningBackend('http://localhost:4001');
         expect(info?.child).toBeNull();
     });
 
-    it('carries the version through when the health payload has one', async () => {
-        fetchMock.mockResolvedValue(okResponse({ status: 'ok', version: '0.4.0' }));
+    it('tolerates a server-info payload with no version or dataDir', async () => {
+        routeFetch({ serverInfo: json({ instanceId: 'inst-1' }) });
 
         const info = await findRunningBackend('http://localhost:4001');
 
-        expect(info?.version).toBe('0.4.0');
+        expect(info?.instanceId).toBe('inst-1');
+        expect(info?.version).toBeUndefined();
+        expect(info?.dataDir).toBeNull();
     });
 
-    it('still attaches when the health payload is not JSON', async () => {
-        fetchMock.mockResolvedValue({
-            ok: true,
-            status: 200,
-            json: async () => { throw new SyntaxError('Unexpected token'); }
-        } as unknown as Response);
+    it('strips a trailing slash instead of probing a double-slashed path', async () => {
+        routeFetch({ serverInfo: json(SERVER_INFO) });
+
+        const info = await findRunningBackend('http://localhost:4001/');
+
+        expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:4001/api/server-info');
+        expect(info?.url).toBe('http://localhost:4001');
+    });
+});
+
+describe('findRunningBackend falling back to /api/health', () => {
+    it('attaches without an identity when server-info is missing (older backend)', async () => {
+        routeFetch({ health: json({ status: 'ok' }) });
+
+        const info = await findRunningBackend('http://localhost:4001');
+
+        expect(info).toEqual({ child: null, port: 4001, url: 'http://localhost:4001' });
+        expect(info?.instanceId).toBeUndefined();
+        expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([
+            'http://localhost:4001/api/server-info',
+            'http://localhost:4001/api/health'
+        ]);
+    });
+
+    it('falls back when server-info answers 200 without an instanceId', async () => {
+        routeFetch({ serverInfo: json({ hello: 'some other service' }), health: json({ status: 'ok' }) });
 
         const info = await findRunningBackend('http://localhost:4001');
 
         expect(info).not.toBeNull();
-        expect(info?.version).toBeUndefined();
+        expect(info?.instanceId).toBeUndefined();
     });
 
-    it('strips a trailing slash instead of probing a double-slashed path', async () => {
-        fetchMock.mockResolvedValue(okResponse());
+    it('falls back when the server-info payload is not JSON', async () => {
+        routeFetch({
+            serverInfo: { ok: true, status: 200, json: async () => { throw new SyntaxError('nope'); } } as unknown as Response,
+            health: json({ status: 'ok' })
+        });
 
-        const info = await findRunningBackend('http://localhost:4001/');
+        await expect(findRunningBackend('http://localhost:4001')).resolves.not.toBeNull();
+    });
+});
 
-        expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:4001/api/health');
-        expect(info?.url).toBe('http://localhost:4001');
+// The identity guard. A 200 proves only that SOMETHING listens on the port;
+// attaching to an unrelated service would leave the app pointed at a backend
+// that cannot serve it. This is sized for a localhost-only default and needs
+// real authentication before attach is ever offered against a remote host.
+describe('findRunningBackend refuses anything that is not Claudia', () => {
+    it('does not attach when health answers 200 with a foreign payload', async () => {
+        routeFetch({ health: json({ status: 'healthy', service: 'grafana' }) });
+
+        await expect(findRunningBackend('http://localhost:4001')).resolves.toBeNull();
     });
 
-    // fetch is mocked here, so a malformed origin can still reach the parse.
-    // In production this guards against a garbage CLAUDIA_BACKEND_URL taking
-    // down startup with an unhandled URL error.
-    it('returns null when the URL cannot be parsed', async () => {
-        fetchMock.mockResolvedValue(okResponse());
+    it('does not attach when the health payload is not JSON', async () => {
+        routeFetch({
+            health: { ok: true, status: 200, json: async () => { throw new SyntaxError('not json'); } } as unknown as Response
+        });
 
-        await expect(findRunningBackend('not-a-url')).resolves.toBeNull();
+        await expect(findRunningBackend('http://localhost:4001')).resolves.toBeNull();
+    });
+
+    it('returns null when both endpoints 404', async () => {
+        routeFetch({});
+
+        await expect(findRunningBackend('http://localhost:4001')).resolves.toBeNull();
+    });
+
+    it('returns null on a non-200 health response', async () => {
+        routeFetch({ health: json({ error: 'unavailable' }, 503) });
+
+        await expect(findRunningBackend('http://localhost:4001')).resolves.toBeNull();
     });
 
     it('returns null on a network error', async () => {
-        fetchMock.mockRejectedValue(new TypeError('fetch failed'));
+        routeFetch({ serverInfo: new TypeError('fetch failed'), health: new TypeError('fetch failed') });
 
         await expect(findRunningBackend('http://localhost:4001')).resolves.toBeNull();
     });
 
-    it('returns null on a non-200 response', async () => {
-        fetchMock.mockResolvedValue({ ok: false, status: 503, json: async () => ({}) } as unknown as Response);
-
-        await expect(findRunningBackend('http://localhost:4001')).resolves.toBeNull();
+    // Parsed before any request, so a garbage CLAUDIA_BACKEND_URL cannot take
+    // down startup with an unhandled URL error.
+    it('returns null without probing when the URL cannot be parsed', async () => {
+        await expect(findRunningBackend('not-a-url')).resolves.toBeNull();
+        expect(fetchMock).not.toHaveBeenCalled();
     });
 
-    it('returns null when the probe times out, and aborts the request', async () => {
+    it('times out across both probes on one budget, and aborts the request', async () => {
         let signal: AbortSignal | undefined;
         fetchMock.mockImplementation((_url: string, init: RequestInit) => {
             signal = init.signal as AbortSignal;
@@ -142,6 +220,8 @@ describe('findRunningBackend', () => {
 
         expect(result).toBeNull();
         expect(signal?.aborted).toBe(true);
+        // The health fallback is skipped once the shared budget is spent.
+        expect(fetchMock).toHaveBeenCalledOnce();
     });
 });
 
