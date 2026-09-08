@@ -3095,6 +3095,58 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Classify, against the CURRENT screen, whether the Enter anchored at
+     * `anchor` was accepted. Shared by the post-Enter check and by the
+     * re-check performed immediately before a retry Enter is written.
+     */
+    private classifyEnterNow(
+        task: InternalTask,
+        anchor: Buffer | undefined,
+        isInitialPrompt: boolean
+    ): { outcome: 'accepted' | 'retry'; activeTurn: boolean; choiceDialog: boolean; outputDelta: number; recentOutput: string } {
+        const sinceEnter = this.getOutputSinceAnchor(task, anchor);
+        // Sample 4096 bytes (matching the ready-detection window) so the idle
+        // input footer isn't pushed out of view by a partial repaint above it,
+        // which could otherwise let growth be accepted while Enter was dropped.
+        const recentOutput = this.getRecentOutput(task, 4096);
+        // Active-turn AND dialog evidence are taken from output printed strictly
+        // AFTER our Enter. Scanning the trailing window instead is wrong in both
+        // directions: the pre-Enter prompt echo can contain the marker or dialog
+        // chrome verbatim (prompts that quote them — this repo writes them), and
+        // a marker painted right after Enter scrolls out of a fixed 4096-byte
+        // tail once a few KB of turn output stream past.
+        const outputSinceEnter = sinceEnter.text;
+        return {
+            outcome: classifyEnterOutcome({
+                outputDeltaBytes: sinceEnter.bytes,
+                recentOutput,
+                outputSinceEnter,
+                outputSinceEnterTruncated: sinceEnter.truncated,
+                // Guard growth-based acceptance against startup/resume churn only for
+                // the initial-prompt/reconnect delivery; a plain follow-up is already
+                // interactive, so growth there reliably means the message was accepted.
+                guardAgainstIdleChurn: isInitialPrompt,
+            }),
+            activeTurn: hasActiveTurnIndicator(outputSinceEnter),
+            choiceDialog: hasChoiceDialog(outputSinceEnter),
+            outputDelta: sinceEnter.bytes,
+            recentOutput,
+        };
+    }
+
+    /**
+     * Mark an initial prompt as having positively started a turn. Idempotent.
+     */
+    private markInitialPromptAccepted(task: InternalTask, isInitialPrompt: boolean): void {
+        if (isInitialPrompt && task.state === 'starting' && !task.hasStartedProcessing) {
+            task.hasStartedProcessing = true;
+            task.state = 'busy';
+            console.log(`[TaskSpawner] Task ${task.id} transitioned: starting → busy`);
+            this.emit('taskStateChanged', this.toPublicTask(task));
+        }
+    }
+
+    /**
      * Public method for debugging output detection
      */
     getRecentOutputForDebug(taskId: string, maxBytes: number): string {
@@ -3390,7 +3442,7 @@ export class TaskSpawner extends EventEmitter {
                     // sampled" from "prompt genuinely never submitted".
                     activeTurnInTail: hasActiveTurnIndicator(tail),
                     stillIdleAtInput: this.isReadyForInitialInput(tail),
-                    choiceDialog: hasChoiceDialog(tail),
+                    choiceDialog: hasChoiceDialog(tail),  // trailing tail: diagnostic only, never a decision
                     tail: tail.slice(-512),
                 });
                 task.hasStartedProcessing = true;
@@ -3399,6 +3451,33 @@ export class TaskSpawner extends EventEmitter {
             }
             // Just return, do not send burst to avoid PTY crashes
             return;
+        }
+
+        // This call is a RETRY when an anchor was threaded from an earlier attempt.
+        // The classification that scheduled it is 500ms stale, and the TUI moves in
+        // that gap: a turn that only just started painting the active-turn marker —
+        // or worse, one that parked on a choice/permission dialog — would EAT this
+        // Enter. On a dialog that means selecting the highlighted option (auto-
+        // answering an AskUserQuestion, auto-approving a tool). Re-check against the
+        // current screen and stand down if the submission has since been confirmed.
+        // Same decision function as the post-Enter check, just a later sample, so
+        // this can only stop the loop where the loop would have stopped anyway.
+        if ('outputAnchorAtSend' in options) {
+            const late = this.classifyEnterNow(task, options.outputAnchorAtSend, isInitialPrompt);
+            if (late.outcome === 'accepted') {
+                console.log(`[TaskSpawner] Submission confirmed for ${context} on task ${task.id} before retry Enter was written — standing down (activeTurn=${late.activeTurn}, choiceDialog=${late.choiceDialog}, outputDelta=${late.outputDelta})`);
+                logger.debug('Retry Enter cancelled by pre-write re-check', {
+                    taskId: task.id,
+                    context,
+                    attempt: task.promptSubmitAttempts,
+                    retriesLeft,
+                    activeTurn: late.activeTurn,
+                    choiceDialog: late.choiceDialog,
+                    outputDelta: late.outputDelta,
+                });
+                this.markInitialPromptAccepted(task, isInitialPrompt);
+                return;
+            }
         }
 
         task.promptSubmitAttempts = (task.promptSubmitAttempts || 0) + 1;
@@ -3416,8 +3495,14 @@ export class TaskSpawner extends EventEmitter {
         // post-Enter output from the prompt echo that preceded it. Sticky across
         // retries: the anchor stays at the FIRST Enter so the evidence window only
         // ever grows, and it survives the 2MB history trim (see getOutputSinceAnchor).
-        const outputAnchorBeforeEnter = options.outputAnchorAtSend ??
-            task.outputHistory[task.outputHistory.length - 1];
+        // `in` rather than `??`, for the same reason the give-up path uses it: the
+        // anchor is legitimately `undefined` when nothing had been printed at the
+        // first Enter (the whole history is then post-Enter output). With `??` that
+        // case silently RE-anchors on every retry, shrinking the evidence window
+        // back to "since the latest Enter" — the opposite of sticky.
+        const outputAnchorBeforeEnter = 'outputAnchorAtSend' in options
+            ? options.outputAnchorAtSend
+            : task.outputHistory[task.outputHistory.length - 1];
 
         // Send Enter
         task.process.write(enterKey);
@@ -3432,34 +3517,11 @@ export class TaskSpawner extends EventEmitter {
             // box (the intermittent bug). classifyEnterOutcome only accepts growth
             // when we are no longer parked at the idle input prompt, and always
             // accepts on a genuine active-turn marker ("esc to interrupt").
-            const sinceEnter = this.getOutputSinceAnchor(task, outputAnchorBeforeEnter);
-            const outputDelta = sinceEnter.bytes;
-            // Sample 4096 bytes (matching the ready-detection window) so the idle
-            // input footer isn't pushed out of view by a partial repaint above it,
-            // which could otherwise let growth be accepted while Enter was dropped.
-            const recentOutput = this.getRecentOutput(task, 4096);
-            // Active-turn evidence is taken from output printed strictly AFTER our
-            // Enter. Scanning the trailing window instead is wrong in both
-            // directions: the pre-Enter prompt echo can contain the marker
-            // verbatim (prompts that quote "esc to interrupt" — this repo writes
-            // them), and a marker painted right after Enter scrolls out of a fixed
-            // 4096-byte tail once a few KB of turn output stream past.
-            const outputSinceEnter = sinceEnter.text;
-            const activeTurn = hasActiveTurnIndicator(outputSinceEnter);
-            const choiceDialog = hasChoiceDialog(recentOutput);
-            // Guard growth-based acceptance against startup/resume churn only for the
-            // initial-prompt/reconnect delivery; a plain follow-up is already
-            // interactive, so growth there reliably means the message was accepted.
             // Note the mode footer ("bypass permissions … shift+tab") stays on screen
-            // during a turn too, so on the guarded path "esc to interrupt" is in
-            // practice the only thing that confirms acceptance.
-            const outcome = classifyEnterOutcome({
-                outputDeltaBytes: outputDelta,
-                recentOutput,
-                outputSinceEnter,
-                outputSinceEnterTruncated: sinceEnter.truncated,
-                guardAgainstIdleChurn: isInitialPrompt,
-            });
+            // during a turn too, so on the guarded path "esc to interrupt" (or a
+            // choice dialog) is in practice the only thing that confirms acceptance.
+            const { outcome, activeTurn, choiceDialog, outputDelta, recentOutput } =
+                this.classifyEnterNow(task, outputAnchorBeforeEnter, isInitialPrompt);
             const stillIdleAtInput = !activeTurn && this.isReadyForInitialInput(recentOutput);
             logger.debug('Classified Enter outcome', {
                 taskId: task.id,
@@ -3476,12 +3538,7 @@ export class TaskSpawner extends EventEmitter {
 
             if (outcome === 'accepted') {
                 console.log(`[TaskSpawner] Submission accepted for ${context} after attempt ${task.promptSubmitAttempts} (activeTurn=${activeTurn}, choiceDialog=${choiceDialog}, outputDelta=${outputDelta})`);
-                if (isInitialPrompt && task.state === 'starting' && !task.hasStartedProcessing) {
-                    task.hasStartedProcessing = true;
-                    task.state = 'busy';
-                    console.log(`[TaskSpawner] Task ${task.id} transitioned: starting → busy`);
-                    this.emit('taskStateChanged', this.toPublicTask(task));
-                }
+                this.markInitialPromptAccepted(task, isInitialPrompt);
                 return;
             }
 

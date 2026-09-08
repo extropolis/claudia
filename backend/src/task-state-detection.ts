@@ -133,6 +133,9 @@ export function classifyEnterOutcome(opts: {
      *  2. The marker-carrying footer paints rarely; a fixed trailing window
      *     loses it as soon as a few KB of turn output stream past, so a live
      *     turn gets misread as "dropped" and sprayed with more Enters.
+     *
+     * {@link hasChoiceDialog} is evaluated against this same window, for reason
+     * (1): a prompt that quotes dialog chrome must not count as acceptance.
      */
     outputSinceEnter?: string;
     /**
@@ -167,7 +170,14 @@ export function classifyEnterOutcome(opts: {
     // A choice/permission dialog can only be on screen because the submission
     // landed and the turn is now parked on the user. Accept — and above all do
     // NOT retry, because a retried Enter here picks the highlighted option.
-    if (hasChoiceDialog(opts.recentOutput)) return 'accepted';
+    //
+    // Same window as the marker, and for the same reason: the TUI echoes the
+    // typed prompt into the input box BEFORE Enter, so a prompt that merely
+    // quotes dialog chrome ("Do you want to proceed?" / "❯ 1. Yes", or an
+    // AskUserQuestion footer) would make a DROPPED Enter look accepted — the
+    // exact bug this classifier exists to prevent. A dialog is painted by the
+    // turn, so real dialog chrome is always in the post-Enter output.
+    if (hasChoiceDialog(opts.outputSinceEnter ?? opts.recentOutput)) return 'accepted';
 
     // More post-Enter output than the evidence window can hold. Startup churn is
     // kilobytes; this is tens of them. Treat as accepted rather than blind-retry.

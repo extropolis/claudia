@@ -169,6 +169,30 @@ describe('sendEnterWithRetry (initial-prompt acceptance vs. startup churn)', () 
         expect(task.hasStartedProcessing).toBe(true);
     });
 
+    it('the anchor stays pinned to the FIRST Enter even when nothing had been printed yet', () => {
+        // Empty history at the first Enter ⇒ a legitimately `undefined` anchor.
+        // It must remain undefined across retries (the whole history is post-Enter
+        // output), not silently re-pin to the newest buffer on every attempt.
+        const task = makeTask();
+        register(task);
+
+        sendEnter(task, 3, true);
+        expect(task.process.write).toHaveBeenCalledTimes(1);
+
+        // Dropped Enter; the TUI finally paints its idle prompt.
+        emit(task, IDLE_FOOTER);
+        vi.advanceTimersByTime(ENTER_CHECK_MS);
+        expect(task.state).toBe('starting');
+        vi.advanceTimersByTime(RETRY_DELAY_MS);
+        expect(task.process.write).toHaveBeenCalledTimes(2);
+
+        // Marker painted after the SECOND Enter is still inside the window whether
+        // or not the anchor moved; the point is the window never shrinks below it.
+        const since = (spawner as any).getOutputSinceAnchor(task, undefined);
+        expect(since.text).toContain('bypass permissions');
+        expect(since.bytes).toBe(Buffer.byteLength(IDLE_FOOTER, 'utf8'));
+    });
+
     it('safety net does not fire when nothing was ever printed after Enter', () => {
         const task = makeTask();
         register(task);
@@ -278,6 +302,77 @@ describe('sendEnterWithRetry: never re-sends Enter into a choice/permission dial
 
         // Enter on "❯ 1. Yes" would auto-approve a tool call. skipPermissions
         // defaults to false (config-store.ts), so this dialog is reachable.
+        expect(task.process.write).toHaveBeenCalledTimes(1);
+        expect(task.state).toBe('busy');
+    });
+
+    it('dialog chrome echoed inside the TYPED PROMPT is not acceptance evidence', () => {
+        // Symmetric to the "esc to interrupt" echo case below. The TUI echoes the
+        // prompt into the input box BEFORE Enter, so a prompt that merely quotes
+        // dialog chrome would make a DROPPED Enter look accepted and strand the
+        // prompt unsubmitted — the exact bug this PR exists to fix. A real dialog
+        // is painted by the turn, so it is always in the POST-Enter output.
+        const task = makeTask();
+        (spawner as any).tasks.set(task.id, task);
+        emit(task, IDLE_FOOTER +
+            '❯ the TUI asks "Do you want to proceed?" with "❯ 1. Yes" — handle it\n' + IDLE_FOOTER);
+
+        (spawner as any).sendEnterWithRetry(task, 3, { isInitialPrompt: true });
+        // Enter dropped; only startup churn follows, still parked at the input.
+        emit(task, STARTUP_CHURN + IDLE_FOOTER);
+        vi.advanceTimersByTime(ENTER_CHECK_MS);
+
+        expect(task.state).toBe('starting');
+        expect(task.hasStartedProcessing).toBe(false);
+        vi.advanceTimersByTime(RETRY_DELAY_MS);
+        expect(task.process.write).toHaveBeenCalledTimes(2);
+    });
+
+    it('a dialog that paints AFTER classification cancels the already-scheduled retry Enter', () => {
+        // The classification runs at t+800ms but the retry Enter is written at
+        // t+1300ms. The TUI moves in that 500ms gap: a turn that was accepted all
+        // along can park on a permission dialog right after we decided "dropped".
+        // Without a re-check immediately before the write, that Enter lands on
+        // "❯ 1. Yes" — which is precisely what hasChoiceDialog exists to prevent.
+        const task = makeTask();
+        (spawner as any).tasks.set(task.id, task);
+        emit(task, IDLE_FOOTER);
+
+        (spawner as any).sendEnterWithRetry(task, 5, { isInitialPrompt: true });
+        expect(task.process.write).toHaveBeenCalledTimes(1);
+
+        // t+800: only churn on screen so far → classified "dropped", retry queued.
+        emit(task, STARTUP_CHURN + IDLE_FOOTER);
+        vi.advanceTimersByTime(ENTER_CHECK_MS);
+        expect(task.state).toBe('starting');
+
+        // t+800..t+1300: the turn had in fact started; it now parks on a dialog.
+        emit(task, PERMISSION_DIALOG);
+        vi.advanceTimersByTime(RETRY_DELAY_MS);
+
+        expect(task.process.write).toHaveBeenCalledTimes(1);
+        expect(task.state).toBe('busy');
+        expect(task.hasStartedProcessing).toBe(true);
+
+        // And it stays stood down for the rest of the budget.
+        vi.advanceTimersByTime((ENTER_CHECK_MS + RETRY_DELAY_MS) * 4);
+        expect(task.process.write).toHaveBeenCalledTimes(1);
+    });
+
+    it('an active turn that only becomes visible in the retry gap also cancels the retry Enter', () => {
+        const task = makeTask();
+        (spawner as any).tasks.set(task.id, task);
+        emit(task, IDLE_FOOTER);
+
+        (spawner as any).sendEnterWithRetry(task, 5, { isInitialPrompt: true });
+        emit(task, STARTUP_CHURN + IDLE_FOOTER);
+        vi.advanceTimersByTime(ENTER_CHECK_MS);
+        expect(task.state).toBe('starting');
+
+        // The marker is a rare one-shot paint; it can land after we sampled.
+        emit(task, ACTIVE_TURN_FOOTER);
+        vi.advanceTimersByTime(RETRY_DELAY_MS);
+
         expect(task.process.write).toHaveBeenCalledTimes(1);
         expect(task.state).toBe('busy');
     });
@@ -416,5 +511,54 @@ describe('sendEnterWithRetry: output-length deltas survive the 2MB history trim'
         vi.advanceTimersByTime(ENTER_CHECK_MS + RETRY_DELAY_MS + ENTER_CHECK_MS);
 
         expect(task.process.write).toHaveBeenCalledTimes(1);
+    });
+
+    it('a trim that evicts buffers BEFORE the anchor leaves the delta and window intact', () => {
+        const task = makeTask();
+        (spawner as any).tasks.set(task.id, task);
+        emit(task, 'PRE-ENTER ECHO: esc to interrupt\n');
+        emit(task, Buffer.alloc(MAX_HISTORY_SIZE - 8192, 0x2e));
+        emit(task, 'ANCHOR\n');
+        const anchor = task.outputHistory[task.outputHistory.length - 1];
+
+        emit(task, 'turn output A\n');
+        // Push over the cap. FIFO eviction drops the echo and then the big filler,
+        // which alone puts us back under — so the anchor survives the trim.
+        emit(task, Buffer.alloc(16384, 0x2e));
+        emit(task, 'turn output B\n');
+
+        expect(task.outputHistory.includes(anchor)).toBe(true);
+        const since = (spawner as any).getOutputSinceAnchor(task, anchor);
+        // Exactly the post-anchor bytes — not the ring-buffer size, which the trim
+        // decrements and which would read ~0 on a task sitting at the cap.
+        expect(since.bytes).toBe(14 + 16384 + 14);
+        expect(since.text).toContain('turn output A');
+        expect(since.text).toContain('turn output B');
+        // The pre-Enter echo must never leak into the evidence window.
+        expect(since.text).not.toContain('esc to interrupt');
+    });
+
+    it('a trim that evicts the ANCHOR ITSELF still yields a post-Enter-only window', () => {
+        // FIFO eviction means: if the anchor is gone, everything still held was
+        // appended after it. The window must degrade to "all of it", never to
+        // "the whole history including the pre-Enter prompt echo".
+        const task = makeTask();
+        (spawner as any).tasks.set(task.id, task);
+        emit(task, 'PRE-ENTER ECHO: esc to interrupt\n');
+        emit(task, Buffer.alloc(1024, 0x2e));
+        const anchor = task.outputHistory[task.outputHistory.length - 1];
+
+        // More than a full cap of turn output ⇒ the anchor is evicted too.
+        for (let i = 0; i < 9; i++) emit(task, Buffer.alloc(256 * 1024, 0x79));
+        emit(task, 'tail of the turn\n');
+
+        expect(task.outputHistory.includes(anchor)).toBe(false);
+        const since = (spawner as any).getOutputSinceAnchor(task, anchor);
+        expect(since.bytes).toBeGreaterThan(0);
+        expect(since.truncated).toBe(true);
+        // Byte-exact cap, and no pre-Enter content survives to be misread.
+        expect(Buffer.byteLength(since.text, 'utf8')).toBeLessThanOrEqual(65536);
+        expect(since.text).not.toContain('esc to interrupt');
+        expect(since.text).toContain('tail of the turn');
     });
 });
