@@ -25,11 +25,12 @@ export function stripAnsi(str: string): string {
 /**
  * Check if terminal output indicates Claude is ready for initial input.
  *
- * These markers all belong to the idle input prompt / its footer hint bar
- * (rendered only when Claude Code is sitting at an empty, ready-to-accept input
- * box). They are ALSO used, inverted, as the "still idle at the input" signal
- * when confirming that a submitted Enter was actually accepted — see
- * {@link classifyEnterOutcome}.
+ * These markers all belong to the input prompt / its footer hint bar. Beware
+ * that the mode footer ("⏵⏵ bypass permissions on (shift+tab to cycle)") stays
+ * on screen during an active turn as well, so a match means "the input box is
+ * rendered", not "the TUI is idle". That is why {@link classifyEnterOutcome}
+ * consults {@link hasActiveTurnIndicator} first and only then treats these
+ * markers as the "still parked at the input" signal.
  */
 export function isReadyForInitialInput(str: string): boolean {
     return str.includes('Try "') ||
@@ -43,8 +44,10 @@ export function isReadyForInitialInput(str: string): boolean {
  * Detect a genuine in-progress turn (Claude actively processing a submission).
  *
  * "esc to interrupt" is Claude Code's definitive active-turn marker: it is shown
- * for the entire duration of a turn (thinking, tool calls, streaming) and NEVER
- * at the idle input prompt nor during startup/banner rendering. We deliberately
+ * for the entire duration of a turn (thinking, tool calls, streaming) — today as
+ * part of the footer line "⏵⏵ bypass permissions on (shift+tab to cycle) · esc
+ * to interrupt · ← for agents" — and NEVER at the idle input prompt nor during
+ * startup/banner rendering. We deliberately
  * do NOT reuse {@link hasProcessingIndicators} here — its spinner glyphs (✻, ✳)
  * and "───Claude" header pattern also appear in the startup "✻ Welcome to Claude
  * Code" banner, so they cannot distinguish "turn started" from "still starting
@@ -71,11 +74,15 @@ export function hasActiveTurnIndicator(str: string): boolean {
  * was intermittent because it only triggered when startup output happened to
  * still be streaming during the post-Enter window.
  *
- * The robust rule: growth only counts as acceptance when we are NOT still parked
- * at the idle input prompt. If the recent output still shows the idle input
- * footer ("? for shortcuts" / "bypass permissions" / "❯" box) and there is no
- * active-turn marker, the Enter was NOT accepted regardless of byte growth —
- * keep retrying. A positive active-turn marker ("esc to interrupt") always wins.
+ * The robust rule: a positive active-turn marker ("esc to interrupt") always
+ * wins. Otherwise growth only counts as acceptance when we are NOT still parked
+ * at the input prompt: if the recent output still shows the input footer
+ * ("? for shortcuts" / "bypass permissions" / "❯" box) with no active-turn
+ * marker, the Enter was NOT accepted regardless of byte growth — keep retrying.
+ * Since the mode footer also persists during a turn, on the guarded path this
+ * effectively means "accepted iff the active-turn marker is visible"; the
+ * caller (sendEnterWithRetry) carries a give-up fallback so a turn that starts
+ * and finishes without the marker being sampled cannot wedge the task.
  */
 export function classifyEnterOutcome(opts: {
     /** Bytes of output that arrived after Enter was written. */

@@ -11,6 +11,7 @@
 #     --system-prompt, --model at the true process boundary
 #   - writes a session JSONL like the real CLI (session capture observable)
 #   - prints the TUI ready banner ("? for shortcuts") so ready-detection fires
+#   - prints the active-turn marker ("esc to interrupt") after a submitted line
 #   - echoes every stdin chunk to input.log (prompt/input delivery observable)
 #   - echoes a MARKER line to stdout when it receives one (output streaming)
 #   - exits on SIGTERM (clean stop/archive paths)
@@ -40,6 +41,13 @@ printf '\n───────────\n❯ ready\n? for shortcuts\n'
 while IFS= read -r -t 600 line; do
     printf '%s\n' "$line" >> "$FAKE_DIR/input.log"
     printf '%s\n' "$line"
+    # A real TUI starts a turn on a submitted (non-empty) line and shows the
+    # active-turn marker; the spawner's Enter acceptance requires seeing it
+    # (mere output growth is startup churn until proven otherwise). An empty
+    # Enter — e.g. a retried Enter after the prompt already went — is a no-op.
+    if [ -n "$line" ]; then
+        printf '✻ Thinking… (esc to interrupt)\n'
+    fi
     case "$line" in
         *EMIT_OUTPUT*) printf 'FAKE_OUTPUT_MARKER_9000\n' ;;
         # Render a permission/choice dialog and STOP — no trailing idle banner,

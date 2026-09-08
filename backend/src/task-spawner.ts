@@ -18,7 +18,7 @@ import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
-import { classifyEnterOutcome, hasActiveTurnIndicator } from './task-state-detection.js';
+import { classifyEnterOutcome, hasActiveTurnIndicator, isReadyForInitialInput as detectReadyForInitialInput } from './task-state-detection.js';
 import { randomBytes, randomUUID } from 'crypto';
 import { SharedMcpManager } from './shared-mcp-manager.js';
 import {
@@ -2969,11 +2969,10 @@ export class TaskSpawner extends EventEmitter {
     }
 
     private isReadyForInitialInput(str: string): boolean {
-        return str.includes('Try "') ||
-            str.includes('? for shortcuts') ||
-            str.includes('bypass permissions') ||
-            str.includes('shift+tab') ||
-            (str.includes('───') && str.includes('❯'));
+        // Single source of truth: classifyEnterOutcome (task-state-detection) uses
+        // the same markers to decide "still parked at the input", so the two must
+        // never drift apart again.
+        return detectReadyForInitialInput(str);
     }
 
     /**
@@ -3333,7 +3332,28 @@ export class TaskSpawner extends EventEmitter {
             // Diagnostic: dump the recent tail so a future non-delivery is debuggable.
             // If the prompt is still visibly sitting in the input box here, the TUI
             // never accepted any of our Enters within the retry budget.
-            console.log(`[TaskSpawner] Max retries reached for ${context} on task ${task.id}, giving up. Recent output: ${JSON.stringify(this.getRecentOutput(task, 512))}`);
+            const tail = this.getRecentOutput(task, 4096);
+            const deltaSinceFirstEnter = options.outputLengthAtSend !== undefined
+                ? task.totalOutputSize - options.outputLengthAtSend
+                : 0;
+            console.log(`[TaskSpawner] Max retries reached for ${context} on task ${task.id}, giving up (outputDeltaSinceFirstEnter=${deltaSinceFirstEnter}). Recent output: ${JSON.stringify(tail.slice(-512))}`);
+            // Safety net for the initial prompt: hasStartedProcessing is set ONLY on
+            // a positive acceptance below, and the poller never moves starting → idle.
+            // If a turn started and finished without "esc to interrupt" ever landing
+            // in our sample window, refusing to advance would wedge the task in
+            // 'starting' forever. Fall back to the pre-fix growth heuristic here (no
+            // worse than before); the poller then settles busy → idle.
+            if (isInitialPrompt && task.state === 'starting' && !task.hasStartedProcessing
+                && (hasActiveTurnIndicator(tail) || deltaSinceFirstEnter > 10)) {
+                logger.warn('Initial prompt never positively confirmed; advancing on output growth so the task does not wedge in starting', {
+                    taskId: task.id,
+                    attempts: task.promptSubmitAttempts,
+                    outputDeltaSinceFirstEnter: deltaSinceFirstEnter,
+                });
+                task.hasStartedProcessing = true;
+                task.state = 'busy';
+                this.emit('taskStateChanged', this.toPublicTask(task));
+            }
             // Just return, do not send burst to avoid PTY crashes
             return;
         }
@@ -3376,10 +3396,25 @@ export class TaskSpawner extends EventEmitter {
             // Guard growth-based acceptance against startup/resume churn only for the
             // initial-prompt/reconnect delivery; a plain follow-up is already
             // interactive, so growth there reliably means the message was accepted.
+            // Note the mode footer ("bypass permissions … shift+tab") stays on screen
+            // during a turn too, so on the guarded path "esc to interrupt" is in
+            // practice the only thing that confirms acceptance.
             const outcome = classifyEnterOutcome({
                 outputDeltaBytes: outputDelta,
                 recentOutput,
                 guardAgainstIdleChurn: isInitialPrompt,
+            });
+            const stillIdleAtInput = !activeTurn && this.isReadyForInitialInput(recentOutput);
+            logger.debug('Classified Enter outcome', {
+                taskId: task.id,
+                context,
+                attempt: task.promptSubmitAttempts,
+                retriesLeft,
+                outputDelta,
+                activeTurn,
+                stillIdleAtInput,
+                guardAgainstIdleChurn: isInitialPrompt,
+                outcome,
             });
 
             if (outcome === 'accepted') {
@@ -3396,7 +3431,7 @@ export class TaskSpawner extends EventEmitter {
             // Not accepted — the Enter was dropped or the TUI is still at the idle
             // input prompt. Retry (re-send Enter only; the prompt text is already in
             // the box and must never be re-typed) until a real turn starts.
-            console.log(`[TaskSpawner] ${context} not yet accepted for task ${task.id} (activeTurn=${activeTurn}, outputDelta=${outputDelta}, stillIdleAtInput=${!activeTurn && this.isReadyForInitialInput(recentOutput)}), retrying Enter in 500ms (${retriesLeft - 1} retries left)`);
+            console.log(`[TaskSpawner] ${context} not yet accepted for task ${task.id} (activeTurn=${activeTurn}, outputDelta=${outputDelta}, stillIdleAtInput=${stillIdleAtInput}), retrying Enter in 500ms (${retriesLeft - 1} retries left)`);
             setTimeout(() => this.sendEnterWithRetry(task, retriesLeft - 1, { ...options, outputLengthAtSend: outputLengthBeforeEnter }), 500);
         }, 800);
     }
