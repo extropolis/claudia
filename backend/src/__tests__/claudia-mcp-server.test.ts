@@ -215,7 +215,7 @@ describe('tool schema integrity', () => {
             claudia_stop_task: ['taskId'],
             claudia_stop_all_tasks: [],
             claudia_rename_task: ['taskId', 'displayName'],
-            claudia_delete_task: ['taskId'],
+            claudia_delete_task: ['taskIds'],
             claudia_cron_create: ['taskId', 'prompt', 'cronExpression'],
             claudia_cron_list: [],
             claudia_cron_delete: ['cronId'],
@@ -464,13 +464,13 @@ describe('claudia_rename_task guardrail', () => {
 
 describe('claudia_delete_task guardrail', () => {
     it('refuses to delete the session that is making the call', async () => {
-        const { json } = await callTool('claudia_delete_task', { taskId: SELF_TASK });
+        const { json } = await callTool('claudia_delete_task', { taskIds: [SELF_TASK] });
         expect(json.success).toBe(false);
         expect(json.message).toMatch(/currently running session/i);
     });
 
     it('reports a clean failure for an unknown task', async () => {
-        const { json } = await callTool('claudia_delete_task', { taskId: 'ghost-task' });
+        const { json } = await callTool('claudia_delete_task', { taskIds: ['ghost-task'] });
         expect(json.success).toBe(false);
         expect(json.message).toMatch(/not found/i);
     });
@@ -493,15 +493,71 @@ describe('claudia_delete_task guardrail', () => {
             }
         });
 
-        const { json } = await callTool('claudia_delete_task', { taskId: 'task-wt-1' });
+        const { json } = await callTool('claudia_delete_task', { taskIds: ['task-wt-1'] });
         frontend.close();
 
         expect(json.success).toBe(false);
-        expect(json.message).toMatch(/rejected/i);
+        expect(json.kept).toContain('task-wt-1');
 
         // The critical assertion: the task actually survived.
         const list = await callTool('claudia_list_tasks');
         expect(list.json.map((t: any) => t.id)).toContain('task-wt-1');
+    }, 30000);
+
+    it('raises ONE confirmation covering every task in a single call', async () => {
+        // The point of the batch API: N tasks must not mean N prompts.
+        const frontend = new WebSocket(`ws://127.0.0.1:${port}`);
+        await new Promise<void>((res, rej) => {
+            frontend.on('open', () => res());
+            frontend.on('error', rej);
+        });
+
+        const seen: Array<{ taskId: string; requestId: string }> = [];
+        frontend.on('message', (data: Buffer) => {
+            let msg: any;
+            try { msg = JSON.parse(data.toString()); } catch { return; }
+            if (msg.type !== 'task:deleteRequest') return;
+            seen.push({ taskId: msg.payload.taskId, requestId: msg.payload.requestId });
+            // Keep the first, reject the rest — proves the split is reported per task.
+            frontend.send(JSON.stringify({
+                type: 'task:deleteRejected',
+                payload: { taskId: msg.payload.taskId, requestId: msg.payload.requestId },
+            }));
+        });
+
+        const { json } = await callTool('claudia_delete_task', {
+            taskIds: ['task-wt-1', 'task-root-1'],
+        });
+        frontend.close();
+
+        // Both arrive as pending confirmations together, so the UI shows one dialog.
+        expect(seen).toHaveLength(2);
+        expect(new Set(seen.map(s => s.requestId)).size).toBe(2);
+        expect(json.kept).toHaveLength(2);
+        expect(json.success).toBe(false);
+    }, 30000);
+
+    it('deduplicates a repeated id instead of prompting for it twice', async () => {
+        const frontend = new WebSocket(`ws://127.0.0.1:${port}`);
+        await new Promise<void>((res, rej) => {
+            frontend.on('open', () => res());
+            frontend.on('error', rej);
+        });
+        let requests = 0;
+        frontend.on('message', (data: Buffer) => {
+            let msg: any;
+            try { msg = JSON.parse(data.toString()); } catch { return; }
+            if (msg.type !== 'task:deleteRequest') return;
+            requests++;
+            frontend.send(JSON.stringify({
+                type: 'task:deleteRejected',
+                payload: { taskId: msg.payload.taskId, requestId: msg.payload.requestId },
+            }));
+        });
+
+        await callTool('claudia_delete_task', { taskIds: ['task-wt-1', 'task-wt-1'] });
+        frontend.close();
+        expect(requests).toBe(1);
     }, 30000);
 });
 

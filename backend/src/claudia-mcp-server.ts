@@ -102,6 +102,78 @@ const log = {
  * Also returns the workspace map so callers can annotate tasks with the
  * worktree they run in.
  */
+/** Wrap a value as the JSON text payload an MCP tool returns. */
+function jsonResult(value: unknown) {
+    return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] };
+}
+
+/**
+ * Send several messages of one type over a SINGLE socket and collect a result per
+ * message, keyed by the caller's correlation id. Resolves once every expected key
+ * has a result, or rejects on timeout naming the keys still outstanding.
+ *
+ * One socket rather than N: a bulk confirmation covering ninety tasks would
+ * otherwise open ninety connections to answer one dialog.
+ */
+async function sendWSBatchWithMultiResponseAt<T>(
+    baseUrl: string,
+    type: string,
+    payloads: Record<string, unknown>[],
+    expectedKeys: string[],
+    matcher: (msg: { type: string; payload?: any }) => { key: string; value: T } | null,
+    timeoutMs: number = 300000
+): Promise<Map<string, T>> {
+    const WebSocket = (await import('ws')).default;
+    const outstanding = new Set(expectedKeys);
+    const results = new Map<string, T>();
+
+    return new Promise((resolve, reject) => {
+        const wsUrl = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+        const ws = new WebSocket(wsUrl);
+        const timeout = setTimeout(() => {
+            ws.close();
+            reject(new Error(
+                `WebSocket operation timed out after ${timeoutMs / 1000}s for ${type}; ` +
+                `no response for: ${[...outstanding].join(', ')}`
+            ));
+        }, timeoutMs);
+
+        ws.on('open', () => {
+            log.debug(`WS connected, sending ${payloads.length}x ${type}`);
+            for (const payload of payloads) ws.send(JSON.stringify({ type, payload }));
+        });
+
+        ws.on('message', (data: Buffer) => {
+            try {
+                const msg = JSON.parse(data.toString());
+                const hit = matcher(msg);
+                if (hit && outstanding.delete(hit.key)) {
+                    results.set(hit.key, hit.value);
+                    if (outstanding.size === 0) {
+                        clearTimeout(timeout);
+                        ws.close();
+                        resolve(results);
+                    }
+                }
+                if (msg.type === 'error') {
+                    clearTimeout(timeout);
+                    ws.close();
+                    reject(new Error(msg.payload?.message || 'Unknown WebSocket error'));
+                }
+            } catch {
+                // Ignore parse errors
+            }
+        });
+
+        ws.on('error', (err: Error) => {
+            clearTimeout(timeout);
+            reject(new Error(`WebSocket error: ${err.message}`));
+        });
+
+        ws.on('close', () => clearTimeout(timeout));
+    });
+}
+
 /** Cycle-guarded walk up worktreeParentId links to the root workspace. */
 function resolveWorktreeRoot(wsById: Map<string, any>, startId: string): string {
     let root = startId;
@@ -475,6 +547,13 @@ export function createClaudiaMcpServer(scope: ClaudiaMcpScope): McpServer {
         matcher: (msg: { type: string; payload?: any }) => T | null,
         timeoutMs: number = 30000,
     ) => sendWSMessageWithMultiResponseAt(BASE_URL, type, payload, matcher, timeoutMs);
+    const sendWSBatchWithMultiResponse = <T>(
+        type: string,
+        payloads: Record<string, unknown>[],
+        expectedKeys: string[],
+        matcher: (msg: { type: string; payload?: any }) => { key: string; value: T } | null,
+        timeoutMs: number = 300000,
+    ) => sendWSBatchWithMultiResponseAt(BASE_URL, type, payloads, expectedKeys, matcher, timeoutMs);
 
     /**
      * READ scope for a session: the ROOT workspace plus every workspace whose own
@@ -1363,94 +1442,117 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_delete_task',
-    'Request deletion (archival) of a task. This sends a confirmation popup to the user — the task is only deleted if the user approves. IMPORTANT: Only call this when the user explicitly asks to delete/remove a task. Never delete tasks automatically after completion — users want to review outputs.',
+    'Request deletion (archival) of one or more tasks. Every task in one call is listed in a SINGLE confirmation popup, each pre-checked; the user unchecks any they want to keep and confirms once. Pass every task you want removed in one call rather than calling this repeatedly — one call is one prompt. IMPORTANT: Only call this when the user explicitly asks to delete/remove tasks. Never delete tasks automatically after completion — users want to review outputs.',
     {
-        taskId: z.string().describe('The task ID to delete. ' + TASK_REF_HINT),
+        taskIds: z.array(z.string()).min(1).describe('The task IDs to delete. Pass all of them in one call to get a single confirmation prompt. ' + TASK_REF_HINT),
     },
-    async ({ taskId }) => {
+    async ({ taskIds }) => {
         // Resolve short refs FIRST: the self-guard must catch "#77" for the
         // caller's own task, and the task:destroyed approval matcher below
         // compares against the broadcast's CANONICAL id — with a raw short ref
         // it never matched, and an approved deletion reported as a timeout.
-        const canonicalId = await resolveRefToCanonicalId(taskId);
-        if (!canonicalId) {
-            return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
+        const notFound: string[] = [];
+        const canonical: string[] = [];
+        for (const ref of [...new Set(taskIds)]) {
+            const id = await resolveRefToCanonicalId(ref);
+            if (id) canonical.push(id); else notFound.push(ref);
         }
-        taskId = canonicalId;
-        if (SELF_TASK_ID && taskId === SELF_TASK_ID) {
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify({
-                        success: false,
-                        message: `Cannot delete task '${taskId}' because it is the currently running session.`,
-                    }, null, 2)
-                }]
-            };
+        const selfRequested = Boolean(SELF_TASK_ID && canonical.includes(SELF_TASK_ID));
+        const deletable = [...new Set(canonical)].filter(id => id !== SELF_TASK_ID);
+
+        if (deletable.length === 0) {
+            return jsonResult({
+                success: false,
+                message: selfRequested
+                    ? 'Cannot delete the currently running session, and no other valid tasks were requested.'
+                    : `Task(s) not found: ${notFound.join(', ')}`,
+                ...(notFound.length > 0 && { notFound }),
+            });
         }
 
         try {
-            // Look up task name for the confirmation dialog
-            let taskName = taskId;
+            // Resolve display names for the dialog, dropping ids the backend does
+            // not know about — a phantom row is one the user can never act on.
+            const names = new Map<string, string>();
             try {
                 const tasksResponse = await backendFetch('/api/tasks');
                 if (tasksResponse.ok) {
-                    const tasks = await tasksResponse.json();
-                    const task = matchTaskRef(tasks, taskId) as any;
-                    if (!task) {
-                        return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
+                    const allTasks = await tasksResponse.json();
+                    for (const id of deletable) {
+                        const task = matchTaskRef(allTasks, id) as any;
+                        if (!task) { notFound.push(id); continue; }
+                        names.set(id, task.displayName || task.prompt?.substring(0, 60) || id);
                     }
-                    taskName = task.displayName || task.prompt?.substring(0, 60) || taskId;
+                } else {
+                    log.error(`Task lookup returned HTTP ${tasksResponse.status}; showing raw ids in the dialog`);
+                    for (const id of deletable) names.set(id, id);
                 }
-            } catch { /* use taskId as fallback name */ }
+            } catch {
+                for (const id of deletable) names.set(id, id);
+            }
 
-            const requestId = `del-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-            log.info(`Requesting user confirmation to delete task: ${taskId}`, { requestId });
+            if (names.size === 0) {
+                return jsonResult({ success: false, notFound, message: `Task(s) not found: ${notFound.join(', ')}` });
+            }
 
-            // Send deleteRequest — backend broadcasts to frontend which shows
-            // a confirmation modal. We wait for either task:destroyed (approved)
-            // or task:deleteRejected (denied).
-            const result = await sendWSMessageWithMultiResponse(
+            // One request per task, all sent together over one socket, so the
+            // dialog coalesces them into a single prompt rather than one per task.
+            const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const entries = [...names].map(([taskId, taskName], i) => ({
+                taskId, taskName, requestId: `del-${stamp}-${i}`,
+            }));
+            log.info(`Requesting user confirmation to delete ${entries.length} task(s)`, { stamp });
+
+            const byRequestId = new Map(entries.map(e => [e.requestId, e]));
+            const byTaskId = new Map(entries.map(e => [e.taskId, e]));
+
+            const outcomes = await sendWSBatchWithMultiResponse(
                 'task:deleteRequest',
-                { taskId, requestId, taskName },
+                entries.map(({ taskId, taskName, requestId }) => ({ taskId, requestId, taskName })),
+                entries.map(e => e.requestId),
                 (msg) => {
-                    if (msg.type === 'task:destroyed' && msg.payload?.taskId === taskId) {
-                        return { outcome: 'approved' };
+                    if (msg.type === 'task:destroyed' && byTaskId.has(msg.payload?.taskId)) {
+                        return { key: byTaskId.get(msg.payload.taskId)!.requestId, value: 'approved' as const };
                     }
-                    if (msg.type === 'task:deleteRejected' && msg.payload?.requestId === requestId) {
-                        return { outcome: 'rejected' };
+                    if (msg.type === 'task:deleteRejected' && byRequestId.has(msg.payload?.requestId)) {
+                        return { key: msg.payload.requestId as string, value: 'rejected' as const };
                     }
                     return null;
                 },
-                60000
             );
 
-            if (result.outcome === 'approved') {
-                return {
-                    content: [{
-                        type: 'text',
-                        text: JSON.stringify({
-                            success: true,
-                            message: `Task '${taskName}' deleted (archived) by user.`,
-                        }, null, 2)
-                    }]
-                };
-            } else {
-                return {
-                    content: [{
-                        type: 'text',
-                        text: JSON.stringify({
-                            success: false,
-                            message: `User rejected deletion of task '${taskName}'.`,
-                        }, null, 2)
-                    }]
-                };
+            // Ids in the arrays so the agent can correlate; names in the message so
+            // whatever it reports back to the user is readable.
+            const deleted: string[] = [];
+            const kept: string[] = [];
+            const keptNames: string[] = [];
+            for (const [requestId, outcome] of outcomes) {
+                const { taskId, taskName } = byRequestId.get(requestId)!;
+                if (outcome === 'approved') {
+                    deleted.push(taskId);
+                } else {
+                    kept.push(taskId);
+                    keptNames.push(taskName);
+                }
             }
+
+            return jsonResult({
+                success: deleted.length > 0,
+                deleted,
+                kept,
+                ...(notFound.length > 0 && { notFound }),
+                ...(selfRequested && { skipped: 'the currently running session cannot delete itself' }),
+                message: `${deleted.length} deleted, ${kept.length} kept by the user`
+                    + (keptNames.length > 0 ? ` (kept: ${keptNames.join(', ')})` : ''),
+            });
         } catch (error) {
             log.error('Failed to delete task:', error);
             const msg = error instanceof Error ? error.message : String(error);
             if (msg.includes('timed out')) {
-                return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: 'User did not respond to the deletion confirmation within 60 seconds.' }, null, 2) }] };
+                return jsonResult({
+                    success: false,
+                    message: 'User did not respond to the deletion confirmation within 5 minutes. Nothing was deleted.',
+                });
             }
             return { content: [{ type: 'text', text: `Error deleting task: ${msg}` }] };
         }
