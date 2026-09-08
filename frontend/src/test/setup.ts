@@ -1,4 +1,19 @@
 import '@testing-library/jest-dom';
+import { vi } from 'vitest';
+
+// ---------------------------------------------------------------------------
+// No network. Any test that needs a real response should override global.fetch
+// itself; this default exists so an unstubbed call can never reach the network
+// (or hang a test) and so `.then(r => r.json())` chains resolve instead of
+// throwing unhandled rejections.
+// ---------------------------------------------------------------------------
+global.fetch = vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    json: async () => ({}),
+    text: async () => '',
+})) as unknown as typeof fetch;
 
 // Mock localStorage
 const localStorageMock = (() => {
@@ -42,6 +57,15 @@ global.ResizeObserver = class ResizeObserver {
     unobserve() {}
     disconnect() {}
 };
+
+// jsdom gaps that component tests trip over. Cheap no-ops so a component can
+// mount without every test file re-stubbing the same primitives.
+if (!Element.prototype.scrollIntoView) {
+    Element.prototype.scrollIntoView = function scrollIntoView() {};
+}
+if (!HTMLCanvasElement.prototype.getContext) {
+    HTMLCanvasElement.prototype.getContext = (() => null) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+}
 
 // Mock WebSocket
 class MockWebSocket {
