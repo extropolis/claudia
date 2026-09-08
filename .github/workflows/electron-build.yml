@@ -53,7 +53,11 @@ jobs:
 
   build-windows:
     name: Windows Installer
-    runs-on: windows-latest
+    # Pinned (not windows-latest): @electron/rebuild's forked node-gyp can't detect
+    # newer Visual Studio versions that GitHub periodically rolls into windows-latest,
+    # which breaks the node-pty native rebuild ("Could not find any Visual Studio
+    # installation to use"). Broken since v0.3.0 - see electron/rebuild#1264.
+    runs-on: windows-2022
     needs: create-release
     permissions:
       contents: write
