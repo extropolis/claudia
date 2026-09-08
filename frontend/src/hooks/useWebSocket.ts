@@ -248,9 +248,25 @@ export function useWebSocket() {
                         break;
                     }
                     case 'task:deleteRequest': {
-                        const payload = message.payload as { taskId: string; requestId: string; taskName: string };
-                        console.log(`[WebSocket] Delete request from agent: ${payload.taskId}`);
+                        const payload = message.payload as { requestId: string; tasks: { taskId: string; taskName: string }[] };
+                        console.log(`[WebSocket] Delete request from agent: ${payload.tasks.length} task(s)`, payload.requestId);
                         useTaskStore.getState().setPendingDeleteRequest(payload);
+                        break;
+                    }
+                    case 'task:deleteResolved': {
+                        const payload = message.payload as {
+                            requestId: string;
+                            archivedIds: string[];
+                            keptIds: string[];
+                            failed: { taskId: string; reason: string }[];
+                        };
+                        console.log(
+                            `[WebSocket] Delete resolved: ${payload.archivedIds.length} archived, ` +
+                            `${payload.keptIds.length} kept, ${payload.failed.length} failed`, payload.requestId
+                        );
+                        if (payload.failed.length > 0) {
+                            console.error('[WebSocket] Some tasks could not be archived:', payload.failed);
+                        }
                         break;
                     }
                     case 'workspace:created': {
@@ -683,8 +699,10 @@ export function useWebSocket() {
         sendMessage('task:archive', { taskId });
     }, [sendMessage]);
 
-    const rejectDeleteRequest = useCallback((taskId: string, requestId: string) => {
-        sendMessage('task:deleteRejected', { taskId, requestId });
+    // Answer a bulk delete confirmation. The backend archives `approvedIds` and
+    // reports back, so the frontend never has to emit one archive per task.
+    const resolveDeleteRequest = useCallback((requestId: string, approvedIds: string[], rejectedIds: string[]) => {
+        sendMessage('task:deleteResolved', { requestId, approvedIds, rejectedIds });
     }, [sendMessage]);
 
     const revertTask = useCallback((taskId: string, cleanUntracked: boolean = false) => {
@@ -860,7 +878,7 @@ export function useWebSocket() {
         deleteScheduledTask,
         updateScheduledTask,
         pauseScheduledTask,
-        rejectDeleteRequest,
+        resolveDeleteRequest,
         wsRef
     };
 }

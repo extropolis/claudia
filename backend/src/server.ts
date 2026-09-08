@@ -54,7 +54,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'task:interrupt',
     'task:archive',
     'task:deleteRequest',
-    'task:deleteRejected',
+    'task:deleteResolved',
     'task:reconnect',
     'task:revert',
     'task:restore',
@@ -1640,30 +1640,62 @@ export async function createApp(basePath?: string) {
                     }
 
                     case 'task:deleteRequest': {
-                        // MCP agent is requesting to delete a task — broadcast to
-                        // frontend so it can show a confirmation dialog to the user.
-                        const { taskId, requestId, taskName } = payload as { taskId?: string; requestId?: string; taskName?: string };
-                        if (taskId && requestId) {
-                            logger.info('task:deleteRequest from MCP agent', { taskId, requestId });
+                        // MCP agent is requesting deletion of one or more tasks —
+                        // broadcast to the frontend so it can show a single
+                        // confirmation dialog listing all of them.
+                        const { requestId, tasks } = payload as {
+                            requestId?: string;
+                            tasks?: Array<{ taskId: string; taskName: string }>;
+                        };
+                        if (requestId && Array.isArray(tasks) && tasks.length > 0) {
+                            logger.info('task:deleteRequest from MCP agent', { requestId, count: tasks.length });
                             broadcast({
                                 type: 'task:deleteRequest' as WSMessageType,
-                                payload: { taskId, requestId, taskName }
+                                payload: { requestId, tasks }
+                            });
+                        } else {
+                            logger.warn('Ignoring malformed task:deleteRequest', {
+                                requestId, taskCount: Array.isArray(tasks) ? tasks.length : 'not-an-array'
                             });
                         }
                         break;
                     }
 
-                    case 'task:deleteRejected': {
-                        // User rejected the delete confirmation — broadcast so the
-                        // MCP agent's waiting WebSocket receives the rejection.
-                        const { taskId, requestId } = payload as { taskId?: string; requestId?: string };
-                        if (taskId && requestId) {
-                            logger.info('task:deleteRejected by user', { taskId, requestId });
-                            broadcast({
-                                type: 'task:deleteRejected' as WSMessageType,
-                                payload: { taskId, requestId }
-                            });
+                    case 'task:deleteResolved': {
+                        // User answered the confirmation dialog. Archive exactly the
+                        // approved subset here rather than making the frontend emit one
+                        // task:archive per id — a partial failure mid-loop would leave
+                        // the agent waiting forever with no way to tell what happened.
+                        const { requestId, approvedIds, rejectedIds } = payload as {
+                            requestId?: string;
+                            approvedIds?: string[];
+                            rejectedIds?: string[];
+                        };
+                        if (!requestId || !Array.isArray(approvedIds) || !Array.isArray(rejectedIds)) {
+                            logger.warn('Ignoring malformed task:deleteResolved', { requestId });
+                            break;
                         }
+
+                        const archived: string[] = [];
+                        const failed: Array<{ taskId: string; reason: string }> = [];
+                        for (const taskId of approvedIds) {
+                            try {
+                                taskSpawner.archiveTask(taskId);
+                                archived.push(taskId);
+                            } catch (error) {
+                                const reason = error instanceof Error ? error.message : String(error);
+                                logger.error('Failed to archive task during bulk delete', { taskId, requestId, reason });
+                                failed.push({ taskId, reason });
+                            }
+                        }
+
+                        logger.info('task:deleteResolved by user', {
+                            requestId, archived: archived.length, kept: rejectedIds.length, failed: failed.length
+                        });
+                        broadcast({
+                            type: 'task:deleteResolved' as WSMessageType,
+                            payload: { requestId, archivedIds: archived, keptIds: rejectedIds, failed }
+                        });
                         break;
                     }
 

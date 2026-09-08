@@ -185,7 +185,7 @@ export type WSMessageType =
     | 'task:waitingInput'
     | 'task:revertResult'
     | 'task:deleteRequest'
-    | 'task:deleteRejected'
+    | 'task:deleteResolved'
     | 'tasks:updated'
     | 'task:renamed'
     // Archived tasks

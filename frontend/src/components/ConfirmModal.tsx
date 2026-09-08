@@ -9,6 +9,8 @@ interface ConfirmModalProps {
     confirmLabel?: string;
     cancelLabel?: string;
     variant?: 'danger' | 'warning' | 'default';
+    /** Block confirmation while the dialog's own selection makes it a no-op. */
+    confirmDisabled?: boolean;
     onConfirm: () => void;
     onCancel: () => void;
 }
@@ -20,6 +22,7 @@ export function ConfirmModal({
     confirmLabel = 'Confirm',
     cancelLabel = 'Cancel',
     variant = 'default',
+    confirmDisabled = false,
     onConfirm,
     onCancel
 }: ConfirmModalProps) {
@@ -59,6 +62,7 @@ export function ConfirmModal({
                     <button
                         className={`confirm-modal-btn confirm-modal-btn--${variant}`}
                         onClick={onConfirm}
+                        disabled={confirmDisabled}
                         autoFocus
                     >
                         {confirmLabel}

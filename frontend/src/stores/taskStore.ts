@@ -93,9 +93,10 @@ interface TaskStore {
     unreadTaskIds: Set<string>;
     activityLog: ActivityEvent[];
 
-    // Pending delete confirmation (from MCP agent)
-    pendingDeleteRequest: { taskId: string; requestId: string; taskName: string } | null;
-    setPendingDeleteRequest: (request: { taskId: string; requestId: string; taskName: string } | null) => void;
+    // Pending delete confirmation (from MCP agent). One request can cover many
+    // tasks — the dialog lists them all and the user unchecks any to keep.
+    pendingDeleteRequest: { requestId: string; tasks: { taskId: string; taskName: string }[] } | null;
+    setPendingDeleteRequest: (request: { requestId: string; tasks: { taskId: string; taskName: string }[] } | null) => void;
 
     // Settings
     autoFocusOnInput: boolean;

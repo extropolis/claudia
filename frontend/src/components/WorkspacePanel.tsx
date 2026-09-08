@@ -9,6 +9,7 @@ import { getApiBaseUrl } from '../config/api-config';
 import { PrBadge } from './PrBadge';
 import { SystemPromptModal } from './SystemPromptModal';
 import { ConfirmModal } from './ConfirmModal';
+import { BulkDeleteModal } from './BulkDeleteModal';
 import { ScheduledTasksModal } from './ScheduledTasksModal';
 import { WorkspaceManager } from './WorkspaceManager';
 import './WorkspacePanel.css';
@@ -2083,7 +2084,7 @@ interface WorkspacePanelProps {
     onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
     onResetWorkspace?: (workspaceId: string) => void;
-    onRejectDeleteRequest?: (taskId: string, requestId: string) => void;
+    onResolveDeleteRequest?: (requestId: string, approvedIds: string[], rejectedIds: string[]) => void;
     onCollapse?: () => void;
 }
 
@@ -2114,7 +2115,7 @@ export function WorkspacePanel({
     onAddCustomReference,
     onRemoveReference,
     onResetWorkspace,
-    onRejectDeleteRequest,
+    onResolveDeleteRequest,
     onCollapse
 }: WorkspacePanelProps) {
     const {
@@ -2609,26 +2610,13 @@ export function WorkspacePanel({
             )}
 
             {pendingDeleteRequest && (
-                <ConfirmModal
-                    title="Delete Task"
-                    variant="danger"
-                    confirmLabel="Delete"
-                    cancelLabel="Keep"
-                    onConfirm={() => {
-                        onArchiveTask(pendingDeleteRequest.taskId);
+                <BulkDeleteModal
+                    request={pendingDeleteRequest}
+                    onResolve={(approvedIds, rejectedIds) => {
+                        onResolveDeleteRequest?.(pendingDeleteRequest.requestId, approvedIds, rejectedIds);
                         setPendingDeleteRequest(null);
                     }}
-                    onCancel={() => {
-                        onRejectDeleteRequest?.(pendingDeleteRequest.taskId, pendingDeleteRequest.requestId);
-                        setPendingDeleteRequest(null);
-                    }}
-                >
-                    <p>An agent is requesting to delete this task:</p>
-                    <p><strong>{pendingDeleteRequest.taskName}</strong></p>
-                    <div className="confirm-note">
-                        The task will be archived and can be restored later.
-                    </div>
-                </ConfirmModal>
+                />
             )}
         </div>
     );

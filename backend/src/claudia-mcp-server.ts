@@ -67,6 +67,11 @@ const log = {
     }
 };
 
+/** Wrap a value as the JSON text payload an MCP tool returns. */
+function jsonResult(value: unknown) {
+    return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] };
+}
+
 /**
  * Get all workspace IDs that belong to the current workspace scope: the root repo
  * workspace plus all of its worktree children.
@@ -925,87 +930,95 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_delete_task',
-    'Request deletion (archival) of a task. This sends a confirmation popup to the user — the task is only deleted if the user approves. IMPORTANT: Only call this when the user explicitly asks to delete/remove a task. Never delete tasks automatically after completion — users want to review outputs.',
+    'Request deletion (archival) of one or more tasks. This sends a SINGLE confirmation popup listing every task, each pre-checked; the user unchecks any they want to keep and confirms once. Pass every task you want removed in one call rather than calling this repeatedly — one call is one prompt, N calls are N prompts. IMPORTANT: Only call this when the user explicitly asks to delete/remove tasks. Never delete tasks automatically after completion — users want to review outputs.',
     {
-        taskId: z.string().describe('The task ID to delete'),
+        taskIds: z.array(z.string()).min(1).describe('The task IDs to delete. Pass all of them in one call to get a single confirmation prompt.'),
     },
-    async ({ taskId }) => {
-        if (SELF_TASK_ID && taskId === SELF_TASK_ID) {
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify({
-                        success: false,
-                        message: `Cannot delete task '${taskId}' because it is the currently running session.`,
-                    }, null, 2)
-                }]
-            };
+    async ({ taskIds }) => {
+        const requested = [...new Set(taskIds)];
+        const selfRequested = SELF_TASK_ID && requested.includes(SELF_TASK_ID);
+        const deletable = requested.filter(id => id !== SELF_TASK_ID);
+
+        if (deletable.length === 0) {
+            return jsonResult({
+                success: false,
+                message: selfRequested
+                    ? 'Cannot delete the currently running session, and no other tasks were requested.'
+                    : 'No task IDs were provided.',
+            });
         }
 
         try {
-            // Look up task name for the confirmation dialog
-            let taskName = taskId;
-            try {
-                const tasksResponse = await backendFetch('/api/tasks');
-                if (tasksResponse.ok) {
-                    const tasks = await tasksResponse.json();
-                    const task = tasks.find((t: any) => t.id === taskId);
-                    if (!task) {
-                        return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
-                    }
-                    taskName = task.displayName || task.prompt?.substring(0, 60) || taskId;
+            // Resolve display names for the dialog, and drop ids the backend does not
+            // know about — listing a phantom row would make the user approve nothing.
+            const names = new Map<string, string>();
+            const notFound: string[] = [];
+            const tasksResponse = await backendFetch('/api/tasks');
+            if (tasksResponse.ok) {
+                const allTasks = await tasksResponse.json();
+                const byId = new Map(allTasks.map((t: any) => [t.id, t]));
+                for (const id of deletable) {
+                    const task: any = byId.get(id);
+                    if (!task) { notFound.push(id); continue; }
+                    names.set(id, task.displayName || task.prompt?.substring(0, 60) || id);
                 }
-            } catch { /* use taskId as fallback name */ }
+            } else {
+                log.error(`Task lookup returned HTTP ${tasksResponse.status}; showing raw ids in the dialog`);
+                for (const id of deletable) names.set(id, id);
+            }
+
+            if (names.size === 0) {
+                return jsonResult({
+                    success: false,
+                    message: `None of the requested tasks exist: ${notFound.join(', ')}`,
+                });
+            }
 
             const requestId = `del-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-            log.info(`Requesting user confirmation to delete task: ${taskId}`, { requestId });
+            const tasks = [...names].map(([taskId, taskName]) => ({ taskId, taskName }));
+            log.info(`Requesting user confirmation to delete ${tasks.length} task(s)`, { requestId });
 
-            // Send deleteRequest — backend broadcasts to frontend which shows
-            // a confirmation modal. We wait for either task:destroyed (approved)
-            // or task:deleteRejected (denied).
+            // One request, one dialog. The backend archives the approved subset and
+            // replies with task:deleteResolved naming exactly what it did.
             const result = await sendWSMessageWithMultiResponse(
                 'task:deleteRequest',
-                { taskId, requestId, taskName },
+                { requestId, tasks },
                 (msg) => {
-                    if (msg.type === 'task:destroyed' && msg.payload?.taskId === taskId) {
-                        return { outcome: 'approved' };
-                    }
-                    if (msg.type === 'task:deleteRejected' && msg.payload?.requestId === requestId) {
-                        return { outcome: 'rejected' };
+                    if (msg.type === 'task:deleteResolved' && msg.payload?.requestId === requestId) {
+                        return msg.payload as {
+                            archivedIds: string[];
+                            keptIds: string[];
+                            failed: Array<{ taskId: string; reason: string }>;
+                        };
                     }
                     return null;
                 },
-                60000
+                300000
             );
 
-            if (result.outcome === 'approved') {
-                return {
-                    content: [{
-                        type: 'text',
-                        text: JSON.stringify({
-                            success: true,
-                            message: `Task '${taskName}' deleted (archived) by user.`,
-                        }, null, 2)
-                    }]
-                };
-            } else {
-                return {
-                    content: [{
-                        type: 'text',
-                        text: JSON.stringify({
-                            success: false,
-                            message: `User rejected deletion of task '${taskName}'.`,
-                        }, null, 2)
-                    }]
-                };
-            }
+            const nameOf = (id: string) => names.get(id) ?? id;
+            return jsonResult({
+                success: result.archivedIds.length > 0,
+                deleted: result.archivedIds.map(nameOf),
+                kept: result.keptIds.map(nameOf),
+                ...(result.failed.length > 0 && {
+                    failed: result.failed.map(f => ({ task: nameOf(f.taskId), reason: f.reason })),
+                }),
+                ...(notFound.length > 0 && { notFound }),
+                ...(selfRequested && { skipped: 'the currently running session cannot delete itself' }),
+                message: `${result.archivedIds.length} deleted, ${result.keptIds.length} kept by the user`
+                    + (result.failed.length > 0 ? `, ${result.failed.length} failed to archive` : ''),
+            });
         } catch (error) {
-            log.error('Failed to delete task:', error);
+            log.error('Failed to delete tasks:', error);
             const msg = error instanceof Error ? error.message : String(error);
             if (msg.includes('timed out')) {
-                return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: 'User did not respond to the deletion confirmation within 60 seconds.' }, null, 2) }] };
+                return jsonResult({
+                    success: false,
+                    message: 'User did not respond to the deletion confirmation within 5 minutes. Nothing was deleted.',
+                });
             }
-            return { content: [{ type: 'text', text: `Error deleting task: ${msg}` }] };
+            return { content: [{ type: 'text', text: `Error deleting tasks: ${msg}` }] };
         }
     }
 );

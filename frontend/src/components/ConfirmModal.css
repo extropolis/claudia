@@ -155,3 +155,96 @@
 .confirm-modal-btn--default:active {
     transform: scale(0.97);
 }
+
+.confirm-modal-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    filter: none;
+    transform: none;
+}
+
+/* ---- Bulk delete confirmation ---- */
+
+.bulk-delete-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0 6px;
+}
+
+.bulk-delete-actions button {
+    background: transparent;
+    border: 1px solid var(--border-color, #30363d);
+    color: var(--text-secondary, #8b949e);
+    border-radius: 5px;
+    padding: 3px 9px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.bulk-delete-actions button:hover {
+    color: var(--text-primary, #e6edf3);
+    border-color: var(--text-secondary, #8b949e);
+}
+
+.bulk-delete-count {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--text-secondary, #8b949e);
+}
+
+/* Cap the list so a 90-task request stays a dialog rather than a full page. */
+.bulk-delete-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 45vh;
+    overflow-y: auto;
+    border: 1px solid var(--border-color, #30363d);
+    border-radius: 6px;
+}
+
+.bulk-delete-list li + li {
+    border-top: 1px solid var(--border-color, #30363d);
+}
+
+.bulk-delete-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 10px;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.bulk-delete-item:hover {
+    background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+}
+
+.bulk-delete-item input {
+    flex-shrink: 0;
+    cursor: pointer;
+}
+
+.bulk-delete-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.bulk-delete-item.keeping .bulk-delete-name {
+    opacity: 0.5;
+    text-decoration: line-through;
+}
+
+.bulk-delete-keep-tag {
+    margin-left: auto;
+    flex-shrink: 0;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-secondary, #8b949e);
+    border: 1px solid var(--border-color, #30363d);
+    border-radius: 3px;
+    padding: 1px 5px;
+}
