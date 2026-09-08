@@ -8,6 +8,9 @@ describe('taskStore', () => {
         // Must match ALL fields from the store's initial state exactly
         useTaskStore.setState({
             tasks: new Map(),
+            // reorderTasks is sort-mode dependent; pin the default so a test that
+            // switches to 'last-modified' cannot leak the mode into later tests.
+            taskSortBy: 'date-created',
             archivedTasks: [],
             showArchivedTasks: false,
             selectedTaskId: null,
