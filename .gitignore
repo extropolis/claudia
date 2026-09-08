@@ -61,6 +61,8 @@ start.ps1
 
 # Runtime data (persisted state) — never commit per-user data
 backend/mcp-token
+# Single-instance lock (backend/ is the legacy data directory)
+backend/instance.json
 backend/tasks.json
 backend/tasks.json.bak
 backend/tasks.json.*.tmp
