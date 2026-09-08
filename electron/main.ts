@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { startServer, stopServer, ServerInfo } from './server-manager.js';
+import { initUpdater, disposeUpdater } from './updater.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -166,6 +167,25 @@ async function createWindow(backendUrl: string): Promise<void> {
     });
 }
 
+/**
+ * Stop the backend utility process exactly once.
+ *
+ * Two callers race for this: the normal `before-quit` path, and the updater
+ * just before it hands over to Squirrel (Electron does not await async
+ * `before-quit` handlers, so the updater cannot rely on that one having
+ * finished). Killing an already-dead child would reject, so guard it.
+ */
+let backendShutdown: Promise<void> | null = null;
+function shutdownBackend(): Promise<void> {
+    if (!serverInfo) return Promise.resolve();
+    if (!backendShutdown) {
+        backendShutdown = stopServer(serverInfo.child).catch(err => {
+            console.error('Backend shutdown error:', err);
+        });
+    }
+    return backendShutdown;
+}
+
 async function startApp(): Promise<void> {
     try {
         console.log('🔮 Starting Claudia...');
@@ -185,6 +205,15 @@ async function startApp(): Promise<void> {
 
         // Create the Electron window with backend URL
         await createWindow(serverInfo.url);
+
+        // Wire the auto-updater. Safe on every platform: when this build can't
+        // self-update (dev run, .deb, unsigned macOS, npx) it registers the IPC
+        // surface so Settings can explain why, and does nothing else.
+        initUpdater({
+            getWindow: () => mainWindow,
+            getBackendUrl: () => serverInfo?.url ?? null,
+            stopBackend: shutdownBackend
+        });
 
         console.log('✅ Claudia is ready!');
     } catch (error) {
@@ -211,10 +240,9 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', async () => {
+    disposeUpdater();
     // Gracefully stop the backend server
-    if (serverInfo) {
-        await stopServer(serverInfo.child);
-    }
+    await shutdownBackend();
 });
 
 // IPC Handlers

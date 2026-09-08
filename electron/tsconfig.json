@@ -14,5 +14,11 @@
     "allowSyntheticDefaultImports": true
   },
   "include": ["./**/*"],
-  "exclude": ["node_modules", "../dist-electron", "./preload.ts"]
+  "exclude": [
+    "node_modules",
+    "../dist-electron",
+    "./preload.ts",
+    "./__tests__",
+    "./vitest.config.ts"
+  ]
 }

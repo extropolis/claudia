@@ -1709,3 +1709,327 @@
 [data-theme="light"] .theme-option.active {
     color: #ffffff;
 }
+
+/* ============================================================
+   Updates panel (Electron auto-updater)
+   Only genuinely new structures live here — the toggles, selects
+   and rows reuse .permission-item / .toggle-switch / .cli-switch-select.
+   ============================================================ */
+
+.updates-notice,
+.updates-message {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+}
+
+.updates-message--error {
+    border-color: var(--accent-red);
+    color: var(--accent-red);
+}
+
+.updates-message--warning {
+    border-color: var(--accent-yellow, #d29922);
+}
+
+.updates-releases-link {
+    align-self: flex-start;
+    font-size: 0.8rem;
+    color: var(--accent-secondary);
+    text-decoration: none;
+}
+
+.updates-releases-link:hover {
+    text-decoration: underline;
+}
+
+.updates-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-bottom: 12px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.updates-header-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.updates-version {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.updates-channel-badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.updates-last-checked {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.updates-pin-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+    border: 1px solid var(--accent-secondary);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+
+.updates-pin-banner .mcp-save-btn {
+    flex-shrink: 0;
+}
+
+.updates-action-row {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 14px 0;
+}
+
+.updates-check-btn {
+    align-self: flex-start;
+    width: auto;
+    border-style: solid;
+}
+
+.updates-status-line {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.updates-status-line--error {
+    color: var(--accent-red);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.updates-release {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+
+.updates-release-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+/* Release notes are rendered as PLAIN TEXT on purpose — no markdown
+   renderer is pulled in for this, so the raw body is shown verbatim. */
+.updates-release-notes {
+    max-height: 180px;
+    overflow-y: auto;
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.updates-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.updates-actions .mcp-save-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.updates-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.updates-progress-track {
+    height: 8px;
+    border-radius: 999px;
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.updates-progress-fill {
+    height: 100%;
+    background: var(--accent-secondary);
+    transition: width 0.2s ease;
+}
+
+.updates-progress-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.updates-ready {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+}
+
+.updates-danger-btn {
+    color: var(--accent-red);
+    border-color: var(--accent-red);
+}
+
+.updates-danger-btn:hover:not(:disabled) {
+    background: rgba(248, 81, 73, 0.1);
+    color: var(--accent-red);
+}
+
+.updates-history {
+    margin-top: 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color);
+}
+
+.updates-history-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.updates-history-toggle:hover {
+    color: var(--text-primary);
+}
+
+.updates-history-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.updates-release-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 260px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.updates-release-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.updates-release-item:last-child {
+    border-bottom: none;
+}
+
+.updates-release-item--current {
+    background: var(--bg-secondary);
+}
+
+.updates-release-item-info {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+
+.updates-release-item-version {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.updates-release-item-meta {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.updates-badge {
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 0.62rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.updates-badge--current {
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--accent-green);
+}
+
+.updates-badge--prerelease {
+    background: rgba(210, 153, 34, 0.15);
+    color: var(--accent-yellow, #d29922);
+}
+
+.updates-install-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.updates-install-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}

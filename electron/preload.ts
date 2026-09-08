@@ -66,6 +66,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
         const handler = (_event: Electron.IpcRendererEvent, isFullscreen: boolean) => callback(isFullscreen);
         ipcRenderer.on('fullscreen-changed', handler);
         return () => ipcRenderer.removeListener('fullscreen-changed', handler);
+    },
+
+    /**
+     * App auto-update control.
+     *
+     * Deliberately an IPC bridge rather than a backend REST route: the backend
+     * is reachable over the ngrok tunnel, and a remote client must never be
+     * able to downgrade or restart the desktop app. See issue #237.
+     */
+    updater: {
+        getStatus: () => ipcRenderer.invoke('updater:get-status'),
+        getPrefs: () => ipcRenderer.invoke('updater:get-prefs'),
+        setPrefs: (patch: unknown) => ipcRenderer.invoke('updater:set-prefs', patch),
+        check: () => ipcRenderer.invoke('updater:check'),
+        download: () => ipcRenderer.invoke('updater:download'),
+        installNow: (force?: boolean) => ipcRenderer.invoke('updater:install-now', force === true),
+        listReleases: () => ipcRenderer.invoke('updater:list-releases'),
+        installVersion: (version: string) => ipcRenderer.invoke('updater:install-version', version),
+        clearPin: () => ipcRenderer.invoke('updater:clear-pin'),
+        skipVersion: (version: string) => ipcRenderer.invoke('updater:skip-version', version),
+        openReleasesPage: () => ipcRenderer.invoke('updater:open-releases-page'),
+        onEvent: (callback: (status: unknown) => void): (() => void) => {
+            const handler = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);
+            ipcRenderer.on('updater:event', handler);
+            return () => ipcRenderer.removeListener('updater:event', handler);
+        }
     }
 });
 
