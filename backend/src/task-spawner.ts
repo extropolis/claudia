@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { writeFile as writeFileAsync, rename as renameAsync, unlink as unlinkAsync, appendFile as appendFileAsync, stat as statAsync, open as openAsync } from 'fs/promises';
 import { tmpdir, homedir, cpus, CpuInfo } from 'os';
+import { readHandoffMark } from './export-import/handoff.js';
 import { execFileSync, execSync } from 'child_process';
 import { atomicWriteFileSync, atomicWriteFileAsync } from './utils/atomic-write.js';
 import { buildSettingsLocalContent } from './settings-local.js';
@@ -1287,6 +1288,67 @@ export class TaskSpawner extends EventEmitter {
         return join(dirname(this.persistencePath), 'archived-tasks.json');
     }
 
+    // -----------------------------------------------------------------------
+    // Handoff guard (P0 task 11, spec §11.3)
+    //
+    // Once this host has handed its work off, it must stop being a writer. The
+    // failure this prevents is not a lost file: it is TWO hosts resuming the
+    // same agent session, both appending to one transcript and both pushing to
+    // one branch. Nothing downstream can repair that, so the guard sits at the
+    // two doors through which a runtime process can be created — createTask and
+    // reconnectTask — rather than at the API layer, where a WebSocket message,
+    // an MCP call, a cron fire or the boot-time auto-reconnect could each walk
+    // straight past it.
+    // -----------------------------------------------------------------------
+
+    /** Cached handoff mark, invalidated by instance.json's mtime. */
+    private handoffMarkCache: { mtimeMs: number; mark: ReturnType<typeof readHandoffMark> } | null = null;
+
+    /**
+     * The handoff mark for this data directory, or `null` if the host is free.
+     *
+     * Cached on mtime because boot-time auto-reconnect calls this once per
+     * task; the file is tiny, but re-reading it a hundred times in a loop is
+     * pointless I/O.
+     */
+    private getHandoffMark(): ReturnType<typeof readHandoffMark> {
+        const dataDir = dirname(this.persistencePath);
+        const lockPath = join(dataDir, 'instance.json');
+        let mtimeMs = 0;
+        try {
+            mtimeMs = existsSync(lockPath) ? statSync(lockPath).mtimeMs : 0;
+        } catch {
+            mtimeMs = 0;
+        }
+        if (mtimeMs === 0) {
+            this.handoffMarkCache = null;
+            return null;
+        }
+        if (this.handoffMarkCache?.mtimeMs === mtimeMs) return this.handoffMarkCache.mark;
+        const mark = readHandoffMark(dataDir);
+        this.handoffMarkCache = { mtimeMs, mark };
+        return mark;
+    }
+
+    /**
+     * Throw if this host has been handed off. Called before anything spawns.
+     *
+     * The error text names `--reclaim` explicitly: an operator who hits this is
+     * usually one who expected the handoff to have been undone already, and the
+     * remedy needs to be in the message rather than in the docs.
+     */
+    private assertNotHandedOff(action: string): void {
+        const mark = this.getHandoffMark();
+        if (!mark) return;
+        throw new Error(
+            `This Claudia instance was handed off at ${mark.handedOffAt} and will not ${action}. ` +
+                `Its tasks are running on another host; starting them here too would have two ` +
+                `machines appending to the same agent sessions. ` +
+                `If the handoff was a mistake or the other host never came up, reclaim this one ` +
+                `(test-cli --reclaim, or POST /api/handoff/reclaim) and try again.`
+        );
+    }
+
     private getTaskHistoryPath(taskId: string): string {
         return join(this.getHistoryDir(), `${taskId}.txt`);
     }
@@ -2371,6 +2433,21 @@ export class TaskSpawner extends EventEmitter {
         // of 29 eligible tasks, ~182s serial becomes ~5s. This matters because
         // the WebSocket init path used to block on waitForReconnect(), so every
         // second here was a second the UI showed nothing.
+        // A handed-off host reconnects nothing. Checked once here as well as
+        // inside reconnectTask: both loop call sites catch per-task errors, so
+        // without this the boot log would carry one stack trace per task and
+        // bury the single fact the operator needs — that this instance is
+        // frozen and needs --reclaim.
+        const bootMark = this.getHandoffMark();
+        if (bootMark) {
+            console.warn(
+                `[TaskSpawner] Skipping auto-reconnect of ${tasksToReconnect.length} task(s): ` +
+                `this instance was handed off at ${bootMark.handedOffAt}. ` +
+                `They are running on another host. Run --reclaim (or POST /api/handoff/reclaim) to take them back.`
+            );
+            return;
+        }
+
         const concurrency = this.reconnectConcurrency;
         const settleMs = this.reconnectSettleMs;
         const totalWaves = Math.ceil(tasksToReconnect.length / concurrency);
@@ -3942,6 +4019,10 @@ export class TaskSpawner extends EventEmitter {
      * @returns The created task object
      */
     async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number, modelOverride?: string, parentTaskId?: string): Promise<Task> {
+        // Single-writer guard: a handed-off host creates nothing. See
+        // assertNotHandedOff above for why this lives here and not at the API.
+        this.assertNotHandedOff('start new tasks');
+
         // Sanitize prompt to prevent command injection and other issues
         const sanitizedPrompt = sanitizePrompt(prompt);
         let sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
@@ -5983,6 +6064,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
     }
 
     reconnectTask(taskId: string, pendingInput?: string): Task | null {
+        // Single-writer guard. Resuming is the more dangerous of the two doors:
+        // it reattaches to an EXISTING agent session, which is precisely the
+        // thing the other host is now doing.
+        this.assertNotHandedOff('resume tasks');
+
         // This task is coming back to life — any undelivered "has exited"
         // notice queued for its parent is now stale and must not be delivered.
         this.retractParentNotificationsFor(taskId);
