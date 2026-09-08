@@ -24,6 +24,7 @@ interface TestConfig {
     taskId: string | null;    // Task ID for operations
     stopTask: boolean;        // Stop a running task
     deleteTask: boolean;      // Delete a specific task
+    deleteRequest: boolean;   // Send a batched task:deleteRequest (confirmation prompt) and watch the broadcast
     clearTasks: boolean;      // Clear all tasks
     approvePlan: boolean;     // Approve current plan
     rejectPlan: boolean;      // Reject current plan
@@ -137,6 +138,9 @@ class TestCLI {
                 } else if (this.config.deleteTask && this.config.taskId) {
                     this.sendDeleteTask(this.config.taskId);
                     setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.deleteRequest && this.config.taskId) {
+                    this.sendDeleteRequest(this.config.taskId);
+                    setTimeout(() => this.cleanup(), 4000);
                 } else if (this.config.clearTasks) {
                     this.sendClearTasks();
                     setTimeout(() => this.cleanup(), 2000);
@@ -414,6 +418,28 @@ class TestCLI {
 
         console.log(`⏹️  Stopping task ${taskId}...`);
         this.ws.send(JSON.stringify(message));
+    }
+
+    /**
+     * Exercise the batched delete-confirmation protocol the `claudia_delete_tasks`
+     * MCP tool speaks: send ONE task:deleteRequest carrying N tasks and print the
+     * broadcast that comes back, so you can see that N tasks produce one prompt.
+     * Nothing is deleted — the broadcast only asks the UI to confirm.
+     */
+    private sendDeleteRequest(taskIds: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot send delete request: WebSocket not connected');
+            return;
+        }
+        const requests = taskIds.split(',').map(id => id.trim()).filter(Boolean).map(taskId => ({
+            taskId,
+            requestId: `cli-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            taskName: taskId,
+        }));
+        console.log(`\nSending ONE task:deleteRequest for ${requests.length} task(s):`);
+        requests.forEach(r => console.log(`   - ${r.taskId}  (requestId ${r.requestId})`));
+        console.log('Watching for the broadcast the frontend would render...\n');
+        this.ws.send(JSON.stringify({ type: 'task:deleteRequest', payload: { requests, ...requests[0] } }));
     }
 
     private sendDeleteTask(taskId: string): void {
@@ -933,6 +959,15 @@ class TestCLI {
         }
 
         switch (message.type) {
+            case 'task:deleteRequest': {
+                // What the frontend receives for --delete-request: ONE message
+                // carrying every task, which is what makes it ONE dialog.
+                const reqs = (message.payload?.requests ?? [message.payload]) as any[];
+                console.log(`[${elapsed}s] DELETE-REQ │ one broadcast carrying ${reqs.length} request(s)`);
+                reqs.forEach((r: any) => console.log(`             │   ${r.taskId}  requestId=${r.requestId}  name=${r.taskName}`));
+                console.log(`             │ legacy top-level taskId=${message.payload?.taskId} (for pre-batch clients)`);
+                break;
+            }
             case 'init':
                 this.handleInit(message.payload);
                 break;
@@ -1349,6 +1384,7 @@ function parseArgs(): TestConfig {
     let taskId: string | null = null;
     let stopTask = false;
     let deleteTask = false;
+    let deleteRequest = false;
     let clearTasks = false;
     let approvePlan = false;
     let rejectPlan = false;
@@ -1457,6 +1493,9 @@ function parseArgs(): TestConfig {
                 break;
             case '--stop-task':
                 stopTask = true;
+                break;
+            case '--delete-request':
+                deleteRequest = true;
                 break;
             case '--delete-task':
                 deleteTask = true;
@@ -1685,6 +1724,8 @@ TASK OPERATIONS:
   --task-input             Send input to a task (requires --task-id and --message)
   --stop-task              Stop a running task (requires --task-id)
   --delete-task            Delete a specific task (requires --task-id)
+  --delete-request         Send ONE batched delete-confirmation request for a comma-separated
+                           --task-id list and print the broadcast (deletes nothing)
   --clear-tasks            Clear all tasks
   --list-tasks             List all tasks with their status
   --tunnel-status          Show tunnel state (url, token, domain, reachability)
@@ -1786,6 +1827,7 @@ Examples:
 
   # Delete a task
   npx tsx test-cli.ts --delete-task --task-id abc123
+  npx tsx test-cli.ts --delete-request --task-id abc123,def456
 
   # List all tasks
   npx tsx test-cli.ts --list-tasks
@@ -1899,6 +1941,7 @@ Examples:
         taskId,
         stopTask,
         deleteTask,
+        deleteRequest,
         clearTasks,
         approvePlan,
         rejectPlan,
@@ -2633,8 +2676,7 @@ async function handleTunnelCommand(argv: string[]): Promise<boolean> {
         show(status);
         if (status.active && status.url) {
             // The server probes asynchronously; give it a beat, then re-read.
-            console.log('
-Probing reachability...');
+            console.log('\nProbing reachability...');
             await new Promise(r => setTimeout(r, 16000));
             show(await (await fetch(`${base}/api/tunnel/status`)).json());
         }
@@ -2646,8 +2688,7 @@ Probing reachability...');
         // drops one zone by SNI makes a perfectly healthy tunnel unreachable,
         // and nothing else in the stack can tell you that.
         const zones = ['ngrok.com', 'probe.ngrok.app', 'probe.ngrok.io', 'probe.ngrok-free.app', 'probe.ngrok-free.dev'];
-        console.log('Probing ngrok domains from this machine (404 = reachable, ngrok just has no such endpoint):
-');
+        console.log('Probing ngrok domains from this machine (404 = reachable, ngrok just has no such endpoint):\n');
         for (const host of zones) {
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), 12000);
@@ -2660,8 +2701,7 @@ Probing reachability...');
                 clearTimeout(timer);
             }
         }
-        console.log('
-If one zone is BLOCKED while others are OK, this network filters that domain.');
+        console.log('\nIf one zone is BLOCKED while others are OK, this network filters that domain.');
         console.log('Pin a reserved domain on a working zone:  --tunnel-domain <your>.ngrok.app');
         return true;
     }
