@@ -26,19 +26,21 @@ export function SessionUsageMeter() {
     if (planUsage.unavailable) {
         const reason = planUsage.reason ?? 'unknown';
         return (
-            <div
-                className="session-usage-meter session-usage-meter--unavailable"
-                title={`Plan usage unavailable (${reason}). Run \`claude\` once to refresh authentication.`}
-                onClick={() => setDashboardOpen(true)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') setDashboardOpen(true);
-                }}
-            >
-                <span className="session-usage-meter__label session-usage-meter__label--muted">
-                    usage unavailable
-                </span>
+            // The dashboard is a SIBLING of the trigger, never a child of it.
+            // Nested, every click inside the modal — the close button, the
+            // backdrop — bubbled back into the trigger's onClick and reopened
+            // it, so the modal could not be dismissed.
+            <div className="session-usage-meter-wrap">
+                <button
+                    type="button"
+                    className="session-usage-meter session-usage-meter--unavailable"
+                    title={`Plan usage unavailable (${reason}). Run \`claude\` once to refresh authentication.`}
+                    onClick={() => setDashboardOpen(true)}
+                >
+                    <span className="session-usage-meter__label session-usage-meter__label--muted">
+                        usage unavailable
+                    </span>
+                </button>
                 {dashboardOpen && <PlanUsageDashboard onClose={() => setDashboardOpen(false)} />}
             </div>
         );

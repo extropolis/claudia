@@ -26,7 +26,7 @@ const healthy: PlanUsage = {
         { model: 'fable', utilization: 41, resetsAt: '2026-07-08T15:00:00Z' },
         { model: 'opus', utilization: 12, resetsAt: '2026-07-08T15:00:00Z' },
     ],
-    planLabel: 'Max (20x)',
+    planLabel: 'Max',
     fetchedAt: '2026-07-02T12:00:00Z',
 };
 
@@ -62,7 +62,7 @@ describe('SessionUsageMeter', () => {
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
         fireEvent.click(screen.getByRole('button', { name: /45% · resets in 2h 17m/ }));
-        expect(screen.getByRole('dialog', { name: /max \(20x\) usage/i })).toBeInTheDocument();
+        expect(screen.getByRole('dialog', { name: /max usage/i })).toBeInTheDocument();
 
         fireEvent.click(screen.getByRole('button', { name: /close/i }));
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -104,7 +104,9 @@ describe('SessionUsageMeter', () => {
         expect(pill).toHaveAttribute('title', expect.stringContaining('no_token'));
         expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
 
-        fireEvent.keyDown(pill, { key: 'Enter' });
+        // A native <button>: Enter/Space activate it without a hand-rolled
+        // onKeyDown, so assert the activation the browser actually performs.
+        fireEvent.click(pill);
         expect(screen.getByRole('dialog', { name: /plan usage usage/i })).toBeInTheDocument();
         expect(screen.getByText(/currently unavailable \(no_token\)/i)).toBeInTheDocument();
     });
@@ -115,7 +117,7 @@ describe('PlanUsageDashboard', () => {
         setUsage(healthy);
         render(<PlanUsageDashboard onClose={() => {}} />);
 
-        expect(screen.getByRole('heading', { name: 'Max (20x)' })).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: 'Max' })).toBeInTheDocument();
         expect(screen.getByRole('progressbar', { name: '5-hour window: 45%' })).toHaveAttribute('aria-valuenow', '45');
         expect(screen.getByRole('progressbar', { name: 'All models: 31%' })).toBeInTheDocument();
         expect(screen.getByRole('progressbar', { name: 'Fable: 41%' })).toBeInTheDocument();
@@ -139,7 +141,7 @@ describe('PlanUsageDashboard', () => {
         });
         render(<PlanUsageDashboard onClose={() => {}} />);
         expect(screen.getByRole('heading', { name: /extra usage/i })).toBeInTheDocument();
-        expect(screen.getByText('25 / 100 credits')).toBeInTheDocument();
+        expect(screen.getByText('25.00 / 100.00 credits')).toBeInTheDocument();
         expect(screen.getByText('25%')).toBeInTheDocument();
     });
 
@@ -168,5 +170,89 @@ describe('PlanUsageDashboard', () => {
         // Backdrop is the dialog's parent.
         fireEvent.click(screen.getByRole('dialog').parentElement!);
         expect(onClose).toHaveBeenCalledTimes(3);
+    });
+});
+
+describe('<SessionUsageMeter /> — regressions', () => {
+    it('renders nothing at all before any usage has arrived', () => {
+        setUsage(null);
+        const { container } = render(<SessionUsageMeter />);
+        // No empty chrome, no phantom 0% bar, no progressbar to mislead.
+        expect(container).toBeEmptyDOMElement();
+        expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    });
+
+    it('the dashboard opened from the UNAVAILABLE meter can actually be closed', () => {
+        // The modal used to be rendered *inside* the clickable trigger, so the
+        // close click bubbled back into the trigger's onClick and reopened it.
+        setUsage({ ...healthy, unavailable: true, reason: 'no_token' });
+        render(<SessionUsageMeter />);
+
+        fireEvent.click(screen.getByRole('button', { name: /usage unavailable/i }));
+        expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+        fireEvent.click(screen.getByTitle('Close'));
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+
+    it('the same dashboard closes on a backdrop click', () => {
+        setUsage({ ...healthy, unavailable: true, reason: 'network' });
+        const { container } = render(<SessionUsageMeter />);
+        fireEvent.click(screen.getByRole('button', { name: /usage unavailable/i }));
+
+        const overlay = container.querySelector('.plan-usage-overlay');
+        expect(overlay).not.toBeNull();
+        fireEvent.click(overlay!);
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+
+    it('the healthy meter\'s dashboard also closes', () => {
+        setUsage(healthy);
+        render(<SessionUsageMeter />);
+        fireEvent.click(screen.getByRole('button', { name: /45% · resets in 2h 17m/ }));
+        expect(screen.getByRole('dialog')).toBeInTheDocument();
+        fireEvent.click(screen.getByTitle('Close'));
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+
+    it('does not re-render when unrelated store slices change', () => {
+        // The meter is mounted for the whole session next to a store that gets
+        // written on every WebSocket frame. It must be selector-scoped.
+        let renders = 0;
+        function Probe() {
+            renders++;
+            return <SessionUsageMeter />;
+        }
+        setUsage(healthy);
+        render(<Probe />);
+        const before = renders;
+
+        act(() => {
+            useTaskStore.setState({ tasks: new Map([['t1', { id: 't1' } as never]]) });
+            useTaskStore.getState().setErrorNotification('unrelated');
+            useTaskStore.setState({ isOffline: true });
+        });
+        expect(renders).toBe(before);
+
+        // ...but it does update when planUsage itself changes.
+        setUsage({ ...healthy, fiveHour: { utilization: 99, resetsAt: healthy.fiveHour.resetsAt } });
+        expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '99');
+    });
+
+    it('survives a reset timestamp in the past without rendering a negative countdown', () => {
+        setUsage({
+            ...healthy,
+            fiveHour: { utilization: 20, resetsAt: '2026-01-01T00:00:00Z' }, // long gone
+        });
+        render(<SessionUsageMeter />);
+        expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '20');
+        expect(screen.getByText('20%')).toBeInTheDocument(); // no "resets in -3000h"
+        expect(screen.queryByText(/-\d/)).not.toBeInTheDocument();
+    });
+
+    it('survives a malformed reset timestamp', () => {
+        setUsage({ ...healthy, fiveHour: { utilization: 5, resetsAt: 'not-a-date' } });
+        expect(() => render(<SessionUsageMeter />)).not.toThrow();
+        expect(screen.getByText('5%')).toBeInTheDocument();
     });
 });
