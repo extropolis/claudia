@@ -3,7 +3,25 @@
  */
 
 import { existsSync, statSync } from 'fs';
-import { resolve, normalize, isAbsolute } from 'path';
+import { resolve, normalize, isAbsolute, sep } from 'path';
+
+/**
+ * Is `child` the same as, or contained within, `parent`?
+ *
+ * Both are resolved first, then compared on a SEPARATOR BOUNDARY. A bare
+ * `child.startsWith(parent)` — which is what every file-op route in server.ts
+ * used to do — is not a containment check: with parent `/home/u/repo`, the
+ * path `/home/u/repo-secrets/creds.txt` passes the prefix test while living
+ * entirely outside the workspace. That let `?file=../repo-secrets/creds.txt`
+ * read, overwrite and delete files in any sibling directory whose name
+ * happened to share the workspace's name as a prefix.
+ */
+export function isPathInside(parent: string, child: string): boolean {
+    const p = resolve(parent);
+    const c = resolve(child);
+    if (c === p) return true;
+    return c.startsWith(p.endsWith(sep) ? p : p + sep);
+}
 
 /**
  * Result of a validation operation
