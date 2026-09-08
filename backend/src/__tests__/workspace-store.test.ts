@@ -392,19 +392,21 @@ describe('WorkspaceStore', () => {
     });
 
     describe('loadConfig filtering', () => {
-        it('should filter out non-existent workspaces on load', () => {
+        it('should keep non-existent workspaces on load and mark them unavailable', () => {
             // Add workspace
             store.addWorkspace(testWorkspace1);
 
             // Remove the directory
             rmSync(testWorkspace1, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 
-            // Create new store - should filter out missing workspace
+            // Create new store - the workspace must survive (its tasks would
+            // otherwise orphan) but be flagged unavailable.
             const newStore = new WorkspaceStore(testBaseDir);
             const workspaces = newStore.getWorkspaces();
 
             const found = workspaces.find(w => w.id === testWorkspace1);
-            expect(found).toBeUndefined();
+            expect(found).toBeDefined();
+            expect(found?.status).toBe('unavailable');
         });
     });
 
@@ -905,6 +907,74 @@ describe('WorkspaceStore', () => {
             const result = await cyclicStore.addWorktreeWorkspace(newTree, testWorkspace1, 'feature/y');
             expect(result.id).toBe(newTree);
             expect(result.worktreeParentId).toBe(testWorkspace1);
+        });
+    });
+
+    describe('unavailable workspaces', () => {
+        function seedWorkspaces(workspaces: any[]): void {
+            const envelope = {
+                schemaVersion: 1,
+                data: {
+                    workspaces,
+                    activeWorkspaceId: workspaces[0]?.id ?? null,
+                    recentWorkspaces: [],
+                },
+            };
+            writeFileSync(join(testBaseDir, 'workspace-config.json'), JSON.stringify(envelope));
+        }
+
+        it('keeps a workspace whose path is missing and marks it unavailable', () => {
+            const missing = join(testBaseDir, 'unmounted-drive');
+            seedWorkspaces([
+                { id: missing, name: 'unmounted-drive', createdAt: new Date().toISOString() },
+            ]);
+
+            const loaded = new WorkspaceStore(testBaseDir);
+            const workspaces = loaded.getWorkspaces();
+
+            expect(workspaces).toHaveLength(1);
+            expect(workspaces[0].id).toBe(missing);
+            expect(workspaces[0].status).toBe('unavailable');
+            expect(loaded.getWorkspace(missing)?.status).toBe('unavailable');
+        });
+
+        it('marks a workspace whose path exists as available', () => {
+            seedWorkspaces([
+                { id: testWorkspace1, name: 'workspace1', createdAt: new Date().toISOString() },
+            ]);
+
+            const loaded = new WorkspaceStore(testBaseDir);
+            expect(loaded.getWorkspaces()[0].status).toBe('available');
+            expect(loaded.getWorkspace(testWorkspace1)?.status).toBe('available');
+        });
+
+        it('flips an unavailable workspace back to available once its path reappears', () => {
+            const missing = join(testBaseDir, 'remounted-drive');
+            seedWorkspaces([
+                { id: missing, name: 'remounted-drive', createdAt: new Date().toISOString() },
+            ]);
+
+            const loaded = new WorkspaceStore(testBaseDir);
+            expect(loaded.getWorkspaces()[0].status).toBe('unavailable');
+
+            mkdirSync(missing, { recursive: true });
+
+            expect(loaded.getWorkspaces()[0].status).toBe('available');
+            expect(loaded.getWorkspace(missing)?.status).toBe('available');
+        });
+
+        it('does not persist a missing-path workspace as deleted across reloads', () => {
+            const missing = join(testBaseDir, 'gone');
+            seedWorkspaces([
+                { id: missing, name: 'gone', createdAt: new Date().toISOString() },
+                { id: testWorkspace1, name: 'workspace1', createdAt: new Date().toISOString() },
+            ]);
+
+            // First load triggers any load-time cleanup + resave.
+            new WorkspaceStore(testBaseDir);
+            // Second load must still see both workspaces.
+            const reloaded = new WorkspaceStore(testBaseDir);
+            expect(reloaded.getWorkspaces().map(w => w.id)).toEqual([missing, testWorkspace1]);
         });
     });
 });

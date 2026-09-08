@@ -78,8 +78,17 @@ export class WorkspaceStore {
                 legacyLoader: (raw) => (raw as WorkspaceConfig) ?? { ...DEFAULT_CONFIG },
             });
 
-            // Filter out workspaces that no longer exist.
-            loaded.workspaces = (loaded.workspaces || []).filter(w => existsSync(w.id));
+            // Never drop a workspace because its path is missing (unmounted
+            // drive, config imported from another machine): its tasks would
+            // orphan. Availability is computed on read — see withStatus().
+            // Copy: loadVersioned's defaultData is a shallow clone of
+            // DEFAULT_CONFIG, so without this every fresh store would share
+            // (and mutate) the same workspaces array.
+            loaded.workspaces = [...(loaded.workspaces || [])];
+            const missing = loaded.workspaces.filter(w => !existsSync(w.id));
+            if (missing.length > 0) {
+                console.warn(`[WorkspaceStore] ${missing.length} workspace path(s) not found; keeping them as unavailable:`, missing.map(w => w.id));
+            }
 
             // Initialize recentWorkspaces if not present.
             if (!loaded.recentWorkspaces) {
@@ -116,7 +125,16 @@ export class WorkspaceStore {
     }
 
     getWorkspaces(): Workspace[] {
-        return this.config.workspaces.map(w => this.withPrInfo(w));
+        return this.config.workspaces.map(w => this.withStatus(this.withPrInfo(w)));
+    }
+
+    /**
+     * Stamp the live availability of a workspace path. Evaluated on every read
+     * (not persisted) so a remounted drive flips back to 'available' without a
+     * restart.
+     */
+    private withStatus(w: Workspace): Workspace {
+        return { ...w, status: existsSync(w.id) ? 'available' : 'unavailable' };
     }
 
     /** Merge the in-memory PR info cache onto a workspace for serialization. */
@@ -149,7 +167,7 @@ export class WorkspaceStore {
 
     getWorkspace(id: string): Workspace | undefined {
         const w = this.config.workspaces.find(w => w.id === id);
-        return w ? this.withPrInfo(w) : w;
+        return w ? this.withStatus(this.withPrInfo(w)) : w;
     }
 
     // Add workspace by path - the id IS the path, name comes from folder

@@ -28,7 +28,7 @@ import { evaluateCorsOrigin, CORS_REJECTED } from './cors-policy.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch, getTaskWorkStatus } from './git-utils.js';
 import { selectWorkspacesToRefresh } from './pr-refresh.js';
 import { WorktreeManager } from './worktree-manager.js';
-import { classifyWorktree, removeWorktreeWithUnlockRetry } from './worktree-reaper.js';
+import { classifyWorktree, reapWorktree } from './worktree-reaper.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
@@ -1320,8 +1320,16 @@ export async function createApp(basePath?: string) {
                     logger.info('Worktree sweep: skip', { worktree: rec.id, reason: decision.reason });
                     continue;
                 }
+                if (!existsSync(rec.worktreeParentId)) {
+                    // Parent repo is missing too (unmounted drive, imported
+                    // config): this is an unavailable workspace, not a stale
+                    // worktree. Leave the record and its archived tasks alone.
+                    skipped++;
+                    logger.info('Worktree sweep: skip', { worktree: rec.id, reason: 'parent repo path not found (workspace unavailable)' });
+                    continue;
+                }
                 try {
-                    await removeWorktreeWithUnlockRetry(rec.worktreeParentId, rec.id);
+                    await reapWorktree(rec.worktreeParentId, rec.id);
                     workspaceStore.deleteWorkspace(rec.id);
                     broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: rec.id } });
                     for (const taskId of decision.archivedTaskIds) {
@@ -1842,6 +1850,18 @@ export async function createApp(basePath?: string) {
                             sendWSError(ws, `Invalid complexity '${complexity}'. Expected one of: low, medium, high.`, message.type, 'INVALID_COMPLEXITY');
                             return;
                         }
+                        // Refuse to spawn into a registered workspace whose path is
+                        // gone (unmounted drive, config from another machine). Checked
+                        // before path validation — which would otherwise reject the
+                        // same case with a generic "Path does not exist" — so the user
+                        // sees which path is expected. Exact-match on a registered id
+                        // only; the raw string is never used as a path here.
+                        if (workspaceStore.getWorkspace(workspaceId)?.status === 'unavailable') {
+                            logger.error('task:create rejected: workspace path not found', { workspaceId });
+                            sendWSError(ws, `Workspace path not found: ${workspaceId}`, message.type, 'WORKSPACE_UNAVAILABLE');
+                            return;
+                        }
+
                         // Validate workspace path
                         const workspaceValidation = validateWorkspacePath(workspaceId);
                         if (!workspaceValidation.valid) {
@@ -2364,6 +2384,15 @@ export async function createApp(basePath?: string) {
                         // Reconnect to a disconnected task
                         const { taskId } = payload as { taskId?: string };
                         if (!taskId) break;
+                        // A task whose workspace path is missing cannot be resumed:
+                        // fail loudly instead of letting the PTY spawn ENOENT.
+                        const reconnectWorkspaceId = taskSpawner.getTask(taskId)?.workspaceId
+                            ?? taskSpawner.getDisconnectedTask(taskId)?.workspaceId;
+                        if (reconnectWorkspaceId && workspaceStore.getWorkspace(reconnectWorkspaceId)?.status === 'unavailable') {
+                            logger.error('task:reconnect rejected: workspace path not found', { taskId, workspaceId: reconnectWorkspaceId });
+                            sendWSError(ws, `Workspace path not found: ${reconnectWorkspaceId}`, message.type, 'WORKSPACE_UNAVAILABLE');
+                            return;
+                        }
                         try {
                             const task = taskSpawner.reconnectTask(taskId);
                             if (task) {
@@ -2926,6 +2955,11 @@ export async function createApp(basePath?: string) {
                         if (!workspaceId) {
                             logger.error('git:push requires workspaceId');
                             sendWSError(ws, 'git:push requires workspaceId', message.type, 'MISSING_PARAMS');
+                            return;
+                        }
+                        if (workspaceStore.getWorkspace(workspaceId)?.status === 'unavailable') {
+                            logger.error('git push task rejected: workspace path not found', { workspaceId });
+                            sendWSError(ws, `Workspace path not found: ${workspaceId}`, message.type, 'WORKSPACE_UNAVAILABLE');
                             return;
                         }
                         // Validate workspace path
