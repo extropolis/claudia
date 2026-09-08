@@ -15,7 +15,7 @@ vi.mock('node:fs/promises', () => ({
     readFile: (...args: unknown[]) => readFileMock(...args),
 }));
 
-import { readOAuthCredentials } from '../usage-credentials.js';
+import { readOAuthCredentials, keychainServiceName } from '../usage-credentials.js';
 
 const NESTED = JSON.stringify({ claudeAiOauth: { accessToken: 'tok-secret-123', subscriptionType: 'max' } });
 
@@ -70,15 +70,37 @@ describe('readOAuthCredentials on macOS (Keychain)', () => {
         expect(readFileMock).not.toHaveBeenCalled();
     });
 
-    it('returns null when the keychain item is missing', async () => {
+    it('returns null when the keychain item is missing and no file exists', async () => {
         keychainReturns(new Error('The specified item could not be found in the keychain.'));
+        readFileMock.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
         expect(await readOAuthCredentials()).toBeNull();
     });
 
-    it('returns null (and warns) when the item exists but holds no token', async () => {
-        keychainReturns('{"claudeAiOauth":{"refreshToken":"only"}}');
+    it('looks the item up under the OS username', async () => {
+        keychainReturns(NESTED);
+        await readOAuthCredentials();
+        const args = execFileMock.mock.calls[0][1] as string[];
+        expect(args[args.indexOf('-a') + 1]).toBe(process.env.USER || require('node:os').userInfo().username);
+    });
+
+    it('falls back to the credentials file when the Keychain is unreachable (SSH/tmux)', async () => {
+        // `security` fails with no controlling terminal; Claude Code itself
+        // falls back to the file here, so reporting "no token" to a signed-in
+        // user was wrong.
+        keychainReturns(new Error('User interaction is not allowed.'));
+        readFileMock.mockResolvedValue(NESTED);
+        const creds = await readOAuthCredentials();
+        expect(creds?.accessToken).toBe('tok-secret-123');
+        expect(allLogged()).not.toContain('tok-secret-123');
+    });
+
+    it('returns null when the item exists but holds no claudeAiOauth token', async () => {
+        // On Claude Code 2.1.x a signed-out user still has an item holding only
+        // `mcpOAuth`. That is a normal state, not a parse failure.
+        keychainReturns('{"mcpOAuth":{"something":"else"}}');
+        readFileMock.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
         expect(await readOAuthCredentials()).toBeNull();
-        expect(allLogged()).toMatch(/no accessToken could be parsed/);
+        expect(allLogged()).toMatch(/holds no claudeAiOauth accessToken/);
     });
 
     it('never writes the token to the logs', async () => {
@@ -104,11 +126,40 @@ describe('readOAuthCredentials elsewhere (~/.claude/.credentials.json)', () => {
     it('returns null when the file is missing', async () => {
         readFileMock.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
         expect(await readOAuthCredentials()).toBeNull();
-        expect(allLogged()).toMatch(/No OAuth credentials available/);
+        expect(allLogged()).toMatch(/No credentials file/);
     });
 
     it('returns null when the file is not valid JSON', async () => {
         readFileMock.mockResolvedValue('not json');
         expect(await readOAuthCredentials()).toBeNull();
+    });
+});
+
+describe('CLAUDE_CONFIG_DIR relocates both stores', () => {
+    afterEach(() => { delete process.env.CLAUDE_CONFIG_DIR; });
+
+    it('uses the plain service name when CLAUDE_CONFIG_DIR is unset', () => {
+        expect(keychainServiceName()).toBe('Claude Code-credentials');
+    });
+
+    it('appends the config-dir hash to the Keychain service name', () => {
+        // Claude Code suffixes the service with the first 8 hex of
+        // sha256(configDir). Hardcoding the plain name reported "no token" for
+        // every user with a relocated config dir.
+        process.env.CLAUDE_CONFIG_DIR = '/tmp/some-other-claude';
+        const name = keychainServiceName();
+        expect(name).toMatch(/^Claude Code-credentials-[0-9a-f]{8}$/);
+        expect(name).not.toBe('Claude Code-credentials');
+
+        process.env.CLAUDE_CONFIG_DIR = '/tmp/a-different-one';
+        expect(keychainServiceName()).not.toBe(name); // derived from the path
+    });
+
+    it('reads the credentials file from CLAUDE_CONFIG_DIR, not ~/.claude', async () => {
+        setPlatform('linux');
+        process.env.CLAUDE_CONFIG_DIR = '/tmp/relocated-claude';
+        readFileMock.mockResolvedValue(NESTED);
+        await readOAuthCredentials();
+        expect(String(readFileMock.mock.calls[0][0])).toBe('/tmp/relocated-claude/.credentials.json');
     });
 });
