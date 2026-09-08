@@ -108,6 +108,26 @@ try {
         taskSpawner.startAutoReconnect();
     });
 
+    // Hardening for the pooled-socket ECONNRESET that surfaced in MCP tools as
+    // an opaque `TypeError: fetch failed`. Node reaps an idle keep-alive socket
+    // after 5s by default, while every session's in-process MCP server polls
+    // /api/tasks over undici's connection pool. undici normally retires a
+    // socket ~1s before the server's advertised timeout, but this process
+    // blocks its event loop routinely (spawning PTYs, writing history files),
+    // which defers the reap past the point the client still considers the
+    // socket safe to reuse.
+    //
+    // A longer server-side idle window keeps that margin from being consumed by
+    // a stall. It is not a complete guarantee — backendFetchAt retrying
+    // transport failures is what actually makes the tools resilient — so treat
+    // this as reducing the frequency, not closing the race.
+    //
+    // headersTimeout must stay above keepAliveTimeout or Node reaps first
+    // anyway. Shutdown is unaffected: since Node 19, server.close() retires
+    // idle connections itself rather than waiting out this timeout.
+    httpServer.keepAliveTimeout = 65_000;
+    httpServer.headersTimeout = 66_000;
+
     httpServer.on('error', (err: any) => {
         console.error('[Index] Server failed to start:', err);
         if (err.code === 'EADDRINUSE') {
