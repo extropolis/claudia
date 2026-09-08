@@ -8,6 +8,7 @@ import {
     type OAuthCredentials,
 } from './usage-credentials.js';
 import { createLogger } from './logger.js';
+import { redactSecrets, safeErrorMessage } from './redact.js';
 
 const execFileAsync = promisify(execFile);
 const logger = createLogger('[UsageService]');
@@ -52,7 +53,7 @@ async function defaultDetectVersion(): Promise<string> {
     } catch (err) {
         logger.warn('Could not run `claude --version`; using fallback User-Agent', {
             ua: FALLBACK_UA,
-            error: err instanceof Error ? err.message : String(err),
+            error: safeErrorMessage(err),
         });
         return FALLBACK_UA;
     }
@@ -246,7 +247,8 @@ export class UsageService {
         } catch (err) {
             this.nextAllowedFetchAt = nowMs + MIN_POLL_MS;
             logger.warn('Plan usage fetch failed', {
-                error: err instanceof Error ? err.message : String(err),
+                // Upstream-authored text: scrub before logging. See redactSecrets.
+                error: safeErrorMessage(err, creds.accessToken),
                 hasCachedValue: this.lastGood !== null,
             });
             return this.staleCopy() ?? this.unavailable('network');
@@ -278,7 +280,7 @@ export class UsageService {
             }).catch((err) => {
                 // getUsage() never throws by contract; guard the timer anyway.
                 logger.error('Unexpected error in usage poll tick', {
-                    error: err instanceof Error ? err.message : String(err),
+                    error: safeErrorMessage(err),
                 });
             });
         }, POLL_INTERVAL_MS);
