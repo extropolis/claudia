@@ -16,7 +16,8 @@ import { test, expect } from '../fixtures/test.js';
 import {
     BACKEND_PORT, BACKEND_URL, DEFAULT_STATE_FILES, FRONTEND_PORT, STATE_DIR,
 } from '../harness/env.js';
-import { openApp } from '../harness/ui.js';
+import { makeGitRepo } from '../harness/repo.js';
+import { addWorkspace, openApp, workspaceSection } from '../harness/ui.js';
 
 test('the sandboxed ports are not the developer dev-server ports', () => {
     expect(BACKEND_PORT, 'backend must not run on the live backend port').not.toBe(4001);
@@ -30,17 +31,48 @@ test('the backend under test reads and writes only the sandboxed state dir', asy
         expect(existsSync(`${STATE_DIR}/${file}`), `${file} must exist in the sandbox state dir`).toBe(true);
     }
 
-    // Drive a real write through the UI, then prove it landed in the sandbox.
+    // The backend READ them: the seeded AI Core credentials are what stop the
+    // onboarding modal covering the app, so a normal shell means our config.json
+    // was the one loaded — not an empty default and not the developer's.
     await openApp(page);
-    await page.getByTestId('open-settings').click();
-    await expect(page.getByTestId('settings-menu')).toBeVisible();
-    await page.locator('.settings-menu-close').click();
+    await expect(page.getByTestId('settings-menu')).toHaveCount(0);
 
-    const config = JSON.parse(readFileSync(`${STATE_DIR}/config.json`, 'utf8'));
-    expect(config, 'sandbox config.json must be readable JSON').toBeTruthy();
+    // And the backend WRITES there. Drive a real mutation through the UI and
+    // assert the bytes on disk, in the sandbox, actually changed. Opening a
+    // modal is not a write; this is.
+    const repo = makeGitRepo('isolation');
+    await addWorkspace(page, repo.path);
 
-    // …and that the default (non-isolated) locations were never created. A
-    // backend that ignored our env would have written these instead.
+    // Read the ACTIVE workspace list, not the raw file: a removed workspace is
+    // retained under `recentWorkspaces`, so a substring match on the whole file
+    // would still find the path after removal and the delete half of this
+    // assertion would pass vacuously.
+    const configPath = `${STATE_DIR}/workspace-config.json`;
+    const activeWorkspaceIds = (): string[] =>
+        (JSON.parse(readFileSync(configPath, 'utf8')).data?.workspaces ?? [])
+            .map((w: { id: string }) => w.id);
+
+    await expect
+        .poll(activeWorkspaceIds, {
+            message: 'the workspace added through the UI never reached the sandbox state dir',
+        })
+        .toContain(repo.path);
+
+    // Leave the state as we found it — 02-workspace-lifecycle asserts it starts
+    // from zero workspaces, and this spec runs first.
+    page.once('dialog', (dialog) => void dialog.accept());
+    await workspaceSection(page, repo.path).getByTestId('workspace-menu').click();
+    await page.getByTestId('workspace-remove').click();
+    await expect(workspaceSection(page, repo.path)).toHaveCount(0);
+    await expect
+        .poll(activeWorkspaceIds, {
+            message: 'the removal never reached the sandbox state dir',
+        })
+        .not.toContain(repo.path);
+
+    // …and the default (non-isolated) locations were never created. A backend
+    // that ignored our env — or a store wired up without a data directory —
+    // would have written these instead, inside the developer's checkout.
     for (const file of DEFAULT_STATE_FILES) {
         expect(existsSync(file), `backend must not fall back to ${file}`).toBe(false);
     }
