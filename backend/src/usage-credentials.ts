@@ -68,36 +68,91 @@ export function planLabelFromSubscription(sub?: string): string {
 }
 
 /**
- * The Claude Code config home. `CLAUDE_CONFIG_DIR` relocates it, which changes
- * BOTH the credentials file path and the Keychain service name.
+ * Claude Code's `be()` — the string it hashes into the Keychain service name.
+ *
+ * Verified against the shipped binary (2.1.263):
+ *
+ *   var be = rs(() => (process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"))
+ *                       .normalize("NFC"), s);
+ *
+ * Two details matter and both are load-bearing, because the result is hashed:
+ * the value is NFC-normalized, and it is NOT trimmed. Getting either wrong
+ * changes the sha256 input, which changes the service name, which means the
+ * lookup silently finds nothing — exactly the "no token" failure the suffix
+ * was added to prevent.
+ */
+function configDirForHash(): string {
+    return (process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude')).normalize('NFC');
+}
+
+/**
+ * The Claude Code config home used for the credentials FILE.
+ *
+ * Mirrors Claude Code's `A_()`: `CLAUDE_SECURESTORAGE_CONFIG_DIR` wins whenever
+ * it is *defined* (an empty value means "the default", not "the cwd"), else
+ * `CLAUDE_CONFIG_DIR`, else `~/.claude`.
  */
 function claudeConfigDir(): string {
-    return process.env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), '.claude');
+    const secure = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+    if (secure !== undefined) {
+        return (secure || path.join(os.homedir(), '.claude')).normalize('NFC');
+    }
+    // An empty CLAUDE_CONFIG_DIR would resolve `.credentials.json` relative to
+    // the server's cwd; fall back to the default instead.
+    return (process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')).normalize('NFC');
 }
 
 /**
  * The macOS Keychain generic-password service Claude Code stores the OAuth
  * blob under.
  *
- * Claude Code composes it as `Claude Code` + `-credentials`, plus — when and
- * only when `CLAUDE_CONFIG_DIR` is set — a `-<first 8 hex of sha256(configDir)>`
- * suffix. Hardcoding the unsuffixed name silently returned "no token" for every
- * user with a relocated config dir.
+ * Claude Code's `Sx()` (2.1.263), with `OAUTH_FILE_SUFFIX: ""` in prod and the
+ * caller passing `"-credentials"`:
+ *
+ *   Sx(n) {
+ *     let e = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR,
+ *         t = e !== undefined ? !e : !process.env.CLAUDE_CONFIG_DIR,
+ *         r = e !== undefined ? e.normalize("NFC") : be(),
+ *         c = t ? "" : `-${sha256(r).hex.substring(0, 8)}`;
+ *     return `Claude Code${OAUTH_FILE_SUFFIX}${n}${c}`;
+ *   }
+ *
+ * Confirmed empirically on an unrelocated install: the login keychain holds
+ * svce="Claude Code-credentials", acct=$USER.
  */
 export function keychainServiceName(): string {
-    const configDir = process.env.CLAUDE_CONFIG_DIR?.trim();
-    if (!configDir) return 'Claude Code-credentials';
-    const hash = createHash('sha256').update(configDir).digest('hex').slice(0, 8);
+    const secure = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+    const suffixed = secure !== undefined ? !!secure : !!process.env.CLAUDE_CONFIG_DIR;
+    if (!suffixed) return 'Claude Code-credentials';
+    const dir = secure !== undefined ? secure.normalize('NFC') : configDirForHash();
+    const hash = createHash('sha256').update(dir).digest('hex').slice(0, 8);
     return `Claude Code-credentials-${hash}`;
 }
 
-/** The account name Claude Code stores the item under. */
+/**
+ * The account name Claude Code stores the item under — its `tv()`:
+ *
+ *   var s = /^[a-zA-Z0-9._-]+$/;
+ *   function tv() {
+ *     let n; try { n = process.env.USER || userInfo().username } catch { n = "claude-code-user" }
+ *     if (!s.test(n)) return "claude-code-user";
+ *     return n;
+ *   }
+ *
+ * The regex guard is not cosmetic: a username carrying a space or a non-ASCII
+ * character makes Claude Code store the item under the literal
+ * `claude-code-user`, so asking for the raw name finds nothing.
+ */
+const KEYCHAIN_ACCOUNT_RE = /^[a-zA-Z0-9._-]+$/;
+
 function keychainAccount(): string {
+    let name: string;
     try {
-        return process.env.USER || os.userInfo().username;
+        name = process.env.USER || os.userInfo().username;
     } catch {
         return 'claude-code-user';
     }
+    return KEYCHAIN_ACCOUNT_RE.test(name) ? name : 'claude-code-user';
 }
 
 /** Read + parse `<configDir>/.credentials.json`, or null if unusable. */
