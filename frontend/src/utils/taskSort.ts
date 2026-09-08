@@ -45,3 +45,40 @@ export function compareTasksForDisplay(
 export function sortTasksForDisplay(taskList: Task[], taskSortBy: TaskSortBy): Task[] {
     return [...taskList].sort((a, b) => compareTasksForDisplay(a, b, taskSortBy));
 }
+
+/** Minimal shape needed to decide whether a task renders top-level or nested. */
+export interface TaskTreeNode {
+    id: string;
+    parentTaskId?: string;
+}
+
+/**
+ * Build a predicate telling whether a task renders as a TOP-LEVEL sidebar row
+ * (as opposed to nested under its parent as a subtask), given the full set of
+ * tasks in one workspace.
+ *
+ * Nesting is ONE level: a task nests only under a parent that itself renders
+ * top-level. Anything deeper (a grandchild whose parent is already a subtask),
+ * a task whose parent is not in this workspace, or a cyclic parent chain all
+ * render top-level/flat.
+ *
+ * IMPORTANT: drag-and-drop indexes are assigned over top-level rows only, so
+ * the store's `reorderTasks` MUST use this same predicate to build its index
+ * space. If the sidebar hides a subtask under its parent but the store still
+ * counts it, the dragged index maps to a different task than the user grabbed.
+ */
+export function createTopLevelResolver<T extends TaskTreeNode>(tasks: T[]): (task: T) => boolean {
+    const byId = new Map(tasks.map(t => [t.id, t]));
+    const cache = new Map<string, boolean>();
+    const isTopLevel = (t: T, seen: Set<string> = new Set()): boolean => {
+        const cached = cache.get(t.id);
+        if (cached !== undefined) return cached;
+        if (seen.has(t.id)) { cache.set(t.id, true); return true; } // cyclic parent links: render flat
+        seen.add(t.id);
+        const parent = t.parentTaskId ? byId.get(t.parentTaskId) : undefined;
+        const result = !(parent && isTopLevel(parent, seen));
+        cache.set(t.id, result);
+        return result;
+    };
+    return (task: T) => isTopLevel(task);
+}

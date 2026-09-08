@@ -8,7 +8,7 @@ import {
 import { getApiBaseUrl } from '../config/api-config';
 import { isSoundEnabled } from '../utils/browserCapabilities';
 import { lastKnownTerminalSize } from '../config/terminal-size';
-import { compareTasksForDisplay } from '../utils/taskSort';
+import { compareTasksForDisplay, createTopLevelResolver } from '../utils/taskSort';
 import { PrBadge } from './PrBadge';
 import { SystemPromptModal } from './SystemPromptModal';
 import { ConfirmModal } from './ConfirmModal';
@@ -1981,18 +1981,11 @@ function WorkspaceSection({
                                     // subtaskMap entries are only read for top-level rows, so filing
                                     // a grandchild under a subtask made it vanish from the sidebar
                                     // entirely: unselectable, unstoppable, invisible.
+                                    // Shared with the store's reorderTasks: BOTH must agree on
+                                    // which tasks are top-level, because drag idx is assigned
+                                    // over top-level rows only.
                                     const byId = new Map(tasks.map(t => [t.id, t]));
-                                    const topCache = new Map<string, boolean>();
-                                    const isTopLevel = (t: Task, seen: Set<string> = new Set()): boolean => {
-                                        const cached = topCache.get(t.id);
-                                        if (cached !== undefined) return cached;
-                                        if (seen.has(t.id)) { topCache.set(t.id, true); return true; } // cyclic parent links: render flat
-                                        seen.add(t.id);
-                                        const parent = t.parentTaskId ? byId.get(t.parentTaskId) : undefined;
-                                        const result = !(parent && isTopLevel(parent, seen));
-                                        topCache.set(t.id, result);
-                                        return result;
-                                    };
+                                    const isTopLevel = createTopLevelResolver(tasks);
                                     const subtaskMap = new Map<string, SubtaskEntry[]>();
                                     const topLevelTasks: Task[] = [];
                                     tasks.forEach(task => {
