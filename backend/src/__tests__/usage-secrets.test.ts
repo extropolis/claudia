@@ -119,4 +119,43 @@ describe('the OAuth access token never leaves the process', () => {
         expect(JSON.stringify(usage).toLowerCase()).not.toContain(TOKEN.toLowerCase());
         expect(logged().toLowerCase()).not.toContain(TOKEN.toLowerCase());
     });
+
+    it('is absent from the payload when the upstream echoes it into resets_at', async () => {
+        // The sibling case above only covered `scope.model.display_name`.
+        // `resets_at` is upstream-authored text too, on three separate paths,
+        // and it used to be copied through verbatim: a reflected Authorization
+        // header reached /api/usage, the WS frame and the rendered UI.
+        const svc = fetchWith(async () => ({
+            status: 200,
+            json: async () => ({
+                five_hour: { utilization: 5, resets_at: `Bearer ${TOKEN}` },
+                seven_day: { utilization: 7, resets_at: TOKEN },
+                limits: [
+                    {
+                        kind: 'weekly_scoped',
+                        percent: 3,
+                        resets_at: `Bearer ${TOKEN}`,
+                        scope: { model: { display_name: 'Opus' } },
+                    },
+                ],
+            }),
+        }));
+        const usage = await svc.getUsage();
+        expect(JSON.stringify(usage).toLowerCase()).not.toContain(TOKEN.toLowerCase());
+        expect(logged().toLowerCase()).not.toContain(TOKEN.toLowerCase());
+    });
+
+    it('does not rebroadcast an unbounded upstream resets_at', async () => {
+        // Not a secret leak but the same root cause: whatever the upstream puts
+        // in this field is fanned out to every connected WebSocket client.
+        const svc = fetchWith(async () => ({
+            status: 200,
+            json: async () => ({
+                five_hour: { utilization: 5, resets_at: 'x'.repeat(100_000) },
+            }),
+        }));
+        const usage = await svc.getUsage();
+        expect(usage.fiveHour.resetsAt).toBe('');
+        expect(JSON.stringify(usage).length).toBeLessThan(1_000);
+    });
 });

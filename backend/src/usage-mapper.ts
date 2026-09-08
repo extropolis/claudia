@@ -34,12 +34,32 @@ function clampUtilization(value: unknown): number {
     return Math.max(0, Math.min(100, n));
 }
 
+/** Longest plausible reset timestamp; an ISO-8601 instant is ~24 chars. */
+const MAX_RESET_LEN = 64;
+
+/**
+ * Sanitize an upstream-authored string before it is copied into the payload we
+ * serve over REST, the `usage:updated` WS frame (including to tunnel clients)
+ * and render in the UI.
+ *
+ * `resets_at` is upstream-controlled text exactly like `scope.model.display_name`
+ * is, and until now it was the only one of the two copied through unbounded and
+ * unscrubbed: a hostile or broken upstream reflecting the Authorization header
+ * into `five_hour.resets_at` got it republished verbatim, and a megabyte-long
+ * value got broadcast to every connected client. Bound it and refuse anything
+ * credential-shaped, the same way display_name is treated.
+ */
+function readUpstreamString(value: unknown, maxLen: number): string {
+    if (typeof value !== 'string' || value.length === 0 || value.length > maxLen) return '';
+    return redactSecrets(value) === value ? value : '';
+}
+
 /** Read a raw `{ utilization, resets_at }` window into a UsageWindow. */
 function readWindow(value: unknown): UsageWindow {
     const obj = (value ?? {}) as Record<string, unknown>;
     return {
         utilization: clampUtilization(obj.utilization),
-        resetsAt: typeof obj.resets_at === 'string' ? obj.resets_at : '',
+        resetsAt: readUpstreamString(obj.resets_at, MAX_RESET_LEN),
     };
 }
 
@@ -88,7 +108,7 @@ export function mapUsageResponse(
         // reset time, means "this window does not apply" — not "0% used".
         // Rendering them produced phantom 0% bars for models never used.
         if (lim.is_active === false) continue;
-        const resetsAt = typeof lim.resets_at === 'string' ? lim.resets_at : '';
+        const resetsAt = readUpstreamString(lim.resets_at, MAX_RESET_LEN);
         const percent = clampUtilization(lim.percent);
         if (percent === 0 && !resetsAt) continue;
 
@@ -102,9 +122,10 @@ export function mapUsageResponse(
             '';
         // Upstream-controlled string that we serve back over REST/WS (including
         // to tunnel clients) and render in the UI. Bound it, and refuse
-        // anything credential-shaped: this is the one field in the response
-        // that is copied out verbatim, so it is the one that could republish a
-        // secret if the upstream ever reflected one.
+        // anything credential-shaped — the same treatment readUpstreamString()
+        // gives `resets_at`. Skipping the row entirely (rather than blanking
+        // the name) is right here: a model window with no usable name is not
+        // worth rendering.
         if (!displayName || displayName.length > MAX_MODEL_NAME) continue;
         if (redactSecrets(displayName) !== displayName) continue;
 
@@ -134,7 +155,13 @@ export function mapUsageResponse(
             isEnabled: extra.is_enabled === true,
             monthlyLimit: minorToMajor(extra.monthly_limit),
             usedCredits: minorToMajor(extra.used_credits),
-            utilization: typeof extra.utilization === 'number' ? extra.utilization : null,
+            // Number.isFinite, matching minorToMajor above: Infinity/NaN would
+            // otherwise reach JSON.stringify and serialize as a bare `null`
+            // that the shared type does not admit for a "present" reading.
+            utilization:
+                typeof extra.utilization === 'number' && Number.isFinite(extra.utilization)
+                    ? extra.utilization
+                    : null,
         };
     }
 
