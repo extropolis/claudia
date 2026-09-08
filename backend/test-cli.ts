@@ -2649,7 +2649,8 @@ async function toggleAutoWorktreeCmd(baseHttpUrl: string, workspaceId: string, e
 }
 
 // Main execution
-// =====================================================================// Jira integration test commands (HTTP-based). Self-contained so they don't
+// ============================================================================
+// Jira integration test commands (HTTP-based). Self-contained so they don't
 // depend on the WebSocket config machinery.
 //   --jira-config                              show connection state
 //   --jira-test                                validate credentials (/myself)
@@ -3079,7 +3080,8 @@ async function handleTunnelCommand(argv: string[]): Promise<boolean> {
     }
 
     return false;
-=======
+}
+
 /** Format an ISO reset time into a "in Xh Ym (local time)" string. */
 function formatReset(resetsAt: string): string {
     if (!resetsAt) return 'unknown';
