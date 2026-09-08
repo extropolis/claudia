@@ -9,14 +9,14 @@ import { contextBridge, ipcRenderer } from 'electron';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const pageUrl: string = (globalThis as any).location?.search || '';
 const urlParams = new URLSearchParams(pageUrl);
-const backendUrl: string = urlParams.get('backendUrl') || 'http://localhost:3001';
+const backendUrl: string = urlParams.get('backendUrl') || 'http://localhost:4001';
 console.log('[Preload] Backend URL:', backendUrl);
 
 // Expose safe APIs to renderer process
 contextBridge.exposeInMainWorld('electronAPI', {
     /**
      * Get the backend server URL
-     * @returns The backend URL (e.g., "http://localhost:3001")
+     * @returns The backend URL (e.g., "http://localhost:4001")
      */
     getBackendUrl: (): string => {
         return backendUrl;

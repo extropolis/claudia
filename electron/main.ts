@@ -3,7 +3,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
-import { startServer, stopServer, ServerInfo } from './server-manager.js';
+import { startServer, stopServer, findRunningBackend, resolveBackend, ServerInfo } from './server-manager.js';
 import { initUpdater, disposeUpdater } from './updater.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -222,17 +222,37 @@ async function startApp(): Promise<void> {
     try {
         console.log('🔮 Starting Claudia...');
 
-        // Start the Express backend server
         const basePath = isDev ? undefined : app.getPath('userData');
-        console.log(`   Config path: ${basePath || 'backend/ (development)'}`);
 
-        serverInfo = await startServer(basePath, (level, message) => {
-            // Forward backend logs from utility process to main process console
-            // (which then forwards to DevTools via our console interceptor)
-            if (level === 'error') console.error(message);
-            else if (level === 'warn') console.warn(message);
-            else console.log(message);
+        // Attach to a backend that is already running (the user's `./start.sh`
+        // on 4001, or another Claudia window) instead of booting a second one
+        // against a different data dir — that is what made the desktop app show
+        // an empty Claudia while the webapp showed every workspace.
+        const attachUrl = process.env.CLAUDIA_BACKEND_URL || 'http://localhost:4001';
+        console.log(`   Probing for a running backend at ${attachUrl}...`);
+
+        const { info, attached } = await resolveBackend({
+            probe: () => findRunningBackend(attachUrl),
+            spawn: () => {
+                // Only meaningful when we own the backend: an attached one uses
+                // whatever data dir its own launcher gave it.
+                console.log(`   Config path: ${basePath || 'backend/ (development)'}`);
+                return startServer(basePath, (level, message) => {
+                    // Forward backend logs from utility process to main
+                    // process console (which then forwards to DevTools via our
+                    // console interceptor)
+                    if (level === 'error') console.error(message);
+                    else if (level === 'warn') console.warn(message);
+                    else console.log(message);
+                });
+            }
         });
+        serverInfo = info;
+
+        if (attached) {
+            const version = serverInfo.version ? ` (version ${serverInfo.version})` : '';
+            console.log(`🔗 Attached to running backend at ${serverInfo.url}${version} — not spawning a local one`);
+        }
         console.log(`   Backend URL: ${serverInfo.url}`);
 
         // Create the Electron window with backend URL
