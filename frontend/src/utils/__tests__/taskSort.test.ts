@@ -87,13 +87,57 @@ describe('createTopLevelResolver', () => {
         expect(createTopLevelResolver([orphan])(orphan)).toBe(true);
     });
 
+    // The invariant that keeps every task on screen: the sidebar only reads
+    // subtaskMap for TOP-LEVEL rows, so a task may resolve to "nested" only if
+    // its own parent resolved to "top-level". Otherwise it is filed under a row
+    // that is never drawn and disappears from the UI entirely.
+    const expectEveryTaskReachable = (nodes: { id: string; parentTaskId?: string }[]) => {
+        const isTop = createTopLevelResolver(nodes);
+        const byId = new Map(nodes.map(n => [n.id, n]));
+        for (const n of nodes) {
+            if (isTop(n)) continue;
+            const parent = byId.get(n.parentTaskId!);
+            expect(parent, `${n.id} is nested but its parent is missing`).toBeDefined();
+            expect(isTop(parent!), `${n.id} nests under ${parent!.id}, which is itself nested → ${n.id} never renders`).toBe(true);
+        }
+    };
+
     it('terminates on cyclic parent chains and keeps every task reachable', () => {
-        // a -> b -> a: the cycle is broken at the first task asked about, which
-        // renders top-level; the other nests under it. Nothing vanishes.
-        const a = node('a', 'b'), b = node('b', 'a');
-        const isTop = createTopLevelResolver([a, b]);
-        expect(isTop(a)).toBe(true);
-        expect(isTop(b)).toBe(false);
+        expectEveryTaskReachable([node('a', 'b'), node('b', 'a')]);
+    });
+
+    it('keeps every task reachable through a 3-cycle', () => {
+        // Regression: the guard used to cache a provisional `true` for the entry
+        // node and then overwrite it with `false` on unwind, so a child that had
+        // already committed to nesting under it was filed under a row that never
+        // rendered — the task vanished from the sidebar.
+        expectEveryTaskReachable([node('a', 'b'), node('b', 'c'), node('c', 'a')]);
+    });
+
+    it('keeps a self-parented task on screen', () => {
+        const a = node('a', 'a');
+        expect(createTopLevelResolver([a])(a)).toBe(true);
+        expectEveryTaskReachable([a, node('b')]);
+    });
+
+    it('keeps every task reachable when a cycle has a tail hanging off it', () => {
+        // tail -> a -> b -> c -> a
+        expectEveryTaskReachable([
+            node('tail', 'a'), node('a', 'b'), node('b', 'c'), node('c', 'a'), node('loose'),
+        ]);
+    });
+
+    it('holds the invariant whichever cycle member is resolved first', () => {
+        // The panel walks `tasks` in array order, so the entry point into the
+        // cycle varies with the store's insertion order. Every rotation must
+        // still leave at least one member top-level and the rest reachable.
+        const ring = [node('a', 'b'), node('b', 'c'), node('c', 'a')];
+        for (let i = 0; i < ring.length; i++) {
+            const rotated = [...ring.slice(i), ...ring.slice(0, i)];
+            expectEveryTaskReachable(rotated);
+            const isTop = createTopLevelResolver(rotated);
+            expect(rotated.some(n => isTop(n)), 'a cycle with no top-level member renders nothing').toBe(true);
+        }
     });
 });
 

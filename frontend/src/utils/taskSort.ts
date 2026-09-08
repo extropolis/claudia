@@ -90,6 +90,17 @@ export interface TaskTreeNode {
  * a task whose parent is not in this workspace, or a cyclic parent chain all
  * render top-level/flat.
  *
+ * INVARIANT (what keeps every task on screen): a task resolves to `false`
+ * (nested) ONLY when its parent resolved to `true` (top-level). The sidebar
+ * reads `subtaskMap` for top-level rows only, so a task filed under a parent
+ * that is itself nested is drawn NOWHERE — invisible, unselectable, unstoppable.
+ * That is why each id is written to `cache` exactly once, on unwind: an earlier
+ * provisional write that a later frame overwrites can flip a parent from
+ * top-level to nested *after* a child already committed to nesting under it.
+ * A cycle is therefore broken by returning `false` for the already-seen node
+ * (WITHOUT caching it), which makes the node that closed the loop render
+ * top-level and every other member of the cycle nest under a rendered row.
+ *
  * IMPORTANT: drag-and-drop indexes are assigned over top-level rows only, so
  * the store's `reorderTasks` MUST use this same predicate to build its index
  * space. If the sidebar hides a subtask under its parent but the store still
@@ -101,7 +112,10 @@ export function createTopLevelResolver<T extends TaskTreeNode>(tasks: T[]): (tas
     const isTopLevel = (t: T, seen: Set<string> = new Set()): boolean => {
         const cached = cache.get(t.id);
         if (cached !== undefined) return cached;
-        if (seen.has(t.id)) { cache.set(t.id, true); return true; } // cyclic parent links: render flat
+        // Cyclic parent link. Report "not top-level" so the CALLER (the node that
+        // closed the loop) renders flat, and do NOT cache: this node's own answer
+        // is still being computed further up the stack and must not be poisoned.
+        if (seen.has(t.id)) return false;
         seen.add(t.id);
         const parent = t.parentTaskId ? byId.get(t.parentTaskId) : undefined;
         const result = !(parent && isTopLevel(parent, seen));
