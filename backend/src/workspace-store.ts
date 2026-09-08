@@ -48,6 +48,9 @@ export class WorkspaceStore {
     // prInfo silently dropped every task-less workspace from the refresh loop
     // and froze its badge at the pre-restart state.
     private prInfoCache = new Map<string, Workspace['prInfo']>();
+    // Last availability seen per workspace id, so the periodic status poll can
+    // broadcast only real flips (drive unmounted / remounted) — not every tick.
+    private lastKnownStatus = new Map<string, NonNullable<Workspace['status']>>();
 
     constructor(basePath?: string) {
         // Use basePath if provided (Electron userData), otherwise use default location
@@ -67,6 +70,33 @@ export class WorkspaceStore {
             this.needsResaveAfterLoad = false;
             this.saveConfig();
         }
+
+        // Prime the availability baseline so the first poll reports only
+        // flips that happen after startup.
+        this.collectStatusChanges();
+    }
+
+    /**
+     * Re-evaluate every workspace's on-disk availability and return those
+     * whose status differs from the previous call. Each flip is reported
+     * exactly once. Workspaces removed from the store are forgotten.
+     */
+    collectStatusChanges(): Workspace[] {
+        const changed: Workspace[] = [];
+        const seen = new Set<string>();
+        for (const w of this.getWorkspaces()) {
+            const status = w.status ?? 'available';
+            seen.add(w.id);
+            const prev = this.lastKnownStatus.get(w.id);
+            this.lastKnownStatus.set(w.id, status);
+            if (prev !== undefined && prev !== status) {
+                changed.push(w);
+            }
+        }
+        for (const id of Array.from(this.lastKnownStatus.keys())) {
+            if (!seen.has(id)) this.lastKnownStatus.delete(id);
+        }
+        return changed;
     }
 
     private loadConfig(): WorkspaceConfig {

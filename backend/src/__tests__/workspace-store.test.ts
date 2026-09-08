@@ -963,6 +963,37 @@ describe('WorkspaceStore', () => {
             expect(loaded.getWorkspace(missing)?.status).toBe('available');
         });
 
+        it('collectStatusChanges reports only workspaces whose availability flipped since the last call', () => {
+            const missing = join(testBaseDir, 'flippy');
+            seedWorkspaces([
+                { id: missing, name: 'flippy', createdAt: new Date().toISOString() },
+                { id: testWorkspace1, name: 'workspace1', createdAt: new Date().toISOString() },
+            ]);
+            const loaded = new WorkspaceStore(testBaseDir);
+
+            // Baseline is primed at construction: nothing has changed yet.
+            expect(loaded.collectStatusChanges()).toEqual([]);
+
+            mkdirSync(missing, { recursive: true });
+            const changed = loaded.collectStatusChanges();
+            expect(changed.map(w => [w.id, w.status])).toEqual([[missing, 'available']]);
+            // Reported once, not on every poll.
+            expect(loaded.collectStatusChanges()).toEqual([]);
+
+            rmSync(testWorkspace1, { recursive: true, force: true });
+            expect(loaded.collectStatusChanges().map(w => [w.id, w.status])).toEqual([[testWorkspace1, 'unavailable']]);
+        });
+
+        it('collectStatusChanges forgets workspaces that were deleted from the store', () => {
+            seedWorkspaces([
+                { id: testWorkspace1, name: 'workspace1', createdAt: new Date().toISOString() },
+            ]);
+            const loaded = new WorkspaceStore(testBaseDir);
+            loaded.deleteWorkspace(testWorkspace1);
+            rmSync(testWorkspace1, { recursive: true, force: true });
+            expect(loaded.collectStatusChanges()).toEqual([]);
+        });
+
         it('does not persist a missing-path workspace as deleted across reloads', () => {
             const missing = join(testBaseDir, 'gone');
             seedWorkspaces([

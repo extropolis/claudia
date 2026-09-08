@@ -419,9 +419,25 @@ describe.skipIf(!SUPPORTS_FAKE_CLI)('unavailable workspaces (path missing on dis
         expect(err.payload.code).toBe('WORKSPACE_UNAVAILABLE');
     }, 15000);
 
+    it('the periodic status check broadcasts workspace:updated when the path disappears', async () => {
+        const f = await observer.waitForMessage(
+            'workspace:updated',
+            m => m.payload?.workspace?.id === gonePath && m.payload.workspace.status === 'unavailable',
+            10000,
+        );
+        expect(f.payload.workspace.status).toBe('unavailable');
+    }, 15000);
+
     it('flips back to available once the path reappears, without a restart', async () => {
         mkdirSync(gonePath, { recursive: true });
         const list = await env.api('/api/workspaces');
         expect(list.workspaces.find((w: any) => w.id === gonePath)?.status).toBe('available');
+        // ...and every client is told, so the UI un-greys without a refresh.
+        const f = await observer.waitForMessage(
+            'workspace:updated',
+            m => m.payload?.workspace?.id === gonePath && m.payload.workspace.status === 'available',
+            10000,
+        );
+        expect(f.payload.workspace.status).toBe('available');
     }, 15000);
 });

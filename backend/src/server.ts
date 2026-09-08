@@ -1354,6 +1354,25 @@ export async function createApp(basePath?: string) {
     }
     const WORKTREE_SWEEP_INTERVAL_MS = 60 * 60 * 1000; // hourly; reads config each run
     const worktreeSweepInterval = setInterval(() => { void sweepArchivedWorktrees(); }, WORKTREE_SWEEP_INTERVAL_MS);
+
+    // Workspace availability poll: a workspace whose folder is missing is kept
+    // (status 'unavailable') rather than deleted. Re-check on a timer and tell
+    // every client when a path disappears or comes back (drive remounted), so
+    // the sidebar un-greys without a refresh. Cheap: one existsSync per workspace.
+    const WORKSPACE_STATUS_POLL_MS = (() => {
+        const fromEnv = parseInt(process.env.WORKSPACE_STATUS_POLL_MS || '', 10);
+        return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 15_000;
+    })();
+    const workspaceStatusInterval = setInterval(() => {
+        try {
+            for (const workspace of workspaceStore.collectStatusChanges()) {
+                logger.info('Workspace availability changed', { workspaceId: workspace.id, status: workspace.status });
+                broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace } });
+            }
+        } catch (e) {
+            logger.error('Workspace status poll failed', { error: e instanceof Error ? e.message : String(e) });
+        }
+    }, WORKSPACE_STATUS_POLL_MS);
     const worktreeSweepKickoff = setTimeout(() => { void sweepArchivedWorktrees(); }, 30_000); // initial pass after startup settles
 
     // Debounced discovery trigger — multiple tasks going idle in quick succession
@@ -7677,6 +7696,7 @@ Guidelines:
         clearInterval(prInfoInterval);
         clearInterval(worktreeScanInterval);
         clearInterval(worktreeSweepInterval);
+        clearInterval(workspaceStatusInterval);
 
         // Notify all connected clients that the server is reloading
         broadcast({ type: 'server:reloading' as WSMessageType, payload: {} });
@@ -7718,6 +7738,7 @@ Guidelines:
         // vitest hangs on a non-idle event loop.
         clearInterval(uploadCleanupInterval);
         clearInterval(worktreeSweepInterval);
+        clearInterval(workspaceStatusInterval);
         clearTimeout(worktreeScanKickoff);
         clearTimeout(worktreeSweepKickoff);
 
