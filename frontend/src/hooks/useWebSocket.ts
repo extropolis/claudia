@@ -294,9 +294,21 @@ export function useWebSocket() {
                         break;
                     }
                     case 'task:deleteRequest': {
-                        const payload = message.payload as { taskId: string; requestId: string; taskName: string };
-                        console.log(`[WebSocket] Delete request from agent: ${payload.taskId}`);
-                        useTaskStore.getState().addPendingDeleteRequest(payload);
+                        // Batch shape ({ requests: [...] }) is what the agent sends
+                        // today; the bare single-request shape is still accepted so an
+                        // older sender keeps working. Every request is added before
+                        // the next render, so N tasks produce ONE confirmation dialog.
+                        const payload = message.payload as {
+                            requests?: { taskId: string; requestId: string; taskName: string }[];
+                            taskId?: string; requestId?: string; taskName?: string;
+                        };
+                        const requests = payload.requests
+                            ?? (payload.taskId && payload.requestId
+                                ? [{ taskId: payload.taskId, requestId: payload.requestId, taskName: payload.taskName ?? payload.taskId }]
+                                : []);
+                        console.log(`[WebSocket] Delete request from agent: ${requests.length} task(s)`, requests.map(r => r.taskId));
+                        const store = useTaskStore.getState();
+                        requests.forEach(r => store.addPendingDeleteRequest(r));
                         break;
                     }
                     case 'jira:focusTicket': {

@@ -3709,8 +3709,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - Only spawn tasks when parallelization provides real value; do simple work yourself
 - Each spawned task prompt should be fully self-contained — include file paths, context, and constraints so it can work independently
 - While waiting for spawned tasks, do NOT start implementing features that overlap with what they're doing
-- **Deleting tasks**: You can request task deletion via \`claudia_delete_task\`, but it requires **explicit user approval** — a confirmation popup appears in the UI and the user must click "Delete" before the task is removed. NEVER call this automatically after tasks complete. Only call it when the user explicitly asks to delete/remove/clean up tasks.
-- **Deleting MANY tasks**: use \`claudia_delete_tasks\` with every id in ONE call. It shows the user a single popup listing all of them (each with a checkbox) instead of one popup per task. Never loop over \`claudia_delete_task\` for a batch.
+- **Deleting tasks**: You can request task deletion via \`claudia_delete_tasks\`, but it requires **explicit user approval** — a confirmation popup appears in the UI and the user must click "Delete" before the tasks are removed. Pass EVERY task you want deleted in a single call (\`taskIds: [...]\`): the user then gets one prompt listing them all with a checkbox each, instead of a burst of competing prompts. NEVER call this automatically after tasks complete. Only call it when the user explicitly asks to delete/remove/clean up tasks.
 
 ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the toolbar):**
 - The Claudia toolbar shows a live TODO work-plan for this task. Treat it as YOUR working plan and keep it current so the user can watch progress at a glance.
