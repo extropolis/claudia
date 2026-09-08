@@ -206,12 +206,13 @@ describe('loopback bootstrap', () => {
         // this, `/api/auth/local` would hand the API token to anyone on the
         // internet who opened the tunnel URL. Any X-Forwarded-* header means
         // the real client is a hop away, so it is refused.
-        for (const headers of [
+        const forwardedHeaders: Array<Record<string, string>> = [
             { 'x-forwarded-for': '127.0.0.1' },
             { 'x-forwarded-for': '203.0.113.4' },
             { 'x-forwarded-host': 'somewhere.ngrok-free.app' },
             { forwarded: 'for=203.0.113.4' },
-        ]) {
+        ];
+        for (const headers of forwardedHeaders) {
             const res = await h.req<{ error: string }>(LOOPBACK_ONLY, { headers });
             expect(res.status, JSON.stringify(headers)).toBe(403);
         }
