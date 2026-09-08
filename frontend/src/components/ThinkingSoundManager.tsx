@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useTaskStore } from '../stores/taskStore';
+import { isSoundEnabled } from '../utils/browserCapabilities';
 
 /**
  * ThinkingSoundManager - Plays a notification sound at regular intervals when any task is busy (thinking).
@@ -16,6 +17,8 @@ export function ThinkingSoundManager() {
 
     // Play the thinking sound using Web Audio API
     const playThinkingSound = () => {
+        // Respect the global mute toggle (previously this tick ignored it)
+        if (!isSoundEnabled()) return;
         try {
             const audioContext = new (window.AudioContext || (window as typeof window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
             const oscillator = audioContext.createOscillator();

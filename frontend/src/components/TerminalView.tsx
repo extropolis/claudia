@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
-import { Task, Workspace } from '@claudia/shared';
+import { Task, Workspace, stripTerminalQueries } from '@claudia/shared';
 import { Copy, Check, Play, BookOpen, ArrowDown } from 'lucide-react';
 import { TaskInputBar } from './TaskInputBar';
 import { CheckpointTimeline } from './CheckpointTimeline';
@@ -40,6 +40,15 @@ function stripScreenClears(history: string): string {
         // These accumulate across server restarts and fill the terminal with noise,
         // hiding the actual conversation content.
         .replace(/\r?\n?\x1b\[90m─── (Resuming session [a-f0-9-]+|Session reconnected) ───\x1b\[0m\r?\n?\r?\n?/g, '');
+}
+
+// Query sequences are stripped via the canonical @claudia/shared implementation
+// (shared with the backend's persist-time stripping so the two lists cannot
+// drift). Replayed queries would make xterm ANSWER them into the live PTY —
+// the ";1;1R?1;2c" injection bug.
+
+function stripScreenClearsAndQueries(history: string): string {
+    return stripTerminalQueries(stripScreenClears(history));
 }
 
 
@@ -433,7 +442,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 }
                 // Prepend the new chunk to the loaded buffer, then reset + rewrite.
                 // We must reset because xterm.write only appends — there's no insert API.
-                const cleanedChunk = stripScreenClears(data);
+                const cleanedChunk = stripScreenClearsAndQueries(data);
                 loadedHistoryRef.current = cleanedChunk + loadedHistoryRef.current;
                 topOffsetRef.current = startOffset;
                 totalSizeRef.current = totalSize;
@@ -579,9 +588,12 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     if (resizeBuffering || restoreInProgress) {
                         if (resizeBuffering) resizeBuffer.push(data);
                         if (restoreInProgress) restoreOutputBuffer.push(data);
-                        // Still track history so scroll-up loading stays current
+                        // Still track history so scroll-up loading stays current.
+                        // Strip query sequences: this buffer gets REPLAYED on
+                        // scroll-up (term.reset + rewrite) — replaying raw live
+                        // queries would make xterm re-answer them into the PTY.
                         if (loadedHistoryRef.current !== '') {
-                            loadedHistoryRef.current += data;
+                            loadedHistoryRef.current += stripTerminalQueries(data);
                         }
                         if (totalSizeRef.current > 0) {
                             totalSizeRef.current += data.length;
@@ -606,8 +618,12 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     // Keep our loaded-history snapshot current so a later
                     // scroll-up rewrite (loadEarlierChunkIfNeeded) doesn't lose
                     // live output that arrived after the initial restore.
+                    // Query-stripped: this buffer is replayed on scroll-up, and
+                    // replaying raw queries re-injects answered garbage (the
+                    // live term.write above stays raw — the live TUI needs its
+                    // queries answered in real time).
                     if (loadedHistoryRef.current !== '') {
-                        loadedHistoryRef.current += message.payload.data;
+                        loadedHistoryRef.current += stripTerminalQueries(message.payload.data);
                     }
                     if (totalSizeRef.current > 0) {
                         // Match the byte count the backend file is growing by so
@@ -656,7 +672,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                         restoreInProgress = true;
                         restoreOutputBuffer = [];
                         term.reset();
-                        const cleaned = stripScreenClears(history);
+                        const cleaned = stripScreenClearsAndQueries(history);
                         programmaticScrollRef.current = true;
                         term.write(cleaned, () => {
                             // History fully written — flush any output that arrived during restore

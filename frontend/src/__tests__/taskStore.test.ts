@@ -19,7 +19,7 @@ describe('taskStore', () => {
             expandedWorkspaces: new Set(),
             expandedWorkspacesInitialized: false,
             collapsedWorktreeGroups: new Set(),
-            taskListHeight: null,
+            workspaceTaskListHeights: {},
             showProjectPicker: false,
             voiceEnabled: false,
             autoSpeakResponses: false,
@@ -90,10 +90,10 @@ describe('taskStore', () => {
             expect(expandedWorkspaces.has('/b')).toBe(true);  // new -> expanded
         });
 
-        it('holds the resizable task-list height in store state', () => {
-            expect(useTaskStore.getState().taskListHeight).toBeNull();
-            useTaskStore.getState().setTaskListHeight(240);
-            expect(useTaskStore.getState().taskListHeight).toBe(240);
+        it('holds the resizable task-list height per workspace in store state', () => {
+            expect(useTaskStore.getState().workspaceTaskListHeights['/a']).toBeUndefined();
+            useTaskStore.getState().setWorkspaceTaskListHeight('/a', 240);
+            expect(useTaskStore.getState().workspaceTaskListHeights['/a']).toBe(240);
         });
 
         it('toggles worktree-group collapsed state by id', () => {
