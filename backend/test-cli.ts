@@ -2422,7 +2422,98 @@ async function toggleAutoWorktreeCmd(baseHttpUrl: string, workspaceId: string, e
 }
 
 // Main execution
+// ============================================================================
+// Jira integration test commands (HTTP-based). Self-contained so they don't
+// depend on the WebSocket config machinery.
+//   --jira-config                              show connection state
+//   --jira-test                                validate credentials (/myself)
+//   --jira-get <KEY|URL>                       fetch a ticket
+//   --jira-search "<JQL>"                      JQL search
+//   --jira-attachments <KEY>                   list attachments
+//   --jira-download <attachmentId>             download to ./ (server proxies)
+//   --jira-focus <KEY>                         broadcast focusTicket to the UI
+//   --jira-security-check                      run the S1/token-leak checks
+// ============================================================================
+async function handleJiraCommand(argv: string[]): Promise<boolean> {
+    const base = 'http://localhost:4001';
+    const idx = (flag: string) => argv.indexOf(flag);
+    const val = (flag: string) => { const i = idx(flag); return i >= 0 ? argv[i + 1] : undefined; };
+
+    const pretty = async (res: Response) => {
+        const text = await res.text();
+        try { console.log(JSON.stringify(JSON.parse(text), null, 2)); }
+        catch { console.log(text); }
+        console.log(`   (HTTP ${res.status})`);
+    };
+
+    if (idx('--jira-config') >= 0) {
+        await pretty(await fetch(`${base}/api/jira/config`));
+        return true;
+    }
+    if (idx('--jira-test') >= 0) {
+        await pretty(await fetch(`${base}/api/jira/test`));
+        return true;
+    }
+    if (val('--jira-get')) {
+        await pretty(await fetch(`${base}/api/jira/issue/${encodeURIComponent(val('--jira-get')!)}`));
+        return true;
+    }
+    if (val('--jira-search')) {
+        await pretty(await fetch(`${base}/api/jira/search?jql=${encodeURIComponent(val('--jira-search')!)}`));
+        return true;
+    }
+    if (val('--jira-attachments')) {
+        await pretty(await fetch(`${base}/api/jira/issue/${encodeURIComponent(val('--jira-attachments')!)}/attachments`));
+        return true;
+    }
+    if (val('--jira-download')) {
+        const id = val('--jira-download')!;
+        const res = await fetch(`${base}/api/jira/attachment/${encodeURIComponent(id)}`);
+        if (!res.ok) { await pretty(res); return true; }
+        const cd = res.headers.get('content-disposition') || '';
+        const m = cd.match(/filename="?([^"]+)"?/);
+        const name = m ? m[1] : `attachment-${id}`;
+        const buf = Buffer.from(await res.arrayBuffer());
+        const fs = await import('fs');
+        fs.writeFileSync(name, buf);
+        console.log(`✅ Downloaded ${buf.length} bytes → ${name}`);
+        return true;
+    }
+    if (val('--jira-focus')) {
+        const res = await fetch(`${base}/api/jira/focus`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: val('--jira-focus') }),
+        });
+        await pretty(res);
+        return true;
+    }
+    if (idx('--jira-security-check') >= 0) {
+        console.log('🔒 Jira security checks:\n');
+        // 1) Token must never appear in /api/config
+        const cfgRes = await fetch(`${base}/api/config`);
+        const cfg = await cfgRes.json();
+        const tokenLeaked = !!(cfg.jira && cfg.jira.apiToken && cfg.jira.apiToken.length > 0);
+        console.log(`  [${tokenLeaked ? 'FAIL' : 'PASS'}] /api/config does not expose jira.apiToken`);
+        // 2) /api/jira/config exposes hasToken, not the token
+        const jcfg = await (await fetch(`${base}/api/jira/config`)).json();
+        const hasTokenField = 'hasToken' in jcfg && !('apiToken' in jcfg);
+        console.log(`  [${hasTokenField ? 'PASS' : 'FAIL'}] /api/jira/config returns hasToken, not apiToken`);
+        // 3) Tunnel host is rejected (spoof Host header)
+        const tunnelRes = await fetch(`${base}/api/jira/test`, { headers: { Host: 'evil.ngrok.io' } });
+        const tunnelBlocked = tunnelRes.status === 403;
+        console.log(`  [${tunnelBlocked ? 'PASS' : 'FAIL'}] tunnel Host header → 403 (got ${tunnelRes.status})`);
+        console.log('\n  Note: SSRF + path-traversal are enforced in jira-client/MCP and covered by unit tests.');
+        return true;
+    }
+    return false;
+}
+
 async function main() {
+    // Jira commands short-circuit before the WS machinery.
+    if (await handleJiraCommand(process.argv.slice(2))) {
+        process.exit(0);
+    }
+
     const config = parseArgs() as any;
 
     // Derive HTTP URL from WebSocket URL for API calls

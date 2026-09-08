@@ -5,6 +5,7 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import { createApp } from './server.js';
 import { checkClaudeCodeInstalled } from './task-spawner.js';
+import { SharedMcpManager, DEFAULT_SHARED_PLAYWRIGHT_PORT } from './shared-mcp-manager.js';
 import { PORTS } from '@claudia/shared';
 
 const PORT = process.env.CLAUDIA_BACKEND_PORT || PORTS.BACKEND;
@@ -63,6 +64,32 @@ installLearnCommand();
 
 
 const { server, taskSpawner, gracefulShutdown } = await createApp();
+
+// Bring up the shared Playwright MCP server before serving traffic, so tasks
+// spawned immediately after boot get the HTTP URL rather than each starting
+// their own subprocess. Adoption makes this a no-op across tsx watch reloads.
+//
+// Opt out with CLAUDIA_SHARED_MCP=0 to restore per-task stdio servers.
+if (process.env.CLAUDIA_SHARED_MCP !== '0') {
+    const sharedPort = parseInt(process.env.CLAUDIA_SHARED_MCP_PORT || '', 10);
+    const sharedMcp = new SharedMcpManager(
+        Number.isFinite(sharedPort) ? sharedPort : DEFAULT_SHARED_PLAYWRIGHT_PORT,
+    );
+    try {
+        const ok = await sharedMcp.ensureStarted();
+        // Only attach on success — otherwise tasks keep using stdio servers.
+        if (ok) {
+            taskSpawner.setSharedMcpManager(sharedMcp);
+            console.log(`[Index] Shared Playwright MCP server ready at ${sharedMcp.getStatus().url}`);
+        } else {
+            console.warn('[Index] Shared Playwright MCP unavailable; using per-task stdio servers');
+        }
+    } catch (err) {
+        console.error('[Index] Shared MCP startup failed; using per-task stdio servers:', err);
+    }
+} else {
+    console.log('[Index] Shared MCP disabled via CLAUDIA_SHARED_MCP=0');
+}
 
 console.log(`[Index] Starting server on port ${PORT}...`);
 let httpServer: ReturnType<typeof server.listen> | undefined;

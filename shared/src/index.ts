@@ -139,6 +139,23 @@ export interface TaskSummary {
     timestamp: Date;
 }
 
+// Checkpoint/Timeline types
+export interface Checkpoint {
+    id: string;                    // Unique identifier
+    taskId: string;                // Which task this checkpoint belongs to
+    workspaceId: string;           // Which workspace
+    name: string;                  // User-provided or auto-generated name
+    description?: string;          // Optional description
+    timestamp: string;             // ISO timestamp when created
+    gitRef?: string;               // Git commit SHA at checkpoint time
+    gitBranch?: string;            // Current branch at checkpoint time
+    gitDiff?: string;              // Uncommitted changes (unified diff) at checkpoint time
+    metadata?: {
+        filesModified?: number;
+        isCurrent?: boolean;
+    };
+}
+
 // Scheduled task (cron) for recurring/one-shot prompts
 export interface ScheduledTask {
     id: string;                    // 8-char unique ID
@@ -217,8 +234,20 @@ export type WSMessageType =
     | 'cron:fired'
     | 'cron:ran'
     | 'cron:updated'
+    // Checkpoints / Timeline
+    | 'checkpoint:created'
+    | 'checkpoint:list'
+    | 'checkpoint:restored'
+    | 'checkpoint:deleted'
+    | 'checkpoint:forked'
+    | 'checkpoint:error'
     // Token usage
     | 'task:tokenUsage'
+    // Jira integration
+    | 'jira:focusTicket'
+    | 'jira:writeRequest'
+    | 'jira:writeApproved'
+    | 'jira:writeRejected'
     // Server status
     | 'server:reloading'
     | 'server:reconnecting'

@@ -567,4 +567,93 @@ describe('ConfigStore', () => {
             expect(cfg.tiers.high).toBe('opus-3');
         });
     });
+
+    describe('Jira integration', () => {
+        const jira = { baseUrl: 'https://acme.atlassian.net', email: 'me@acme.com', apiToken: 'secret-token' };
+
+        it('defaults to disabled and unconfigured', () => {
+            const config = store.getConfig();
+            expect(config.jiraEnabled).toBe(false);
+            expect(config.jira).toBeUndefined();
+            expect(store.isJiraEnabled()).toBe(false);
+            expect(store.isJiraConfigured()).toBe(false);
+            expect(store.getJiraConfig()).toBeUndefined();
+        });
+
+        it('setJiraEnabled toggles the master switch and persists it', () => {
+            store.setJiraEnabled(true);
+            expect(store.isJiraEnabled()).toBe(true);
+            expect(new ConfigStore(testBaseDir).isJiraEnabled()).toBe(true);
+
+            store.setJiraEnabled(false);
+            expect(store.isJiraEnabled()).toBe(false);
+        });
+
+        it('setJiraConfig stores a copy that survives a reload', () => {
+            store.setJiraConfig(jira);
+            expect(store.getJiraConfig()).toEqual(jira);
+            expect(new ConfigStore(testBaseDir).getJiraConfig()).toEqual(jira);
+        });
+
+        it('getJiraConfig returns a defensive copy', () => {
+            store.setJiraConfig(jira);
+            const returned = store.getJiraConfig()!;
+            returned.apiToken = 'mutated';
+            expect(store.getJiraConfig()!.apiToken).toBe('secret-token');
+        });
+
+        it('isJiraConfigured requires enabled AND all three fields', () => {
+            store.setJiraConfig(jira);
+            expect(store.isJiraConfigured()).toBe(false); // configured but disabled
+
+            store.setJiraEnabled(true);
+            expect(store.isJiraConfigured()).toBe(true);
+
+            store.setJiraConfig({ ...jira, apiToken: '' });
+            expect(store.isJiraConfigured()).toBe(false);
+            store.setJiraConfig({ ...jira, email: '' });
+            expect(store.isJiraConfigured()).toBe(false);
+            store.setJiraConfig({ ...jira, baseUrl: '' });
+            expect(store.isJiraConfigured()).toBe(false);
+        });
+
+        it('updateConfig merges jira fields instead of replacing them', () => {
+            store.updateConfig({ jiraEnabled: true, jira });
+            // Frontend masks the token, so a follow-up save omits it — it must survive.
+            store.updateConfig({ jira: { email: 'other@acme.com' } });
+            expect(store.getJiraConfig()).toEqual({
+                baseUrl: 'https://acme.atlassian.net',
+                email: 'other@acme.com',
+                apiToken: 'secret-token',
+            });
+        });
+
+        it('updateConfig treats an empty apiToken as "keep the stored one"', () => {
+            store.updateConfig({ jira });
+            store.updateConfig({ jira: { baseUrl: 'https://new.atlassian.net', apiToken: '' } });
+            const stored = store.getJiraConfig()!;
+            expect(stored.baseUrl).toBe('https://new.atlassian.net');
+            expect(stored.apiToken).toBe('secret-token');
+        });
+
+        it('updateConfig on a virgin store fills unset jira fields with empty strings', () => {
+            store.updateConfig({ jira: { email: 'me@acme.com' } });
+            expect(store.getJiraConfig()).toEqual({ baseUrl: '', email: 'me@acme.com', apiToken: '' });
+        });
+
+        it('resetToDefaults clears the Jira integration', () => {
+            store.updateConfig({ jiraEnabled: true, jira });
+            const reset = store.resetToDefaults();
+            expect(reset.jiraEnabled).toBe(false);
+            expect(reset.jira).toBeUndefined();
+            expect(store.isJiraConfigured()).toBe(false);
+        });
+
+        it('loads jiraEnabled=false for configs written before the integration existed', () => {
+            writeFileSync(join(testBaseDir, 'config.json'), JSON.stringify({ rules: 'legacy' }));
+            const legacy = new ConfigStore(testBaseDir);
+            expect(legacy.getConfig().jiraEnabled).toBe(false);
+            expect(legacy.getJiraConfig()).toBeUndefined();
+        });
+    });
 });

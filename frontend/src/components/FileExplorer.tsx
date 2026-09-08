@@ -126,7 +126,7 @@ interface GitHubIssuesStatus {
     error?: string;
 }
 
-type TabId = 'files' | 'changes' | 'ci' | 'issues' | 'inbox';
+type TabId = 'files' | 'changes' | 'ci' | 'issues' | 'inbox' | 'jira';
 
 interface GitHubNotification {
     id: string;
@@ -1855,6 +1855,233 @@ function InboxTab({ workspacePath, isActive, onUnreadCount }: { workspacePath: s
 }
 
 
+// ============== JIRA TAB ==============
+
+interface JiraComment { id: string; author: string; created: string; body: string; }
+interface JiraAttachment { id: string; filename: string; mimeType: string; size: number; created: string; }
+interface JiraIssueData {
+    key: string; summary: string; status: string; issueType: string;
+    assignee: string | null; reporter: string | null; priority: string | null;
+    labels: string[]; created: string; updated: string; description: string;
+    comments: JiraComment[]; attachments: JiraAttachment[]; url: string;
+}
+interface JiraSearchRow { key: string; summary: string; status: string; issueType: string; assignee: string | null; updated: string; url: string; }
+
+function formatBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function JiraTab({ isActive, focusKey, onFocusHandled }: { isActive: boolean; focusKey?: string | null; onFocusHandled?: () => void }) {
+    const [queryInput, setQueryInput] = useState('');
+    const [issue, setIssue] = useState<JiraIssueData | null>(null);
+    const [results, setResults] = useState<JiraSearchRow[] | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [downloadingId, setDownloadingId] = useState<string | null>(null);
+
+    const openTicket = useCallback(async (keyOrUrl: string) => {
+        const value = keyOrUrl.trim();
+        if (!value) return;
+        setLoading(true); setError(null); setResults(null); setIssue(null);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/jira/issue/${encodeURIComponent(value)}`);
+            const data = await res.json().catch(() => ({}));
+            if (res.ok) setIssue(data);
+            else setError(data.error || `Failed to load ticket (HTTP ${res.status})`);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : 'Failed to load ticket');
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    const runSearch = useCallback(async (jql: string) => {
+        setLoading(true); setError(null); setResults(null); setIssue(null);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/jira/search?jql=${encodeURIComponent(jql)}`);
+            const data = await res.json().catch(() => ({}));
+            if (res.ok) setResults(data.issues || []);
+            else setError(data.error || `Search failed (HTTP ${res.status})`);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : 'Search failed');
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    // Default view: tickets assigned to me. Load once when the tab first activates.
+    const [hasLoaded, setHasLoaded] = useState(false);
+    useEffect(() => {
+        if (isActive && !hasLoaded) {
+            setHasLoaded(true);
+            runSearch('assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC');
+        }
+    }, [isActive, hasLoaded, runSearch]);
+
+    // React to a session-driven focus request.
+    useEffect(() => {
+        if (focusKey) {
+            openTicket(focusKey);
+            onFocusHandled?.();
+        }
+    }, [focusKey, openTicket, onFocusHandled]);
+
+    const submitQuery = useCallback(() => {
+        const v = queryInput.trim();
+        if (!v) return;
+        // Heuristic: a bare KEY or /browse/ URL opens the ticket; anything else is JQL.
+        if (/^[A-Za-z][A-Za-z0-9]+-\d+$/.test(v) || /\/browse\//i.test(v)) {
+            openTicket(v);
+        } else {
+            runSearch(v);
+        }
+    }, [queryInput, openTicket, runSearch]);
+
+    const downloadAttachment = useCallback(async (att: JiraAttachment) => {
+        setDownloadingId(att.id);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/jira/attachment/${encodeURIComponent(att.id)}`);
+            if (!res.ok) {
+                const d = await res.json().catch(() => ({}));
+                alert(`Download failed: ${d.error || res.status}`);
+                return;
+            }
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = att.filename;
+            document.body.appendChild(a); a.click(); a.remove();
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            alert(`Download failed: ${e instanceof Error ? e.message : 'error'}`);
+        } finally {
+            setDownloadingId(null);
+        }
+    }, []);
+
+    return (
+        <div className="fe-tab-content jira-tab">
+            <div className="fe-issues-toolbar" style={{ display: 'flex', gap: 6, padding: 8 }}>
+                <input
+                    type="text"
+                    value={queryInput}
+                    onChange={(e) => setQueryInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') submitQuery(); }}
+                    placeholder="Ticket key, URL, or JQL…"
+                    className="fe-issue-input"
+                    style={{ flex: 1 }}
+                />
+                <button className="fe-btn" onClick={submitQuery} disabled={loading} title="Open / Search">
+                    {loading ? <Loader2 size={14} className="spinning" /> : <RefreshCw size={14} />}
+                </button>
+            </div>
+
+            {error && (
+                <div className="fe-empty" style={{ color: 'var(--error, #e06c75)', padding: 12 }}>
+                    {error}
+                </div>
+            )}
+
+            {!error && loading && <div className="fe-empty" style={{ padding: 12 }}>Loading…</div>}
+
+            {/* Search results list */}
+            {!loading && results && (
+                results.length === 0
+                    ? <div className="fe-empty" style={{ padding: 12 }}>No matching tickets.</div>
+                    : <div className="fe-issues-list">
+                        {results.map(r => (
+                            <div key={r.key} className="fe-issue-item" style={{ cursor: 'pointer', padding: '8px 12px' }}
+                                onClick={() => openTicket(r.key)}>
+                                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                    <span style={{ fontWeight: 600 }}>{r.key}</span>
+                                    <span className="fe-issue-badge">{r.status}</span>
+                                </div>
+                                <div style={{ fontSize: 13, opacity: 0.85 }}>{r.summary}</div>
+                            </div>
+                        ))}
+                    </div>
+            )}
+
+            {/* Single ticket view */}
+            {!loading && issue && (
+                <div className="jira-issue-detail" style={{ padding: 12, overflowY: 'auto' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                        <span style={{ fontWeight: 700 }}>{issue.key}</span>
+                        <span className="fe-issue-badge">{issue.status}</span>
+                        <a href={issue.url} target="_blank" rel="noreferrer" title="Open in Jira" style={{ marginLeft: 'auto' }}>
+                            <ExternalLink size={14} />
+                        </a>
+                    </div>
+                    <h3 style={{ margin: '4px 0 8px', fontSize: 15 }}>{issue.summary}</h3>
+                    <div style={{ fontSize: 12, opacity: 0.75, display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 10 }}>
+                        <span>{issue.issueType}</span>
+                        {issue.priority && <span>Priority: {issue.priority}</span>}
+                        <span>Assignee: {issue.assignee || 'Unassigned'}</span>
+                        {issue.reporter && <span>Reporter: {issue.reporter}</span>}
+                    </div>
+                    {issue.labels.length > 0 && (
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 10 }}>
+                            {issue.labels.map(l => <span key={l} className="fe-issue-badge"><Tag size={10} /> {l}</span>)}
+                        </div>
+                    )}
+
+                    {issue.description && (
+                        <div className="jira-section">
+                            <div className="jira-section-title" style={{ fontWeight: 600, margin: '8px 0 4px' }}>Description</div>
+                            <div className="jira-markdown" style={{ fontSize: 13, whiteSpace: 'pre-wrap' }}>
+                                <Markdown remarkPlugins={[remarkGfm]}>{issue.description}</Markdown>
+                            </div>
+                        </div>
+                    )}
+
+                    {issue.attachments.length > 0 && (
+                        <div className="jira-section">
+                            <div className="jira-section-title" style={{ fontWeight: 600, margin: '12px 0 4px' }}>
+                                Attachments ({issue.attachments.length})
+                            </div>
+                            {issue.attachments.map(att => (
+                                <div key={att.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', fontSize: 13 }}>
+                                    <File size={13} />
+                                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.filename}</span>
+                                    <span style={{ opacity: 0.6, fontSize: 11 }}>{formatBytes(att.size)}</span>
+                                    <button className="fe-btn" onClick={() => downloadAttachment(att)} disabled={downloadingId === att.id} title="Download">
+                                        {downloadingId === att.id ? <Loader2 size={13} className="spinning" /> : <ArrowDown size={13} />}
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {issue.comments.length > 0 && (
+                        <div className="jira-section">
+                            <div className="jira-section-title" style={{ fontWeight: 600, margin: '12px 0 4px' }}>
+                                Comments ({issue.comments.length})
+                            </div>
+                            {issue.comments.map(c => (
+                                <div key={c.id} className="jira-comment" style={{ borderTop: '1px solid var(--border, #333)', padding: '6px 0', fontSize: 13 }}>
+                                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', opacity: 0.75, fontSize: 12 }}>
+                                        <User size={11} /> {c.author}
+                                        <span style={{ marginLeft: 'auto' }}>{new Date(c.created).toLocaleString()}</span>
+                                    </div>
+                                    <div style={{ whiteSpace: 'pre-wrap', marginTop: 2 }}>{c.body}</div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {!loading && !issue && !results && !error && (
+                <div className="fe-empty" style={{ padding: 12 }}>
+                    Enter a ticket key (e.g. PROJ-123) or a JQL query.
+                </div>
+            )}
+        </div>
+    );
+}
+
 // ============== MAIN PANEL ==============
 
 const PANEL_WIDTH_KEY = 'claudia-file-explorer-width';
@@ -1864,6 +2091,37 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
     const [isExpanded, setIsExpanded] = useState(false);
     const [activeTab, setActiveTab] = useState<TabId>('files');
     const [inboxUnreadCount, setInboxUnreadCount] = useState(0);
+    // Whether the Jira tab should be shown (enabled + a token configured).
+    const [jiraAvailable, setJiraAvailable] = useState(false);
+    // A ticket key a Claude session asked to open (via jira:focusTicket WS).
+    const pendingJiraFocus = useTaskStore(s => s.pendingJiraFocus);
+    const clearJiraFocus = useTaskStore(s => s.clearJiraFocus);
+
+    // Poll Jira availability so the tab appears/disappears with the setting.
+    useEffect(() => {
+        let cancelled = false;
+        const check = async () => {
+            try {
+                const res = await fetch(`${getApiBaseUrl()}/api/jira/config`);
+                if (res.ok && !cancelled) {
+                    const j = await res.json();
+                    setJiraAvailable(!!j.jiraEnabled && !!j.hasToken);
+                }
+            } catch { /* ignore */ }
+        };
+        check();
+        const interval = setInterval(check, 15000);
+        return () => { cancelled = true; clearInterval(interval); };
+    }, []);
+
+    // When a session focuses a ticket, surface the Jira tab and expand the panel.
+    useEffect(() => {
+        if (pendingJiraFocus) {
+            setJiraAvailable(true);
+            setIsExpanded(true);
+            setActiveTab('jira');
+        }
+    }, [pendingJiraFocus]);
     const [panelWidth, setPanelWidth] = useState(() => {
         try {
             const saved = localStorage.getItem(PANEL_WIDTH_KEY);
@@ -1959,6 +2217,13 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
                             <span>Inbox</span>
                             {inboxUnreadCount > 0 && <span className="fe-tab-badge">{inboxUnreadCount > 9 ? '9+' : inboxUnreadCount}</span>}
                         </button>
+                        {jiraAvailable && (
+                            <button className={`fe-tab ${activeTab === 'jira' ? 'active' : ''}`}
+                                onClick={() => setActiveTab('jira')} title="Jira">
+                                <FileText size={13} />
+                                <span>Jira</span>
+                            </button>
+                        )}
                     </div>
 
                     {/* Tab content */}
@@ -1967,6 +2232,7 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
                     {activeTab === 'ci' && <CITab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'ci'} />}
                     {activeTab === 'issues' && <IssuesTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'issues'} />}
                     {activeTab === 'inbox' && <InboxTab workspacePath={workspacePath} isActive={isExpanded && activeTab === 'inbox'} onUnreadCount={setInboxUnreadCount} />}
+                    {activeTab === 'jira' && <JiraTab isActive={isExpanded && activeTab === 'jira'} focusKey={pendingJiraFocus} onFocusHandled={clearJiraFocus} />}
                 </div>
             )}
         </div>

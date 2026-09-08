@@ -638,3 +638,88 @@ describe('decodeHtmlEntities', () => {
     });
 });
 
+
+describe('validateConfigUpdate — Jira', () => {
+    it('should validate jiraEnabled as a boolean field', () => {
+        expect(validateConfigUpdate({ jiraEnabled: true }).data?.jiraEnabled).toBe(true);
+        expect(validateConfigUpdate({ jiraEnabled: false }).data?.jiraEnabled).toBe(false);
+        expect(validateConfigUpdate({ jiraEnabled: 'yes' }).valid).toBe(false);
+    });
+
+    it('should reject a non-object jira field', () => {
+        expect(validateConfigUpdate({ jira: 'nope' }).error).toBe('jira must be an object');
+        expect(validateConfigUpdate({ jira: null }).error).toBe('jira must be an object');
+        expect(validateConfigUpdate({ jira: 42 }).error).toBe('jira must be an object');
+    });
+
+    it('should accept an empty jira object', () => {
+        const result = validateConfigUpdate({ jira: {} });
+        expect(result.valid).toBe(true);
+        expect(result.data?.jira).toEqual({});
+    });
+
+    it('should accept an Atlassian Cloud https baseUrl and strip the trailing slash', () => {
+        expect(validateConfigUpdate({ jira: { baseUrl: 'https://acme.atlassian.net' } }).data?.jira?.baseUrl)
+            .toBe('https://acme.atlassian.net');
+        expect(validateConfigUpdate({ jira: { baseUrl: 'https://acme.atlassian.net/' } }).data?.jira?.baseUrl)
+            .toBe('https://acme.atlassian.net');
+        expect(validateConfigUpdate({ jira: { baseUrl: '  https://my-site.atlassian.net  ' } }).data?.jira?.baseUrl)
+            .toBe('https://my-site.atlassian.net');
+    });
+
+    it('should allow an empty baseUrl (clears the field)', () => {
+        const result = validateConfigUpdate({ jira: { baseUrl: '   ' } });
+        expect(result.valid).toBe(true);
+        expect(result.data?.jira?.baseUrl).toBe('');
+    });
+
+    it('should reject non-Atlassian and non-https baseUrls (SSRF hardening)', () => {
+        const bad = [
+            'http://acme.atlassian.net',
+            'file:///etc/passwd',
+            'https://evil.com',
+            'https://acme.atlassian.net.evil.com',
+            'https://169.254.169.254',
+            'https://acme.atlassian.net/rest/api/3',
+        ];
+        for (const baseUrl of bad) {
+            const result = validateConfigUpdate({ jira: { baseUrl } });
+            expect(result.valid, `expected ${baseUrl} to be rejected`).toBe(false);
+            expect(result.error).toBe('jira.baseUrl must be an https://<site>.atlassian.net URL');
+        }
+    });
+
+    it('should reject a non-string baseUrl', () => {
+        expect(validateConfigUpdate({ jira: { baseUrl: 123 } }).error).toBe('jira.baseUrl must be a string');
+    });
+
+    it('should validate and trim jira.email', () => {
+        expect(validateConfigUpdate({ jira: { email: '  user@example.com  ' } }).data?.jira?.email)
+            .toBe('user@example.com');
+        expect(validateConfigUpdate({ jira: { email: 123 } }).error).toBe('jira.email must be a string');
+        expect(validateConfigUpdate({ jira: { email: 'a'.repeat(321) } }).error)
+            .toBe('jira.email too long (max 320 chars)');
+    });
+
+    it('should validate jira.apiToken and preserve it verbatim', () => {
+        expect(validateConfigUpdate({ jira: { apiToken: '  tok en  ' } }).data?.jira?.apiToken).toBe('  tok en  ');
+        expect(validateConfigUpdate({ jira: { apiToken: 123 } }).error).toBe('jira.apiToken must be a string');
+        expect(validateConfigUpdate({ jira: { apiToken: 'a'.repeat(1025) } }).error)
+            .toBe('jira.apiToken too long (max 1024 chars)');
+        expect(validateConfigUpdate({ jira: { apiToken: 'a'.repeat(1024) } }).valid).toBe(true);
+    });
+
+    it('should accept a fully populated jira config', () => {
+        const result = validateConfigUpdate({
+            jiraEnabled: true,
+            jira: { baseUrl: 'https://acme.atlassian.net/', email: 'me@acme.com', apiToken: 'secret' },
+        });
+        expect(result.valid).toBe(true);
+        expect(result.data?.jiraEnabled).toBe(true);
+        expect(result.data?.jira).toEqual({
+            baseUrl: 'https://acme.atlassian.net',
+            email: 'me@acme.com',
+            apiToken: 'secret',
+        });
+    });
+});

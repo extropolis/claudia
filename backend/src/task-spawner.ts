@@ -17,6 +17,26 @@ import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
 import { randomBytes } from 'crypto';
+import { SharedMcpManager } from './shared-mcp-manager.js';
+import {
+    selectTasksToDisconnect,
+    measureRssByPid,
+    budgetBytesFromPct,
+    formatMB,
+    DEFAULT_BUDGET_PCT,
+    DEFAULT_MIN_LIVE,
+    GuardCandidate,
+} from './memory-guard.js';
+
+/**
+ * Identify a Playwright MCP entry so it can be routed to the shared HTTP
+ * server. Matches on the package in argv rather than the server name alone,
+ * since users can rename servers in their config.
+ */
+function isPlaywrightMcpServer(server: { name: string; args?: string[] }): boolean {
+    if (server.args?.some(a => a.includes('@playwright/mcp'))) return true;
+    return server.name === 'playwright';
+}
 
 const logger = createLogger('[TaskSpawner]');
 
@@ -211,6 +231,18 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Default persistence file path
+/**
+ * Age past which an ARCHIVED task's history file may be swept.
+ *
+ * Default 0 = disabled. History is user-visible scrollback, so reclaiming it
+ * is opt-in rather than something a version bump does silently. Set
+ * HISTORY_RETENTION_DAYS to enable; only archived tasks are ever considered.
+ */
+const DEFAULT_HISTORY_RETENTION_DAYS = 0;
+
+/** Grace period after startup before the idle reaper acts. */
+const REAP_STARTUP_GRACE_MS = 10 * 60 * 1000;
+
 const DEFAULT_PERSISTENCE_PATH = join(__dirname, '..', 'tasks.json');
 
 // Persisted task data (no process, just metadata)
@@ -334,6 +366,13 @@ export class TaskSpawner extends EventEmitter {
     /** Counter of persisted saves, for diagnostics. */
     private saveCounter: number = 0;
     private configStore: ConfigStore | null = null;
+    /**
+     * Set when the shared Playwright MCP server is up. While running, tasks get
+     * an HTTP URL instead of their own stdio subprocess; when absent or
+     * unhealthy, buildMcpConfig falls back to per-task stdio so browser tooling
+     * keeps working.
+     */
+    private sharedMcpManager: SharedMcpManager | null = null;
     private pendingSessionCapture: Map<string, { taskId: string; workspaceId: string; startTime: number }> = new Map();
     /** Map of task IDs to their session capture interval timers */
     private sessionCaptureIntervals: Map<string, NodeJS.Timeout> = new Map();
@@ -360,6 +399,21 @@ export class TaskSpawner extends EventEmitter {
     private readonly idleReapMs: number;
     /** How often the reaper runs. Configurable via IDLE_TASK_REAP_INTERVAL_MS. */
     private readonly idleReapIntervalMs: number;
+    /** Percent of system RAM live agents may use before shedding. 0 disables. */
+    private readonly memoryBudgetPct: number;
+    /** Floor on live agents; the guard never sheds below this. */
+    private readonly memoryMinLiveTasks: number;
+    private readonly memoryGuardIntervalMs: number;
+    private memoryGuardInterval: NodeJS.Timeout | null = null;
+    /**
+     * Archived tasks are immutable once written, but they made up 71% of
+     * tasks.json (6.8MB of 9.5MB) and were re-serialized on EVERY debounced
+     * save. They now live in their own file, rewritten only when the archive
+     * actually changes.
+     */
+    private archivedDirty = false;
+    /** Days before an archived task's history is swept. 0 disables. */
+    private readonly historyRetentionDays: number;
 
     // On-disk history file cap.
     // The in-memory outputHistory is trimmed to 2MB (see MAX_HISTORY_SIZE in
@@ -424,6 +478,27 @@ export class TaskSpawner extends EventEmitter {
             ? envReapInterval
             : 10 * 60 * 1000;
 
+        // Memory guard config. Sheds the coldest idle agents once live tasks
+        // exceed a share of system RAM, so a busy workspace degrades into
+        // fewer live agents rather than into swap. 0 disables.
+        const envBudgetPct = parseFloat(process.env.CLAUDIA_MEMORY_BUDGET_PCT || '');
+        this.memoryBudgetPct = !isNaN(envBudgetPct) && envBudgetPct >= 0
+            ? envBudgetPct
+            : DEFAULT_BUDGET_PCT;
+        const envMinLive = parseInt(process.env.CLAUDIA_MIN_LIVE_TASKS || '', 10);
+        this.memoryMinLiveTasks = !isNaN(envMinLive) && envMinLive >= 0
+            ? envMinLive
+            : DEFAULT_MIN_LIVE;
+        const envGuardInterval = parseInt(process.env.CLAUDIA_MEMORY_GUARD_INTERVAL_MS || '', 10);
+        this.memoryGuardIntervalMs = !isNaN(envGuardInterval) && envGuardInterval >= 10_000
+            ? envGuardInterval
+            : 60_000;
+
+        const envRetention = parseFloat(process.env.HISTORY_RETENTION_DAYS || '');
+        this.historyRetentionDays = !isNaN(envRetention) && envRetention >= 0
+            ? envRetention
+            : DEFAULT_HISTORY_RETENTION_DAYS;
+
         // History file cap config. Default: rotate at 10MB, keep last 5MB tail.
         // Files on disk are kept large to preserve full scrollback history.
         // Memory loading on reconnect is capped separately (MAX_RECONNECT_HISTORY
@@ -450,6 +525,7 @@ export class TaskSpawner extends EventEmitter {
         // in older versions. Runs once at startup; new destroys/archives clean
         // up inline.
         this.sweepOrphanHistoryFiles();
+        this.sweepAgedArchivedHistories();
 
         // Start state polling (only for claude-code backend which uses PTY)
         // OpenCode backend handles its own state management via HTTP API
@@ -457,6 +533,7 @@ export class TaskSpawner extends EventEmitter {
             this.startStatePolling();
             // Start idle-task reaper (claude-code only — OpenCode has its own lifecycle)
             this.startIdleTaskReaper();
+            this.startMemoryGuard();
         }
 
         if (autoReconnect && this.disconnectedTasks.size > 0) {
@@ -574,6 +651,14 @@ export class TaskSpawner extends EventEmitter {
      * Build the MCP config object from the current config store settings.
      * Returns null if no enabled MCP servers are found.
      */
+    /**
+     * Attach the shared MCP manager. Pass null to disable sharing, which makes
+     * buildMcpConfig fall back to per-task stdio servers.
+     */
+    setSharedMcpManager(manager: SharedMcpManager | null): void {
+        this.sharedMcpManager = manager;
+    }
+
     private buildMcpConfig(workspaceId?: string, taskId?: string): { mcpConfig: Record<string, Record<string, unknown>>; enabledMcpServers: { name: string }[] } | null {
         const mcpServers = this.configStore?.getMCPServers() || [];
         const enabledMcpServers = mcpServers.filter(s => s.enabled);
@@ -596,6 +681,20 @@ export class TaskSpawner extends EventEmitter {
                 if (server.autoApprove && server.autoApprove.length > 0) config.autoApprove = server.autoApprove;
                 if (server.description) config.description = server.description;
                 if (server.headers) config.headers = server.headers;
+                mcpConfig[server.name] = config;
+            } else if (this.sharedMcpManager?.getStatus().running && isPlaywrightMcpServer(server)) {
+                // Route Playwright through the single shared HTTP server instead of
+                // giving this task its own subprocess. Stdio is 1:1, so N tasks used
+                // to mean N Playwright servers — the dominant memory cost on a busy
+                // machine. One shared server multiplexes sessions (each client gets
+                // its own mcp-session-id and browser context).
+                const config: Record<string, unknown> = {
+                    type: 'http',
+                    url: this.sharedMcpManager.getStatus().url
+                };
+                if (server.timeout !== undefined) config.timeout = server.timeout;
+                if (server.autoApprove && server.autoApprove.length > 0) config.autoApprove = server.autoApprove;
+                if (server.description) config.description = server.description;
                 mcpConfig[server.name] = config;
             } else {
                 // Optimize npx commands: resolve to direct node invocation when possible.
@@ -818,6 +917,10 @@ export class TaskSpawner extends EventEmitter {
             clearInterval(this.idleReaperInterval);
             this.idleReaperInterval = null;
         }
+        if (this.backendType === 'claude-code' && this.memoryGuardInterval) {
+            clearInterval(this.memoryGuardInterval);
+            this.memoryGuardInterval = null;
+        }
 
         // Update the config store if we have one
         if (this.configStore) {
@@ -831,6 +934,7 @@ export class TaskSpawner extends EventEmitter {
         if (this.backendType === 'claude-code') {
             this.startStatePolling();
             this.startIdleTaskReaper();
+            this.startMemoryGuard();
         }
     }
 
@@ -847,6 +951,11 @@ export class TaskSpawner extends EventEmitter {
     /**
      * Get the directory for archived task histories
      */
+    /** Path to the separate archived-tasks file, beside tasks.json. */
+    private getArchivedPersistencePath(): string {
+        return join(dirname(this.persistencePath), 'archived-tasks.json');
+    }
+
     private getTaskHistoryPath(taskId: string): string {
         return join(this.getHistoryDir(), `${taskId}.txt`);
     }
@@ -1111,6 +1220,95 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Start the memory guard. Runs `enforceMemoryBudget` on an interval.
+     *
+     * This complements the idle reaper rather than duplicating it: the reaper
+     * sheds on AGE (idle >24h) regardless of pressure, while the guard sheds on
+     * PRESSURE regardless of age. Twenty agents idle for an hour never trip the
+     * reaper but will happily exhaust RAM.
+     */
+    private startMemoryGuard(): void {
+        if (this.memoryGuardInterval) return;
+        if (this.memoryBudgetPct <= 0) {
+            logger.info('Memory guard disabled (CLAUDIA_MEMORY_BUDGET_PCT=0)');
+            return;
+        }
+        this.memoryGuardInterval = setInterval(() => {
+            try {
+                this.enforceMemoryBudget();
+            } catch (e) {
+                logger.error('Memory guard threw', { error: (e as Error).message });
+            }
+        }, this.memoryGuardIntervalMs);
+        this.memoryGuardInterval.unref?.();
+        logger.info('Memory guard started', {
+            budgetPct: this.memoryBudgetPct,
+            budgetMB: formatMB(budgetBytesFromPct(this.memoryBudgetPct)),
+            minLiveTasks: this.memoryMinLiveTasks,
+            intervalMs: this.memoryGuardIntervalMs,
+        });
+    }
+
+    /**
+     * Disconnect the coldest idle agents when live tasks exceed the memory
+     * budget. Disconnected tasks keep their sessionId and resume on click, so
+     * this sheds memory without losing work.
+     */
+    private enforceMemoryBudget(): void {
+        const candidates: GuardCandidate[] = [];
+        for (const task of this.tasks.values()) {
+            const pid = task.process?.pid;
+            if (pid === undefined) continue;
+            candidates.push({
+                id: task.id,
+                state: task.state,
+                lastActivity: task.lastActivity,
+                pid,
+            });
+        }
+        if (candidates.length === 0) return;
+
+        const rssByPid = measureRssByPid(candidates.map(c => c.pid!));
+        const budgetBytes = budgetBytesFromPct(this.memoryBudgetPct);
+        const { toDisconnect, usedBytes, projectedBytes } = selectTasksToDisconnect({
+            tasks: candidates,
+            rssByPid,
+            budgetBytes,
+            minLive: this.memoryMinLiveTasks,
+        });
+
+        if (toDisconnect.length === 0) return;
+
+        logger.info('Memory budget exceeded; disconnecting coldest idle agents', {
+            liveTasks: candidates.length,
+            usedMB: formatMB(usedBytes),
+            budgetMB: formatMB(budgetBytes),
+            projectedMB: formatMB(projectedBytes),
+            disconnecting: toDisconnect.length,
+        });
+
+        for (const id of toDisconnect) {
+            try {
+                this.disconnectTask(id);
+                // Same as the idle reaper: clear the continuation flags so the
+                // task isn't auto-reconnected on next startup. Without this the
+                // backend treats the dead PTY as a sleep-death and resurrects
+                // it, which turns shedding into a respawn storm.
+                const persisted = this.disconnectedTasks.get(id);
+                if (persisted) {
+                    persisted.shouldContinue = false;
+                    persisted.wasInterrupted = false;
+                }
+            } catch (e) {
+                logger.warn('Failed to disconnect task for memory budget', {
+                    taskId: id,
+                    error: (e as Error).message,
+                });
+            }
+        }
+    }
+
+    /**
      * Disconnect live tasks that have been idle longer than idleReapMs. The
      * disconnected PTY is killed (freeing its Claude CLI + MCP processes) but
      * the task metadata is preserved with its sessionId — the user can still
@@ -1121,14 +1319,20 @@ export class TaskSpawner extends EventEmitter {
      */
     private reapIdleTasks(): void {
         const now = Date.now();
+
+        // Hold off briefly after startup rather than skipping tasks whose
+        // lastActivity predates startedAt.
+        //
+        // That older guard made the reaper nearly inert: tsx watch resets
+        // startedAt on every source edit, so any task idle across a reload
+        // became permanently immune and agents accumulated indefinitely. A
+        // grace period preserves the intent — don't mass-disconnect the instant
+        // the server comes up — while still reaping genuinely stale tasks,
+        // whose lastActivity is persisted across restarts anyway.
+        if (now - this.startedAt.getTime() < REAP_STARTUP_GRACE_MS) return;
         const toReap: string[] = [];
         for (const task of this.tasks.values()) {
             if (task.state !== 'idle') continue;
-            // Only reap tasks that went idle during this server session. A task
-            // whose lastActivity predates startedAt was already idle when the
-            // server started; its age would immediately exceed the 24h threshold
-            // on every restart, disconnecting tasks the user hasn't touched yet.
-            if (task.lastActivity < this.startedAt) continue;
             const age = now - task.lastActivity.getTime();
             if (age >= this.idleReapMs) toReap.push(task.id);
         }
@@ -1631,6 +1835,25 @@ export class TaskSpawner extends EventEmitter {
                     }
                 }
 
+                // Archived tasks now live in their own file. Prefer it; fall
+                // back to the inline copy so an existing tasks.json migrates on
+                // first load (and gets rewritten split).
+                const archivedPath = this.getArchivedPersistencePath();
+                if (existsSync(archivedPath)) {
+                    try {
+                        const raw = readFileSync(archivedPath, 'utf-8');
+                        const parsed = JSON.parse(raw) as { archivedTasks?: any[] };
+                        persistence.archivedTasks = parsed.archivedTasks || [];
+                        console.log(`[TaskSpawner] Loaded ${persistence.archivedTasks.length} archived tasks from ${archivedPath}`);
+                    } catch (e) {
+                        console.error('[TaskSpawner] Archived-tasks file unreadable; keeping inline copy', e);
+                    }
+                } else if (persistence.archivedTasks?.length) {
+                    // First run after the split — persist them to the new file.
+                    console.log(`[TaskSpawner] Migrating ${persistence.archivedTasks.length} archived tasks out of tasks.json`);
+                    this.archivedDirty = true;
+                }
+
                 // Load archived tasks - migrate old format if needed
                 if (persistence.archivedTasks) {
                     console.log(`[TaskSpawner] Loading ${persistence.archivedTasks.length} archived tasks (metadata only)`);
@@ -1695,6 +1918,76 @@ export class TaskSpawner extends EventEmitter {
             clearTimeout(this.saveDebounceTimer);
         }
         this.saveDebounceTimer = setTimeout(() => this.saveTasks(), 500);
+    }
+
+    /**
+     * Write the archived-task file. Called only when the archive changed, so
+     * the cost is paid on archive/restore/delete rather than on every save.
+     */
+    /**
+     * Delete history files for archived tasks older than the retention window.
+     *
+     * Measured on a real install: 781 history files totalling 1.1GB, with no
+     * policy bounding them — and with RAM exhausted the page cache is gone, so
+     * every scroll-up becomes a cold read of a multi-megabyte file.
+     *
+     * Only ARCHIVED tasks are eligible: the user already put them away. Live
+     * and disconnected tasks keep their scrollback regardless of age.
+     */
+    private sweepAgedArchivedHistories(): void {
+        if (this.historyRetentionDays <= 0) return;
+        const cutoff = Date.now() - this.historyRetentionDays * 86400_000;
+        let removed = 0;
+        let bytes = 0;
+        for (const [id, meta] of this.archivedTasks) {
+            const last = new Date(meta.lastActivity).getTime();
+            if (!Number.isFinite(last) || last >= cutoff) continue;
+            for (const path of [this.getTaskHistoryPath(id), this.getArchivedHistoryPath(id)]) {
+                try {
+                    if (!existsSync(path)) continue;
+                    bytes += statSync(path).size;
+                    unlinkSync(path);
+                    removed++;
+                } catch (e) {
+                    logger.warn('Failed to sweep archived history', { taskId: id, error: (e as Error).message });
+                }
+            }
+        }
+        if (removed > 0) {
+            logger.info('Swept aged archived history files', {
+                files: removed,
+                freedMB: Math.round(bytes / 1048576),
+                retentionDays: this.historyRetentionDays,
+            });
+        }
+    }
+
+    private saveArchivedTasks(archived: ArchivedTaskMetadata[]): void {
+        try {
+            const path = this.getArchivedPersistencePath();
+            // Same guard as tasks.json: never replace a populated archive with
+            // an empty one, which would silently destroy history.
+            if (archived.length === 0 && existsSync(path)) {
+                try {
+                    const existing = JSON.parse(readFileSync(path, 'utf-8')) as { archivedTasks?: unknown[] };
+                    if ((existing.archivedTasks?.length || 0) > 0) {
+                        console.error(
+                            `[TaskSpawner] REFUSING to save archived tasks: would overwrite ` +
+                            `${existing.archivedTasks!.length} archived with empty state.`
+                        );
+                        return;
+                    }
+                } catch (_e) {
+                    // Unparseable — fall through and overwrite.
+                }
+            }
+            atomicWriteFileSync(path, JSON.stringify({ archivedTasks: archived }), { backup: true });
+            this.archivedDirty = false;
+            console.log(`[TaskSpawner] Saved ${archived.length} archived tasks`);
+        } catch (error) {
+            // Leave archivedDirty set so the next save retries.
+            console.error('[TaskSpawner] Failed to save archived tasks:', error);
+        }
     }
 
     private saveTasks(): void {
@@ -1810,12 +2103,14 @@ export class TaskSpawner extends EventEmitter {
                 tasksToSave.push(task);
             }
 
-            // Archived tasks metadata (history is stored separately in files)
+            // Archived tasks are written to their own file, and only when they
+            // changed — see saveArchivedTasks(). Keeping them here meant every
+            // save re-serialized megabytes of data that never changes.
             const archivedTasksToSave: ArchivedTaskMetadata[] = Array.from(this.archivedTasks.values());
 
             const persistence: TaskPersistence = {
                 tasks: tasksToSave,
-                archivedTasks: archivedTasksToSave
+                archivedTasks: []
             };
             const dir = dirname(this.persistencePath);
             if (!existsSync(dir)) {
@@ -1849,11 +2144,17 @@ export class TaskSpawner extends EventEmitter {
             // current file to tasks.json.bak, then rename the temp file into place.
             // The previous good save is recoverable from .bak if a future load hits
             // an empty/corrupt main file.
+            // Not pretty-printed: only machines read this, and the indentation
+            // cost ~6% of every write for no benefit.
             atomicWriteFileSync(
                 this.persistencePath,
-                JSON.stringify(persistence, null, 2),
+                JSON.stringify(persistence),
                 { backup: true }
             );
+
+            if (this.archivedDirty) {
+                this.saveArchivedTasks(archivedTasksToSave);
+            }
 
             // Update our tracked modification time after successful save (PR #37 multi-instance guard)
             const newStats = statSync(this.persistencePath);
@@ -4068,6 +4369,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 displayNameEditedByUser: task.displayNameEditedByUser,
             };
             this.archivedTasks.set(taskId, archivedMetadata);
+            this.archivedDirty = true;
 
             // If task is running, first try to stop it gracefully
             if (task.state === 'busy' || task.state === 'starting' || task.state === 'waiting_input') {
@@ -4123,6 +4425,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
                 displayNameEditedByUser: disconnected.displayNameEditedByUser,
             };
             this.archivedTasks.set(taskId, archivedMetadata);
+            this.archivedDirty = true;
             this.disconnectedTasks.delete(taskId);
             archived = true;
         }
@@ -4193,6 +4496,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // Move from archived to disconnected
         this.disconnectedTasks.set(taskId, persistedTask);
         this.archivedTasks.delete(taskId);
+        this.archivedDirty = true;
 
         // Delete history file since it's now in disconnectedTasks
         if (existsSync(historyPath)) {
@@ -4252,6 +4556,8 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
     deleteArchivedTask(taskId: string): boolean {
         if (this.archivedTasks.has(taskId)) {
             this.archivedTasks.delete(taskId);
+            this.archivedDirty = true;
+        this.archivedDirty = true;
 
             // Also delete history file from disk
             const historyPath = this.getArchivedHistoryPath(taskId);
@@ -4660,6 +4966,10 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
             clearInterval(this.idleReaperInterval);
             this.idleReaperInterval = null;
         }
+        if (this.memoryGuardInterval) {
+            clearInterval(this.memoryGuardInterval);
+            this.memoryGuardInterval = null;
+        }
 
         // Clean up all session capture intervals to prevent memory leaks
         for (const taskId of this.sessionCaptureIntervals.keys()) {
@@ -4753,6 +5063,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
         // 2. Clear persisted maps
         this.disconnectedTasks.clear();
         this.archivedTasks.clear();
+        this.archivedDirty = true;
 
         // 3. Delete tasks.json
         try {

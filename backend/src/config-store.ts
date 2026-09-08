@@ -65,6 +65,13 @@ export interface ModelTieringConfig {
     };
 }
 
+// Jira Cloud integration: personal API token + Basic auth. Off by default.
+export interface JiraConfig {
+    baseUrl: string;   // e.g. https://your-domain.atlassian.net
+    email: string;     // Atlassian account email (Basic auth username)
+    apiToken: string;  // personal API token (stored server-side, never returned to clients)
+}
+
 export const DEFAULT_MODEL_TIERING: ModelTieringConfig = {
     enabled: false,
     tiers: { low: 'haiku', medium: 'sonnet', high: 'opus' },
@@ -120,7 +127,16 @@ export interface AppConfig {
     defaultBaseDirectory?: string;  // Default base directory for new workspaces (optional)
     modelTiering?: ModelTieringConfig;  // Complexity-based model selection for MCP-spawned tasks
     worktreeRetentionDays?: number;  // Days before archived tasks' worktrees are swept (0 = never)
+    jiraEnabled: boolean;  // Master toggle for the Jira integration (default false)
+    jira?: JiraConfig;  // Jira Cloud connection (only set once the user configures it)
 }
+
+/**
+ * Shape accepted by ConfigStore.updateConfig. `jira` is field-wise partial because the
+ * settings UI masks the API token and sends only the keys the user touched — updateConfig
+ * merges it rather than replacing, so the type needs to permit that.
+ */
+export type ConfigUpdate = Partial<Omit<AppConfig, 'jira'>> & { jira?: Partial<JiraConfig> };
 
 const DEFAULT_SUPERVISOR_PROMPT = `You are a concise, witty AI supervisor for a voice-first coding environment. Keep all responses SHORT and spoken-friendly — no bullet lists, no markdown headers, no walls of text.
 
@@ -206,6 +222,8 @@ const DEFAULT_CONFIG: AppConfig = {
     defaultBaseDirectory: undefined,  // No default base directory set
     modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } },
     worktreeRetentionDays: 30,  // Per the archived-worktree retention spec
+    jiraEnabled: false,  // Jira integration off by default
+    jira: undefined
 };
 
 export class ConfigStore {
@@ -257,7 +275,9 @@ export class ConfigStore {
             modelTiering: {
                 enabled: loaded.modelTiering?.enabled ?? DEFAULT_MODEL_TIERING.enabled,
                 tiers: { ...DEFAULT_MODEL_TIERING.tiers, ...(loaded.modelTiering?.tiers || {}) }
-            }
+            },
+            jiraEnabled: loaded.jiraEnabled ?? false,
+            jira: loaded.jira
         };
     }
 
@@ -297,7 +317,10 @@ export class ConfigStore {
         return { ...this.config };
     }
 
-    updateConfig(updates: Partial<AppConfig>): AppConfig {
+    // `jira` is widened to a partial: the settings UI masks the API token and sends
+    // only the fields the user touched, and the merge below is written to preserve
+    // whatever it omits. Keeping that in the type avoids casts at the call sites.
+    updateConfig(updates: ConfigUpdate): AppConfig {
         if (updates.mcpServers !== undefined) {
             this.config.mcpServers = updates.mcpServers;
         }
@@ -373,6 +396,22 @@ export class ConfigStore {
                 tiers: { ...existing.tiers, ...(updates.modelTiering.tiers || {}) }
             };
         }
+        if (updates.jiraEnabled !== undefined) {
+            this.config.jiraEnabled = updates.jiraEnabled;
+        }
+        if (updates.jira !== undefined) {
+            // MERGE, not replace: the frontend sends partial payloads and masks the
+            // token field, so an incoming empty/omitted apiToken must NOT wipe the
+            // stored one. Same reasoning applies to baseUrl/email.
+            const existing = this.config.jira;
+            this.config.jira = {
+                baseUrl: updates.jira.baseUrl ?? existing?.baseUrl ?? '',
+                email: updates.jira.email ?? existing?.email ?? '',
+                apiToken: (updates.jira.apiToken && updates.jira.apiToken.length > 0)
+                    ? updates.jira.apiToken
+                    : (existing?.apiToken ?? ''),
+            };
+        }
         this.saveConfig();
         return this.getConfig();
     }
@@ -440,10 +479,39 @@ export class ConfigStore {
             tokenCostEnabled: false,
             tokenPricing: { ...DEFAULT_TOKEN_PRICING },
             defaultBaseDirectory: undefined,
-            modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } }
+            modelTiering: { ...DEFAULT_MODEL_TIERING, tiers: { ...DEFAULT_MODEL_TIERING.tiers } },
+            jiraEnabled: false,
+            jira: undefined
         };
         this.saveConfig();
         return this.getConfig();
+    }
+
+    // ===== Jira integration =====
+
+    isJiraEnabled(): boolean {
+        return this.config.jiraEnabled === true;
+    }
+
+    /** Returns the stored Jira config (including the token) for server-side use only. */
+    getJiraConfig(): JiraConfig | undefined {
+        return this.config.jira ? { ...this.config.jira } : undefined;
+    }
+
+    /** True when the integration is enabled AND fully configured (baseUrl + email + token). */
+    isJiraConfigured(): boolean {
+        const j = this.config.jira;
+        return this.isJiraEnabled() && !!j?.baseUrl && !!j?.email && !!j?.apiToken;
+    }
+
+    setJiraEnabled(enabled: boolean): void {
+        this.config.jiraEnabled = enabled;
+        this.saveConfig();
+    }
+
+    setJiraConfig(jira: JiraConfig): void {
+        this.config.jira = { ...jira };
+        this.saveConfig();
     }
 
     getBackend(): BackendType {

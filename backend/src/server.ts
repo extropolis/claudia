@@ -12,12 +12,13 @@ import { fileURLToPath } from 'url';
 import multer from 'multer';
 import { TaskSpawner } from './task-spawner.js';
 import { WorkspaceStore } from './workspace-store.js';
-import { ConfigStore } from './config-store.js';
+import { ConfigStore, type AppConfig } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
+import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, Checkpoint, PORTS, TaskTokenUsage, UsageDashboardData } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
+import { CheckpointStore } from './checkpoint-store.js';
 import { validateConfigUpdate, validateWorkspacePath } from './validation.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch } from './git-utils.js';
 import { selectWorkspacesToRefresh } from './pr-refresh.js';
@@ -31,6 +32,7 @@ import { VoiceSupervisor } from './voice-supervisor.js';
 // import { ElevenLabsTTS } from './elevenlabs-tts.js'; // TODO: Implement ElevenLabs TTS
 import { createLogger } from './logger.js';
 import { PluginManager, PluginContext } from './plugin-system/index.js';
+import { JiraClient, JiraError, parseIssueKey } from './jira-client.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
 // - config-routes.ts: Config API routes template
@@ -104,6 +106,16 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'worktree:remove',
     'worktree:prune',
     'workspace:autoWorktree',
+    'checkpoint:create',
+    'checkpoint:list',
+    'checkpoint:restore',
+    'checkpoint:restore-selective',
+    'checkpoint:restore-force',
+    'checkpoint:delete',
+    'checkpoint:fork',
+    'jira:writeRequest',
+    'jira:writeApproved',
+    'jira:writeRejected',
 ]);
 
 // WebSocket message validation
@@ -528,6 +540,9 @@ export async function createApp(basePath?: string) {
     );
     cronScheduler.start();
 
+    // CheckpointStore for per-task git snapshots / restore points
+    const checkpointStore = new CheckpointStore(basePath);
+
     // Wire up tunnel events for broadcasting
     tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
         logger.info('Tunnel ready, broadcasting status', { url: data.url });
@@ -616,6 +631,21 @@ export async function createApp(basePath?: string) {
     // Track connected clients with their alive status for heartbeat
     const clients = new Set<WebSocket>();
     const clientAliveMap = new WeakMap<WebSocket, boolean>();
+    // Clients connected from loopback (localhost). Used to scope broadcasts that
+    // may carry sensitive data (e.g. Jira ticket content) so they never reach a
+    // client connected over the tunnel.
+    const loopbackClients = new WeakSet<WebSocket>();
+
+    // Pending Jira write operations awaiting user confirmation, keyed by requestId.
+    // The MCP agent sends the write details; the server holds them and only executes
+    // the exact stored operation when the user approves (prevents approval spoofing).
+    interface PendingJiraWrite {
+        action: 'comment' | 'transition';
+        key: string;
+        body?: string;          // comment text
+        transitionId?: string;  // for transitions
+    }
+    const pendingJiraWrites = new Map<string, PendingJiraWrite>();
 
     // Heartbeat interval to keep WebSocket connections alive
     const HEARTBEAT_INTERVAL_MS = 30000; // 30 seconds
@@ -664,6 +694,24 @@ export async function createApp(basePath?: string) {
             } catch (err) {
                 console.error('[Server] Error sending to client:', err);
                 // Remove broken client from set
+                clients.delete(client);
+            }
+        }
+    }
+
+    // Broadcast ONLY to loopback (localhost) clients. Use for messages that may
+    // carry sensitive data (e.g. Jira ticket content) so they never reach a
+    // tunnel-connected client.
+    function broadcastToLoopback(message: WSMessage): void {
+        const data = JSON.stringify(message);
+        for (const client of clients) {
+            if (!loopbackClients.has(client)) continue;
+            try {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(data);
+                }
+            } catch (err) {
+                console.error('[Server] Error sending to loopback client:', err);
                 clients.delete(client);
             }
         }
@@ -1346,6 +1394,13 @@ export async function createApp(basePath?: string) {
         clients.add(ws);
         clientAliveMap.set(ws, true); // Mark as alive on connection
 
+        // Tag loopback (localhost) connections. A mobile/tunnel client is never
+        // loopback. Used to scope sensitive broadcasts (Jira) to local clients only.
+        const remoteAddr = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+        const isLoopbackConn = !isMobile && !isTunnelHost(req.headers.host || '') &&
+            (remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr.startsWith('127.'));
+        if (isLoopbackConn) loopbackClients.add(ws);
+
         // Handle pong responses to keep connection alive
         ws.on('pong', () => {
             clientAliveMap.set(ws, true);
@@ -1507,6 +1562,23 @@ export async function createApp(basePath?: string) {
                             if (internalTask) {
                                 internalTask.lastRefKey = validRefs.map(r => r.id).sort().join(',');
                             }
+                            // Create initial checkpoint capturing repo state before any agent action.
+                            // Best-effort: failures don't block task creation.
+                            checkpointStore
+                                .createCheckpoint(newTask.id, validatedPath, 'Initial state')
+                                .then((cp) => {
+                                    logger.info('Initial checkpoint created for new task', {
+                                        taskId: newTask.id,
+                                        checkpointId: cp.id,
+                                    });
+                                    broadcast({ type: 'checkpoint:created', payload: cp });
+                                })
+                                .catch((err) => {
+                                    logger.warn('Failed to create initial checkpoint', {
+                                        taskId: newTask.id,
+                                        error: String(err),
+                                    });
+                                });
                         } catch (err) {
                             const errorMessage = err instanceof Error ? err.message : String(err);
                             logger.error('Failed to create task', { error: errorMessage });
@@ -1730,6 +1802,77 @@ export async function createApp(basePath?: string) {
                                 payload: { taskId, requestId }
                             });
                         }
+                        break;
+                    }
+
+                    case 'jira:writeRequest': {
+                        // MCP agent requests a Jira write (comment/transition). Store
+                        // the operation server-side keyed by requestId, then broadcast
+                        // to loopback UI clients to show a confirmation dialog. The
+                        // write is only executed later on jira:writeApproved.
+                        const p = payload as { requestId?: string; action?: string; key?: string; body?: string; transitionId?: string; summary?: string };
+                        if (!p.requestId || !p.action || !p.key) break;
+                        if (p.action !== 'comment' && p.action !== 'transition') break;
+                        pendingJiraWrites.set(p.requestId, {
+                            action: p.action,
+                            key: p.key,
+                            body: p.body,
+                            transitionId: p.transitionId,
+                        });
+                        logger.info('jira:writeRequest from MCP agent', { requestId: p.requestId, action: p.action, key: p.key });
+                        // Loopback-only: the request carries ticket key + a preview.
+                        broadcastToLoopback({
+                            type: 'jira:writeRequest' as WSMessageType,
+                            payload: { requestId: p.requestId, action: p.action, key: p.key, body: p.body, transitionId: p.transitionId, summary: p.summary },
+                        });
+                        break;
+                    }
+
+                    case 'jira:writeApproved': {
+                        // User approved a Jira write. Execute ONLY the operation the
+                        // server previously stored for this requestId — never trust
+                        // operation details from the approval message itself.
+                        const { requestId } = payload as { requestId?: string };
+                        if (!requestId) break;
+                        const pending = pendingJiraWrites.get(requestId);
+                        if (!pending) {
+                            logger.warn('jira:writeApproved for unknown/expired requestId', { requestId });
+                            break;
+                        }
+                        pendingJiraWrites.delete(requestId);
+                        (async () => {
+                            try {
+                                if (!configStore.isJiraConfigured()) throw new JiraError('Jira not configured.');
+                                const client = new JiraClient(configStore.getJiraConfig()!);
+                                let result: Record<string, unknown> = {};
+                                if (pending.action === 'comment') {
+                                    result = await client.addComment(pending.key, pending.body || '');
+                                } else if (pending.action === 'transition') {
+                                    await client.transition(pending.key, pending.transitionId || '');
+                                    result = { transitioned: true };
+                                }
+                                broadcast({
+                                    type: 'jira:writeApproved' as WSMessageType,
+                                    payload: { requestId, success: true, key: pending.key, action: pending.action, result },
+                                });
+                            } catch (err) {
+                                broadcast({
+                                    type: 'jira:writeApproved' as WSMessageType,
+                                    payload: { requestId, success: false, key: pending.key, action: pending.action,
+                                        error: err instanceof Error ? err.message : String(err) },
+                                });
+                            }
+                        })();
+                        break;
+                    }
+
+                    case 'jira:writeRejected': {
+                        // User declined the write — drop the pending op and relay to
+                        // the waiting MCP agent.
+                        const { requestId } = payload as { requestId?: string };
+                        if (!requestId) break;
+                        pendingJiraWrites.delete(requestId);
+                        broadcast({ type: 'jira:writeRejected' as WSMessageType, payload: { requestId } });
                         break;
                     }
 
@@ -2735,6 +2878,138 @@ export async function createApp(basePath?: string) {
                         }
                         const updatedWs = workspaceStore.getWorkspace(workspaceId);
                         broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace: updatedWs } });
+                        break;
+                    }
+
+                    // ===== Checkpoints / Timeline =====
+
+                    case 'checkpoint:create': {
+                        const {
+                            taskId: cpTaskId,
+                            workspaceId: cpWsId,
+                            name: cpName,
+                            description: cpDesc,
+                        } = payload as {
+                            taskId?: string;
+                            workspaceId?: string;
+                            name?: string;
+                            description?: string;
+                        };
+                        if (!cpTaskId || !cpWsId) {
+                            sendWSError(ws, 'checkpoint:create requires taskId and workspaceId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        try {
+                            const checkpoint = await checkpointStore.createCheckpoint(cpTaskId, cpWsId, cpName, cpDesc);
+                            ws.send(JSON.stringify({ type: 'checkpoint:created', payload: checkpoint }));
+                        } catch (err) {
+                            sendWSError(ws, `Failed to create checkpoint: ${err}`, message.type, 'CHECKPOINT_ERROR');
+                        }
+                        break;
+                    }
+
+                    case 'checkpoint:list': {
+                        const { taskId: cpListTaskId, workspaceId: cpListWsId } = payload as {
+                            taskId?: string;
+                            workspaceId?: string;
+                        };
+                        let checkpoints: Checkpoint[] = [];
+                        if (cpListTaskId) {
+                            checkpoints = checkpointStore.listCheckpoints(cpListTaskId);
+                        } else if (cpListWsId) {
+                            checkpoints = checkpointStore.listCheckpointsByWorkspace(cpListWsId);
+                        }
+                        ws.send(JSON.stringify({ type: 'checkpoint:list', payload: { checkpoints } }));
+                        break;
+                    }
+
+                    case 'checkpoint:restore': {
+                        const { checkpointId: restoreId } = payload as { checkpointId?: string };
+                        if (!restoreId) {
+                            sendWSError(ws, 'checkpoint:restore requires checkpointId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const result = await checkpointStore.restoreCheckpoint(restoreId);
+                        if (result.success) {
+                            ws.send(JSON.stringify({ type: 'checkpoint:restored', payload: { checkpointId: restoreId } }));
+                        } else {
+                            ws.send(JSON.stringify({ type: 'checkpoint:error', payload: { error: result.error, checkpointId: restoreId } }));
+                        }
+                        break;
+                    }
+
+                    case 'checkpoint:restore-selective': {
+                        const { checkpointId: selRestoreId } = payload as { checkpointId?: string };
+                        if (!selRestoreId) {
+                            sendWSError(ws, 'checkpoint:restore-selective requires checkpointId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const selResult = await checkpointStore.restoreCheckpointSelective(selRestoreId);
+                        ws.send(JSON.stringify({
+                            type: 'checkpoint:restore-selective-result',
+                            payload: {
+                                checkpointId: selRestoreId,
+                                success: selResult.success,
+                                restoredFiles: selResult.restoredFiles,
+                                conflictingFiles: selResult.conflictingFiles,
+                                error: selResult.error,
+                            },
+                        }));
+                        break;
+                    }
+
+                    case 'checkpoint:restore-force': {
+                        const { checkpointId: forceId, files: forceFiles } = payload as {
+                            checkpointId?: string;
+                            files?: string[];
+                        };
+                        if (!forceId || !forceFiles || forceFiles.length === 0) {
+                            sendWSError(ws, 'checkpoint:restore-force requires checkpointId and files[]', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const forceResult = await checkpointStore.forceRestoreFiles(forceId, forceFiles);
+                        ws.send(JSON.stringify({
+                            type: 'checkpoint:restore-force-result',
+                            payload: {
+                                checkpointId: forceId,
+                                success: forceResult.success,
+                                restoredFiles: forceResult.restoredFiles,
+                                error: forceResult.error,
+                            },
+                        }));
+                        break;
+                    }
+
+                    case 'checkpoint:delete': {
+                        const { checkpointId: deleteId } = payload as { checkpointId?: string };
+                        if (!deleteId) {
+                            sendWSError(ws, 'checkpoint:delete requires checkpointId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const deleted = checkpointStore.deleteCheckpoint(deleteId);
+                        if (deleted) {
+                            ws.send(JSON.stringify({ type: 'checkpoint:deleted', payload: { checkpointId: deleteId } }));
+                        } else {
+                            sendWSError(ws, 'Checkpoint not found', message.type, 'CHECKPOINT_NOT_FOUND');
+                        }
+                        break;
+                    }
+
+                    case 'checkpoint:fork': {
+                        const { checkpointId: forkId, branchName } = payload as {
+                            checkpointId?: string;
+                            branchName?: string;
+                        };
+                        if (!forkId) {
+                            sendWSError(ws, 'checkpoint:fork requires checkpointId', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        const forkResult = await checkpointStore.forkFromCheckpoint(forkId, branchName);
+                        if (forkResult.success) {
+                            ws.send(JSON.stringify({ type: 'checkpoint:forked', payload: { checkpointId: forkId, branch: forkResult.branch } }));
+                        } else {
+                            ws.send(JSON.stringify({ type: 'checkpoint:error', payload: { error: forkResult.error, checkpointId: forkId } }));
+                        }
                         break;
                     }
                 }
@@ -5396,6 +5671,16 @@ export async function createApp(basePath?: string) {
 
     // Config API routes
 
+    // Strip server-only secrets from a config object before returning it to clients.
+    // The Jira API token is never sent to the frontend — the Jira config UI reads
+    // state from GET /api/jira/config (which exposes only hasToken).
+    function redactConfigForClient(config: AppConfig): AppConfig {
+        if (config.jira) {
+            return { ...config, jira: { ...config.jira, apiToken: '' } };
+        }
+        return config;
+    }
+
     app.get('/api/config', async (_req, res) => {
         // If rules are empty, try to sync from CLAUDE.md files
         const config = configStore.getConfig();
@@ -5407,11 +5692,11 @@ export async function createApp(basePath?: string) {
                     console.log(`[Server] Syncing rules from ${workspace.id}/CLAUDE.md to config`);
                     configStore.updateConfig({ rules });
                     const updatedConfig = configStore.getConfig();
-                    return res.json(updatedConfig);
+                    return res.json(redactConfigForClient(updatedConfig));
                 }
             }
         }
-        res.json(config);
+        res.json(redactConfigForClient(config));
     });
 
     app.put('/api/config', async (req, res) => {
@@ -5434,7 +5719,8 @@ export async function createApp(basePath?: string) {
                 delete configUpdate.sapAiCore;
             }
 
-            // Cast is needed because ConfigUpdatePayload has optional fields but AppConfig requires them
+            // Cast is needed because ConfigUpdatePayload's nested objects (hyperspaceProxy,
+            // aiCoreCredentials, ...) are all-optional while AppConfig requires their fields.
             const updatedConfig = configStore.updateConfig(configUpdate as Parameters<typeof configStore.updateConfig>[0]);
 
             // If backend was changed, switch the task spawner's backend
@@ -5484,10 +5770,210 @@ export async function createApp(basePath?: string) {
                 }
             }
 
-            res.json(updatedConfig);
+            res.json(redactConfigForClient(updatedConfig));
         } catch (error) {
             logger.error('Failed to update config', { error });
             res.status(500).json({ error: 'Failed to update config' });
+        }
+    });
+
+    // ===== Jira integration =====
+    // Config endpoints (GET/POST) are reachable regardless of the enabled flag so
+    // the Settings UI can read/write connection details. All *data* endpoints go
+    // through jiraGuard, which enforces: enabled + configured, and localhost-only.
+
+    /**
+     * True when the request originates from loopback (localhost).
+     * Deliberately uses the raw socket address, NOT req.ip — req.ip honors the
+     * X-Forwarded-For header when Express "trust proxy" is enabled, which a tunnel
+     * client could spoof to "127.0.0.1". The socket peer address cannot be forged.
+     */
+    function isLoopbackRequest(req: express.Request): boolean {
+        const ip = req.socket?.remoteAddress || '';
+        // Normalize IPv4-mapped IPv6 (::ffff:127.0.0.1) and bare forms.
+        const norm = ip.replace(/^::ffff:/, '');
+        if (norm === '127.0.0.1' || norm === '::1' || norm === 'localhost') return true;
+        return norm.startsWith('127.');
+    }
+
+    /**
+     * Gate for all /api/jira/* data routes. Rejects when the feature is off/not
+     * configured, or when the request is not from loopback (Jira is a
+     * localhost-only feature — never expose the corp token over a tunnel).
+     */
+    function jiraGuard(req: express.Request, res: express.Response, next: express.NextFunction): void {
+        const host = req.headers.host || '';
+        if (!isLoopbackRequest(req) || isTunnelHost(host)) {
+            logger.warn('Blocked non-loopback Jira request', { host });
+            res.status(403).json({ error: 'Jira is only accessible from localhost.' });
+            return;
+        }
+        if (!configStore.isJiraConfigured()) {
+            res.status(403).json({ error: 'Jira integration is disabled or not configured.' });
+            return;
+        }
+        next();
+    }
+
+    /**
+     * Lighter guard for the config endpoints: loopback-only, but does NOT require
+     * the integration to be enabled/configured (Settings must read/write state
+     * before it's configured). Still blocks the tunnel so the internal Atlassian
+     * hostname + account email never leak off-machine.
+     */
+    function jiraLoopbackOnly(req: express.Request, res: express.Response, next: express.NextFunction): void {
+        const host = req.headers.host || '';
+        if (!isLoopbackRequest(req) || isTunnelHost(host)) {
+            logger.warn('Blocked non-loopback Jira config request', { host });
+            res.status(403).json({ error: 'Jira is only accessible from localhost.' });
+            return;
+        }
+        next();
+    }
+
+    /** Build a JiraClient from stored config, or throw a JiraError if unconfigured. */
+    function getJiraClient(): JiraClient {
+        const cfg = configStore.getJiraConfig();
+        if (!cfg) throw new JiraError('Jira is not configured.');
+        return new JiraClient(cfg);
+    }
+
+    /** Map a thrown error to an HTTP response. */
+    function sendJiraError(res: express.Response, err: unknown): void {
+        if (err instanceof JiraError) {
+            const status = err.status && err.status >= 400 && err.status < 600 ? err.status : 400;
+            res.status(status).json({ error: err.message });
+        } else {
+            logger.error('Unexpected Jira error', { error: err instanceof Error ? err.message : String(err) });
+            res.status(500).json({ error: 'Unexpected Jira error' });
+        }
+    }
+
+    // GET /api/jira/config — connection state for the Settings UI (never the token).
+    app.get('/api/jira/config', jiraLoopbackOnly, (_req, res) => {
+        const cfg = configStore.getJiraConfig();
+        res.json({
+            jiraEnabled: configStore.isJiraEnabled(),
+            configured: configStore.isJiraConfigured(),
+            baseUrl: cfg?.baseUrl || '',
+            email: cfg?.email || '',
+            hasToken: !!cfg?.apiToken,
+        });
+    });
+
+    // POST /api/jira/config — save connection details. apiToken optional (omit to keep).
+    app.post('/api/jira/config', jiraLoopbackOnly, (req, res) => {
+        const validation = validateConfigUpdate({
+            jiraEnabled: req.body.jiraEnabled,
+            jira: req.body.jira,
+        });
+        if (!validation.valid) {
+            return res.status(400).json({ error: validation.error });
+        }
+        const data = validation.data!;
+        if (data.jiraEnabled !== undefined) configStore.setJiraEnabled(data.jiraEnabled);
+        // Explicit disconnect: wipe all stored credentials (bypasses the merge that
+        // otherwise preserves the token). Used by a "Disconnect" action in the UI.
+        if (req.body.clearCredentials === true) {
+            configStore.setJiraConfig({ baseUrl: '', email: '', apiToken: '' });
+        } else if (data.jira !== undefined) {
+            // updateConfig merges partial jira fields (preserving the token when omitted).
+            configStore.updateConfig({ jira: data.jira });
+        }
+        const cfg = configStore.getJiraConfig();
+        res.json({
+            jiraEnabled: configStore.isJiraEnabled(),
+            configured: configStore.isJiraConfigured(),
+            baseUrl: cfg?.baseUrl || '',
+            email: cfg?.email || '',
+            hasToken: !!cfg?.apiToken,
+        });
+    });
+
+    // GET /api/jira/test — validate credentials (loopback-only, requires config).
+    app.get('/api/jira/test', jiraGuard, async (_req, res) => {
+        try {
+            const result = await getJiraClient().testConnection();
+            res.json({ ok: true, ...result });
+        } catch (err) {
+            sendJiraError(res, err);
+        }
+    });
+
+    // GET /api/jira/issue/:key — fetch one ticket (fields, description, comments, attachments).
+    app.get('/api/jira/issue/:key', jiraGuard, async (req, res) => {
+        try {
+            const issue = await getJiraClient().getIssue(req.params.key);
+            res.json(issue);
+        } catch (err) {
+            sendJiraError(res, err);
+        }
+    });
+
+    // GET /api/jira/search?jql=... — JQL search (cursor pagination).
+    app.get('/api/jira/search', jiraGuard, async (req, res) => {
+        try {
+            const jql = String(req.query.jql || '');
+            const maxResults = req.query.maxResults ? parseInt(String(req.query.maxResults), 10) : undefined;
+            const nextPageToken = req.query.nextPageToken ? String(req.query.nextPageToken) : undefined;
+            const result = await getJiraClient().search(jql, { maxResults, nextPageToken });
+            res.json(result);
+        } catch (err) {
+            sendJiraError(res, err);
+        }
+    });
+
+    // GET /api/jira/issue/:key/attachments — attachment metadata list.
+    app.get('/api/jira/issue/:key/attachments', jiraGuard, async (req, res) => {
+        try {
+            const attachments = await getJiraClient().listAttachments(req.params.key);
+            res.json({ attachments });
+        } catch (err) {
+            sendJiraError(res, err);
+        }
+    });
+
+    // GET /api/jira/attachment/:id — proxy-download by numeric id (SSRF-guarded in client).
+    app.get('/api/jira/attachment/:id', jiraGuard, async (req, res) => {
+        try {
+            const { filename, mimeType, data } = await getJiraClient().downloadAttachment(req.params.id);
+            res.setHeader('Content-Type', mimeType);
+            res.setHeader('Content-Disposition', `attachment; filename="${filename.replace(/"/g, '')}"`);
+            res.send(data);
+        } catch (err) {
+            sendJiraError(res, err);
+        }
+    });
+
+    // GET /api/jira/issue/:key/transitions — list available transitions.
+    app.get('/api/jira/issue/:key/transitions', jiraGuard, async (req, res) => {
+        try {
+            const transitions = await getJiraClient().getTransitions(req.params.key);
+            res.json({ transitions });
+        } catch (err) {
+            sendJiraError(res, err);
+        }
+    });
+
+    // POST /api/jira/focus — a Claude session (or the UI) asks the frontend to open
+    // a specific ticket on the Jira tab. Validates the key and that the ticket is
+    // reachable, then broadcasts jira:focusTicket. Optional workspaceId lets the
+    // frontend scope which workspace's tab to surface it on.
+    app.post('/api/jira/focus', jiraGuard, async (req, res) => {
+        try {
+            const key = parseIssueKey(String(req.body.key || ''));
+            const workspaceId = req.body.workspaceId ? String(req.body.workspaceId) : null;
+            // Confirm the ticket exists / is visible before telling the UI to open it.
+            const issue = await getJiraClient().getIssue(key);
+            // Loopback-only: the ticket summary is confidential Jira content and must
+            // never reach a tunnel-connected client via the broadcast fan-out.
+            broadcastToLoopback({
+                type: 'jira:focusTicket' as WSMessageType,
+                payload: { key: issue.key, summary: issue.summary, url: issue.url, workspaceId },
+            });
+            res.json({ ok: true, key: issue.key, summary: issue.summary, url: issue.url });
+        } catch (err) {
+            sendJiraError(res, err);
         }
     });
 
