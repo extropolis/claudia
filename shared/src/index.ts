@@ -244,6 +244,9 @@ export type WSMessageType =
     | 'task:deleteRejected'
     | 'tasks:updated'
     | 'task:renamed'
+    // Multi-client viewer model (P0 §5.6 "Multi-client viewer model")
+    | 'task:focus'
+    | 'task:viewers'
     // Archived tasks
     | 'task:archived'
     | 'task:archived:list'
@@ -321,6 +324,36 @@ export type WSMessageType =
 export interface WSMessage {
     type: WSMessageType;
     payload: unknown;
+}
+
+/**
+ * Inbound: the sending client declares that `taskId` is the task it is
+ * currently displaying. The most recent client to focus a task becomes its
+ * OWNER, and only the owner's `task:resize` frames are applied to the PTY.
+ */
+export interface TaskFocusPayload {
+    taskId: string;
+}
+
+/**
+ * Outbound: broadcast whenever a task's viewer set or owner changes (focus,
+ * an owner resize that changed the size, or a client disconnecting).
+ *
+ * `count` is the number of CONNECTED CLIENTS CURRENTLY FOCUSED ON THIS TASK —
+ * not the number of sockets connected to the server. The UI renders exactly one
+ * terminal at a time, so "focused" and "viewing" are the same thing, which makes
+ * this both the useful definition and one we can compute exactly.
+ *
+ * `cols`/`rows` are the OWNER's terminal dimensions, i.e. the size the PTY is
+ * actually running at. Non-owner clients render at these dimensions inside
+ * their own viewport instead of reflowing to their local width.
+ */
+export interface TaskViewersPayload {
+    taskId: string;
+    count: number;
+    ownerClientId: string | null;
+    cols?: number;
+    rows?: number;
 }
 
 /**

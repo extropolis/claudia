@@ -13,6 +13,7 @@ import { useEffectiveTheme } from '../hooks/useTheme';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
 import { getApiBaseUrl } from '../config/api-config';
 import { lastKnownTerminalSize } from '../config/terminal-size';
+import { clientIdentity } from '../config/client-identity';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
 
@@ -78,6 +79,24 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     // When `topOffsetRef.current === 0` we've loaded everything.
     const loadedHistoryRef = useRef<string>('');
     const topOffsetRef = useRef<number>(0);
+
+    // --- Multi-client viewer model -------------------------------------------
+    // One backend serves many clients, but a PTY has exactly one size. The
+    // server grants each task a single OWNER — the client that most recently
+    // focused it — and applies only that client's resizes. A non-owner must NOT
+    // send resizes at all (that is the thrash this model exists to stop) and
+    // renders at the owner's dimensions inside its own viewport instead of
+    // reflowing to its local width.
+    //
+    // Optimistic default: we send task:focus on mount, so we expect to be the
+    // owner until a task:viewers frame naming someone else says otherwise.
+    const isOwnerRef = useRef(true);
+    const [viewerState, setViewerState] = useState<{
+        isOwner: boolean;
+        count: number;
+        cols?: number;
+        rows?: number;
+    }>({ isOwner: true, count: 1 });
     const totalSizeRef = useRef<number>(0);
     const isLoadingChunkRef = useRef<boolean>(false);
     const historyChunkUnavailableRef = useRef<boolean>(false); // true for legacy base64 histories
@@ -155,6 +174,12 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     const fitTerminal = () => {
         if (!fitAddonRef.current || !terminalRef.current || !xtermRef.current) return;
 
+        // Not the owner: the PTY is running at someone else's width. Fitting to
+        // our own container would reflow the TUI against the real terminal size
+        // and garble it, so we stay at the owner's dimensions and let the
+        // viewport scroll instead.
+        if (!isOwnerRef.current) return;
+
         // Check if container has valid dimensions
         if (terminalRef.current.clientWidth === 0 || terminalRef.current.clientHeight === 0) {
             return;
@@ -194,6 +219,11 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         userHasScrolledRef.current = false;
         historyLoadedRef.current = false;
         setIsLoadingHistory(true);
+        // Ownership is per (client, task): switching tasks means we are about to
+        // focus a different terminal, so start optimistic again rather than
+        // inheriting the previous task's follower state.
+        isOwnerRef.current = true;
+        setViewerState({ isOwner: true, count: 1 });
 
         // Clear container
         while (terminalRef.current.firstChild) {
@@ -330,9 +360,29 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         };
 
 
+        /**
+         * Tell the server this client is the one displaying the task, which
+         * makes it the owner of the terminal's size. Sent on mount (we are the
+         * visible task) and whenever the user interacts with the terminal, so
+         * clicking into a terminal someone else owns takes it over.
+         */
+        const sendFocus = () => {
+            if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+            wsRef.current.send(JSON.stringify({
+                type: 'task:focus',
+                payload: { taskId: task.id }
+            }));
+        };
+
         // Handle resize - sync to backend
         term.onResize(({ cols, rows }) => {
             if (initPhase) return; // Skip during init — we send one resize after fit
+            // Only the task's owner drives the PTY size. A non-owner's resize
+            // would be dropped by the server anyway; not sending it keeps a
+            // background tab from streaming pointless frames, and stops the
+            // local term.resize() we do to FOLLOW the owner from echoing back
+            // as a resize request.
+            if (!isOwnerRef.current) return;
             // Suppress small col changes (scrollbar oscillation)
             if (Math.abs(cols - lastSentCols) <= 2 && rows === lastSentRows) return;
             lastSentCols = cols;
@@ -533,6 +583,12 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 // be forwarded to the backend normally.
                 initPhase = false;
 
+                // Claim the terminal BEFORE resizing it. This view is now the
+                // visible task for this client, which under the viewer model
+                // makes us its owner — and only the owner's resize below is
+                // applied. Sent first so the two frames cannot race.
+                sendFocus();
+
                 // Send ONE definitive resize to the backend with the correct dimensions
                 const { cols, rows } = term;
                 lastSentCols = cols;
@@ -662,6 +718,36 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                         historyLoadedRef.current = true;
                         setIsLoadingHistory(false);
                     }
+                } else if (message.type === 'task:viewers' && message.payload.taskId === task.id) {
+                    // Who owns this terminal, and what size is the PTY really
+                    // running at? `ownerClientId === null` means the task is
+                    // unowned (the previous owner disconnected) — treat that as
+                    // ours to claim so the next local resize goes through.
+                    const { ownerClientId, count, cols, rows } = message.payload as {
+                        ownerClientId: string | null; count: number; cols?: number; rows?: number;
+                    };
+                    const owned = ownerClientId === null || ownerClientId === clientIdentity.id;
+                    const wasOwner = isOwnerRef.current;
+                    isOwnerRef.current = owned;
+                    setViewerState({ isOwner: owned, count, cols, rows });
+
+                    if (!owned && cols && rows) {
+                        // Follow the owner: render at THEIR dimensions rather
+                        // than reflowing to our container. xterm scrolls the
+                        // smaller viewport; reflowing would garble a TUI whose
+                        // cursor positioning assumes the owner's width.
+                        if (term.cols !== cols || term.rows !== rows) {
+                            console.log(`[TerminalView] Following owner size ${cols}x${rows} for ${task.id}`);
+                            try { term.resize(cols, rows); } catch (e) {
+                                console.warn('[TerminalView] follower resize failed:', e);
+                            }
+                        }
+                    } else if (owned && !wasOwner) {
+                        // We just took (or inherited) the terminal — re-fit to
+                        // our own container and push that size to the PTY.
+                        console.log(`[TerminalView] Became owner of ${task.id}, refitting`);
+                        fitTerminal();
+                    }
                 } else if (message.type === 'task:restore' && message.payload.taskId === task.id) {
                     const { history } = message.payload;
                     console.log(`[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}, alreadyLoaded: ${historyLoadedRef.current}`);
@@ -719,6 +805,15 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             wsRef.current.addEventListener('message', handleMessage);
         }
 
+        // Interacting with the terminal claims it. `focusin` covers keyboard
+        // navigation into xterm's hidden textarea; `mousedown` covers a click
+        // that lands on the canvas without moving focus. Both are cheap and the
+        // server ignores a repeat focus from the current owner.
+        const claimOnInteraction = () => sendFocus();
+        const container = terminalRef.current;
+        container.addEventListener('focusin', claimOnInteraction);
+        container.addEventListener('mousedown', claimOnInteraction);
+
         // NOTE: task:select is sent inside the requestAnimationFrame above
         // (after fitAddon.fit()) so that history arrives at the correct terminal size.
 
@@ -733,6 +828,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             if (wsRef.current) {
                 wsRef.current.removeEventListener('message', handleMessage);
             }
+            container.removeEventListener('focusin', claimOnInteraction);
+            container.removeEventListener('mousedown', claimOnInteraction);
             term.dispose();
             xtermRef.current = null;
             fitAddonRef.current = null;
@@ -799,10 +896,25 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                         Resume
                     </button>
                 )}
+                {!viewerState.isOwner && (
+                    <span
+                        className="terminal-viewing-badge"
+                        title={
+                            'Another client owns this terminal, so it is running at their size. ' +
+                            'Click the terminal to take over.'
+                        }
+                    >
+                        viewing at {viewerState.cols ?? '?'}×{viewerState.rows ?? '?'}
+                        {viewerState.count > 1 ? ` · ${viewerState.count} viewers` : ''}
+                    </span>
+                )}
                 <span className={`terminal-state ${task.state}`}>{stateLabel}</span>
             </div>
             <div className="terminal-container-wrapper">
-                <div ref={terminalRef} className="terminal-container" />
+                <div
+                    ref={terminalRef}
+                    className={`terminal-container${viewerState.isOwner ? '' : ' terminal-container--follower'}`}
+                />
                 {showSpinner && (
                     <div className="terminal-loading-overlay">
                         <div className="terminal-loading-spinner" />
