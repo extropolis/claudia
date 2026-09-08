@@ -534,11 +534,26 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
         return validateAuthToken(dataDir, candidate) || tunnelManager.validateToken(candidate);
     }
 
+    /**
+     * Normalize the path the way Express's ROUTER will see it.
+     *
+     * Express matches routes case-insensitively unless `caseSensitive` is set,
+     * which it is not here. A gate written as `req.path.startsWith('/api/')`
+     * therefore has a hole you can drive a truck through: `GET /API/tasks`
+     * fails the gate's prefix test, falls through to `next()`, and is then
+     * matched and served by `app.get('/api/tasks')`. Collapsing repeated
+     * slashes closes the same trick spelled `//api/tasks`.
+     */
+    function routedPath(req: Request): string {
+        return req.path.replace(/\/{2,}/g, '/').toLowerCase();
+    }
+
     app.use((req: Request, res: Response, next: NextFunction) => {
-        if (!req.path.startsWith('/api/')) return next();
-        if (UNAUTHENTICATED_API_PATHS.has(req.path)) return next();
+        const path = routedPath(req);
+        if (!path.startsWith('/api/')) return next();
+        if (UNAUTHENTICATED_API_PATHS.has(path)) return next();
         // The bootstrap endpoint runs its own, stricter check (loopback peer).
-        if (req.path === LOOPBACK_BOOTSTRAP_PATH) return next();
+        if (path === LOOPBACK_BOOTSTRAP_PATH) return next();
 
         const candidate = presentedToken(req);
         if (!isAcceptedToken(candidate)) {
@@ -666,7 +681,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
 
         // /api/* already passed the unconditional auth middleware above — there
         // is no separate, weaker tunnel rule any more. Hand it to the routes.
-        if (req.path.startsWith('/api/')) {
+        if (routedPath(req).startsWith('/api/')) {
             return next();
         }
 

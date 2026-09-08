@@ -153,6 +153,30 @@ describe('every /api route rejects an unauthenticated request', () => {
         }
     });
 
+    it('cannot be bypassed by changing the case of the path', async () => {
+        // Express matches routes case-insensitively by default, so `/API/tasks`
+        // reaches the same handler as `/api/tasks`. A gate that tested
+        // `startsWith('/api/')` on the raw path would wave it straight through.
+        for (const path of ['/API/tasks', '/Api/Tasks', '/aPi/tasks']) {
+            const res = await h.fetch(path);
+            expect(res.status, path).toBe(401);
+        }
+    });
+
+    it('cannot be bypassed by doubling a slash', async () => {
+        const res = await h.fetch('//api/tasks');
+        // Either the gate caught it (401) or the router never matched (404) —
+        // what must NEVER happen is the route serving data.
+        expect([401, 404]).toContain(res.status);
+        if (res.status === 200) throw new Error('//api/tasks served data unauthenticated');
+    });
+
+    it('does not let a case-changed allowlist path widen the exemption', async () => {
+        // /API/HEALTH is still just the health probe, not a way in.
+        const res = await h.fetch('/API/health');
+        expect(res.status).toBe(200);
+    });
+
     it('leaves the unauthenticated allowlist reachable', async () => {
         expect((await h.fetch('/api/health')).status).toBe(200);
         const info = await h.req<{ name: string; authRequired: boolean }>('/api/server-info');
