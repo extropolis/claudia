@@ -2,12 +2,16 @@ import { describe, it, expect, afterEach, beforeEach, beforeAll, afterAll, vi } 
 import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir, homedir } from 'os';
+import { dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { CronScheduler } from '../cron-scheduler.js';
 import { SharedMcpManager } from '../shared-mcp-manager.js';
 import { LEGACY_DATA_DIR, DATA_DIR_ENV } from '../paths.js';
 import { createApp } from '../server.js';
 import { WSClient } from './helpers/ws-harness.js';
 import { getAuthToken } from '../auth-token.js';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 /**
  * Guards the stores that gained a data-directory parameter in #188.
@@ -112,6 +116,60 @@ describe('data directory wiring', () => {
             expect(b.getForTask('task-a')).toHaveLength(0);
         });
     });
+
+    /**
+     * The call site, not the store.
+     *
+     * TodoStore and CheckpointStore both HAVE a working `basePath` seam and are
+     * covered by their own suites — yet the server still wrote
+     * `backend/todos.json` and `backend/checkpoints.json` into the source tree
+     * for every non-Electron instance. The bug was in `createApp`: it handed
+     * CheckpointStore `basePath` (Electron's userData — `undefined` under
+     * CLAUDIA_DATA_DIR) and TodoStore nothing at all, so both fell back to
+     * `join(__dirname, '..')`, outside the configured data directory and on top
+     * of a developer's live instance.
+     *
+     * The behavioural tests further down prove today's two stores land in the
+     * data dir. These structural guards catch the NEXT store someone wires up
+     * the same wrong way: once `dataDir` has been resolved from it, `basePath`
+     * must never be read again, and no store may be built with no argument.
+     */
+    describe('createApp wiring', () => {
+        it('uses basePath only to resolve dataDir, never to construct a store', () => {
+            const source = readFileSync(join(HERE, '..', 'server.ts'), 'utf-8');
+            const start = source.indexOf('export async function createApp(');
+            expect(start, 'createApp not found in server.ts').toBeGreaterThan(-1);
+
+            const uses = source
+                .slice(start)
+                .split('\n')
+                .filter((line) => /\bbasePath\b/.test(line))
+                // Comments explain the rule; they are not uses of the value.
+                .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+                // The parameter declaration and the one legitimate read.
+                .filter((line) => !/export async function createApp\(/.test(line))
+                .filter((line) => !/ensureDataDir\(basePath\)/.test(line))
+                .map((line) => line.trim());
+
+            expect(
+                uses,
+                'basePath is undefined unless Electron supplies it — stores must take dataDir',
+            ).toEqual([]);
+        });
+
+        it('constructs no state-writing store with an empty argument list', () => {
+            const source = readFileSync(join(HERE, '..', 'server.ts'), 'utf-8');
+            const start = source.indexOf('export async function createApp(');
+            const body = source.slice(start);
+
+            // `new FooStore()` with no argument silently selects the legacy
+            // in-source-tree path in every store that has a `basePath?` seam.
+            const argless = [...body.matchAll(/new\s+(\w*Store)\s*\(\s*\)/g)].map((m) => m[1]);
+
+            expect(argless, 'a store constructed with no data directory writes to backend/').toEqual([]);
+        });
+    });
+
     describe('SharedMcpManager', () => {
         it('puts the pid and log files under the configured data directory', () => {
             const dataDir = tempDir();
