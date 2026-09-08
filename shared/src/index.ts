@@ -541,7 +541,7 @@ export interface UsageWindow {
     resetsAt: string; // ISO8601
 }
 
-/** A per-model weekly window (e.g. model "opus", "sonnet", "fable"). */
+/** A per-model weekly window (e.g. model "opus", "sonnet", "claude opus 4"). */
 export interface UsageModelWindow extends UsageWindow {
     model: string;
 }
@@ -552,15 +552,18 @@ export interface PlanUsage {
     sevenDayByModel: UsageModelWindow[];
     extraUsage?: {
         isEnabled: boolean;
+        /** Currency units (the API reports minor units; the mapper normalizes). */
         monthlyLimit: number | null;
+        /** Currency units (the API reports minor units; the mapper normalizes). */
         usedCredits: number | null;
+        /** Percentage in [0, 100]. */
         utilization: number | null;
     };
-    planLabel: string; // "Max (20x)" | "Pro" | "Unknown"
+    planLabel: string; // "Max" | "Pro" | "Team" | "Enterprise" | "Unknown"
     fetchedAt: string; // ISO
     stale?: boolean; // served from cache after a failed refresh
     unavailable?: boolean; // could not fetch at all
-    reason?: 'auth' | 'rate_limited' | 'no_token' | 'network' | 'unsupported_platform' | 'disabled';
+    reason?: 'auth' | 'rate_limited' | 'no_token' | 'network' | 'unsupported_platform' | 'disabled' | 'no_data';
 }
 
 // NOTE: the .js extension is REQUIRED. This package is ESM ("type": "module")

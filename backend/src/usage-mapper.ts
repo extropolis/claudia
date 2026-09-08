@@ -1,6 +1,34 @@
 import type { PlanUsage, UsageWindow, UsageModelWindow } from '@claudia/shared';
+import { redactSecrets } from './redact.js';
 
-/** Clamp a utilization value defensively into [0, 100]. */
+/**
+ * Top-level `seven_day_<x>` keys that are genuinely MODELS.
+ *
+ * The live response carries several keys with that prefix which are *not*
+ * models but per-product buckets — confirmed against captured payloads and
+ * Claude Code's own `Utilization` type:
+ *
+ *   seven_day_oauth_apps  third-party OAuth apps
+ *   seven_day_cowork      Daily Routines (a.k.a. seven_day_routines)
+ *   seven_day_omelette    Claude Design
+ *
+ * Matching the prefix generically rendered those as models named "oauth_apps",
+ * "cowork" and "omelette" in the dashboard. Worse, it made the model list a
+ * mirror of arbitrary upstream key names: any `seven_day_<anything>` key was
+ * copied verbatim into a payload we serve over REST and the tunnel.
+ *
+ * An allowlist is safe rather than limiting, because since the Fable launch the
+ * top-level per-model fields are null anyway — new models arrive through the
+ * `limits[]` array below, which stays fully generic.
+ */
+const MODEL_KEYS = new Set(['opus', 'sonnet', 'haiku']);
+
+/** Longest plausible model display name; anything longer is not a model. */
+const MAX_MODEL_NAME = 48;
+
+/** Clamp a utilization value defensively into [0, 100].
+ *  The JSON body reports percentages (0–100), unlike the `anthropic-ratelimit-*`
+ *  response headers elsewhere in the API, which report a 0–1 fraction. */
 function clampUtilization(value: unknown): number {
     const n = typeof value === 'number' && Number.isFinite(value) ? value : 0;
     return Math.max(0, Math.min(100, n));
@@ -15,13 +43,14 @@ function readWindow(value: unknown): UsageWindow {
     };
 }
 
+/** True when a raw window object actually carries a reading. */
+function isPresent(value: unknown): boolean {
+    return !!value && typeof value === 'object';
+}
+
 /**
  * Map the raw JSON returned by Anthropic's `GET /api/oauth/usage` endpoint into
  * our normalized {@link PlanUsage} shape.
- *
- * Per-model weekly windows are matched generically via `seven_day_<model>`, so a
- * future key such as `seven_day_fable` is surfaced with no code change. Null
- * per-model values are dropped. Utilization is clamped to [0, 100] defensively.
  *
  * Pure: no I/O, no clock — `fetchedAt` and `planLabel` are passed through.
  */
@@ -33,22 +62,18 @@ export function mapUsageResponse(
     const src = (raw ?? {}) as Record<string, unknown>;
 
     // Per-model weekly windows come from two sources:
-    //  1. `seven_day_<model>` top-level keys (documented; often null in practice).
+    //  1. `seven_day_<model>` top-level keys — allowlisted (see MODEL_KEYS);
+    //     null for scoped models since the Fable launch.
     //  2. A `limits[]` array with `kind:"weekly_scoped"` and
-    //     `scope.model.display_name` — the source actually populated by the live
-    //     API (observed 2026-07-02). We merge both keyed by lowercase model name.
-    //     Note the two sources use different naming (a `seven_day_<codename>`
-    //     suffix like "opus" vs. a `display_name` like "Claude Opus 4"), so the
-    //     key-based dedup only collapses genuinely identical strings and will not
-    //     recognize the same model expressed both ways. In practice only source
-    //     (2) is populated, so this is not observed; the `has()` check simply
-    //     gives the explicit `seven_day_<model>` key precedence when it appears.
+    //     `scope.model.display_name` — the source actually populated today.
+    //     Kept generic so a new model needs no code change.
     const byModel = new Map<string, UsageModelWindow>();
     for (const [key, value] of Object.entries(src)) {
         const match = /^seven_day_(.+)$/.exec(key);
         if (!match) continue;
-        if (value === null || value === undefined) continue;
+        if (!isPresent(value)) continue;
         const model = match[1].toLowerCase();
+        if (!MODEL_KEYS.has(model)) continue;
         byModel.set(model, { model, ...readWindow(value) });
     }
 
@@ -57,20 +82,35 @@ export function mapUsageResponse(
         if (!entry || typeof entry !== 'object') continue;
         const lim = entry as Record<string, unknown>;
         if (lim.kind !== 'weekly_scoped') continue;
+
+        // Placeholder rows: the API emits an inactive entry per model that the
+        // account has no scoped limit for. `is_active:false`, or 0% with no
+        // reset time, means "this window does not apply" — not "0% used".
+        // Rendering them produced phantom 0% bars for models never used.
+        if (lim.is_active === false) continue;
+        const resetsAt = typeof lim.resets_at === 'string' ? lim.resets_at : '';
+        const percent = clampUtilization(lim.percent);
+        if (percent === 0 && !resetsAt) continue;
+
         const scope = lim.scope as Record<string, unknown> | null | undefined;
         const modelInfo = scope?.model as Record<string, unknown> | undefined;
+        // `scope.model.id` is null in every observed payload; display_name is
+        // the usable field.
         const displayName =
             (typeof modelInfo?.display_name === 'string' && modelInfo.display_name) ||
             (typeof modelInfo?.id === 'string' && modelInfo.id) ||
             '';
-        if (!displayName) continue;
+        // Upstream-controlled string that we serve back over REST/WS (including
+        // to tunnel clients) and render in the UI. Bound it, and refuse
+        // anything credential-shaped: this is the one field in the response
+        // that is copied out verbatim, so it is the one that could republish a
+        // secret if the upstream ever reflected one.
+        if (!displayName || displayName.length > MAX_MODEL_NAME) continue;
+        if (redactSecrets(displayName) !== displayName) continue;
+
         const model = displayName.toLowerCase();
         if (byModel.has(model)) continue; // prefer the seven_day_<model> key
-        byModel.set(model, {
-            model,
-            utilization: clampUtilization(lim.percent),
-            resetsAt: typeof lim.resets_at === 'string' ? lim.resets_at : '',
-        });
+        byModel.set(model, { model, utilization: percent, resetsAt });
     }
 
     const sevenDayByModel: UsageModelWindow[] = Array.from(byModel.values());
@@ -85,12 +125,25 @@ export function mapUsageResponse(
 
     const extra = src.extra_usage as Record<string, unknown> | undefined;
     if (extra && typeof extra === 'object') {
+        // `monthly_limit` and `used_credits` arrive in MINOR units (cents);
+        // Claude Code divides both by 100 before display. Normalize here so
+        // every consumer gets currency units and nobody has to remember.
+        const minorToMajor = (v: unknown) =>
+            typeof v === 'number' && Number.isFinite(v) ? v / 100 : null;
         usage.extraUsage = {
             isEnabled: extra.is_enabled === true,
-            monthlyLimit: typeof extra.monthly_limit === 'number' ? extra.monthly_limit : null,
-            usedCredits: typeof extra.used_credits === 'number' ? extra.used_credits : null,
+            monthlyLimit: minorToMajor(extra.monthly_limit),
+            usedCredits: minorToMajor(extra.used_credits),
             utilization: typeof extra.utilization === 'number' ? extra.utilization : null,
         };
+    }
+
+    // Enterprise (and any account with no consumer rate-limit windows) gets
+    // null for every bucket. Reporting that as a flat 0% meter is a lie; say
+    // "no data" so the UI degrades to its unavailable state instead.
+    if (!isPresent(src.five_hour) && !isPresent(src.seven_day) && sevenDayByModel.length === 0) {
+        usage.unavailable = true;
+        usage.reason = 'no_data';
     }
 
     return usage;
