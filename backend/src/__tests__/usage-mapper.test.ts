@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mapUsageResponse } from '../usage-mapper';
+import { mapUsageResponse } from '../usage-mapper.js';
 
 const raw = {
     five_hour: { utilization: 31, resets_at: '2026-07-02T04:00:00Z' },

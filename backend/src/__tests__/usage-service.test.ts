@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { UsageService, type UsageFetch } from '../usage-service';
+import { UsageService, type UsageFetch } from '../usage-service.js';
 
 const OK_BODY = {
     five_hour: { utilization: 45, resets_at: '2026-07-02T20:30:00Z' },

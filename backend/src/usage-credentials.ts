@@ -3,8 +3,10 @@ import { promisify } from 'node:util';
 import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createLogger } from './logger.js';
 
 const execFileAsync = promisify(execFile);
+const logger = createLogger('[UsageCredentials]');
 
 export interface OAuthCredentials {
     accessToken: string;
@@ -60,6 +62,9 @@ export function planLabelFromSubscription(sub?: string): string {
  * Never logs the token.
  */
 export async function readOAuthCredentials(): Promise<OAuthCredentials | null> {
+    // Only the *source* and whether a token was found are logged — never the
+    // blob or the token itself.
+    const source = process.platform === 'darwin' ? 'macos-keychain' : 'credentials-file';
     try {
         if (process.platform === 'darwin') {
             const { stdout } = await execFileAsync('security', [
@@ -70,13 +75,23 @@ export async function readOAuthCredentials(): Promise<OAuthCredentials | null> {
                 os.userInfo().username,
                 '-w',
             ]);
-            return parseCredentialsBlob(stdout);
+            const creds = parseCredentialsBlob(stdout);
+            if (!creds) logger.warn('Keychain entry found but no accessToken could be parsed', { source });
+            else logger.debug('Read OAuth credentials', { source, subscriptionType: creds.subscriptionType ?? null });
+            return creds;
         }
         const credPath = path.join(os.homedir(), '.claude', '.credentials.json');
         const contents = await readFile(credPath, 'utf8');
-        return parseCredentialsBlob(contents);
-    } catch {
+        const creds = parseCredentialsBlob(contents);
+        if (!creds) logger.warn('Credentials file found but no accessToken could be parsed', { source, credPath });
+        else logger.debug('Read OAuth credentials', { source, subscriptionType: creds.subscriptionType ?? null });
+        return creds;
+    } catch (err) {
         // Missing keychain entry / missing file / unsupported: treat as no token.
+        logger.debug('No OAuth credentials available', {
+            source,
+            error: err instanceof Error ? err.message : String(err),
+        });
         return null;
     }
 }

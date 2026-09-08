@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseCredentialsBlob, planLabelFromSubscription } from '../usage-credentials';
+import { parseCredentialsBlob, planLabelFromSubscription } from '../usage-credentials.js';
 
 describe('parseCredentialsBlob', () => {
     it('parses the nested claudeAiOauth shape', () => {

@@ -1,14 +1,16 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { PlanUsage } from '@claudia/shared';
-import { mapUsageResponse } from './usage-mapper';
+import { mapUsageResponse } from './usage-mapper.js';
 import {
     readOAuthCredentials,
     planLabelFromSubscription,
     type OAuthCredentials,
-} from './usage-credentials';
+} from './usage-credentials.js';
+import { createLogger } from './logger.js';
 
 const execFileAsync = promisify(execFile);
+const logger = createLogger('[UsageService]');
 
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const FALLBACK_UA = 'claude-code/2.1.198';
@@ -37,8 +39,14 @@ async function defaultDetectVersion(): Promise<string> {
     try {
         const { stdout } = await execFileAsync('claude', ['--version'], { timeout: 5000 });
         const m = /(\d+\.\d+\.\d+)/.exec(stdout);
-        return m ? `claude-code/${m[1]}` : FALLBACK_UA;
-    } catch {
+        const ua = m ? `claude-code/${m[1]}` : FALLBACK_UA;
+        logger.debug('Detected Claude Code version for User-Agent', { ua, parsed: !!m });
+        return ua;
+    } catch (err) {
+        logger.warn('Could not run `claude --version`; using fallback User-Agent', {
+            ua: FALLBACK_UA,
+            error: err instanceof Error ? err.message : String(err),
+        });
         return FALLBACK_UA;
     }
 }
@@ -101,6 +109,12 @@ export class UsageService {
         const step = Math.min(this.backoffStep, BACKOFF_STEPS_MS.length - 1);
         this.nextAllowedFetchAt = nowMs + BACKOFF_STEPS_MS[step];
         this.backoffStep++;
+        logger.warn('Upstream 429: entering backoff', {
+            step: this.backoffStep,
+            backoffMs: BACKOFF_STEPS_MS[step],
+            nextAllowedFetchAt: new Date(this.nextAllowedFetchAt).toISOString(),
+            hasCachedValue: this.lastGood !== null,
+        });
     }
 
     private async getUA(): Promise<string> {
@@ -128,16 +142,24 @@ export class UsageService {
         const nowMs = this.now();
         if (!forceRefresh) {
             if (this.lastGood && nowMs - this.lastGoodAtMs < TTL_MS) {
+                logger.debug('Cache hit (within TTL)', { ageMs: nowMs - this.lastGoodAtMs });
                 return this.lastGood;
             }
             if (nowMs < this.nextAllowedFetchAt) {
+                logger.debug('Fetch gated by min-poll/backoff window', {
+                    waitMs: this.nextAllowedFetchAt - nowMs,
+                    hasCachedValue: this.lastGood !== null,
+                });
                 return this.staleCopy() ?? this.unavailable('rate_limited');
             }
         }
 
         this.inFlight = (async () => {
             const creds = await this.readCreds();
-            if (!creds) return this.unavailable('no_token');
+            if (!creds) {
+                logger.debug('No OAuth credentials available; reporting no_token');
+                return this.unavailable('no_token');
+            }
             return this.performFetch(creds, nowMs);
         })();
         try {
@@ -150,6 +172,12 @@ export class UsageService {
     private async performFetch(creds: OAuthCredentials, nowMs: number): Promise<PlanUsage> {
         try {
             const ua = await this.getUA();
+            // NOTE: never log `creds.accessToken` — only non-secret metadata.
+            logger.debug('Fetching plan usage from upstream', {
+                url: USAGE_URL,
+                ua,
+                subscriptionType: creds.subscriptionType ?? null,
+            });
             const res = await this.fetchImpl(USAGE_URL, {
                 headers: {
                     Authorization: `Bearer ${creds.accessToken}`,
@@ -165,9 +193,19 @@ export class UsageService {
                 const usage = mapUsageResponse(raw, planLabel, new Date(nowMs).toISOString());
                 this.lastGood = usage;
                 this.lastGoodAtMs = nowMs;
+                if (this.backoffStep > 0) {
+                    logger.info('Upstream recovered; clearing 429 backoff', { previousStep: this.backoffStep });
+                }
                 this.backoffStep = 0;
                 // Enforce a minimum spacing between real fetches.
                 this.nextAllowedFetchAt = nowMs + MIN_POLL_MS;
+                logger.info('Plan usage refreshed', {
+                    planLabel,
+                    fiveHourPct: usage.fiveHour.utilization,
+                    sevenDayPct: usage.sevenDay.utilization,
+                    perModel: usage.sevenDayByModel.map((m) => `${m.model}:${m.utilization}`),
+                    nextAllowedFetchAt: new Date(this.nextAllowedFetchAt).toISOString(),
+                });
                 return usage;
             }
 
@@ -179,14 +217,26 @@ export class UsageService {
             if (res.status === 401) {
                 // Auth problem: avoid hammering, but don't compound backoff.
                 this.nextAllowedFetchAt = nowMs + MIN_POLL_MS;
+                logger.warn('Upstream rejected OAuth token (401); run `claude` to re-authenticate', {
+                    hasCachedValue: this.lastGood !== null,
+                    nextAllowedFetchAt: new Date(this.nextAllowedFetchAt).toISOString(),
+                });
                 return this.staleCopy() ?? this.unavailable('auth');
             }
 
             // Other/5xx: transient network-ish failure.
             this.nextAllowedFetchAt = nowMs + MIN_POLL_MS;
+            logger.warn('Unexpected upstream status; will retry after min-poll window', {
+                status: res.status,
+                hasCachedValue: this.lastGood !== null,
+            });
             return this.staleCopy() ?? this.unavailable('network');
-        } catch {
+        } catch (err) {
             this.nextAllowedFetchAt = nowMs + MIN_POLL_MS;
+            logger.warn('Plan usage fetch failed', {
+                error: err instanceof Error ? err.message : String(err),
+                hasCachedValue: this.lastGood !== null,
+            });
             return this.staleCopy() ?? this.unavailable('network');
         }
     }
@@ -198,8 +248,12 @@ export class UsageService {
      */
     startPolling(hasClients: () => boolean, onUpdate?: (u: PlanUsage) => void): void {
         if (this.pollTimer) return;
+        logger.info('Starting background plan-usage polling', { intervalMs: POLL_INTERVAL_MS });
         this.pollTimer = setInterval(() => {
-            if (!hasClients()) return;
+            if (!hasClients()) {
+                logger.debug('Poll tick skipped: no connected clients');
+                return;
+            }
             void this.getUsage().then((u) => {
                 // Broadcast only when the meaningful state changed since the last
                 // broadcast. Ignoring `fetchedAt` prevents an unchanged
@@ -207,7 +261,13 @@ export class UsageService {
                 const sig = UsageService.signature(u);
                 if (sig === this.lastBroadcastSig) return;
                 this.lastBroadcastSig = sig;
+                logger.debug('Poll tick produced new usage; broadcasting');
                 if (onUpdate) onUpdate(u);
+            }).catch((err) => {
+                // getUsage() never throws by contract; guard the timer anyway.
+                logger.error('Unexpected error in usage poll tick', {
+                    error: err instanceof Error ? err.message : String(err),
+                });
             });
         }, POLL_INTERVAL_MS);
         // Do not keep the process alive solely for polling.
@@ -218,6 +278,7 @@ export class UsageService {
         if (this.pollTimer) {
             clearInterval(this.pollTimer);
             this.pollTimer = null;
+            logger.debug('Stopped background plan-usage polling');
         }
     }
 }
