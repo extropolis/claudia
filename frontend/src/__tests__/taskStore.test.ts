@@ -828,7 +828,7 @@ describe('taskStore', () => {
             fiveHour: { utilization: 45, resetsAt: '2026-07-02T20:30:00Z' },
             sevenDay: { utilization: 31, resetsAt: '2026-07-08T15:00:00Z' },
             sevenDayByModel: [{ model: 'fable', utilization: 41, resetsAt: '2026-07-08T15:00:00Z' }],
-            planLabel: 'Max (20x)',
+            planLabel: 'Max',
             fetchedAt: '2026-07-02T01:00:00Z',
         };
 
@@ -850,7 +850,7 @@ describe('taskStore', () => {
                 }
             };
             dispatch({ type: 'usage:updated', payload: mockUsage });
-            expect(useTaskStore.getState().planUsage?.planLabel).toBe('Max (20x)');
+            expect(useTaskStore.getState().planUsage?.planLabel).toBe('Max');
             expect(useTaskStore.getState().planUsage?.sevenDayByModel[0].model).toBe('fable');
         });
 

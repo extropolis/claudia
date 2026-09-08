@@ -6,6 +6,7 @@ import {
     formatCountdown,
     formatResetLocal,
     capitalizeModel,
+    formatCredits,
 } from '../usageFormat';
 
 describe('usageFormat', () => {
@@ -87,5 +88,20 @@ describe('usageFormat', () => {
         it('passes through empty strings', () => {
             expect(capitalizeModel('')).toBe('');
         });
+    });
+});
+
+describe('formatCredits', () => {
+    it('renders a normalized currency amount to two places', () => {
+        // The mapper has already divided the API's minor units by 100.
+        expect(formatCredits(40.5)).toBe('40.50');
+        expect(formatCredits(0)).toBe('0.00');
+        expect(formatCredits(100)).toBe('100.00');
+    });
+
+    it('renders a null/absent monthly limit as Unlimited', () => {
+        expect(formatCredits(null)).toBe('Unlimited');
+        expect(formatCredits(undefined)).toBe('Unlimited');
+        expect(formatCredits(NaN)).toBe('Unlimited');
     });
 });

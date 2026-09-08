@@ -7,6 +7,7 @@ import {
     formatCountdown,
     formatResetLocal,
     capitalizeModel,
+    formatCredits,
 } from '../utils/usageFormat';
 import type { UsageWindow } from '@claudia/shared';
 import './PlanUsageDashboard.css';
@@ -132,8 +133,8 @@ export function PlanUsageDashboard({ onClose }: PlanUsageDashboardProps) {
                         <h3>Extra usage</h3>
                         <div className="plan-usage-extra">
                             <span>
-                                {planUsage.extraUsage.usedCredits ?? 0} /{' '}
-                                {planUsage.extraUsage.monthlyLimit ?? '∞'} credits
+                                {formatCredits(planUsage.extraUsage.usedCredits ?? 0)} /{' '}
+                                {formatCredits(planUsage.extraUsage.monthlyLimit)} credits
                             </span>
                             {planUsage.extraUsage.utilization != null && (
                                 <span className="plan-usage-extra__pct">

@@ -3145,8 +3145,12 @@ async function printPlanUsage(baseHttpUrl: string): Promise<void> {
         }
 
         if (u.extraUsage?.isEnabled) {
+            // Amounts are already normalized to currency units by the mapper
+            // (the API reports minor units); a null limit means unlimited.
+            const credits = (v: number | null | undefined) =>
+                typeof v === 'number' && Number.isFinite(v) ? v.toFixed(2) : 'Unlimited';
             console.log('\nExtra usage:');
-            console.log(`  ${u.extraUsage.usedCredits ?? 0} / ${u.extraUsage.monthlyLimit ?? '∞'} credits (${u.extraUsage.utilization ?? 0}%)`);
+            console.log(`  ${credits(u.extraUsage.usedCredits ?? 0)} / ${credits(u.extraUsage.monthlyLimit)} credits (${u.extraUsage.utilization ?? 0}%)`);
         }
         console.log('');
     } catch (error) {

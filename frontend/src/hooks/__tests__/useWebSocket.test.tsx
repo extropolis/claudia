@@ -878,7 +878,7 @@ describe('useWebSocket — inbound dispatch', () => {
             fiveHour: { utilization: 60, resetsAt: '2026-09-08T03:30:00Z' },
             sevenDay: { utilization: 45, resetsAt: '2026-09-09T15:00:00Z' },
             sevenDayByModel: [{ model: 'fable', utilization: 33, resetsAt: '2026-09-09T15:00:00Z' }],
-            planLabel: 'Max (20x)',
+            planLabel: 'Max',
             fetchedAt: '2026-09-08T02:45:00Z',
         };
 

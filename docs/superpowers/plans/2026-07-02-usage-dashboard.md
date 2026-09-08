@@ -51,7 +51,7 @@ export interface PlanUsage {
     sevenDay: UsageWindow;
     sevenDayByModel: UsageModelWindow[];
     extraUsage?: { isEnabled: boolean; monthlyLimit: number | null; usedCredits: number | null; utilization: number | null };
-    planLabel: string;            // "Max (20x)" | "Pro" | "Unknown"
+    planLabel: string;            // "Max" | "Pro" | "Unknown"
     fetchedAt: string;            // ISO
     stale?: boolean;              // served from cache after a failed refresh
     unavailable?: boolean;        // could not fetch at all
@@ -86,13 +86,13 @@ const raw = {
 };
 
 it('maps windows, generic per-model keys, and drops nulls', () => {
-    const u = mapUsageResponse(raw, 'Max (20x)', '2026-07-02T01:00:00Z');
+    const u = mapUsageResponse(raw, 'Max', '2026-07-02T01:00:00Z');
     expect(u.fiveHour).toEqual({ utilization: 31, resetsAt: '2026-07-02T04:00:00Z' });
     expect(u.sevenDay.utilization).toBe(28);
     expect(u.sevenDayByModel.map(m => m.model).sort()).toEqual(['fable', 'opus']);
     expect(u.sevenDayByModel.find(m => m.model === 'fable')?.utilization).toBe(9);
     expect(u.extraUsage?.isEnabled).toBe(false);
-    expect(u.planLabel).toBe('Max (20x)');
+    expect(u.planLabel).toBe('Max');
 });
 ```
 
@@ -106,7 +106,7 @@ it('maps windows, generic per-model keys, and drops nulls', () => {
 
 **Interfaces — Produces:**
 - `readOAuthCredentials(): Promise<{ accessToken: string; subscriptionType?: string } | null>` (null when no token found / unsupported)
-- `planLabelFromSubscription(sub?: string): string` (`'max'`→`'Max (20x)'`, `'pro'`→`'Pro'`, else `'Unknown'`)
+- `planLabelFromSubscription(sub?: string): string` (`'max'`→`'Max'`, `'pro'`→`'Pro'`, else `'Unknown'`)
 - `parseCredentialsBlob(json: string): { accessToken: string; subscriptionType?: string } | null` (pure — this is what the test targets; handles both `{claudeAiOauth:{...}}` and a bare `{...}` shape)
 
 - [ ] **Step 1 — failing test** for `parseCredentialsBlob` (valid nested blob → token+sub; missing accessToken → null; malformed JSON → null) and `planLabelFromSubscription`. Keep `readOAuthCredentials` (does I/O: spawns `security` on macOS, reads `~/.claude/.credentials.json` otherwise) out of the pure test.
@@ -171,7 +171,7 @@ it('maps windows, generic per-model keys, and drops nulls', () => {
 
 **Files:** Create `frontend/src/components/UsageDashboard.tsx` (+ css); trigger from the meter.
 
-**REQUIRED: dataviz skill.** A modal/side panel titled with `planLabel` ("Max (20x)"). Sections mirroring claude.ai:
+**REQUIRED: dataviz skill.** A modal/side panel titled with `planLabel` ("Max"). Sections mirroring claude.ai:
 1. **Current session** — ring or bar, `fiveHour.utilization`%, "Resets in Xh Ym".
 2. **Weekly limits** — "All models" bar (`sevenDay`), then one bar per `sevenDayByModel` entry (label the model name capitalized — "Fable", "Opus"), each with "Resets <weekday> <time>" from its `resetsAt`.
 3. **Extra usage** — only if `extraUsage?.isEnabled`: used vs monthly limit.
@@ -182,7 +182,7 @@ Consistent color system with the meter (one shared utilization→color helper �
 ---
 
 ## Self-Review Notes
-- Spec coverage: session-always-visible ✅ (Task 8); openable dashboard with weekly all-models + per-model + resets ✅ (Task 9); "Max (20x)" label ✅ (Task 3); Fable per-model handled generically ✅ (Task 2). Visualized like claude.ai ✅ (Tasks 8–9, dataviz skill).
+- Spec coverage: session-always-visible ✅ (Task 8); openable dashboard with weekly all-models + per-model + resets ✅ (Task 9); "Max" label ✅ (Task 3); Fable per-model handled generically ✅ (Task 2). Visualized like claude.ai ✅ (Tasks 8–9, dataviz skill).
 - Rate-limit safety is enforced in Task 4 and re-stated in Global Constraints — the single highest-risk area; the backoff/cache tests are mandatory, not optional.
 - Type consistency: `PlanUsage`/`UsageWindow`/`UsageModelWindow` names identical across backend mapper, service, server, store, and both components. `utilization` is 0–100 everywhere.
 - Cross-platform: Keychain path (macOS) vs `.credentials.json` (Linux/Windows) both handled in Task 3; `reason:'unsupported_platform'` reserved if neither works.

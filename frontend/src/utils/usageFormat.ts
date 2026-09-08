@@ -70,3 +70,16 @@ export function capitalizeModel(model: string): string {
     if (!model) return model;
     return model.charAt(0).toUpperCase() + model.slice(1);
 }
+
+/**
+ * Render an extra-usage credit amount.
+ *
+ * The API reports these in MINOR units (cents); the backend mapper divides by
+ * 100, so what reaches the UI is already in currency units. Printing the raw
+ * value showed "4050 / 10000 credits" for $40.50 of a $100 cap. No currency
+ * symbol is invented — the response's `currency` field is null in practice.
+ */
+export function formatCredits(amount: number | null | undefined): string {
+    if (amount == null || !Number.isFinite(amount)) return 'Unlimited';
+    return amount.toFixed(2);
+}
