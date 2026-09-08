@@ -4,6 +4,7 @@
  * The token must never leak into logs, so the logger is spied on too.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import path from 'node:path';
 
 const execFileMock = vi.fn();
 const readFileMock = vi.fn();
@@ -160,6 +161,10 @@ describe('CLAUDE_CONFIG_DIR relocates both stores', () => {
         process.env.CLAUDE_CONFIG_DIR = '/tmp/relocated-claude';
         readFileMock.mockResolvedValue(NESTED);
         await readOAuthCredentials();
-        expect(String(readFileMock.mock.calls[0][0])).toBe('/tmp/relocated-claude/.credentials.json');
+        // path.join, not a literal: on Windows this is
+        // `\\tmp\\relocated-claude\\.credentials.json`, and hardcoding the POSIX
+        // separator turned the Windows CI leg red.
+        expect(String(readFileMock.mock.calls[0][0]))
+            .toBe(path.join('/tmp/relocated-claude', '.credentials.json'));
     });
 });
