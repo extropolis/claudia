@@ -72,3 +72,9 @@ vite
 
 # Playwright MCP snapshots
 .playwright-mcp/
+
+# Playwright browser E2E
+/playwright-report/
+/test-results/
+/blob-report/
+/playwright/.cache/

@@ -266,6 +266,8 @@ function DirectoryNode({
         <div className="file-tree-node">
             <div
                 className={`file-tree-item directory ${isSelected ? 'selected' : ''}`}
+                data-testid="dir-node"
+                data-file-path={item.path}
                 style={{ paddingLeft: `${depth * 16 + 8}px` }}
                 onClick={handleClick}
                 onContextMenu={handleContextMenu}
@@ -374,6 +376,8 @@ function FileNode({
     return (
         <div
             className={`file-tree-item file clickable ${isSelected ? 'selected' : ''}`}
+            data-testid="file-node"
+            data-file-path={item.path}
             style={{ paddingLeft: `${depth * 16 + 8}px` }}
             title={`${item.path}${item.size ? ` (${formatSize(item.size)})` : ''}`}
             onClick={handleClick}
@@ -1910,7 +1914,7 @@ export function FileExplorer({ workspacePath, workspaceName }: FileExplorerProps
 
             {/* Toggle tab (collapsed) */}
             {!isExpanded && (
-                <button className="file-explorer-toggle" onClick={() => setIsExpanded(true)}
+                <button className="file-explorer-toggle" data-testid="file-explorer-toggle" onClick={() => setIsExpanded(true)}
                     title="Expand file explorer">
                     <ChevronLeft size={14} />
                     <span className="file-explorer-toggle-label">Files</span>

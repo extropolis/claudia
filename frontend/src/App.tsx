@@ -480,7 +480,14 @@ function App() {
     const mobileShowingTerminal = isMobile && mobileShowTerminal && selectedTask;
 
     return (
-        <div className={`app ${isMobile ? 'is-mobile' : ''}`}>
+        <div
+            className={`app ${isMobile ? 'is-mobile' : ''}`}
+            data-testid="app-root"
+            // Exposes live WebSocket health to E2E tests (and to anyone
+            // inspecting the DOM); the UI itself only renders a banner when
+            // the connection is DOWN, so there is no positive "connected" signal.
+            data-ws-connected={isConnected ? 'true' : 'false'}
+        >
             <header className="app-header">
                 {/* Mobile back button when viewing terminal */}
                 {mobileShowingTerminal && (
@@ -581,6 +588,7 @@ function App() {
                     </button>
                     <button
                         className="settings-button"
+                        data-testid="open-settings"
                         onClick={handleSettingsOpen}
                         title="Settings"
                     >
@@ -739,7 +747,7 @@ function App() {
                                         />
                                     </>
                                 ) : (
-                                    <div className="empty-state-main">
+                                    <div className="empty-state-main" data-testid="no-task-selected">
                                         <Terminal size={48} strokeWidth={1} />
                                         <h2>Select a task to view its terminal</h2>
                                         <p>Add a workspace and create a task to get started</p>
@@ -809,7 +817,7 @@ function App() {
 
             {/* Server reloading banner (non-blocking) */}
             {!isOffline && (isServerReloading || !isConnected) && (
-                <div className="server-reload-banner">
+                <div className="server-reload-banner" data-testid="reconnect-banner">
                     <RefreshCw className="spinning" size={18} />
                     <span>
                         {isServerReloading

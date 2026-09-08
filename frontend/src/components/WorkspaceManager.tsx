@@ -261,6 +261,7 @@ export function WorkspaceManager({
 
                         <button
                             className="workspace-action-btn add-workspace"
+                            data-testid="wm-add-workspace"
                             onClick={handleAddWorkspace}
                             title="Add workspace"
                         >
@@ -375,6 +376,7 @@ export function WorkspaceManager({
                     </div>
                     <button
                         className="workspace-manager-done"
+                        data-testid="wm-done"
                         onClick={onClose}
                     >
                         Done

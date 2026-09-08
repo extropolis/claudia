@@ -237,6 +237,10 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
         <div
             ref={taskItemRef}
             className={`task-item ${isSelected ? 'selected' : ''} ${isLastSelected && !isSelected ? 'last-selected' : ''} ${task.state} ${hasActiveQuestion ? 'has-question' : ''} ${hasUnreadActivity && !isSelected ? 'unread' : ''} ${isBeingDragged ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
+            data-testid="task-item"
+            data-task-id={task.id}
+            data-task-state={task.state}
+            data-task-selected={isSelected ? 'true' : 'false'}
             draggable={!isEditing && !worktreeInfo}
             onClick={() => !isEditing && onSelectTask(task.id)}
             onDragStart={(e) => {
@@ -268,6 +272,7 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
             ) : (
                 <span
                     className="task-prompt"
+                    data-testid="task-prompt"
                     title={task.prompt}
                 >
                     {displayPrompt}
@@ -307,6 +312,7 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                 {canInterrupt && (
                     <button
                         className="task-action-button stop"
+                        data-testid="task-stop"
                         onClick={(e) => {
                             e.stopPropagation();
                             setStopClicked(true);
@@ -352,6 +358,7 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                 )}
                 <button
                     className="task-action-button delete"
+                    data-testid="task-delete"
                     onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}
                     title="Delete task"
                 >
@@ -1221,6 +1228,9 @@ function WorkspaceSection({
     return (
         <div
             className={`workspace-section ${isExpanded ? 'expanded' : ''} ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''} ${isMenuOpen ? 'menu-open' : ''}`}
+            data-testid="workspace-section"
+            data-workspace-id={workspace.id}
+            data-expanded={isExpanded ? 'true' : 'false'}
             onDragOver={(e) => e.preventDefault()}
             onDragEnter={() => onDragEnter(index)}
         >
@@ -1246,7 +1256,7 @@ function WorkspaceSection({
                 <div className="workspace-drag-handle">
                     <GripVertical size={14} />
                 </div>
-                <div className="workspace-header-left" onClick={() => !isEditingWorkspaceName && onToggleExpand()}>
+                <div className="workspace-header-left" data-testid="workspace-header" onClick={() => !isEditingWorkspaceName && onToggleExpand()}>
                     {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                     {isWorktree
                         ? <span aria-label="Git worktree"><GitBranch size={16} className="workspace-icon worktree-icon" /></span>
@@ -1256,6 +1266,7 @@ function WorkspaceSection({
                         <input
                             ref={workspaceEditRef}
                             className="workspace-name-input"
+                            data-testid="workspace-name-input"
                             value={workspaceEditValue}
                             onChange={(e) => setWorkspaceEditValue(e.target.value)}
                             onBlur={handleSaveWorkspaceEdit}
@@ -1266,6 +1277,7 @@ function WorkspaceSection({
                         <>
                             <span
                                 className="workspace-name"
+                                data-testid="workspace-name"
                                 title={workspace.id}
                             >
                                 {workspaceDisplayName}
@@ -1273,6 +1285,7 @@ function WorkspaceSection({
                             {onRenameWorkspace && (
                                 <button
                                     className="workspace-rename-button"
+                                    data-testid="workspace-rename"
                                     onClick={handleStartWorkspaceEdit}
                                     title="Rename workspace"
                                 >
@@ -1340,6 +1353,7 @@ function WorkspaceSection({
                 <div className="workspace-menu-container">
                     <button
                         className={`workspace-action-button menu ${isMenuOpen ? 'active' : ''}`}
+                        data-testid="workspace-menu"
                         onClick={(e) => {
                             e.stopPropagation();
                             onToggleMenu();
@@ -1714,6 +1728,7 @@ function WorkspaceSection({
                             )}
                             <button
                                 className="workspace-dropdown-item delete"
+                                data-testid="workspace-remove"
                                 onClick={(e) => {
                                     e.stopPropagation();
                                     if (isWorktree) {
@@ -1795,6 +1810,7 @@ function WorkspaceSection({
                                     onBlur={handleBlur}
                                     rows={1}
                                     data-input-type="new-task-input"
+                                    data-testid="new-task-input"
                                 />
                                 {showInterim && (
                                     <span className="interim-indicator">{voiceInterimTranscript}</span>
@@ -1830,6 +1846,7 @@ function WorkspaceSection({
                             <button
                                 type="submit"
                                 className="task-submit-button"
+                                data-testid="new-task-submit"
                                 disabled={!inputValue.trim() && images.length === 0}
                             >
                                 <Send size={16} />
@@ -2510,6 +2527,7 @@ export function WorkspacePanel({
                     </button>
                     <button
                         className="add-workspace-button"
+                        data-testid="add-workspace"
                         onClick={handleAddWorkspace}
                         title="Add workspace"
                     >

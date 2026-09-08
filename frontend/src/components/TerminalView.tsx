@@ -762,9 +762,9 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     };
 
     return (
-        <div className="terminal-view">
+        <div className="terminal-view" data-testid="terminal">
             <div className="terminal-header">
-                <span className="terminal-title">{task.prompt}</span>
+                <span className="terminal-title" data-testid="terminal-title">{task.prompt}</span>
                 <button
                     className={`copy-button ${copied ? 'copied' : ''}`}
                     onClick={copyToClipboard}
@@ -792,10 +792,10 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                         Resume
                     </button>
                 )}
-                <span className={`terminal-state ${task.state}`}>{stateLabel}</span>
+                <span className={`terminal-state ${task.state}`} data-testid="terminal-state">{stateLabel}</span>
             </div>
             <div className="terminal-container-wrapper">
-                <div ref={terminalRef} className="terminal-container" />
+                <div ref={terminalRef} className="terminal-container" data-testid="terminal-container" />
                 {showSpinner && (
                     <div className="terminal-loading-overlay">
                         <div className="terminal-loading-spinner" />

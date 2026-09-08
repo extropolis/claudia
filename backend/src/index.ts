@@ -9,6 +9,18 @@ import { PORTS } from '@claudia/shared';
 
 const PORT = process.env.CLAUDIA_BACKEND_PORT || PORTS.BACKEND;
 
+// Optional isolated state directory. When set, config.json / workspace-config.json /
+// tasks.json / learnings live here instead of next to the backend bundle. Used by the
+// E2E harness (and anyone wanting a throwaway instance) so a sandboxed server never
+// races the user's real instance over the same state files.
+const STATE_DIR = process.env.CLAUDIA_STATE_DIR
+    ? path.resolve(process.env.CLAUDIA_STATE_DIR)
+    : undefined;
+if (STATE_DIR) {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    console.log(`[Index] Using isolated state directory: ${STATE_DIR}`);
+}
+
 // Check if Claude Code CLI is installed — warn but don't block startup.
 // The CLI may be unreachable when off VPN or during network issues;
 // the server should still start so the UI is accessible.
@@ -62,7 +74,7 @@ function installLearnCommand() {
 installLearnCommand();
 
 
-const { server, taskSpawner, gracefulShutdown } = await createApp();
+const { server, taskSpawner, gracefulShutdown } = await createApp(STATE_DIR);
 
 console.log(`[Index] Starting server on port ${PORT}...`);
 let httpServer: ReturnType<typeof server.listen> | undefined;
