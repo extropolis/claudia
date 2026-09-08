@@ -6,6 +6,7 @@ import {
     hasProcessingIndicators,
     hasActiveTurnIndicator,
     classifyEnterOutcome,
+    hasChoiceDialog,
     detectWaitingForInput,
     getRecentOutput,
 } from '../task-state-detection.js';
@@ -394,5 +395,98 @@ describe('getRecentOutput', () => {
         const buffers = [Buffer.from('\x1b[31mred text\x1b[0m')];
         const result = getRecentOutput(buffers, 100);
         expect(result).toBe('red text');
+    });
+});
+
+describe('hasChoiceDialog', () => {
+    // Strings copied from real frames in backend/task-histories.
+    it('matches the AskUserQuestion footer (arrow-key variant)', () => {
+        expect(hasChoiceDialog('  5. Chat about this\nEnter to select · ↑/↓ to navigate · Esc to cancel')).toBe(true);
+    });
+
+    it('matches the AskUserQuestion footer (Tab/Arrow variant)', () => {
+        expect(hasChoiceDialog('Enter to select · Tab/Arrow keys to navigate · Esc to cancel')).toBe(true);
+    });
+
+    it('matches a wrapped footer on a narrow terminal', () => {
+        expect(hasChoiceDialog('Enter to\nselect ·\n↑/↓ to\nnavigate')).toBe(true);
+    });
+
+    it('matches the tool permission prompt', () => {
+        expect(hasChoiceDialog('Do you want to proceed?\n❯ 1. Yes\n  2. No')).toBe(true);
+    });
+
+    it('does not match the idle prompt or its footer', () => {
+        expect(hasChoiceDialog('\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n')).toBe(false);
+    });
+
+    it('does not match an active turn', () => {
+        expect(hasChoiceDialog('✻ Thinking…\n⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents')).toBe(false);
+    });
+
+    it('does not match prose that merely mentions allow/deny or selecting', () => {
+        expect(hasChoiceDialog('I will allow the deny-list to select the right files.')).toBe(false);
+    });
+});
+
+describe('classifyEnterOutcome: evidence windows', () => {
+    const IDLE = '\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)\n';
+
+    it('ignores an active-turn marker that only appears in the pre-Enter echo', () => {
+        // outputSinceEnter carries no marker even though the trailing window does.
+        expect(classifyEnterOutcome({
+            outputDeltaBytes: 500,
+            recentOutput: '❯ add /esc to interrupt/i to the classifier' + IDLE,
+            outputSinceEnter: 'startup churn\n' + IDLE,
+            guardAgainstIdleChurn: true,
+        })).toBe('retry');
+    });
+
+    it('accepts a marker that appeared after Enter but scrolled out of the trailing window', () => {
+        expect(classifyEnterOutcome({
+            outputDeltaBytes: 20000,
+            recentOutput: 'tool output' + IDLE,
+            outputSinceEnter: '✻ Thinking… esc to interrupt\n' + 'x'.repeat(9000) + IDLE,
+            guardAgainstIdleChurn: true,
+        })).toBe('accepted');
+    });
+
+    it('accepts when a choice dialog is on screen (a dialog proves the prompt was submitted)', () => {
+        expect(classifyEnterOutcome({
+            outputDeltaBytes: 400,
+            recentOutput: 'Enter to select · ↑/↓ to navigate · Esc to cancel' + IDLE,
+            outputSinceEnter: 'Enter to select · ↑/↓ to navigate · Esc to cancel' + IDLE,
+            guardAgainstIdleChurn: true,
+        })).toBe('accepted');
+    });
+
+    it('falls back to the trailing window when outputSinceEnter is omitted', () => {
+        expect(classifyEnterOutcome({
+            outputDeltaBytes: 100,
+            recentOutput: '✻ Thinking… esc to interrupt',
+            guardAgainstIdleChurn: true,
+        })).toBe('accepted');
+    });
+});
+
+describe('classifyEnterOutcome: truncated post-Enter window', () => {
+    it('accepts when more output arrived than the evidence window can hold', () => {
+        expect(classifyEnterOutcome({
+            outputDeltaBytes: 200_000,
+            recentOutput: 'tool output\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)\n',
+            outputSinceEnter: 'x'.repeat(65536),
+            outputSinceEnterTruncated: true,
+            guardAgainstIdleChurn: true,
+        })).toBe('accepted');
+    });
+
+    it('does not accept on a non-truncated window with no marker', () => {
+        expect(classifyEnterOutcome({
+            outputDeltaBytes: 2000,
+            recentOutput: 'churn\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)\n',
+            outputSinceEnter: 'churn\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)\n',
+            outputSinceEnterTruncated: false,
+            guardAgainstIdleChurn: true,
+        })).toBe('retry');
     });
 });

@@ -18,7 +18,7 @@ import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
-import { classifyEnterOutcome, hasActiveTurnIndicator, isReadyForInitialInput as detectReadyForInitialInput } from './task-state-detection.js';
+import { classifyEnterOutcome, hasActiveTurnIndicator, hasChoiceDialog, isReadyForInitialInput as detectReadyForInitialInput } from './task-state-detection.js';
 import { randomBytes, randomUUID } from 'crypto';
 import { SharedMcpManager } from './shared-mcp-manager.js';
 import {
@@ -3061,6 +3061,40 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * The output that arrived after a given point in the stream, identified by
+     * the LAST buffer present at that point (the "anchor").
+     *
+     * Why an anchor and not a byte delta: `task.totalOutputSize` is the size of
+     * the in-memory ring buffer, not a monotonic byte counter — the PTY handler
+     * DECREMENTS it while trimming `outputHistory` down to the 2MB cap. On a
+     * long-running task at that cap, every new chunk evicts an equal-sized old
+     * one, so a delta computed from it reads ~0 (or negative) even while a turn
+     * is streaming, and the Enter classifier reads an accepted submission as
+     * dropped. Buffer identity is stable across the trim: if the anchor itself
+     * has been evicted, everything still held is by definition post-anchor.
+     *
+     * The text is capped at `cap` bytes (byte-exact, not character-sliced —
+     * a character slice over multi-byte box-drawing/spinner glyphs silently
+     * widens the window and can pull the pre-Enter prompt echo back into view).
+     */
+    private getOutputSinceAnchor(
+        task: InternalTask,
+        anchor: Buffer | undefined,
+        cap = 65536
+    ): { text: string; bytes: number; truncated: boolean } {
+        const idx = anchor ? task.outputHistory.lastIndexOf(anchor) : -1;
+        const since = task.outputHistory.slice(idx >= 0 ? idx + 1 : 0);
+        const combined = Buffer.concat(since);
+        const truncated = combined.length > cap;
+        const window = truncated ? combined.subarray(combined.length - cap) : combined;
+        return {
+            text: this.stripAnsi(window.toString('utf8')),
+            bytes: combined.length,
+            truncated,
+        };
+    }
+
+    /**
      * Public method for debugging output detection
      */
     getRecentOutputForDebug(taskId: string, maxBytes: number): string {
@@ -3317,7 +3351,7 @@ export class TaskSpawner extends EventEmitter {
     private sendEnterWithRetry(
         task: InternalTask,
         retriesLeft: number,
-        options: { isInitialPrompt?: boolean; enterKey?: string; outputLengthAtSend?: number } = {}
+        options: { isInitialPrompt?: boolean; enterKey?: string; outputAnchorAtSend?: Buffer } = {}
     ): void {
         const { isInitialPrompt = false, enterKey = '\r' } = options;
         const context = isInitialPrompt ? 'initial prompt' : 'input';
@@ -3333,8 +3367,11 @@ export class TaskSpawner extends EventEmitter {
             // If the prompt is still visibly sitting in the input box here, the TUI
             // never accepted any of our Enters within the retry budget.
             const tail = this.getRecentOutput(task, 4096);
-            const deltaSinceFirstEnter = options.outputLengthAtSend !== undefined
-                ? task.totalOutputSize - options.outputLengthAtSend
+            // `in` rather than `!== undefined`: the anchor is legitimately undefined
+            // when nothing had been printed yet at the first Enter, and that retry
+            // still threads the key — the whole history is then post-Enter output.
+            const deltaSinceFirstEnter = 'outputAnchorAtSend' in options
+                ? this.getOutputSinceAnchor(task, options.outputAnchorAtSend).bytes
                 : 0;
             console.log(`[TaskSpawner] Max retries reached for ${context} on task ${task.id}, giving up (outputDeltaSinceFirstEnter=${deltaSinceFirstEnter}). Recent output: ${JSON.stringify(tail.slice(-512))}`);
             // Safety net for the initial prompt: hasStartedProcessing is set ONLY on
@@ -3349,6 +3386,12 @@ export class TaskSpawner extends EventEmitter {
                     taskId: task.id,
                     attempts: task.promptSubmitAttempts,
                     outputDeltaSinceFirstEnter: deltaSinceFirstEnter,
+                    // Without these the warn alone cannot distinguish "marker never
+                    // sampled" from "prompt genuinely never submitted".
+                    activeTurnInTail: hasActiveTurnIndicator(tail),
+                    stillIdleAtInput: this.isReadyForInitialInput(tail),
+                    choiceDialog: hasChoiceDialog(tail),
+                    tail: tail.slice(-512),
                 });
                 task.hasStartedProcessing = true;
                 task.state = 'busy';
@@ -3369,9 +3412,12 @@ export class TaskSpawner extends EventEmitter {
             this.emit('taskStateChanged', this.toPublicTask(task));
         }
 
-        // Record output length just before sending Enter so we can detect any output growth
-        const outputLengthBeforeEnter = options.outputLengthAtSend ??
-            task.totalOutputSize;
+        // Anchor the stream just before sending Enter so every later sample can tell
+        // post-Enter output from the prompt echo that preceded it. Sticky across
+        // retries: the anchor stays at the FIRST Enter so the evidence window only
+        // ever grows, and it survives the 2MB history trim (see getOutputSinceAnchor).
+        const outputAnchorBeforeEnter = options.outputAnchorAtSend ??
+            task.outputHistory[task.outputHistory.length - 1];
 
         // Send Enter
         task.process.write(enterKey);
@@ -3386,13 +3432,21 @@ export class TaskSpawner extends EventEmitter {
             // box (the intermittent bug). classifyEnterOutcome only accepts growth
             // when we are no longer parked at the idle input prompt, and always
             // accepts on a genuine active-turn marker ("esc to interrupt").
-            const currentOutputLength = task.totalOutputSize;
-            const outputDelta = currentOutputLength - outputLengthBeforeEnter;
+            const sinceEnter = this.getOutputSinceAnchor(task, outputAnchorBeforeEnter);
+            const outputDelta = sinceEnter.bytes;
             // Sample 4096 bytes (matching the ready-detection window) so the idle
             // input footer isn't pushed out of view by a partial repaint above it,
             // which could otherwise let growth be accepted while Enter was dropped.
             const recentOutput = this.getRecentOutput(task, 4096);
-            const activeTurn = hasActiveTurnIndicator(recentOutput);
+            // Active-turn evidence is taken from output printed strictly AFTER our
+            // Enter. Scanning the trailing window instead is wrong in both
+            // directions: the pre-Enter prompt echo can contain the marker
+            // verbatim (prompts that quote "esc to interrupt" — this repo writes
+            // them), and a marker painted right after Enter scrolls out of a fixed
+            // 4096-byte tail once a few KB of turn output stream past.
+            const outputSinceEnter = sinceEnter.text;
+            const activeTurn = hasActiveTurnIndicator(outputSinceEnter);
+            const choiceDialog = hasChoiceDialog(recentOutput);
             // Guard growth-based acceptance against startup/resume churn only for the
             // initial-prompt/reconnect delivery; a plain follow-up is already
             // interactive, so growth there reliably means the message was accepted.
@@ -3402,6 +3456,8 @@ export class TaskSpawner extends EventEmitter {
             const outcome = classifyEnterOutcome({
                 outputDeltaBytes: outputDelta,
                 recentOutput,
+                outputSinceEnter,
+                outputSinceEnterTruncated: sinceEnter.truncated,
                 guardAgainstIdleChurn: isInitialPrompt,
             });
             const stillIdleAtInput = !activeTurn && this.isReadyForInitialInput(recentOutput);
@@ -3412,13 +3468,14 @@ export class TaskSpawner extends EventEmitter {
                 retriesLeft,
                 outputDelta,
                 activeTurn,
+                choiceDialog,
                 stillIdleAtInput,
                 guardAgainstIdleChurn: isInitialPrompt,
                 outcome,
             });
 
             if (outcome === 'accepted') {
-                console.log(`[TaskSpawner] Submission accepted for ${context} after attempt ${task.promptSubmitAttempts} (activeTurn=${activeTurn}, outputDelta=${outputDelta})`);
+                console.log(`[TaskSpawner] Submission accepted for ${context} after attempt ${task.promptSubmitAttempts} (activeTurn=${activeTurn}, choiceDialog=${choiceDialog}, outputDelta=${outputDelta})`);
                 if (isInitialPrompt && task.state === 'starting' && !task.hasStartedProcessing) {
                     task.hasStartedProcessing = true;
                     task.state = 'busy';
@@ -3431,8 +3488,8 @@ export class TaskSpawner extends EventEmitter {
             // Not accepted — the Enter was dropped or the TUI is still at the idle
             // input prompt. Retry (re-send Enter only; the prompt text is already in
             // the box and must never be re-typed) until a real turn starts.
-            console.log(`[TaskSpawner] ${context} not yet accepted for task ${task.id} (activeTurn=${activeTurn}, outputDelta=${outputDelta}, stillIdleAtInput=${stillIdleAtInput}), retrying Enter in 500ms (${retriesLeft - 1} retries left)`);
-            setTimeout(() => this.sendEnterWithRetry(task, retriesLeft - 1, { ...options, outputLengthAtSend: outputLengthBeforeEnter }), 500);
+            console.log(`[TaskSpawner] ${context} not yet accepted for task ${task.id} (activeTurn=${activeTurn}, choiceDialog=${choiceDialog}, outputDelta=${outputDelta}, stillIdleAtInput=${stillIdleAtInput}), retrying Enter in 500ms (${retriesLeft - 1} retries left)`);
+            setTimeout(() => this.sendEnterWithRetry(task, retriesLeft - 1, { ...options, outputAnchorAtSend: outputAnchorBeforeEnter }), 500);
         }, 800);
     }
 
