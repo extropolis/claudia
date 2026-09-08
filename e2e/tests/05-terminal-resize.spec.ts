@@ -105,14 +105,34 @@ test('a small width change is suppressed; a large one resizes the PTY', async ({
     await page.setViewportSize({ width: 1000, height: 900 });
     await expect.poll(() => frames.length, { timeout: 5000 }).toBeGreaterThan(settled);
 
-    // Exactly one new frame: the big resize, and nothing left over from the
-    // wobble. Its cols must be well outside the +-2 suppression band.
+    // Every frame the large resize produced must BE the large resize — nothing
+    // left over from the wobble.
+    //
+    // Deliberately not an exact count of one. Changing the viewport moves width
+    // AND height, and the layout settles in more than one pass: cols reaches its
+    // final value immediately while rows can change again a frame later as the
+    // surrounding chrome reflows. That second frame is a rows-only delta, which
+    // the <=2-column suppression guard does not (and should not) suppress, so it
+    // is legitimate. It usually lands inside the debounce window and coalesces;
+    // under load it separates, and an exact-count assertion then fails for a
+    // reason that has nothing to do with the behaviour under test:
+    //
+    //   frames=[{cols:87,rows:35,t:7674},{cols:35,rows:34,t:19960},{cols:35,rows:33,t:20136}]
+    //
+    // The property that actually matters is that no frame is wobble-sized: a
+    // leaked wobble would sit at ~colsBefore, well inside the suppression band.
+    const added = frames.slice(settled);
     expect(
-        frames.length,
-        `the large resize must send exactly one task:resize; frames=${JSON.stringify(frames)}`,
-    ).toBe(settled + 1);
-    const latest = frames[frames.length - 1];
-    expect(latest.cols).toBeLessThan(colsBefore - 2);
+        added.length,
+        `the large resize must send at least one task:resize; frames=${JSON.stringify(frames)}`,
+    ).toBeGreaterThan(0);
+    for (const frame of added) {
+        expect(
+            frame.cols,
+            `every post-wobble frame must belong to the large resize, not a suppressed ` +
+                `wobble; frames=${JSON.stringify(frames)}`,
+        ).toBeLessThan(colsBefore - 2);
+    }
     console.log(`[e2e] task:resize frames: ${JSON.stringify(frames)}`);
 });
 
