@@ -10,6 +10,7 @@ import { tmpdir, homedir, cpus, CpuInfo } from 'os';
 import { readHandoffMark } from './export-import/handoff.js';
 import { execFileSync, execSync } from 'child_process';
 import { atomicWriteFileSync, atomicWriteFileAsync } from './utils/atomic-write.js';
+import { loadVersioned, type VersionedFile } from './utils/schema-version.js';
 import { buildSettingsLocalContent } from './settings-local.js';
 import { buildClaudePrivacyArgs, ensurePrivacySettingsFile } from './claude-privacy.js';
 import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
@@ -404,6 +405,34 @@ export interface ArchivedTaskSearchMatch {
     matchedIn: string[];
     /** Context around the hit, when the match came from archived history */
     snippet?: string;
+}
+
+/**
+ * Schema version for tasks.json and archived-tasks.json. v1 is exactly the
+ * pre-envelope shape, so an unversioned file loads unchanged as v1 data.
+ * Bump when either file's shape changes, and add a migration to the
+ * `loadVersioned` call sites in `loadPersistedTasks`.
+ */
+const TASKS_SCHEMA_VERSION = 1;
+
+/** Shape of the archived-tasks.json payload (inside the envelope). */
+interface ArchivedTasksPersistence {
+    archivedTasks: ArchivedTaskMetadata[];
+}
+
+/**
+ * Peek at a raw parsed tasks/archived file, versioned or legacy, without
+ * migrating it. Used by the guards that only need to count entries (the
+ * `.bak` recovery check and the never-overwrite-with-empty checks) so they
+ * keep working on both shapes.
+ */
+function unwrapTaskFile(raw: unknown): { tasks?: unknown[]; archivedTasks?: unknown[] } {
+    if (!raw || typeof raw !== 'object') return {};
+    if ('schemaVersion' in raw) {
+        const data = (raw as VersionedFile<unknown>).data;
+        return data && typeof data === 'object' ? (data as { tasks?: unknown[]; archivedTasks?: unknown[] }) : {};
+    }
+    return raw as { tasks?: unknown[]; archivedTasks?: unknown[] };
 }
 
 interface TaskPersistence {
@@ -2528,10 +2557,12 @@ export class TaskSpawner extends EventEmitter {
             if (existsSync(bakPath)) {
                 let mainTotal = 0;
                 let mainState: 'missing' | 'empty' | 'corrupt' | 'ok' = 'missing';
+                // Both files may be versioned or legacy (the .bak is whatever the
+                // previous save wrote), so peek through the envelope to count.
                 if (existsSync(this.persistencePath)) {
                     try {
                         const mainRaw = readFileSync(this.persistencePath, 'utf-8');
-                        const main = JSON.parse(mainRaw) as { tasks?: any[]; archivedTasks?: any[] };
+                        const main = unwrapTaskFile(JSON.parse(mainRaw));
                         mainTotal = (main.tasks?.length || 0) + (main.archivedTasks?.length || 0);
                         mainState = mainTotal === 0 ? 'empty' : 'ok';
                     } catch (_e) {
@@ -2541,13 +2572,14 @@ export class TaskSpawner extends EventEmitter {
                 if (mainTotal === 0) {
                     try {
                         const bakRaw = readFileSync(bakPath, 'utf-8');
-                        const bak = JSON.parse(bakRaw) as { tasks?: any[]; archivedTasks?: any[] };
+                        const bak = unwrapTaskFile(JSON.parse(bakRaw));
                         const bakTotal = (bak.tasks?.length || 0) + (bak.archivedTasks?.length || 0);
                         if (bakTotal > 0) {
                             console.warn(
                                 `[TaskSpawner] Main file is ${mainState} but backup has ${bakTotal} tasks — ` +
                                 `restoring from ${bakPath}`
                             );
+                            // Verbatim copy: loadVersioned below handles either shape.
                             atomicWriteFileSync(this.persistencePath, bakRaw);
                         }
                     } catch (_e) {
@@ -2557,9 +2589,21 @@ export class TaskSpawner extends EventEmitter {
             }
 
             if (existsSync(this.persistencePath)) {
-                const data = readFileSync(this.persistencePath, 'utf-8');
-                // Use 'any' for raw persistence to handle migration from old format
-                const persistence = JSON.parse(data) as { tasks: PersistedTask[]; archivedTasks?: any[]; nextTaskNumber?: number; pendingParentNotifications?: Record<string, { childId: string; text: string }[]> };
+                // Versioned envelope with legacy pass-through: the unversioned
+                // shape is exactly the v1 data, so old files load unchanged
+                // (and get rewritten in the envelope by loadVersioned).
+                // archivedTasks is `any[]` here (not ArchivedTaskMetadata[]): the
+                // legacy inline-history migration below inspects fields that
+                // no longer exist on the metadata type.
+                type RawTaskPersistence = Omit<TaskPersistence, 'archivedTasks'> & { archivedTasks?: any[] };
+                const persistence = loadVersioned<RawTaskPersistence>(this.persistencePath, {
+                    currentVersion: TASKS_SCHEMA_VERSION,
+                    defaultData: { tasks: [], archivedTasks: [] },
+                    legacyLoader: (raw) => (raw as RawTaskPersistence) ?? { tasks: [], archivedTasks: [] },
+                });
+                if (!Array.isArray(persistence.tasks)) persistence.tasks = [];
+
+
                 if (typeof persistence.nextTaskNumber === 'number' && persistence.nextTaskNumber > 0) {
                     this.nextTaskNumber = persistence.nextTaskNumber;
                 }
@@ -2637,13 +2681,21 @@ export class TaskSpawner extends EventEmitter {
                 // first load (and gets rewritten split).
                 const archivedPath = this.getArchivedPersistencePath();
                 if (existsSync(archivedPath)) {
-                    try {
-                        const raw = readFileSync(archivedPath, 'utf-8');
-                        const parsed = JSON.parse(raw) as { archivedTasks?: any[] };
-                        persistence.archivedTasks = parsed.archivedTasks || [];
+                    // loadVersioned hands back `defaultData` only when the file
+                    // exists but won't parse (we checked existence above), so a
+                    // sentinel default lets us keep the "unreadable → keep the
+                    // inline copy" behavior.
+                    const UNREADABLE: { archivedTasks: any[] } = { archivedTasks: [] };
+                    const parsed = loadVersioned<{ archivedTasks: any[] }>(archivedPath, {
+                        currentVersion: TASKS_SCHEMA_VERSION,
+                        defaultData: UNREADABLE,
+                        legacyLoader: (raw) => (raw as { archivedTasks: any[] }) ?? { archivedTasks: [] },
+                    });
+                    if (parsed === UNREADABLE) {
+                        console.error('[TaskSpawner] Archived-tasks file unreadable; keeping inline copy');
+                    } else {
+                        persistence.archivedTasks = Array.isArray(parsed.archivedTasks) ? parsed.archivedTasks : [];
                         console.log(`[TaskSpawner] Loaded ${persistence.archivedTasks.length} archived tasks from ${archivedPath}`);
-                    } catch (e) {
-                        console.error('[TaskSpawner] Archived-tasks file unreadable; keeping inline copy', e);
                     }
                 } else if (persistence.archivedTasks?.length) {
                     // First run after the split — persist them to the new file.
@@ -2885,7 +2937,7 @@ export class TaskSpawner extends EventEmitter {
             // an empty one, which would silently destroy history.
             if (archived.length === 0 && existsSync(path)) {
                 try {
-                    const existing = JSON.parse(readFileSync(path, 'utf-8')) as { archivedTasks?: unknown[] };
+                    const existing = unwrapTaskFile(JSON.parse(readFileSync(path, 'utf-8')));
                     if ((existing.archivedTasks?.length || 0) > 0) {
                         console.error(
                             `[TaskSpawner] REFUSING to save archived tasks: would overwrite ` +
@@ -2897,7 +2949,11 @@ export class TaskSpawner extends EventEmitter {
                     // Unparseable — fall through and overwrite.
                 }
             }
-            atomicWriteFileSync(path, JSON.stringify({ archivedTasks: archived }), { backup: true });
+            const envelope: VersionedFile<ArchivedTasksPersistence> = {
+                schemaVersion: TASKS_SCHEMA_VERSION,
+                data: { archivedTasks: archived },
+            };
+            atomicWriteFileSync(path, JSON.stringify(envelope), { backup: true });
             this.archivedDirty = false;
             console.log(`[TaskSpawner] Saved ${archived.length} archived tasks`);
         } catch (error) {
@@ -3044,7 +3100,7 @@ export class TaskSpawner extends EventEmitter {
             if (newTotal === 0 && existsSync(this.persistencePath)) {
                 try {
                     const existingRaw = readFileSync(this.persistencePath, 'utf-8');
-                    const existing = JSON.parse(existingRaw) as { tasks?: any[]; archivedTasks?: any[] };
+                    const existing = unwrapTaskFile(JSON.parse(existingRaw));
                     const existingTotal = (existing.tasks?.length || 0) + (existing.archivedTasks?.length || 0);
                     if (existingTotal > 0) {
                         console.error(
@@ -3065,10 +3121,15 @@ export class TaskSpawner extends EventEmitter {
             // The previous good save is recoverable from .bak if a future load hits
             // an empty/corrupt main file.
             // Not pretty-printed: only machines read this, and the indentation
-            // cost ~6% of every write for no benefit.
+            // cost ~6% of every write for no benefit. (Hand-rolled envelope
+            // rather than saveVersioned() for that reason and for `backup`.)
+            const envelope: VersionedFile<TaskPersistence> = {
+                schemaVersion: TASKS_SCHEMA_VERSION,
+                data: persistence,
+            };
             atomicWriteFileSync(
                 this.persistencePath,
-                JSON.stringify(persistence),
+                JSON.stringify(envelope),
                 { backup: true }
             );
 

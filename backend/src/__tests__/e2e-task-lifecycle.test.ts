@@ -152,8 +152,9 @@ describe.skipIf(SKIP_ON_WINDOWS)('reconnect end-to-end: --resume and --system-pr
     it('reconnecting a disconnected task respawns claude with --resume <sid> and the persisted system prompt', async () => {
         // Seed a disconnected task whose session file exists (created by the fake earlier)
         const taskId2 = 'task-e2e-reconnect-1';
+        // The spawner has saved by now, so the file is a { schemaVersion, data } envelope.
         const tasksFile = JSON.parse(readFileSync(join(base, 'tasks.json'), 'utf8'));
-        tasksFile.tasks = [{
+        tasksFile.data.tasks = [{
             id: taskId2, prompt: 'seeded', workspaceId: workspace,
             createdAt: new Date().toISOString(), lastActivity: new Date().toISOString(),
             lastState: 'idle', wasInterrupted: false, shouldContinue: false,

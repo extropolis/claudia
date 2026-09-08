@@ -148,11 +148,12 @@ describe('session-recovery map', () => {
 
         // Task later gets a NEW session; a lingering/re-created map must not re-pin.
         // Simulate by restoring the map and giving the task a newer sessionId first.
+        // The spawner rewrote tasks.json in the { schemaVersion, data } envelope.
         const tasks = JSON.parse(require('fs').readFileSync(join(base, 'tasks.json'), 'utf8'));
-        expect(tasks.tasks[0].sessionId).toBe(corrected); // first application worked
+        expect(tasks.data.tasks[0].sessionId).toBe(corrected); // first application worked
 
         const newerSid = 'ffffffff-0000-0000-0000-000000000001';
-        tasks.tasks[0].sessionId = newerSid;
+        tasks.data.tasks[0].sessionId = newerSid;
         writeFileSync(join(base, 'tasks.json'), JSON.stringify(tasks));
         renameSync(join(base, 'session-recovery.json.applied'), join(base, 'session-recovery.json'));
 

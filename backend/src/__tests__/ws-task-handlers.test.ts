@@ -159,7 +159,7 @@ describe.skipIf(!SUPPORTS_FAKE_CLI)('task:rename + task:reorder persist across a
         // timer rather than on persistence.
         await waitFor(
             () => JSON.parse(readFileSync(join(env.base, 'tasks.json'), 'utf8')),
-            (j: any) => j.tasks.some((t: any) => t.id === id && t.displayName === 'Renamed By Test'),
+            (j: any) => j.data.tasks.some((t: any) => t.id === id && t.displayName === 'Renamed By Test'),
             10000,
         );
 
