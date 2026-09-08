@@ -54,14 +54,27 @@ export interface PeerCarrier {
 /**
  * Did this request originate on this machine?
  *
- * A forwarded request is never loopback, even from a trusted proxy and even
- * when the proxy itself dials us over 127.0.0.1: the header's presence is proof
- * that the actual client is a hop away. Without that rule, putting nginx in
- * front of Claudia would silently make the token endpoint world-readable.
+ * TWO conditions, and the second is the one that is easy to miss: the socket
+ * peer must be loopback, AND the request must not have been forwarded.
+ *
+ * A forwarded request is never loopback even when the socket says 127.0.0.1,
+ * because the header's presence is proof that the real client is a hop away.
+ * This is not hypothetical — it is the normal case here. The ngrok agent runs
+ * on this machine, so EVERY request arriving over the public tunnel connects
+ * from 127.0.0.1. Treating the socket alone as sufficient would have served
+ * `/api/auth/local` — the API token — to the open internet. The same reasoning
+ * covers putting nginx or Caddy in front of Claudia.
+ *
+ * The header disqualifies regardless of `CLAUDIA_TRUSTED_PROXY`. That variable
+ * governs whether we BELIEVE the forwarded values (see isSecureRequest); it
+ * does not make a forwarded request local, and a client that sets the header
+ * on a genuinely local request only ever loses access it would otherwise have.
  */
 export function isLoopbackPeer(req: PeerCarrier, env: NodeJS.ProcessEnv = process.env): boolean {
+    void env;
     if (!isLoopbackAddress(req.socket?.remoteAddress)) return false;
-    if (isTrustedProxyConfigured(env) && req.headers?.['x-forwarded-for']) return false;
+    const h = req.headers;
+    if (h?.['x-forwarded-for'] || h?.['x-forwarded-host'] || h?.['forwarded']) return false;
     return true;
 }
 

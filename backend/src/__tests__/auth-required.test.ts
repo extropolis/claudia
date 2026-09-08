@@ -199,15 +199,22 @@ describe('loopback bootstrap', () => {
         expect(res.body.token).toMatch(/^[0-9a-f]{64}$/);
     });
 
-    it('is not fooled by a forged X-Forwarded-For (it reads the socket)', async () => {
-        // From loopback the header is irrelevant either way; the point of the
-        // assertion is that presence of the header does not change the answer,
-        // and the non-loopback case below proves the header cannot manufacture
-        // a loopback verdict.
-        const res = await h.req<{ token: string }>(LOOPBACK_ONLY, {
-            headers: { 'x-forwarded-for': '127.0.0.1' },
-        });
-        expect(res.status).toBe(200);
+    it('refuses a FORWARDED request even though the socket is loopback', async () => {
+        // Not a theoretical case. The ngrok agent runs on this machine, so a
+        // request that arrived over the public tunnel reaches the server from
+        // 127.0.0.1 and looks local at the socket. If the socket alone decided
+        // this, `/api/auth/local` would hand the API token to anyone on the
+        // internet who opened the tunnel URL. Any X-Forwarded-* header means
+        // the real client is a hop away, so it is refused.
+        for (const headers of [
+            { 'x-forwarded-for': '127.0.0.1' },
+            { 'x-forwarded-for': '203.0.113.4' },
+            { 'x-forwarded-host': 'somewhere.ngrok-free.app' },
+            { forwarded: 'for=203.0.113.4' },
+        ]) {
+            const res = await h.req<{ error: string }>(LOOPBACK_ONLY, { headers });
+            expect(res.status, JSON.stringify(headers)).toBe(403);
+        }
     });
 
     it('refuses a real non-loopback peer, even one claiming X-Forwarded-For: 127.0.0.1', async () => {

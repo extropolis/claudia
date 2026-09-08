@@ -579,7 +579,14 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
      * reading the token file, which any local process could also do.
      */
     app.get(LOOPBACK_BOOTSTRAP_PATH, (req: Request, res: Response) => {
-        if (!isLoopbackPeer(req)) {
+        // isTunnelHost as well as isLoopbackPeer, and the tunnel check is the
+        // load-bearing one: the ngrok agent runs on THIS machine, so a request
+        // that came in over the public tunnel reaches us from 127.0.0.1 and
+        // looks local at the socket. isLoopbackPeer already refuses anything
+        // carrying X-Forwarded-*, which is what ngrok sends; this is the second
+        // lock, in case a tunnel is ever configured to strip those headers.
+        // Getting this wrong hands the API token to the open internet.
+        if (!isLoopbackPeer(req) || isTunnelHost(req.headers.host || '')) {
             logger.warn('Rejected non-loopback auth bootstrap', {
                 peer: req.socket?.remoteAddress,
                 host: req.headers.host,

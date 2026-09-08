@@ -169,15 +169,27 @@ describe('isLoopbackPeer', () => {
         expect(isLoopbackPeer({ socket: { remoteAddress: '::ffff:127.0.0.1' }, headers: {} }, env())).toBe(true);
     });
 
-    it('refuses a forwarded request even from a trusted proxy on loopback', () => {
+    it('refuses a forwarded request even when the socket really is loopback', () => {
+        // THE CASE THIS EXISTS FOR: the ngrok agent runs on this machine, so
+        // every request arriving over the public tunnel connects from
+        // 127.0.0.1. Trusting the socket alone would serve /api/auth/local —
+        // the API token — to the open internet.
         const forwarded = {
             socket: { remoteAddress: '127.0.0.1' },
             headers: { 'x-forwarded-for': '203.0.113.4' },
         };
-        expect(isLoopbackPeer(forwarded, env("nginx"))).toBe(false);
-        // Without the trusted-proxy assertion the header is ignored entirely,
-        // so the peer is still simply the loopback socket it actually is.
-        expect(isLoopbackPeer(forwarded, env())).toBe(true);
+        expect(isLoopbackPeer(forwarded, env('nginx'))).toBe(false);
+        // And regardless of whether an operator declared a trusted proxy —
+        // that setting governs whether we believe forwarded VALUES, not
+        // whether a forwarded request is local.
+        expect(isLoopbackPeer(forwarded, env())).toBe(false);
+    });
+
+    it('refuses the other forwarding headers too', () => {
+        const base = { socket: { remoteAddress: '127.0.0.1' } };
+        expect(isLoopbackPeer({ ...base, headers: { 'x-forwarded-host': 'x.ngrok.app' } }, env())).toBe(false);
+        expect(isLoopbackPeer({ ...base, headers: { forwarded: 'for=203.0.113.4' } }, env())).toBe(false);
+        expect(isLoopbackPeer({ ...base, headers: {} }, env())).toBe(true);
     });
 
     it('handles a request with no socket at all', () => {
