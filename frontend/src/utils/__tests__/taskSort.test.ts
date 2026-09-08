@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { compareTasksForDisplay, sortTasksForDisplay, createTopLevelResolver, type TaskSortable } from '../taskSort';
+import { compareTasksForDisplay, sortTasksForDisplay, createTopLevelResolver, newestSortable, type TaskSortable } from '../taskSort';
 import type { Task } from '@claudia/shared';
 
 const mk = (id: string, created: number, activity: number, order?: number): Task => ({
@@ -94,5 +94,34 @@ describe('createTopLevelResolver', () => {
         const isTop = createTopLevelResolver([a, b]);
         expect(isTop(a)).toBe(true);
         expect(isTop(b)).toBe(false);
+    });
+});
+
+describe('newestSortable', () => {
+    it('represents a set by its newest createdAt and newest lastActivity independently', () => {
+        const rep = newestSortable([
+            { createdAt: new Date(1000), lastActivity: new Date(9000) },
+            { createdAt: new Date(5000), lastActivity: new Date(2000) },
+            { createdAt: '1970-01-01T00:00:03.000Z' }, // no lastActivity → falls back to createdAt
+        ]);
+        expect(new Date(rep.createdAt).getTime()).toBe(5000);
+        expect(new Date(rep.lastActivity!).getTime()).toBe(9000);
+    });
+
+    it('never yields an Invalid Date for an empty set (would make the comparator NaN)', () => {
+        const rep = newestSortable([]);
+        expect(new Date(rep.createdAt).getTime()).toBe(0);
+        expect(new Date(rep.lastActivity!).getTime()).toBe(0);
+        // A comparator using it stays numeric, so sort remains consistent.
+        const task: TaskSortable = { createdAt: new Date(1000), lastActivity: new Date(1000) };
+        expect(Number.isNaN(compareTasksForDisplay(rep, task, 'date-created'))).toBe(false);
+        expect(compareTasksForDisplay(rep, task, 'date-created')).toBeGreaterThan(0); // empty group sinks
+    });
+
+    it('keeps the sort transitive when an empty group is interleaved', () => {
+        const a = mk('a', 1000, 1000), b = mk('b', 2000, 2000), c = mk('c', 3000, 3000);
+        const G = { id: 'G', ...newestSortable([]) };
+        const sorted = [a, G, b, c].sort((x, y) => compareTasksForDisplay(x, y, 'date-created'));
+        expect(sorted.map(t => t.id)).toEqual(['c', 'b', 'a', 'G']);
     });
 });

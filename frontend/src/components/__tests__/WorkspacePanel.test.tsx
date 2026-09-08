@@ -9,7 +9,7 @@
  * Queried by role / label / text / title only; never by CSS class.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, within, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, within, fireEvent, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Task, Workspace } from '@claudia/shared';
 import { WorkspacePanel } from '../WorkspacePanel';
@@ -538,6 +538,40 @@ describe('WorkspacePanel', () => {
             { taskId: 't3', order: 1 },
             { taskId: 't1', order: 2 },
         ]);
+    });
+
+    it('reorders the task the user grabbed even when Recent sort re-sorts the list mid-drag', () => {
+        // Recent (last-modified) mode, no manual order yet: visible [a, b, c].
+        const { props } = renderWorkspacePanel({
+            store: { taskSortBy: 'last-modified' },
+            tasks: [
+                makeTask('a', '/repos/alpha', { prompt: 'task alpha', lastActivity: new Date(T0.getTime() + 3000) }),
+                makeTask('b', '/repos/alpha', { prompt: 'task bravo', lastActivity: new Date(T0.getTime() + 2000) }),
+                makeTask('c', '/repos/alpha', { prompt: 'task charlie', lastActivity: new Date(T0.getTime() + 1000) }),
+            ],
+        });
+
+        const dataTransfer = makeDataTransfer();
+        fireEvent.dragStart(draggableFor('task alpha'), { dataTransfer }); // alpha is idx 0
+
+        // A busy task produces output mid-drag: charlie's lastActivity jumps, the
+        // list re-sorts to [c, a, b] and alpha is now idx 1.
+        act(() => {
+            useTaskStore.getState().updateTask({
+                ...useTaskStore.getState().tasks.get('c')!,
+                lastActivity: new Date(T0.getTime() + 10_000),
+            });
+        });
+
+        fireEvent.dragEnter(draggableFor('task bravo'), { dataTransfer }); // bravo is idx 2 now
+        fireEvent.dragEnd(draggableFor('task alpha'), { dataTransfer });
+
+        // alpha (the grabbed row) lands at the bottom: [c, b, a].
+        const orders = useTaskStore.getState().tasks;
+        expect(orders.get('c')!.order).toBe(0);
+        expect(orders.get('b')!.order).toBe(1);
+        expect(orders.get('a')!.order).toBe(2);
+        expect(props.onReorderTasksOnServer).toHaveBeenCalledTimes(1);
     });
 
     it('adds a workspace from an OS folder drop that carries a real path', () => {

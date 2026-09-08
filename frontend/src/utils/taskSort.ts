@@ -41,6 +41,34 @@ export function compareTasksForDisplay(
     return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
 }
 
+/**
+ * Represent a set of tasks (e.g. a worktree group) by its newest member so the
+ * group can be interleaved with plain task rows via {@link compareTasksForDisplay}.
+ *
+ * An EMPTY set (a group whose tasks were all lifted under their spawning parent
+ * but which still has nested sub-worktrees) must NOT produce `Math.max()` =
+ * -Infinity: `new Date(-Infinity)` is Invalid and the comparator would return
+ * NaN, which `Array.prototype.sort` treats as "equal" — a non-transitive
+ * comparator that can permute task rows relative to their drag `idx`. Fall back
+ * to the epoch so such a group sinks to the bottom deterministically.
+ */
+export function newestSortable(tasks: TaskSortable[]): TaskSortable {
+    if (tasks.length === 0) return { createdAt: new Date(0), lastActivity: new Date(0) };
+    let maxCreated = -Infinity;
+    let maxActivity = -Infinity;
+    for (const t of tasks) {
+        const created = new Date(t.createdAt).getTime();
+        const activity = new Date(t.lastActivity ?? t.createdAt).getTime();
+        if (created > maxCreated) maxCreated = created;
+        if (activity > maxActivity) maxActivity = activity;
+    }
+    // NaN timestamps compare false above; if every input was invalid, use the epoch.
+    return {
+        createdAt: new Date(Number.isFinite(maxCreated) ? maxCreated : 0),
+        lastActivity: new Date(Number.isFinite(maxActivity) ? maxActivity : 0),
+    };
+}
+
 /** Convenience: return a new array sorted by {@link compareTasksForDisplay}. */
 export function sortTasksForDisplay(taskList: Task[], taskSortBy: TaskSortBy): Task[] {
     return [...taskList].sort((a, b) => compareTasksForDisplay(a, b, taskSortBy));

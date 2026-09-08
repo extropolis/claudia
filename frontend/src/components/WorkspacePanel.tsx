@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace, WorkspacePrInfo, TaskWorkStatus } from '@claudia/shared';
 import {
@@ -8,7 +8,7 @@ import {
 import { getApiBaseUrl } from '../config/api-config';
 import { isSoundEnabled } from '../utils/browserCapabilities';
 import { lastKnownTerminalSize } from '../config/terminal-size';
-import { compareTasksForDisplay, createTopLevelResolver } from '../utils/taskSort';
+import { compareTasksForDisplay, createTopLevelResolver, newestSortable } from '../utils/taskSort';
 import { PrBadge } from './PrBadge';
 import { SystemPromptModal } from './SystemPromptModal';
 import { ConfirmModal } from './ConfirmModal';
@@ -987,25 +987,43 @@ function WorkspaceSection({
     const taskListRef = useRef<HTMLDivElement>(null);
 
     // Task drag state (separate from workspace drag)
-    const [taskDragIndex, setTaskDragIndex] = useState<number | null>(null);
+    // Track the dragged task by ID, not by index. In "Recent" sort mode the
+    // list re-sorts live while a drag is in flight (lastActivity is bumped on
+    // every PTY output chunk of any busy task), so an index captured at
+    // dragstart can point at a different row by the time the user drops.
+    // The index is re-derived from the id against the CURRENT top-level order
+    // at drop time, which is the same order the store's reorderTasks rebuilds.
+    const [taskDragId, setTaskDragId] = useState<string | null>(null);
     const [taskDragOverIndex, setTaskDragOverIndex] = useState<number | null>(null);
 
+    const topLevelTaskIds = useMemo(() => {
+        const isTopLevel = createTopLevelResolver(tasks);
+        return tasks.filter(isTopLevel).map(t => t.id);
+    }, [tasks]);
+    const taskDragIndex = (() => {
+        if (taskDragId === null) return null;
+        const i = topLevelTaskIds.indexOf(taskDragId);
+        return i === -1 ? null : i;
+    })();
+
     const handleTaskDragStart = useCallback((idx: number) => {
-        setTaskDragIndex(idx);
+        const id = topLevelTaskIds[idx];
+        if (id === undefined) return;
+        setTaskDragId(id);
         setTaskDragOverIndex(idx);
-    }, []);
+    }, [topLevelTaskIds]);
 
     const handleTaskDragEnter = useCallback((idx: number) => {
-        if (taskDragIndex !== null) {
+        if (taskDragId !== null) {
             setTaskDragOverIndex(idx);
         }
-    }, [taskDragIndex]);
+    }, [taskDragId]);
 
     const handleTaskDragEnd = useCallback(() => {
         if (taskDragIndex !== null && taskDragOverIndex !== null && taskDragIndex !== taskDragOverIndex) {
             onReorderTasks(taskDragIndex, taskDragOverIndex);
         }
-        setTaskDragIndex(null);
+        setTaskDragId(null);
         setTaskDragOverIndex(null);
     }, [taskDragIndex, taskDragOverIndex, onReorderTasks]);
 
@@ -2058,12 +2076,15 @@ function WorkspaceSection({
                                     // the `idx` handed to the drag handlers and manual reorder
                                     // moves the wrong task (notably in "Recent" sort mode).
                                     // Worktree groups are represented by their newest task.
-                                    const itemSortable = (it: RenderItem) => {
-                                        if (it.type === 'task') return it.task;
-                                        const maxCreated = Math.max(...it.group.tasks.map(t => new Date(t.createdAt).getTime()));
-                                        const maxActivity = Math.max(...it.group.tasks.map(t => new Date(t.lastActivity || t.createdAt).getTime()));
-                                        return { createdAt: new Date(maxCreated), lastActivity: new Date(maxActivity) };
+                                    // A group's own tasks may all have been lifted (leaving
+                                    // only nested sub-worktrees), so collect recursively.
+                                    const collectGroupTasks = (g: WorktreeGroup, out: Task[] = []): Task[] => {
+                                        out.push(...g.tasks);
+                                        for (const sg of g.subGroups ?? []) collectGroupTasks(sg, out);
+                                        return out;
                                     };
+                                    const itemSortable = (it: RenderItem) =>
+                                        it.type === 'task' ? it.task : newestSortable(collectGroupTasks(it.group));
                                     items.sort((a, b) => compareTasksForDisplay(itemSortable(a), itemSortable(b), taskSortBy));
 
                                     const sharedProps = {
