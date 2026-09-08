@@ -1,5 +1,18 @@
-import { describe, it, expect } from 'vitest';
-import { classifyWorktree, type TaskRef, type WorktreeRecord } from '../worktree-reaper.js';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+
+// Shells out to real git repeatedly; the 10s project default flakes under load
+// and on slow CI runners. File-scoped — the project default is unchanged.
+vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+import { execFileSync } from 'child_process';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readFileSync } from 'fs';
+import { join, resolve } from 'path';
+import { homedir } from 'os';
+import {
+    classifyWorktree,
+    removeWorktreeWithUnlockRetry,
+    type TaskRef,
+    type WorktreeRecord,
+} from '../worktree-reaper.js';
 
 const WT: WorktreeRecord = { id: '/repo/.claudia-worktrees/wt-1', worktreeParentId: '/repo' };
 const NOW = new Date('2026-07-24T12:00:00Z').getTime();
@@ -47,5 +60,110 @@ describe('classifyWorktree (retention spec rules)', () => {
     it('ignores tasks belonging to OTHER worktrees', () => {
         const d = classifyWorktree(WT, [task('/repo/.claudia-worktrees/wt-2', daysAgo(1))], [], NOW, 30);
         expect(d.action).toBe('remove'); // still an orphan — the active task is elsewhere
+    });
+});
+
+/**
+ * removeWorktreeWithUnlockRetry — driven against REAL temp git repos.
+ * Base dirs live under homedir(), NOT os.tmpdir(): on macOS tmpdir resolves
+ * under /var, which validateWorkspacePath blocklists.
+ */
+describe('removeWorktreeWithUnlockRetry (real git)', () => {
+    let base: string;
+    let counter = 0;
+
+    const git = (args: string[], cwd: string): string =>
+        execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+
+    function makeRepo(): string {
+        const dir = join(base, `repo-${++counter}`);
+        mkdirSync(dir, { recursive: true });
+        git(['init', '-q', '-b', 'main', '.'], dir);
+        git(['config', 'user.email', 'test@test.com'], dir);
+        git(['config', 'user.name', 'Test User'], dir);
+        git(['config', 'commit.gpgsign', 'false'], dir);
+        writeFileSync(join(dir, 'README.md'), 'hello\n');
+        git(['add', '-A'], dir);
+        git(['commit', '-qm', 'init'], dir);
+        return dir;
+    }
+
+    function addWorktree(repo: string, branch: string): string {
+        const wt = join(repo, '.claudia-worktrees', branch.replace(/\//g, '-'));
+        git(['worktree', 'add', '-q', '-b', branch, wt], repo);
+        return wt;
+    }
+
+    beforeAll(() => {
+        base = mkdtempSync(join(homedir(), '.claudia-test-wtr-'));
+    });
+
+    afterAll(() => {
+        try {
+            rmSync(base, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+        } catch { /* ignore */ }
+    });
+
+    it('removes a clean worktree on the first attempt', async () => {
+        const repo = makeRepo();
+        const wt = addWorktree(repo, 'claudia/task-clean');
+
+        await removeWorktreeWithUnlockRetry(repo, wt);
+
+        expect(existsSync(wt)).toBe(false);
+        expect(git(['worktree', 'list', '--porcelain'], repo)).not.toContain(resolve(wt));
+    });
+
+    it('unlocks and retries when the first removal fails because the worktree is LOCKED', async () => {
+        const repo = makeRepo();
+        const wt = addWorktree(repo, 'claudia/task-locked');
+        git(['worktree', 'lock', '--reason', 'held', wt], repo);
+
+        // sanity: a plain --force remove genuinely fails while locked
+        expect(() => git(['worktree', 'remove', '--force', wt], repo)).toThrow();
+
+        await removeWorktreeWithUnlockRetry(repo, wt);
+        expect(existsSync(wt)).toBe(false);
+    });
+
+    it('rethrows the ORIGINAL failure (not the unlock failure) when the retry cannot help', async () => {
+        const repo = makeRepo();
+        const missing = join(repo, '.claudia-worktrees', 'never-existed');
+
+        await expect(removeWorktreeWithUnlockRetry(repo, missing))
+            .rejects.toThrow(/is not a working tree|No such file or directory/);
+    });
+
+    it('propagates failure when repoPath is not a git repository', async () => {
+        const plain = join(base, `plain-${++counter}`);
+        mkdirSync(plain, { recursive: true });
+
+        await expect(removeWorktreeWithUnlockRetry(plain, join(plain, 'wt')))
+            .rejects.toThrow(/not a git repository/);
+    });
+
+    it('GUARDRAIL: cannot destroy the primary working tree, even with --force', async () => {
+        const repo = makeRepo();
+
+        await expect(removeWorktreeWithUnlockRetry(repo, repo))
+            .rejects.toThrow(/is a main working tree/);
+
+        expect(readFileSync(join(repo, 'README.md'), 'utf-8')).toBe('hello\n');
+        expect(existsSync(join(repo, '.git'))).toBe(true);
+    });
+
+    it('CHARACTERIZATION (known data-loss surface): the retention sweep --force-removes worktrees holding uncommitted work', async () => {
+        // removeWorktreeWithUnlockRetry hard-codes `--force` and performs no
+        // dirty check. classifyWorktree decides purely on task age/ownership,
+        // so an orphaned or retention-expired worktree with uncommitted (or
+        // committed-but-unpushed) work is deleted unrecoverably and silently.
+        // Documented, not endorsed — see the report.
+        const repo = makeRepo();
+        const wt = addWorktree(repo, 'claudia/task-dirty');
+        writeFileSync(join(wt, 'unsaved-work.txt'), 'never pushed anywhere\n');
+        writeFileSync(join(wt, 'README.md'), 'edited but not committed\n');
+
+        await removeWorktreeWithUnlockRetry(repo, wt);
+        expect(existsSync(wt)).toBe(false);
     });
 });

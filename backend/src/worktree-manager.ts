@@ -343,9 +343,13 @@ export class WorktreeManager {
      */
     private async ensureWorktreeDirExcluded(repoPath: string): Promise<void> {
         try {
-            // Locate .git dir (works from main worktree and linked worktrees)
+            // Locate .git dir (works from main worktree and linked worktrees).
+            // --path-format=absolute is REQUIRED: without it git returns the
+            // relative ".git" when run in a main worktree, which then resolves
+            // against the server process's cwd instead of the repo, and the
+            // exclude entry is silently never written.
             const { stdout: gitDir } = await execFileAsync(
-                'git', ['rev-parse', '--git-common-dir'], { cwd: repoPath }
+                'git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: repoPath }
             );
             const excludeFile = join(gitDir.trim(), 'info', 'exclude');
             if (!existsSync(excludeFile)) return;

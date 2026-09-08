@@ -22,20 +22,30 @@ export class VoiceSupervisor extends EventEmitter {
     private anthropic: Anthropic | null = null;
     private customSystemPrompt: string;
 
+    /**
+     * @param options.anthropic Injectable Anthropic client. Test-only seam: when
+     * omitted (always, in production) the client is built from ANTHROPIC_API_KEY
+     * exactly as before. Pass `null` to force the "unavailable" path.
+     */
     constructor(
         supervisorChat: SupervisorChat,
-        taskSpawner: TaskSpawner
+        taskSpawner: TaskSpawner,
+        options?: { anthropic?: Anthropic | null }
     ) {
         super();
         this.supervisorChat = supervisorChat;
         this.taskSpawner = taskSpawner;
 
-        // Initialize Anthropic SDK for streaming (optional - voice features disabled without API key)
-        const apiKey = process.env.ANTHROPIC_API_KEY;
-        if (!apiKey) {
-            console.warn('[VoiceSupervisor] ANTHROPIC_API_KEY not set - voice features will be unavailable');
+        if (options && 'anthropic' in options) {
+            this.anthropic = options.anthropic ?? null;
         } else {
-            this.anthropic = new Anthropic({ apiKey });
+            // Initialize Anthropic SDK for streaming (optional - voice features disabled without API key)
+            const apiKey = process.env.ANTHROPIC_API_KEY;
+            if (!apiKey) {
+                console.warn('[VoiceSupervisor] ANTHROPIC_API_KEY not set - voice features will be unavailable');
+            } else {
+                this.anthropic = new Anthropic({ apiKey });
+            }
         }
 
         // Default system prompt
