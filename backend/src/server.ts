@@ -1752,9 +1752,12 @@ export async function createApp(basePath?: string) {
 
                 const message = parsed;
                 messageTypeForError = message.type;
-                // Only log non-frequent message types to avoid spam
-                if (message.type !== 'task:input' && message.type !== 'task:resize') {
-                    logger.info(`Received message`, { type: message.type });
+                // Per-message logging is debug-only: this fires on every WS frame,
+                // and the high-frequency types (input/resize for both tasks and
+                // shells) drown out everything else. Run with DEBUG=1 to see them.
+                if (message.type !== 'task:input' && message.type !== 'task:resize' &&
+                    message.type !== 'shell:input' && message.type !== 'shell:resize') {
+                    logger.debug(`Received message`, { type: message.type });
                 }
 
                 const payload = message.payload || {};

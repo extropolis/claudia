@@ -18,7 +18,7 @@ import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 import { SharedMcpManager } from './shared-mcp-manager.js';
 import {
     selectTasksToDisconnect,
@@ -41,6 +41,23 @@ function isPlaywrightMcpServer(server: { name: string; args?: string[] }): boole
 }
 
 const logger = createLogger('[TaskSpawner]');
+
+// On Windows, node-pty defaults to ConPTY. Some enterprise EDR software (e.g.
+// CrowdStrike Falcon) hooks ConPTY's console I/O and can stall stdin delivery to
+// the child process while it is mid-turn — the symptom is that input typed/pasted
+// into a busy Claude session is never consumed until the turn ends. Setting
+// CLAUDIA_USE_WINPTY=1 forces node-pty to use the winpty backend instead, whose
+// stdin path EDR may not intercept the same way. No effect off Windows.
+const USE_WINPTY = process.platform === 'win32' && process.env.CLAUDIA_USE_WINPTY === '1';
+if (USE_WINPTY) {
+    logger.info('CLAUDIA_USE_WINPTY=1 set — spawning PTYs with winpty (useConpty:false) instead of ConPTY');
+}
+
+/**
+ * How long the fallback session-file watcher keeps polling before giving up.
+ * Only a fallback path now that tasks pre-assign their session id via --session-id.
+ */
+const SESSION_CAPTURE_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
  * Map legacy permission mode values to actual Claude Code CLI values.
@@ -799,7 +816,7 @@ export class TaskSpawner extends EventEmitter {
                     if (resolved) {
                         resolvedCommand = resolved.command;
                         resolvedArgs = resolved.args;
-                        logger.info(`Optimized MCP server "${server.name}": npx → direct node`, { command: resolvedCommand, args: resolvedArgs });
+                        logger.debug(`Optimized MCP server "${server.name}": npx → direct node`, { command: resolvedCommand, args: resolvedArgs });
                     }
                 }
                 const config: Record<string, unknown> = {
@@ -2106,6 +2123,13 @@ export class TaskSpawner extends EventEmitter {
                     if (process.env.DEBUG_TASKS) {
                         console.log(`[TaskSpawner] Loading task ${persisted.id}`);
                     }
+                    // Claim the persisted session id up-front so a later recovery
+                    // (findSessionForTask at disconnect, or the stale-capture path)
+                    // cannot hand another task a session that is already owned.
+                    if (persisted.sessionId) {
+                        this.sessionToTaskId.set(persisted.sessionId, persisted.id);
+                    }
+
                     this.disconnectedTasks.set(persisted.id, persisted);
 
                     // Restore the taskBackends map from persisted backendType
@@ -2561,6 +2585,41 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Locate the on-disk Claude Code session file for a given session id.
+     *
+     * Claude names session files <sessionId>.jsonl inside a per-workspace project
+     * folder. Normally that folder is deterministic from the workspace path, but a
+     * session can end up under a *different* folder — e.g. the workspace was moved,
+     * a worktree was recreated at a new path, or Claude wrote it under a sibling
+     * project dir. So we check the expected folder first, then fall back to a scan
+     * of ~/.claude/projects for the same <sessionId>.jsonl before concluding it is
+     * truly gone. Returns the full path, or null if not found anywhere.
+     */
+    private findSessionFile(workspacePath: string, sessionId: string): string | null {
+        const expected = join(this.getClaudeProjectsDir(workspacePath), `${sessionId}.jsonl`);
+        if (existsSync(expected)) return expected;
+
+        // Fallback: scan every project folder for <sessionId>.jsonl. This is a cheap
+        // existsSync per folder (no file reads), unlike findSessionForTask which has
+        // to grep contents.
+        try {
+            const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+            const projectsRoot = join(homeDir, '.claude', 'projects');
+            if (!existsSync(projectsRoot)) return null;
+            for (const folder of readdirSync(projectsRoot)) {
+                const candidate = join(projectsRoot, folder, `${sessionId}.jsonl`);
+                if (existsSync(candidate)) {
+                    logger.info('Resolved session file via projects-dir fallback scan', { sessionId, folder });
+                    return candidate;
+                }
+            }
+        } catch (err) {
+            logger.warn('Session file fallback scan failed', { error: err instanceof Error ? err.message : String(err) });
+        }
+        return null;
+    }
+
+    /**
      * Find the Claude session that belongs to a task by scanning a workspace's
      * project dir for the most recently-modified .jsonl that references the
      * task's ID. Claude embeds the owning task ID (via the claudia MCP "context
@@ -2688,8 +2747,17 @@ export class TaskSpawner extends EventEmitter {
                         const sessionId = file.replace('.jsonl', '');
                         const task = this.tasks.get(taskId);
 
-                        if (task && !task.sessionId) {
-                            logger.info(`Captured session for task`, { taskId, sessionId });
+                        // Capture the new session id when the task has none, OR when
+                        // its current id is STALE — it points at a .jsonl that no longer
+                        // exists anywhere (e.g. we skipped --resume because the file was
+                        // gone, so Claude started a brand-new session). Without the stale
+                        // case a task that lost its file stays pinned to the dead id and
+                        // never adopts the session it is actually running in.
+                        const currentStale = !!task?.sessionId &&
+                            !this.findSessionFile(workspaceId, task.sessionId);
+                        if (task && (!task.sessionId || currentStale)) {
+                            logger.info(`Captured session for task`, { taskId, sessionId, replacedStale: currentStale });
+                            if (task.sessionId) this.sessionToTaskId.delete(task.sessionId);
                             task.sessionId = sessionId;
                             this.sessionToTaskId.set(sessionId, taskId);
                             // Save immediately (not debounced) - session IDs are critical state
@@ -2705,9 +2773,15 @@ export class TaskSpawner extends EventEmitter {
 
                 existingFiles = new Set(currentFiles);
 
+                // Capture window: Claude Code can take well over 30s to first flush
+                // its session .jsonl on a slow/long turn. A premature timeout meant the
+                // sessionId was never captured and the task's history became
+                // unrecoverable on the next resume. 10 minutes covers realistic
+                // first-write latency; the interval is cheap (a single readdir/500ms).
+                // With --session-id pre-assignment this is only a fallback path.
                 const pending = this.pendingSessionCapture.get(taskId);
-                if (pending && Date.now() - pending.startTime > 30000) {
-                    logger.warn(`Session capture timeout`, { taskId });
+                if (pending && Date.now() - pending.startTime > SESSION_CAPTURE_TIMEOUT_MS) {
+                    logger.warn(`Session capture timeout`, { taskId, afterMs: SESSION_CAPTURE_TIMEOUT_MS });
                     this.clearSessionCapture(taskId);
                 }
             } catch (_e) {
@@ -3426,11 +3500,22 @@ export class TaskSpawner extends EventEmitter {
         console.log(`[TaskSpawner] createTaskWithClaudeCode called with workspaceId: "${workspaceId}"`);
         const id = `task-${Date.now()}-${randomBytes(5).toString('hex')}`;
 
+        // Pre-assign the Claude Code session id instead of watching the filesystem to
+        // discover it. Claude Code accepts `--session-id <uuid>` (verified on 2.1.263)
+        // and uses exactly that id for the conversation's .jsonl. This removes the
+        // capture race that lost history: previously Claudia spawned Claude with no id
+        // and polled ~/.claude/projects for a newly-created file, but Claude flushes
+        // that file lazily (sometimes only at clean exit). A backend restart or a
+        // disconnect before the flush left sessionId null and the conversation
+        // unrecoverable on resume. Now the id is known deterministically at spawn.
+        const preassignedSessionId = randomUUID();
+
         const customArgs = process.env['CC_CLAUDE_ARGS']
             ? process.env['CC_CLAUDE_ARGS'].split(' ')
             : [];
 
         const claudeArgs = [...customArgs];
+        claudeArgs.push('--session-id', preassignedSessionId);
 
         const skipPerms = this.configStore?.getSkipPermissions();
         const switchesForPerms = this.configStore?.getClaudeCodeSwitches();
@@ -3610,6 +3695,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             rows: initialRows || 40,  // Use provided rows or default 40 (increased from 24)
             cwd: workspaceId,
             env: taskEnv,
+            ...(USE_WINPTY ? { useConpty: false } : {}),
         });
 
         const now = new Date();
@@ -3626,7 +3712,8 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             isActive: false,
             initialPromptSent: false,
             pendingPrompt: prompt,
-            sessionId: null,
+            // Known up-front because we passed it via --session-id (no capture race).
+            sessionId: preassignedSessionId,
             gitStateBefore: undefined, // Will be set asynchronously below
             systemPrompt: systemPrompt?.trim() || undefined,
             lastOutputLength: 0,  // Initialize for state polling
@@ -3652,8 +3739,15 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         this.setupProcessHandlers(task);
         this.tasks.set(id, task);
         this.taskBackends.set(id, 'claude-code');
-        this.scheduleSave();
+        // Register + persist the pre-assigned session id immediately (NOT debounced).
+        // This is the critical state that must survive a Windows restart, where
+        // TerminateProcess skips every exit handler and a debounced save is lost.
+        this.sessionToTaskId.set(preassignedSessionId, id);
+        this.saveTasks();
         this.emit('taskCreated', this.toPublicTask(task));
+        // Fallback only: with --session-id the id is already known, so the capture
+        // handler (guarded on !task.sessionId) is a no-op unless the id goes stale.
+        // Kept for resilience if a Claude build ever ignores --session-id.
         this.startSessionCapture(id, workspaceId);
 
         // Fallback: if the ready signal is never detected (e.g., Claude Code changed its
@@ -4157,7 +4251,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             }
         }
 
-        console.log(`[TaskSpawner] setTaskActive called: taskId=${taskId}, active=${active}, inTasks=${this.tasks.has(taskId)}, inDisconnected=${this.disconnectedTasks.has(taskId)}`);
+        logger.debug(`setTaskActive called: taskId=${taskId}, active=${active}, inTasks=${this.tasks.has(taskId)}, inDisconnected=${this.disconnectedTasks.has(taskId)}`);
         if (active && this.disconnectedTasks.has(taskId)) {
             // Don't auto-reconnect on click - just show the stored history.
             // The task will be reconnected when the user actually sends input (via writeToTask).
@@ -4197,10 +4291,10 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         }
 
         const task = this.tasks.get(taskId);
-        console.log(`[TaskSpawner] setTaskActive: taskId=${taskId}, active=${active}, taskFound=${!!task}, currentIsActive=${task?.isActive}, ptyPid=${task?.process?.pid}`);
+        logger.debug(`setTaskActive: taskId=${taskId}, active=${active}, taskFound=${!!task}, currentIsActive=${task?.isActive}, ptyPid=${task?.process?.pid}`);
         if (task) {
             task.isActive = active;
-            console.log(`[TaskSpawner] Set task.isActive to ${active} for ${taskId}`);
+            logger.debug(`Set task.isActive to ${active} for ${taskId}`);
 
             if (active) {
                 // Notify backend if using OpenCode
@@ -4524,7 +4618,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
         if (taskBackend === 'opencode' && this.backend) {
-            console.log(`[TaskSpawner] Writing to OpenCode backend for task ${taskId}`);
+            logger.debug(`Writing to OpenCode backend for task ${taskId}`);
             this.backend.sendInput(taskId, data);
             return;
         }
@@ -4605,16 +4699,18 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                 console.log(`[TaskSpawner] Failed to reconnect exited task ${taskId} for write`);
             }
         } else {
-            // Single keypress or task is busy — write directly.
-            // For multi-char messages, wrap in bracketed paste so they aren't
-            // truncated by the TUI (same fix as the idle/initial paths).
-            if (hasMessageContent) {
-                const msg = data.slice(0, -1);
-                const safeMsg = msg.replace(/\x1b\[201~/g, '');
-                task.process.write(`\x1b[200~${safeMsg}\x1b[201~${data.slice(-1)}`);
-            } else {
-                task.process.write(data);
-            }
+            // Single keypress or task is busy - write raw, exactly as received.
+            //
+            // Do NOT wrap busy-task input in bracketed paste (ESC[200~ ... ESC[201~).
+            // #69 added that wrapping here to stop front-truncation of large pastes,
+            // but it regressed the common case: while Claude is mid-turn its TUI is
+            // rapidly re-rendering, and a bracketed-paste sequence arriving in that
+            // window gets mishandled, so the queued message is silently dropped.
+            // Raw passthrough lets the TUI queue the input exactly as if it had been
+            // typed locally - which is why the plain `claude` CLI never had this bug,
+            // nothing wraps its stdin. The idle/initial paths above keep the
+            // bracketed-paste treatment, where it is correct and needed.
+            task.process.write(data);
         }
     }
 
@@ -5189,12 +5285,15 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
         let ptyProcess: IPty;
 
-        // Check if session file exists before trying to resume
+        // Check if the session file exists before trying to resume. findSessionFile
+        // also covers the case where the .jsonl lives under a different project
+        // folder than the workspace path implies (workspace moved, worktree recreated
+        // at a new path), which a bare existsSync on the expected path misses.
         let sessionIdToUse = persisted.sessionId;
         if (sessionIdToUse) {
             const claudeDir = this.getClaudeProjectsDir(persisted.workspaceId);
-            const sessionFilePath = join(claudeDir, `${sessionIdToUse}.jsonl`);
-            if (!existsSync(sessionFilePath)) {
+            const sessionFilePath = this.findSessionFile(persisted.workspaceId, sessionIdToUse);
+            if (!sessionFilePath) {
                 // The persisted session file is gone. Starting fresh here would make the
                 // PTY capture a brand-new empty session ID and permanently orphan the
                 // task's real conversation (this is exactly how a chaotic multi-task
@@ -5209,12 +5308,20 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                     persisted.sessionId = recovered;
                     this.scheduleSave();
                 } else {
-                    console.log(`[TaskSpawner] Session file not found for ${taskId}: ${sessionFilePath}`);
-                    console.log(`[TaskSpawner] Will start fresh session instead of resuming`);
-                    sessionIdToUse = null;
-                    // Clear the invalid session ID from persisted data
-                    persisted.sessionId = null;
-                    this.scheduleSave();
+                    // Skip --resume for THIS launch, but do NOT null persisted.sessionId.
+                    // Nulling it was destructive: a single transient miss (worktree
+                    // briefly unmounted, FS hiccup, file not yet flushed) permanently
+                    // discarded the session, so recovery was impossible even after the
+                    // file reappeared. Keeping the id lets a later reconnect succeed.
+                    // If Claude instead starts a genuinely new session, the capture
+                    // handler notices the id is stale and swaps in the new one.
+                    logger.warn('Session file not found; starting fresh this launch but preserving sessionId for future recovery', {
+                        taskId,
+                        sessionId: sessionIdToUse,
+                        workspaceId: persisted.workspaceId,
+                    });
+                    sessionIdToUse = null; // skip --resume for this launch only
+                    // NOTE: persisted.sessionId is intentionally left intact.
                 }
             }
         }
@@ -5309,6 +5416,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                 rows: spawnRows,
                 cwd: persisted.workspaceId,
                 env: taskEnv,
+                ...(USE_WINPTY ? { useConpty: false } : {}),
             });
         }
 
@@ -5404,9 +5512,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             initialPromptSent: !needsDelivery,  // False if we have a prompt/message to deliver on ready
             pendingPrompt: deliverOnReady,  // Continuation or the user's first message
             pendingFollowupInputs: followupInputs.length > 0 ? [...followupInputs] : undefined,  // User's message, delivered after a 'continue' resolves
-            // Use sessionIdToUse (not persisted.sessionId) — if the session file was missing,
-            // sessionIdToUse was cleared to null so the PTY handler can capture the new session ID.
-            sessionId: sessionIdToUse,
+            // Keep the original persisted.sessionId even when we skipped --resume this
+            // launch (file temporarily missing), so recovery stays possible if the file
+            // reappears. If Claude starts a genuinely new session instead, the
+            // session-capture handler detects the stale id and overwrites it.
+            sessionId: persisted.sessionId,
             lastOutputLength: 0,  // Initialize for state polling
             totalOutputSize: 0,  // Incremental output size tracking
             savedBufferCount: 0,  // Incremental history saves
@@ -5548,6 +5658,28 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
         console.log(`[TaskSpawner] Disconnecting task ${taskId} (simulating restart)`);
 
+        // Last-chance session capture: if this task never got a sessionId (a legacy
+        // task, or an OpenCode task whose backend event never landed), try to resolve
+        // it from disk before we persist. A null sessionId here means the conversation
+        // is lost on the next resume. findSessionForTask is the safe resolver - it
+        // only adopts an UNAMBIGUOUS match on the task id, never "the newest file",
+        // because adopting the wrong session is worse than starting fresh: it gets
+        // persisted and resumed forever.
+        // Only for claude-code tasks: findSessionForTask greps Claude transcripts,
+        // which is both meaningless and wasted I/O for any other backend. With
+        // --session-id pre-assignment a claude-code task normally already has an id,
+        // so this scan is reached only by legacy tasks persisted before that change.
+        let recoveredSessionAtDisconnect = false;
+        if (!task.sessionId && (this.taskBackends.get(taskId) || 'claude-code') === 'claude-code') {
+            const recovered = this.findSessionForTask(taskId, this.getClaudeProjectsDir(task.workspaceId));
+            if (recovered && !this.sessionToTaskId.has(recovered)) {
+                logger.info('Recovered sessionId at disconnect', { taskId, sessionId: recovered });
+                task.sessionId = recovered;
+                this.sessionToTaskId.set(recovered, taskId);
+                recoveredSessionAtDisconnect = true;
+            }
+        }
+
         // Kill the process
         try {
             task.process.kill();
@@ -5579,7 +5711,14 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         this.disconnectedTasks.set(taskId, persisted);
         this.tasks.delete(taskId);
 
-        this.scheduleSave();
+        // A just-recovered sessionId is exactly the state a debounced save loses on
+        // an abrupt restart, which is the failure this recovery exists to prevent.
+        // Flush it synchronously; the ordinary path stays debounced.
+        if (recoveredSessionAtDisconnect) {
+            this.saveTasks();
+        } else {
+            this.scheduleSave();
+        }
         this.emit('taskStateChanged', { ...this.toPublicTask(task), state: 'disconnected' });
         this.emit('tasksUpdated');
 

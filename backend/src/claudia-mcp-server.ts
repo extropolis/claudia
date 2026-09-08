@@ -356,15 +356,31 @@ export async function getWorkspaceScopeFor(
             for (const ws of workspaces) {
                 if (resolveWorktreeRoot(wsById, ws.id) === root && ws.worktreeParentId) ids.add(ws.id);
             }
+            log.debug(`Workspace scope for ${workspaceId}: root=${root}`);
+        } else {
+            // Say so loudly. A silent self-only fallback makes claudia_list_tasks
+            // return just the caller, which every agent is told to read as
+            // "nothing else is running" - that is how two agents end up opening
+            // two PRs for the same issue.
+            log.error(
+                `Workspace scope: /api/workspaces returned HTTP ${response.status}. ` +
+                `Falling back to this workspace only (${workspaceId}); sibling worktree ` +
+                `tasks will NOT be visible.`
+            );
         }
-    } catch {
-        // Backend unreachable — fall through to self-only scope below
+    } catch (error) {
+        log.error(
+            `Workspace scope: could not reach the Claudia backend at ${baseUrl} ` +
+            `(${error instanceof Error ? error.message : String(error)}). Falling back to ` +
+            `this workspace only (${workspaceId}); sibling worktree tasks will NOT be visible.`
+        );
     }
 
     // Always include the session's own workspace (also the fallback when the
     // backend fetch fails or the workspace isn't registered)
     ids.add(workspaceId);
 
+    log.debug(`Workspace scope resolved: ${ids.size} workspace(s) for ${workspaceId}`);
     return { ids, wsById };
 }
 
