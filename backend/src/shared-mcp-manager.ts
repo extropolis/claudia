@@ -24,7 +24,7 @@
  */
 
 import { spawn } from 'child_process';
-import { existsSync, readFileSync, writeFileSync, unlinkSync, openSync, closeSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync, openSync, closeSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -57,6 +57,11 @@ export interface SharedMcpStatus {
     adopted: boolean;
 }
 
+export interface SharedMcpManagerOptions {
+    /** Directory for the pid and log files. Falls back to `backend/` when unset. */
+    dataDir?: string;
+}
+
 export class SharedMcpManager {
     private port: number;
     private pid?: number;
@@ -66,20 +71,30 @@ export class SharedMcpManager {
     /** Guards against concurrent respawns from overlapping health checks. */
     private starting?: Promise<boolean>;
 
-    constructor(port: number = DEFAULT_SHARED_PLAYWRIGHT_PORT) {
+    /**
+     * Where the pid and log files live. Defaults to `backend/` (the legacy
+     * location) so an install that sets nothing keeps adopting the server it
+     * already has; a container passes its mounted data directory.
+     */
+    private readonly stateDir: string;
+
+    constructor(port: number = DEFAULT_SHARED_PLAYWRIGHT_PORT, options: SharedMcpManagerOptions = {}) {
         this.port = port;
+        this.stateDir = options.dataDir ?? join(__dirname, '..');
     }
 
     get url(): string {
         return `http://${BIND_HOST}:${this.port}/mcp`;
     }
 
-    private get pidFile(): string {
-        return join(__dirname, '..', `.shared-playwright-mcp-${this.port}.pid`);
+    /** Pid file recording the detached server so a later boot can adopt it. */
+    get pidFile(): string {
+        return join(this.stateDir, `.shared-playwright-mcp-${this.port}.pid`);
     }
 
-    private get logFile(): string {
-        return join(__dirname, '..', `.shared-playwright-mcp-${this.port}.log`);
+    /** Append-only stdout/stderr log of the detached server. */
+    get logFile(): string {
+        return join(this.stateDir, `.shared-playwright-mcp-${this.port}.log`);
     }
 
     getStatus(): SharedMcpStatus {
@@ -199,6 +214,7 @@ export class SharedMcpManager {
         let stdio: 'ignore' | ['ignore', number, number] = 'ignore';
         let logFd: number | undefined;
         try {
+            mkdirSync(this.stateDir, { recursive: true });
             logFd = openSync(this.logFile, 'a');
             stdio = ['ignore', logFd, logFd];
         } catch (err) {

@@ -701,10 +701,10 @@ export async function createApp(basePath?: string) {
     cronScheduler.start();
 
     // TodoStore for per-task user TODOs
-    const todoStore = new TodoStore();
+    const todoStore = new TodoStore(dataDir);
 
     // CheckpointStore for per-task git snapshots / restore points
-    const checkpointStore = new CheckpointStore(basePath);
+    const checkpointStore = new CheckpointStore(dataDir);
 
     // Wire up tunnel events for broadcasting
     tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
