@@ -872,6 +872,23 @@ describe('useWebSocket — inbound dispatch', () => {
         expect(useTaskStore.getState().chatMessages).toHaveLength(1);
     });
 
+    it('usage:updated stores the plan usage pushed by the server', () => {
+        const { ws } = mountConnected();
+        const usage = {
+            fiveHour: { utilization: 60, resetsAt: '2026-09-08T03:30:00Z' },
+            sevenDay: { utilization: 45, resetsAt: '2026-09-09T15:00:00Z' },
+            sevenDayByModel: [{ model: 'fable', utilization: 33, resetsAt: '2026-09-09T15:00:00Z' }],
+            planLabel: 'Max (20x)',
+            fetchedAt: '2026-09-08T02:45:00Z',
+        };
+
+        act(() => {
+            ws.simulateMessage('usage:updated', usage);
+        });
+
+        expect(useTaskStore.getState().planUsage).toEqual(usage);
+    });
+
     it('task:tokenUsage updates usage for the task', () => {
         const { ws } = mountInitialized([makeTask('t1')]);
 

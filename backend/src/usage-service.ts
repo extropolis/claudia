@@ -32,6 +32,13 @@ export interface UsageServiceDeps {
     readCreds?: () => Promise<OAuthCredentials | null>;
     detectVersion?: () => Promise<string>;
     now?: () => number;
+    /**
+     * Inert mode: never read credentials, never touch the network, never poll.
+     * getUsage() resolves to `unavailable` with reason 'disabled'. The server
+     * enables this under vitest (integration suites boot dozens of servers and
+     * must not hammer the real endpoint) and via CLAUDIA_PLAN_USAGE=off.
+     */
+    disabled?: boolean;
 }
 
 /** Detect the local Claude Code version and return a `claude-code/<x.y.z>` UA. */
@@ -61,6 +68,7 @@ export class UsageService {
     private readonly readCreds: () => Promise<OAuthCredentials | null>;
     private readonly detectVersion: () => Promise<string>;
     private readonly now: () => number;
+    private readonly disabled: boolean;
 
     private lastGood: PlanUsage | null = null;
     private lastGoodAtMs = 0;
@@ -76,6 +84,8 @@ export class UsageService {
         this.readCreds = deps.readCreds ?? readOAuthCredentials;
         this.detectVersion = deps.detectVersion ?? defaultDetectVersion;
         this.now = deps.now ?? Date.now;
+        this.disabled = deps.disabled ?? false;
+        if (this.disabled) logger.info('Plan usage service disabled; no credential reads or upstream fetches will occur');
     }
 
     private unavailable(reason: PlanUsage['reason']): PlanUsage {
@@ -130,6 +140,8 @@ export class UsageService {
      * failures are encoded in `unavailable`/`stale`/`reason`.
      */
     async getUsage(forceRefresh = false): Promise<PlanUsage> {
+        if (this.disabled) return this.unavailable('disabled');
+
         // Coalesce concurrent callers onto a single in-flight fetch. This guard
         // must be the first thing we do — and inFlight must be assigned before
         // any `await` — so that two callers arriving in the same tick cannot
@@ -247,7 +259,7 @@ export class UsageService {
      * refreshed usage differs from the previous value, `onUpdate` is invoked.
      */
     startPolling(hasClients: () => boolean, onUpdate?: (u: PlanUsage) => void): void {
-        if (this.pollTimer) return;
+        if (this.pollTimer || this.disabled) return;
         logger.info('Starting background plan-usage polling', { intervalMs: POLL_INTERVAL_MS });
         this.pollTimer = setInterval(() => {
             if (!hasClients()) {

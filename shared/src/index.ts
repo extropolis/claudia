@@ -560,7 +560,7 @@ export interface PlanUsage {
     fetchedAt: string; // ISO
     stale?: boolean; // served from cache after a failed refresh
     unavailable?: boolean; // could not fetch at all
-    reason?: 'auth' | 'rate_limited' | 'no_token' | 'network' | 'unsupported_platform';
+    reason?: 'auth' | 'rate_limited' | 'no_token' | 'network' | 'unsupported_platform' | 'disabled';
 }
 
 // NOTE: the .js extension is REQUIRED. This package is ESM ("type": "module")

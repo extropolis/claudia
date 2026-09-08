@@ -419,7 +419,10 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
 
     // Plan usage service (Anthropic OAuth usage endpoint). Hard-cached and
     // slowly polled — see usage-service.ts for the rate-limit discipline.
-    const usageService = new UsageService();
+    // Inert under vitest (integration suites boot many servers; none of them
+    // may touch the OS keychain or the live endpoint) and when opted out.
+    const planUsageDisabled = process.env['CLAUDIA_PLAN_USAGE'] === 'off' || !!process.env['VITEST'];
+    const usageService = new UsageService({ disabled: planUsageDisabled });
 
     // TunnelManager for mobile remote access (ngrok-based). Created before the
     // CORS middleware because that middleware needs to consult the active
@@ -2002,6 +2005,13 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
         if (tunnelStatus.active) {
             ws.send(JSON.stringify({ type: 'tunnel:status' as WSMessageType, payload: tunnelStatus }));
         }
+        // Push current plan usage to the new client. Served from the hard cache
+        // (or a single gated fetch), so a reconnect storm cannot hammer upstream.
+        void usageService.getUsage().then((usage) => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'usage:updated', payload: usage }));
+            }
+        });
 
         ws.on('message', async (data: Buffer) => {
             let messageTypeForError: string | undefined;

@@ -164,12 +164,8 @@ export function useWebSocket() {
             setConnected(true);
             // Reset reconnection attempts on successful connection
             reconnectAttempts.current = 0;
-            // Request current plan usage on (re)connect.
-            try {
-                ws.send(JSON.stringify({ type: 'usage:get' }));
-            } catch (err) {
-                console.warn('[WebSocket] Failed to request usage on connect:', err);
-            }
+            // Plan usage is pushed by the server (`usage:updated`) right after
+            // `init`, so nothing needs requesting here.
         };
 
         ws.onclose = (event) => {
