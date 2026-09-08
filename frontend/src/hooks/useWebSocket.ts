@@ -788,8 +788,10 @@ export function useWebSocket() {
         sendMessage('task:reconnect', { taskId });
     }, [sendMessage]);
 
-    const archiveTask = useCallback((taskId: string) => {
-        sendMessage('task:archive', { taskId });
+    // `source` distinguishes a direct user action from an agent-requested delete
+    // that the user merely approved — the backend logs it for provenance.
+    const archiveTask = useCallback((taskId: string, source: 'user' | 'mcp' = 'user') => {
+        sendMessage('task:archive', { taskId, source });
     }, [sendMessage]);
 
     const rejectDeleteRequest = useCallback((taskId: string, requestId: string) => {

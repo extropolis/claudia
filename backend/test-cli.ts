@@ -43,6 +43,8 @@ interface TestConfig {
     supervisorChat: boolean;  // Use supervisor chat (supervisor:chat:message)
     // Archived task operations
     listArchivedTasks: boolean;  // List all archived tasks
+    searchArchived: string | null;  // Search archived tasks by text
+    searchDeep: boolean;  // Also scan archived history (base64-decoded) when searching
     restoreArchivedTask: boolean;  // Restore an archived task
     deleteArchivedTask: boolean;   // Delete an archived task permanently
     continueArchivedTask: boolean; // Continue an archived task (restore + reconnect)
@@ -215,6 +217,9 @@ class TestCLI {
                 } else if (this.config.supervisorChat) {
                     // Use supervisor chat
                     this.sendSupervisorChat(this.config.testMessage, this.config.taskId || undefined);
+                } else if (this.config.searchArchived) {
+                    // Search archived tasks (metadata, optionally history)
+                    this.sendSearchArchivedTasks(this.config.searchArchived, this.config.searchDeep);
                 } else if (this.config.listArchivedTasks) {
                     // List archived tasks
                     this.sendListArchivedTasks();
@@ -574,6 +579,41 @@ class TestCLI {
 
         console.log('📦 Requesting archived tasks...');
         this.ws.send(JSON.stringify(message));
+    }
+
+    private sendSearchArchivedTasks(query: string, deep: boolean): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot search archived tasks: WebSocket not connected');
+            return;
+        }
+
+        console.log(`🔎 Searching archived tasks for "${query}"${deep ? ' (deep: scanning history)' : ''}...`);
+        this.ws.send(JSON.stringify({
+            type: 'task:archived:search',
+            payload: { query, deep }
+        }));
+    }
+
+    private handleArchivedSearchResults(payload: { query: string; deep: boolean; matches: any[] }): void {
+        const { query, deep, matches } = payload;
+        console.log('');
+        console.log(`🔎 ARCHIVED SEARCH — "${query}"${deep ? ' (deep)' : ''}: ${matches.length} match(es)`);
+        console.log('─'.repeat(80));
+        if (matches.length === 0) {
+            console.log('  No archived tasks matched.');
+            if (!deep) console.log('  Tip: add --deep to also scan archived terminal history.');
+        }
+        for (const m of matches) {
+            console.log(`  ${m.id}`);
+            console.log(`    title     : ${m.displayName || '(untitled)'}`);
+            console.log(`    prompt    : ${String(m.prompt || '').replace(/\s+/g, ' ').slice(0, 70)}`);
+            console.log(`    workspace : ${m.workspaceId}`);
+            console.log(`    activity  : ${m.lastActivity}`);
+            console.log(`    matched   : ${(m.matchedIn || []).join(', ')}`);
+            if (m.snippet) console.log(`    snippet   : …${m.snippet.slice(0, 140)}…`);
+            console.log('');
+        }
+        setTimeout(() => this.cleanup(), 250);
     }
 
     private sendRestoreArchivedTask(taskId: string): void {
@@ -940,6 +980,10 @@ class TestCLI {
 
             case 'task:archived:list':
                 this.handleArchivedTaskList(message.payload as { tasks: Task[] });
+                break;
+
+            case 'task:archived:search':
+                this.handleArchivedSearchResults(message.payload as { query: string; deep: boolean; matches: any[] });
                 break;
 
             case 'task:archived:restored':
@@ -1323,6 +1367,8 @@ function parseArgs(): TestConfig {
     let imagePath: string | null = null;
     let supervisorChat = false;
     let listArchivedTasks = false;
+    let searchArchived: string | null = null;
+    let searchDeep = false;
     let restoreArchivedTask = false;
     let deleteArchivedTask = false;
     let continueArchivedTask = false;
@@ -1471,6 +1517,12 @@ function parseArgs(): TestConfig {
                 break;
             case '--list-archived':
                 listArchivedTasks = true;
+                break;
+            case '--search-archived':
+                searchArchived = args[++i];
+                break;
+            case '--deep':
+                searchDeep = true;
                 break;
             case '--restore-archived':
                 restoreArchivedTask = true;
@@ -1659,6 +1711,9 @@ WORKSPACE OPERATIONS (rename/references):
 
 ARCHIVED TASK OPERATIONS:
   --list-archived          List all archived tasks
+  --search-archived <text> Search archived tasks by title/prompt/workspace
+  --deep                   With --search-archived, also scan archived terminal
+                           history (base64-decoded; slower but finds untitled tasks)
   --restore-archived       Restore an archived task (requires --task-id)
   --continue-archived      Continue an archived task - restores and reconnects (requires --task-id)
   --delete-archived        Permanently delete an archived task (requires --task-id)
@@ -1762,6 +1817,9 @@ Examples:
   # List archived tasks
   npx tsx test-cli.ts --list-archived
 
+  # Search archived tasks (metadata only, then including history)
+  npx tsx test-cli.ts --search-archived "security vulnerability" --deep
+
   # Restore an archived task
   npx tsx test-cli.ts --restore-archived --task-id task-123456
 
@@ -1859,6 +1917,8 @@ Examples:
         imagePath,
         supervisorChat,
         listArchivedTasks,
+        searchArchived,
+        searchDeep,
         restoreArchivedTask,
         deleteArchivedTask,
         continueArchivedTask,

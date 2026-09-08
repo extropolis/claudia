@@ -863,8 +863,9 @@ describe('WorkspacePanel', () => {
         fireEvent.click(spared);
         fireEvent.click(screen.getByRole('button', { name: 'Delete 1' }));
 
-        expect(props.onArchiveTask).toHaveBeenCalledWith('t1');
-        expect(props.onArchiveTask).not.toHaveBeenCalledWith('t2');
+        // 'mcp' provenance: this archive was agent-requested, merely user-approved.
+        expect(props.onArchiveTask).toHaveBeenCalledWith('t1', 'mcp');
+        expect(props.onArchiveTask).not.toHaveBeenCalledWith('t2', 'mcp');
         expect(props.onRejectDeleteRequest).toHaveBeenCalledWith('t2', 'req-2');
         expect(props.onRejectDeleteRequest).not.toHaveBeenCalledWith('t1', 'req-1');
         expect(useTaskStore.getState().pendingDeleteRequests).toEqual([]);

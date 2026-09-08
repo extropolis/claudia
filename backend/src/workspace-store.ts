@@ -35,9 +35,22 @@ const DEFAULT_CONFIG: WorkspaceConfig = {
 
 const MAX_RECENT_WORKSPACES = 10;  // Keep only the last 10 recent workspaces
 
+/**
+ * Heuristic: does this path look like a Claudia-managed git worktree directory?
+ * Worktrees live under a `.claudia-worktrees` (or legacy `.claude-worktrees`)
+ * folder and are named `claudia-task-*`. Used to keep transient worktree dirs out
+ * of the recent-workspaces list. Matches both `/` and `\` separators.
+ */
+function isWorktreePath(p: string): boolean {
+    return /[\\/]\.claud(ia|e)-worktrees[\\/]/.test(p) || /[\\/]claudia-task-[0-9a-f]+/i.test(p);
+}
+
 export class WorkspaceStore {
     private config: WorkspaceConfig;
     private workspaceFile: string;
+    // Set by loadConfig when it mutates the loaded config (e.g. pruning leaked
+    // worktree recents) so the constructor can persist the cleanup once.
+    private needsResaveAfterLoad = false;
     // In-memory PR info cache keyed by workspace id. The latest value is ALSO
     // persisted onto the workspace record: the periodic refresh only re-polls
     // workspaces whose last-known PR is non-terminal, so a restart that lost
@@ -57,6 +70,12 @@ export class WorkspaceStore {
         }
 
         this.config = this.loadConfig();
+
+        // Persist any load-time cleanup (e.g. pruned worktree recents) exactly once.
+        if (this.needsResaveAfterLoad) {
+            this.needsResaveAfterLoad = false;
+            this.saveConfig();
+        }
     }
 
     private loadConfig(): WorkspaceConfig {
@@ -74,6 +93,18 @@ export class WorkspaceStore {
             // Initialize recentWorkspaces if not present.
             if (!loaded.recentWorkspaces) {
                 loaded.recentWorkspaces = [];
+            }
+
+            // One-time cleanup: purge worktree dirs that leaked into recentWorkspaces
+            // in older builds. Worktrees are transient per-task dirs, not folders a
+            // user re-opens as a workspace — surfacing them in the Add Workspace
+            // dialog's recent list is noise. Match by path since these legacy recent
+            // entries don't carry the worktreeParentId flag.
+            const beforeCount = loaded.recentWorkspaces.length;
+            loaded.recentWorkspaces = loaded.recentWorkspaces.filter(w => !isWorktreePath(w.id));
+            if (loaded.recentWorkspaces.length !== beforeCount) {
+                console.log(`[WorkspaceStore] Pruned ${beforeCount - loaded.recentWorkspaces.length} worktree entr${beforeCount - loaded.recentWorkspaces.length === 1 ? 'y' : 'ies'} from recentWorkspaces`);
+                this.needsResaveAfterLoad = true;
             }
 
             return loaded;
@@ -278,8 +309,13 @@ export class WorkspaceStore {
         this.config.workspaces.splice(index, 1);
         this.prInfoCache.delete(id);
 
-        // Add to recent workspaces (only if it still exists on disk)
-        if (existsSync(id)) {
+        // Add to recent workspaces (only if it still exists on disk).
+        // Skip worktree workspaces: they are transient per-task/per-branch dirs
+        // (e.g. .claudia-worktrees/claudia-task-*) that are created and removed
+        // constantly, and they are not standalone folders a user would re-open as
+        // a workspace. Including them floods the "recent workspaces" list in the
+        // Add Workspace dialog with worktree entries.
+        if (existsSync(id) && !workspace.worktreeParentId && !isWorktreePath(id)) {
             // Remove if already in recent (to avoid duplicates)
             this.config.recentWorkspaces = this.config.recentWorkspaces.filter(w => w.id !== id);
 

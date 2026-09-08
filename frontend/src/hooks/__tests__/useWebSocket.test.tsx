@@ -391,7 +391,7 @@ describe('useWebSocket — outbound messages', () => {
         { name: 'resizeTask', invoke: (api) => api.resizeTask('t1', 100, 30), type: 'task:resize', payload: { taskId: 't1', cols: 100, rows: 30 } },
         { name: 'destroyTask', invoke: (api) => api.destroyTask('t1'), type: 'task:destroy', payload: { taskId: 't1' } },
         { name: 'interruptTask', invoke: (api) => api.interruptTask('t1'), type: 'task:interrupt', payload: { taskId: 't1' } },
-        { name: 'archiveTask', invoke: (api) => api.archiveTask('t1'), type: 'task:archive', payload: { taskId: 't1' } },
+        { name: 'archiveTask', invoke: (api) => api.archiveTask('t1'), type: 'task:archive', payload: { taskId: 't1', source: 'user' } },
         { name: 'reconnectTask', invoke: (api) => api.reconnectTask('t1'), type: 'task:reconnect', payload: { taskId: 't1' } },
         { name: 'restoreTask', invoke: (api) => api.restoreTask('t1'), type: 'task:restore', payload: { taskId: 't1' } },
         { name: 'createWorkspace', invoke: (api) => api.createWorkspace('/ws/new'), type: 'workspace:create', payload: { path: '/ws/new' } },
@@ -431,6 +431,16 @@ describe('useWebSocket — outbound messages', () => {
         });
 
         expect(ws.sent).toEqual([{ type, payload }]);
+    });
+
+    it('archiveTask forwards an explicit mcp source for provenance', () => {
+        const { result, ws } = mountConnected();
+
+        act(() => {
+            result.current.archiveTask('t1', 'mcp');
+        });
+
+        expect(ws.sent).toEqual([{ type: 'task:archive', payload: { taskId: 't1', source: 'mcp' } }]);
     });
 
     it('defaults revertTask to leaving untracked files alone', () => {

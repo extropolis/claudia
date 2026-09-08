@@ -1,11 +1,18 @@
 # Claudia - Start Script (PowerShell)
 #
 # Usage:
-#   .\start.ps1          # backend runs no-watch (default; stable, no spurious restarts)
-#   .\start.ps1 -Watch   # backend runs tsx watch (auto-reload on backend/src edits)
+#   .\start.ps1            # backend runs no-watch (default; stable, no spurious restarts)
+#   .\start.ps1 -Watch     # backend runs tsx watch (auto-reload on backend/src edits)
+#   .\start.ps1 -Restart   # kill any existing Claudia server first, then start (true restart)
+#
+# Without -Restart, the script refuses to start when a server is already running
+# (lock file present or a port in use) so it never spawns a duplicate. Use
+# -Restart to stop the running instance and take over the ports.
 
 param(
-    [switch]$Watch
+    [switch]$Watch,
+    [Alias("Force")]
+    [switch]$Restart
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,6 +28,45 @@ $OPENCODE_PORT = 4097
 # Lock file to prevent recursive starts
 $LOCK_FILE = Join-Path $env:TEMP "claudia-server.lock"
 
+# -Restart: stop any running Claudia server (by lock PID and by whatever owns the
+# ports) so this invocation can cleanly take over. Without this, a running server
+# would make the start below a no-op ("already running" / "port in use").
+if ($Restart) {
+    Write-Host "Restart requested - stopping any running Claudia server..."
+
+    # Helper: kill a process tree by PID, tolerating an already-dead PID.
+    # Uses Stop-Process (honors -ErrorAction) instead of external taskkill, whose
+    # stderr on a missing PID would be escalated to a fatal error by
+    # $ErrorActionPreference = "Stop" and abort the whole script.
+    function Stop-ProcTree([int]$procId) {
+        if (-not $procId) { return }
+        # Kill children first (best-effort), then the parent.
+        try {
+            Get-CimInstance Win32_Process -Filter "ParentProcessId=$procId" -ErrorAction SilentlyContinue |
+                ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        } catch { }
+        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+    }
+
+    # 1) Stop the process recorded in the lock file
+    if (Test-Path $LOCK_FILE) {
+        $LOCK_PID = Get-Content $LOCK_FILE -ErrorAction SilentlyContinue
+        if ($LOCK_PID) { Stop-ProcTree ([int]$LOCK_PID) }
+        Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
+    }
+
+    # 2) Stop whatever currently owns the ports (covers servers started without the lock)
+    foreach ($port in @($BACKEND_PORT, $FRONTEND_PORT, $OPENCODE_PORT)) {
+        $owners = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
+            Where-Object { $_.OwningProcess -ne 0 } |
+            Select-Object -ExpandProperty OwningProcess -Unique
+        foreach ($owningPid in $owners) { Stop-ProcTree ([int]$owningPid) }
+    }
+
+    Start-Sleep -Seconds 2
+    Write-Host "Existing server stopped."
+}
+
 # Check if server is already running (lock file exists and process is alive)
 if (Test-Path $LOCK_FILE) {
     $LOCK_PID = Get-Content $LOCK_FILE -ErrorAction SilentlyContinue
@@ -28,7 +74,7 @@ if (Test-Path $LOCK_FILE) {
         $proc = Get-Process -Id $LOCK_PID -ErrorAction SilentlyContinue
         if ($proc) {
             Write-Host "Claudia is already running (PID: $LOCK_PID)."
-            Write-Host "   Stop it first or remove the lock file: Remove-Item $LOCK_FILE"
+            Write-Host "   Stop it first, or re-run with -Restart to replace it."
             exit 1
         }
     }
@@ -60,7 +106,7 @@ foreach ($port in @($BACKEND_PORT, $FRONTEND_PORT, $OPENCODE_PORT)) {
 
 if ($ports_busy) {
     Write-Host ""
-    Write-Host "Please free the ports above and try again."
+    Write-Host "Please free the ports above and try again, or re-run with -Restart to stop the existing server automatically."
     Write-Host "You can kill a process on a port with: Stop-Process -Id (Get-NetTCPConnection -LocalPort <port>).OwningProcess -Force"
     Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
     exit 1
