@@ -116,7 +116,7 @@ interface TaskItemProps {
     index: number;
     onDeleteTask: (taskId: string) => void;
     onInterruptTask: (taskId: string) => void;
-    onArchiveTask: (taskId: string) => void;
+    onArchiveTask: (taskId: string, source?: 'user' | 'mcp') => void;
     onRevertTask: (taskId: string) => void;
     onSelectTask: (taskId: string) => void;
     onRenameTask?: (taskId: string, displayName: string) => void;
@@ -697,7 +697,7 @@ interface SubtaskSharedProps {
     unreadTaskIds: Set<string>;
     onDeleteTask: (id: string) => void;
     onInterruptTask: (id: string) => void;
-    onArchiveTask: (id: string) => void;
+    onArchiveTask: (id: string, source?: 'user' | 'mcp') => void;
     onRevertTask: (id: string) => void;
     onSelectTask: (id: string) => void;
     onRenameTask?: (id: string, name: string) => void;
@@ -764,7 +764,7 @@ interface SubtaskListProps {
     unreadTaskIds: Set<string>;
     onDeleteTask: (id: string) => void;
     onInterruptTask: (id: string) => void;
-    onArchiveTask: (id: string) => void;
+    onArchiveTask: (id: string, source?: 'user' | 'mcp') => void;
     onRevertTask: (id: string) => void;
     onSelectTask: (id: string) => void;
     onRenameTask?: (id: string, name: string) => void;
@@ -825,7 +825,7 @@ interface WorkspaceSectionProps {
     onToggleExpand: () => void;
     onDeleteTask: (taskId: string) => void;
     onInterruptTask: (taskId: string) => void;
-    onArchiveTask: (taskId: string) => void;
+    onArchiveTask: (taskId: string, source?: 'user' | 'mcp') => void;
     onRevertTask: (taskId: string) => void;
     onSelectTask: (taskId: string) => void;
     onDeleteWorkspace: () => void;
@@ -2383,7 +2383,7 @@ function ArchivedTaskItem({ task, workspaceName, onContinue, onRestore, onDelete
 interface WorkspacePanelProps {
     onDeleteTask: (taskId: string) => void;
     onInterruptTask: (taskId: string) => void;
-    onArchiveTask: (taskId: string) => void;
+    onArchiveTask: (taskId: string, source?: 'user' | 'mcp') => void;
     onRevertTask: (taskId: string) => void;
     onCreateWorkspace: (path: string) => void;
     onDeleteWorkspace: (workspaceId: string) => void;
@@ -2960,7 +2960,7 @@ export function WorkspacePanel({
                     onConfirm={() => {
                         const approved = pendingDeleteRequests.filter(r => checkedDeleteIds.has(r.requestId));
                         const rejected = pendingDeleteRequests.filter(r => !checkedDeleteIds.has(r.requestId));
-                        approved.forEach(r => onArchiveTask(r.taskId));
+                        approved.forEach(r => onArchiveTask(r.taskId, 'mcp'));
                         rejected.forEach(r => onRejectDeleteRequest?.(r.taskId, r.requestId));
                         removePendingDeleteRequests(pendingDeleteRequests.map(r => r.requestId));
                         setCheckedDeleteIds(new Set());

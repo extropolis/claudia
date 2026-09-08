@@ -279,6 +279,101 @@ interface ArchivedTaskMetadata {
     parentTaskId?: string;     // Spawning task, kept so restore rebuilds the hierarchy
 }
 
+/**
+ * Openers that say nothing about what a task is actually doing. A task whose only
+ * text is one of these shows up in the sidebar as e.g. "checkout head of main." —
+ * indistinguishable from every other task, and effectively lost.
+ */
+const GENERIC_TITLE_PATTERNS: RegExp[] = [
+    /^(hi|hey|hello|yo|sup|ok|okay|k|thanks|ty|nice|cool)\b/i,
+    /^(continue|go|go ahead|proceed|next|resume|retry|again|more|keep going)\b/i,
+    /^(yes|yep|yeah|no|nope|sure|done|stop|wait)\b/i,
+    /^(fix|fix it|review|test|check|run|run it|build|lint|commit|push|explain)\s*$/i,
+    /^(checkout|git|cd|ls|cat|clear|npm|npx|pwd|pytest|make)\b/i,
+    /^\//,          // slash commands: /clear, /compact
+    /^[^a-z]*$/i,   // no letters at all
+];
+
+/**
+ * True if `text` is too generic to identify a task by. Callers should wait for a
+ * better candidate rather than burning it as the title.
+ */
+export function isGenericTitleCandidate(text: string): boolean {
+    const t = text.trim();
+    if (t.length < 12) return true;
+    return GENERIC_TITLE_PATTERNS.some(re => re.test(t));
+}
+
+/**
+ * Condense a raw user message into a short sidebar title. Strips the noise that
+ * makes titles useless — injected context blocks, absolute paths, URLs, ANSI — then
+ * takes the first clause and truncates on a word boundary.
+ * Returns '' if nothing meaningful survives.
+ */
+export function deriveTaskTitle(raw: string): string {
+    const cleaned = raw
+        // eslint-disable-next-line no-control-regex
+        .replace(/\x1b\[[0-9;]*[A-Za-z]/g, ' ')             // ANSI escapes
+        .replace(/\[CONTEXT UPDATE:[^\]]*\]/gi, ' ')        // our own injected context
+        .replace(/[A-Za-z]:\\[^\s]+/g, ' ')                 // windows paths
+        .replace(/(?:^|\s)~?\/(?:[\w.-]+\/)+[\w.-]*/g, ' ') // unix paths
+        .replace(/https?:\/\/\S+/g, ' ')                    // urls
+        .replace(/[`*_#>]+/g, '')                           // markdown noise
+        // eslint-disable-next-line no-control-regex
+        .replace(/[\x00-\x1f]+/g, ' ')                      // control chars incl. CR/LF/TAB
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!cleaned) return '';
+
+    // Prefer the first sentence or clause — the rest is usually detail.
+    const clause = cleaned.split(/[.?!]\s+|:\s+| - /)[0]?.trim() || cleaned;
+    const base = clause.length >= 12 ? clause : cleaned;
+
+    const MAX = 52;
+    let title = base.length <= MAX ? base : base.slice(0, MAX).replace(/\s+\S*$/, '');
+    title = title.replace(/[\s,;:.\-]+$/, '').trim();
+    return title.length >= 3 ? title : '';
+}
+
+/**
+ * Find `needle` in one archived history blob, returning a snippet around the first
+ * hit. Archived history is written base64-encoded, so a plain substring scan finds
+ * nothing — this tries the decoded form too, and tolerates non-base64 input.
+ */
+export function searchHistoryBlob(raw: string, needle: string): string | undefined {
+    const candidates: string[] = [raw];
+    try {
+        candidates.push(Buffer.from(raw, 'base64').toString('utf-8'));
+    } catch {
+        // not base64 — the raw form above is all we have
+    }
+
+    for (const text of candidates) {
+        // eslint-disable-next-line no-control-regex
+        const plain = text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+        const idx = plain.toLowerCase().indexOf(needle);
+        if (idx === -1) continue;
+        const from = Math.max(0, idx - 60);
+        return plain.slice(from, idx + needle.length + 90).replace(/\s+/g, ' ').trim();
+    }
+    return undefined;
+}
+
+/** One hit from searchArchivedTasks, with the fields that identify it in the UI. */
+export interface ArchivedTaskSearchMatch {
+    id: string;
+    prompt: string;
+    displayName?: string;
+    workspaceId: string;
+    createdAt: string;
+    lastActivity: string;
+    sessionId: string | null;
+    /** Which fields matched: displayName | prompt | workspace | history */
+    matchedIn: string[];
+    /** Context around the hit, when the match came from archived history */
+    snippet?: string;
+}
+
 interface TaskPersistence {
     tasks: PersistedTask[];
     // Archived tasks now only contain metadata (history stored separately)
@@ -3475,6 +3570,7 @@ export class TaskSpawner extends EventEmitter {
 
         this.tasks.set(task.id, task);
         this.taskBackends.set(task.id, 'opencode');
+        this.ensureFallbackTitle(task.id);
         this.scheduleSave();
         this.emit('taskCreated', this.toPublicTask(task));
 
@@ -3739,6 +3835,10 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         this.setupProcessHandlers(task);
         this.tasks.set(id, task);
         this.taskBackends.set(id, 'claude-code');
+        // Seed a title from the prompt before announcing the task, so it never
+        // reaches the sidebar nameless. Skipped for generic prompts ("checkout
+        // head of main."), which get a second chance on the first real message.
+        this.ensureFallbackTitle(id);
         // Register + persist the pre-assigned session id immediately (NOT debounced).
         // This is the critical state that must survive a Windows restart, where
         // TerminateProcess skips every exit handler and a debounced save is lost.
@@ -4099,17 +4199,18 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
     /**
      * Rename a task by setting its displayName
      * Works for both active and disconnected tasks
-     * @param source - 'user' if renamed by user in UI (locks title from agent edits), 'agent' if renamed by MCP agent
+     * @param source - 'user' if renamed by user in UI (locks title from agent edits), 'agent' if
+     *                 renamed by MCP agent, 'auto' if derived server-side by ensureFallbackTitle
      */
-    renameTask(taskId: string, displayName: string, source: 'user' | 'agent' = 'user'): boolean {
+    renameTask(taskId: string, displayName: string, source: 'user' | 'agent' | 'auto' = 'user'): boolean {
         const trimmed = decodeHtmlEntities(displayName.trim());
 
         // Try active tasks first
         const task = this.tasks.get(taskId);
         if (task) {
-            // If user edited, block agent renames
-            if (source === 'agent' && task.displayNameEditedByUser) {
-                console.log(`[TaskSpawner] Agent rename blocked for task ${taskId} — title was edited by user`);
+            // If user edited, block agent/auto renames
+            if (source !== 'user' && task.displayNameEditedByUser) {
+                console.log(`[TaskSpawner] ${source} rename blocked for task ${taskId} — title was edited by user`);
                 return false;
             }
             task.displayName = trimmed || undefined; // Clear if empty
@@ -4126,8 +4227,8 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // Try disconnected tasks
         const persisted = this.disconnectedTasks.get(taskId);
         if (persisted) {
-            if (source === 'agent' && persisted.displayNameEditedByUser) {
-                console.log(`[TaskSpawner] Agent rename blocked for disconnected task ${taskId} — title was edited by user`);
+            if (source !== 'user' && persisted.displayNameEditedByUser) {
+                console.log(`[TaskSpawner] ${source} rename blocked for disconnected task ${taskId} — title was edited by user`);
                 return false;
             }
             persisted.displayName = trimmed || undefined;
@@ -4142,8 +4243,8 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // Try archived tasks
         const archived = this.archivedTasks.get(taskId);
         if (archived) {
-            if (source === 'agent' && archived.displayNameEditedByUser) {
-                console.log(`[TaskSpawner] Agent rename blocked for archived task ${taskId} — title was edited by user`);
+            if (source !== 'user' && archived.displayNameEditedByUser) {
+                console.log(`[TaskSpawner] ${source} rename blocked for archived task ${taskId} — title was edited by user`);
                 return false;
             }
             archived.displayName = trimmed || undefined;
@@ -4157,6 +4258,125 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
         console.log(`[TaskSpawner] Cannot rename: task ${taskId} not found`);
         return false;
+    }
+
+    /**
+     * Safety net for task titles. Titling is otherwise entirely dependent on the
+     * agent calling `claudia_rename_task` on itself, which silently does nothing if
+     * the Claudia MCP server isn't wired into that session — leaving the task
+     * showing its raw first prompt forever.
+     *
+     * Never overwrites an existing title, so an agent rename always wins.
+     *
+     * @param candidate - a later user message; falls back to the task's initial prompt
+     */
+    ensureFallbackTitle(taskId: string, candidate?: string): void {
+        const task = this.tasks.get(taskId);
+        const persisted = task ? undefined : this.disconnectedTasks.get(taskId);
+        const current = task ?? persisted;
+        if (!current) return;
+        if (current.displayName || current.displayNameEditedByUser) return;
+
+        const source = (candidate ?? current.prompt ?? '').trim();
+        if (!source) return;
+        if (isGenericTitleCandidate(source)) {
+            logger.debug('Skipping generic fallback-title candidate', { taskId, sample: source.slice(0, 40) });
+            return;
+        }
+
+        const title = deriveTaskTitle(source);
+        if (!title) return;
+
+        if (this.renameTask(taskId, title, 'auto')) {
+            logger.info('Applied fallback task title', { taskId, title, fromPrompt: candidate === undefined });
+        }
+    }
+
+    /**
+     * Search archived tasks. Metadata (title, prompt, workspace) is always searched;
+     * `deep` additionally scans each task's archived terminal history, which is stored
+     * base64-encoded on disk and therefore invisible to a plain grep.
+     *
+     * Deep search is the only way to find a task that was never titled and whose
+     * opening prompt was generic — exactly the case that makes a task unrecoverable.
+     */
+    searchArchivedTasks(
+        query: string,
+        opts?: { deep?: boolean; limit?: number }
+    ): ArchivedTaskSearchMatch[] {
+        const needle = query.trim().toLowerCase();
+        if (!needle) return [];
+        const deep = opts?.deep ?? false;
+        const limit = opts?.limit ?? 50;
+
+        // Cap per-file work so a deep search over hundreds of MB stays interactive.
+        const MAX_B64_BYTES = 4_000_000;
+        const results: ArchivedTaskSearchMatch[] = [];
+        let deepScanned = 0;
+        const startedAt = Date.now();
+
+        for (const archived of this.archivedTasks.values()) {
+            if (results.length >= limit) break;
+
+            const matchedIn: string[] = [];
+            if (archived.displayName?.toLowerCase().includes(needle)) matchedIn.push('displayName');
+            if (archived.prompt?.toLowerCase().includes(needle)) matchedIn.push('prompt');
+            if (archived.workspaceId?.toLowerCase().includes(needle)) matchedIn.push('workspace');
+
+            let snippet: string | undefined;
+            if (deep && matchedIn.length === 0) {
+                const hit = this.searchArchivedHistory(archived.id, needle, MAX_B64_BYTES);
+                deepScanned++;
+                if (hit) {
+                    matchedIn.push('history');
+                    snippet = hit;
+                }
+            }
+
+            if (matchedIn.length > 0) {
+                results.push({
+                    id: archived.id,
+                    prompt: archived.prompt,
+                    displayName: archived.displayName,
+                    workspaceId: archived.workspaceId,
+                    createdAt: archived.createdAt,
+                    lastActivity: archived.lastActivity,
+                    sessionId: archived.sessionId,
+                    matchedIn,
+                    snippet,
+                });
+            }
+        }
+
+        results.sort((a, b) => String(b.lastActivity).localeCompare(String(a.lastActivity)));
+        logger.info('Archived task search complete', {
+            query: needle, deep, deepScanned, matches: results.length, ms: Date.now() - startedAt,
+        });
+        return results;
+    }
+
+    /**
+     * Look for `needle` inside one archived history file, returning a short snippet
+     * around the first hit. Handles both the base64 form written by archiveTask and
+     * any plain-text file, and tolerates a missing or unreadable file.
+     */
+    private searchArchivedHistory(taskId: string, needle: string, maxB64Bytes: number): string | undefined {
+        const path = this.getArchivedHistoryPath(taskId);
+        if (!existsSync(path)) return undefined;
+        try {
+            let raw = readFileSync(path, 'utf-8');
+            if (raw.length > maxB64Bytes) {
+                // Keep the tail (most recent output); align to 4 so base64 still decodes.
+                raw = raw.slice(raw.length - maxB64Bytes - (raw.length - maxB64Bytes) % 4);
+            }
+
+            return searchHistoryBlob(raw, needle);
+        } catch (e) {
+            logger.debug('Deep search could not read archived history', {
+                taskId, error: e instanceof Error ? e.message : String(e),
+            });
+        }
+        return undefined;
     }
 
     /**
@@ -4912,7 +5132,14 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         }
     }
 
-    archiveTask(taskId: string): void {
+    /**
+     * Archive a task, moving it out of the sidebar into archived storage.
+     *
+     * @param source - who triggered this. Archiving is the main way a task silently
+     *                 vanishes on a user, and without provenance there is no way to
+     *                 tell an accidental UI click from an agent-initiated delete.
+     */
+    archiveTask(taskId: string, source: 'user' | 'mcp' | 'workspace-reset' | 'unknown' = 'unknown'): void {
         // Archive moves task from active list to archived storage
         let archived = false;
         let wasLive = false;
@@ -5041,7 +5268,8 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             // Save immediately — destructive operations must not be lost to debounce
             this.saveTasks();
             this.emit('taskDestroyed', taskId);
-            console.log(`[TaskSpawner] Archived ${wasLive ? 'live' : 'disconnected'} task ${taskId}`);
+            console.log(`[TaskSpawner] Archived ${wasLive ? 'live' : 'disconnected'} task ${taskId} (source: ${source})`);
+            logger.info('Task archived', { taskId, source, wasLive });
         }
     }
 

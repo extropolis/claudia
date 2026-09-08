@@ -72,6 +72,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'task:rename',
     'task:reorder',
     'task:archived:list',
+    'task:archived:search',
     'task:archived:restore',
     'task:archived:continue',
     'task:archived:delete',
@@ -1969,6 +1970,11 @@ export async function createApp(basePath?: string) {
                                 const endsWithEnter = filteredInput.endsWith('\r') || filteredInput.endsWith('\n');
                                 const hasMessageContent = filteredInput.length > 1 && endsWithEnter;
                                 if (hasMessageContent && (inputTask.state === 'idle' || inputTask.state === 'waiting_input')) {
+                                    // Second chance at a title, using the user's raw text before any
+                                    // context injection below. Covers tasks whose opening prompt was
+                                    // too generic to name them by.
+                                    taskSpawner.ensureFallbackTitle(taskId, filteredInput);
+
                                     const currentRefs = workspaceStore.getReferences(inputTask.workspaceId);
                                     const currentValidRefs = currentRefs.filter(r => existsSync(r.path));
                                     const currentRefKey = currentValidRefs.map(r => r.id).sort().join(',');
@@ -2111,8 +2117,8 @@ export async function createApp(basePath?: string) {
 
                     case 'task:archive': {
                         // Archive a completed task (removes from view)
-                        const { taskId } = payload as { taskId?: string };
-                        if (taskId) taskSpawner.archiveTask(taskId);
+                        const { taskId, source } = payload as { taskId?: string; source?: 'user' | 'mcp' };
+                        if (taskId) taskSpawner.archiveTask(taskId, source === 'mcp' ? 'mcp' : 'user');
                         break;
                     }
 
@@ -2311,6 +2317,17 @@ export async function createApp(basePath?: string) {
                         ws.send(JSON.stringify({
                             type: 'task:archived:list',
                             payload: { tasks: archivedTasks }
+                        }));
+                        break;
+                    }
+
+                    case 'task:archived:search': {
+                        // Search archived tasks by metadata, optionally scanning history
+                        const { query, deep, limit } = payload as { query?: string; deep?: boolean; limit?: number };
+                        const matches = query ? taskSpawner.searchArchivedTasks(query, { deep, limit }) : [];
+                        ws.send(JSON.stringify({
+                            type: 'task:archived:search',
+                            payload: { query: query || '', deep: !!deep, matches }
                         }));
                         break;
                     }
@@ -2708,7 +2725,7 @@ export async function createApp(basePath?: string) {
                         let archivedCount = 0;
                         for (const task of workspaceTasks) {
                             try {
-                                taskSpawner.archiveTask(task.id);
+                                taskSpawner.archiveTask(task.id, 'workspace-reset');
                                 archivedCount++;
                                 logger.info('Archived task during workspace reset', { taskId: task.id });
                             } catch (e) {
