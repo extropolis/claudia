@@ -377,4 +377,9 @@ export interface UsageDashboardData {
     taskCount: number;
     lastUpdated: string;
 }
-export * from './terminal';
+// NOTE: the .js extension is REQUIRED. This package is ESM ("type": "module")
+// and Node's ESM resolver does not add extensions, so an extensionless
+// specifier crashes `node backend/dist/index.js` with ERR_MODULE_NOT_FOUND —
+// i.e. the published `claudia` CLI and the packaged Electron app. `tsx watch`
+// resolves it fine, which is why the dev loop never caught it.
+export * from './terminal.js';
