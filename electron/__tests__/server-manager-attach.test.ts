@@ -6,9 +6,36 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('electron', () => ({
     utilityProcess: { fork: vi.fn() }
 }));
+vi.mock('get-port', () => ({ default: vi.fn(async () => 3001) }));
 
-const { findRunningBackend, resolveBackend, stopServer } = await import('../server-manager.js');
+const { utilityProcess } = await import('electron');
+const { findRunningBackend, resolveBackend, startServer, stopServer } =
+    await import('../server-manager.js');
 type ServerInfo = Awaited<ReturnType<typeof resolveBackend>>['info'];
+
+/**
+ * Stand-in for an Electron UtilityProcess: records listeners so a test can
+ * drive the `message`/`exit` events startServer waits on.
+ */
+function fakeChild() {
+    const handlers: Record<string, Array<(...args: any[]) => void>> = {};
+    return {
+        on: vi.fn((event: string, cb: (...args: any[]) => void) => {
+            (handlers[event] ||= []).push(cb);
+        }),
+        postMessage: vi.fn(),
+        kill: vi.fn(),
+        emit(event: string, ...args: any[]) {
+            (handlers[event] ?? []).forEach((cb) => cb(...args));
+        }
+    };
+}
+
+/**
+ * startServer registers its listeners only after `await getPort(...)`, so a
+ * test must let that microtask land before driving the fake child's events.
+ */
+const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 const okResponse = (body: unknown = { status: 'ok' }) =>
     ({ ok: true, status: 200, json: async () => body }) as unknown as Response;
@@ -77,6 +104,15 @@ describe('findRunningBackend', () => {
         expect(info?.url).toBe('http://localhost:4001');
     });
 
+    // fetch is mocked here, so a malformed origin can still reach the parse.
+    // In production this guards against a garbage CLAUDIA_BACKEND_URL taking
+    // down startup with an unhandled URL error.
+    it('returns null when the URL cannot be parsed', async () => {
+        fetchMock.mockResolvedValue(okResponse());
+
+        await expect(findRunningBackend('not-a-url')).resolves.toBeNull();
+    });
+
     it('returns null on a network error', async () => {
         fetchMock.mockRejectedValue(new TypeError('fetch failed'));
 
@@ -131,21 +167,130 @@ describe('resolveBackend', () => {
     });
 });
 
+describe('startServer', () => {
+    it('resolves once the worker reports ready, and starts it on the chosen port', async () => {
+        const child = fakeChild();
+        vi.mocked(utilityProcess.fork).mockReturnValue(child as never);
+
+        const pending = startServer('/tmp/userData');
+        await flush();
+        child.emit('message', { type: 'ready' });
+
+        await expect(pending).resolves.toEqual({
+            child,
+            port: 3001,
+            url: 'http://localhost:3001'
+        });
+        expect(child.postMessage).toHaveBeenCalledWith({
+            type: 'start',
+            port: 3001,
+            basePath: '/tmp/userData'
+        });
+    });
+
+    it('passes an empty basePath through when none is given', async () => {
+        const child = fakeChild();
+        vi.mocked(utilityProcess.fork).mockReturnValue(child as never);
+
+        const pending = startServer();
+        await flush();
+        child.emit('message', { type: 'ready' });
+        await pending;
+
+        expect(child.postMessage).toHaveBeenCalledWith({
+            type: 'start',
+            port: 3001,
+            basePath: ''
+        });
+    });
+
+    it('forwards worker log messages to the onLog callback', async () => {
+        const child = fakeChild();
+        vi.mocked(utilityProcess.fork).mockReturnValue(child as never);
+        const onLog = vi.fn();
+
+        const pending = startServer(undefined, onLog);
+        await flush();
+        child.emit('message', { type: 'log', level: 'warn', message: 'heads up' });
+        child.emit('message', { type: 'ready' });
+        await pending;
+
+        expect(onLog).toHaveBeenCalledWith('warn', 'heads up');
+    });
+
+    it('rejects when the worker reports an error', async () => {
+        const child = fakeChild();
+        vi.mocked(utilityProcess.fork).mockReturnValue(child as never);
+
+        const pending = startServer();
+        await flush();
+        child.emit('message', { type: 'error', message: 'port already bound' });
+
+        await expect(pending).rejects.toThrow('port already bound');
+    });
+
+    it('rejects when the worker exits non-zero', async () => {
+        const child = fakeChild();
+        vi.mocked(utilityProcess.fork).mockReturnValue(child as never);
+
+        const pending = startServer();
+        await flush();
+        child.emit('exit', 1);
+
+        await expect(pending).rejects.toThrow('Backend process exited with code 1');
+    });
+
+    it('stays pending on a clean exit code rather than rejecting', async () => {
+        const child = fakeChild();
+        vi.mocked(utilityProcess.fork).mockReturnValue(child as never);
+        const settled = vi.fn();
+
+        const pending = startServer().then(settled, settled);
+        await flush();
+        child.emit('exit', 0);
+        await flush();
+
+        expect(settled).not.toHaveBeenCalled();
+        child.emit('message', { type: 'ready' });
+        await pending;
+        expect(settled).toHaveBeenCalledOnce();
+    });
+
+    it('rejects if the worker never reports ready within 30s', async () => {
+        vi.useFakeTimers();
+        const child = fakeChild();
+        vi.mocked(utilityProcess.fork).mockReturnValue(child as never);
+
+        const pending = startServer();
+        const assertion = expect(pending).rejects.toThrow('Backend startup timeout (30s)');
+        await vi.advanceTimersByTimeAsync(30_000);
+        await assertion;
+    });
+});
+
 describe('stopServer', () => {
     it('is a no-op for an attached (externally owned) backend', async () => {
         await expect(stopServer(null)).resolves.toBeUndefined();
     });
 
     it('kills a child process that we spawned', async () => {
-        const listeners: Array<() => void> = [];
-        const child = {
-            kill: vi.fn(),
-            on: vi.fn((event: string, cb: () => void) => { if (event === 'exit') listeners.push(cb); })
-        };
+        const child = fakeChild();
 
         const pending = stopServer(child as never);
         expect(child.kill).toHaveBeenCalledOnce();
-        listeners.forEach((cb) => cb());
+        child.emit('exit', 0);
         await expect(pending).resolves.toBeUndefined();
+    });
+
+    // A wedged child must not block app quit forever.
+    it('gives up and resolves after 5s if the child never exits', async () => {
+        vi.useFakeTimers();
+        const child = fakeChild();
+
+        const pending = stopServer(child as never);
+        await vi.advanceTimersByTimeAsync(5_000);
+
+        await expect(pending).resolves.toBeUndefined();
+        expect(child.kill).toHaveBeenCalledOnce();
     });
 });
