@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildSettingsLocalContent } from '../settings-local';
+import { buildSettingsLocalContent } from '../settings-local.js';
 
 describe('buildSettingsLocalContent', () => {
     it('never emits a wildcard allow rule in skip-permissions mode', () => {
