@@ -47,8 +47,8 @@ describe('parseCredentialsBlob', () => {
 });
 
 describe('planLabelFromSubscription', () => {
-    it('maps max to "Max (20x)"', () => {
-        expect(planLabelFromSubscription('max')).toBe('Max (20x)');
+    it('maps max to "Max"', () => {
+        expect(planLabelFromSubscription('max')).toBe('Max');
     });
 
     it('maps pro to "Pro"', () => {
@@ -56,11 +56,18 @@ describe('planLabelFromSubscription', () => {
     });
 
     it('is case-insensitive', () => {
-        expect(planLabelFromSubscription('MAX')).toBe('Max (20x)');
+        expect(planLabelFromSubscription('MAX')).toBe('Max');
+    });
+
+    it('labels the team and enterprise plans instead of calling them Unknown', () => {
+        // organization_type maps to max | pro | team | enterprise | null.
+        expect(planLabelFromSubscription('team')).toBe('Team');
+        expect(planLabelFromSubscription('enterprise')).toBe('Enterprise');
     });
 
     it('returns "Unknown" for unrecognized or missing values', () => {
-        expect(planLabelFromSubscription('team')).toBe('Unknown');
+        expect(planLabelFromSubscription('nonsense')).toBe('Unknown');
+        expect(planLabelFromSubscription('')).toBe('Unknown');
         expect(planLabelFromSubscription(undefined)).toBe('Unknown');
     });
 });

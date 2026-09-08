@@ -1,9 +1,11 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createLogger } from './logger.js';
+import { redactSecrets } from './redact.js';
 
 const execFileAsync = promisify(execFile);
 const logger = createLogger('[UsageCredentials]');
@@ -41,57 +43,138 @@ export function parseCredentialsBlob(json: string): OAuthCredentials | null {
 
 /**
  * Human-facing plan label from a subscription type.
- * `'max'` → `'Max (20x)'`, `'pro'` → `'Pro'`, otherwise `'Unknown'`.
+ *
+ * `subscriptionType` is one of `max` | `pro` | `team` | `enterprise` | null —
+ * derived by Claude Code from `organization.organization_type` and stored in
+ * the credentials blob. It carries NO 5x/20x information: that lives in a
+ * separate `rateLimitTier` field (`default_claude_max_5x` /
+ * `default_claude_max_20x`). Labelling every `max` account "Max (20x)" was
+ * therefore wrong for every Max 5x subscriber. Claude Code's own
+ * `getSubscriptionName()` does not surface the tier either, so neither do we.
  */
 export function planLabelFromSubscription(sub?: string): string {
     switch ((sub ?? '').toLowerCase()) {
         case 'max':
-            return 'Max (20x)';
+            return 'Max';
         case 'pro':
             return 'Pro';
+        case 'team':
+            return 'Team';
+        case 'enterprise':
+            return 'Enterprise';
         default:
             return 'Unknown';
     }
 }
 
 /**
- * Read the Claude Code OAuth credentials from the OS credential store.
- * - macOS: reads the "Claude Code-credentials" generic password from Keychain.
- * - Linux/Windows: reads `~/.claude/.credentials.json`.
- * Returns null when no token is found or the platform is unsupported.
- * Never logs the token.
+ * The Claude Code config home. `CLAUDE_CONFIG_DIR` relocates it, which changes
+ * BOTH the credentials file path and the Keychain service name.
  */
-export async function readOAuthCredentials(): Promise<OAuthCredentials | null> {
-    // Only the *source* and whether a token was found are logged — never the
-    // blob or the token itself.
-    const source = process.platform === 'darwin' ? 'macos-keychain' : 'credentials-file';
+function claudeConfigDir(): string {
+    return process.env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), '.claude');
+}
+
+/**
+ * The macOS Keychain generic-password service Claude Code stores the OAuth
+ * blob under.
+ *
+ * Claude Code composes it as `Claude Code` + `-credentials`, plus — when and
+ * only when `CLAUDE_CONFIG_DIR` is set — a `-<first 8 hex of sha256(configDir)>`
+ * suffix. Hardcoding the unsuffixed name silently returned "no token" for every
+ * user with a relocated config dir.
+ */
+export function keychainServiceName(): string {
+    const configDir = process.env.CLAUDE_CONFIG_DIR?.trim();
+    if (!configDir) return 'Claude Code-credentials';
+    const hash = createHash('sha256').update(configDir).digest('hex').slice(0, 8);
+    return `Claude Code-credentials-${hash}`;
+}
+
+/** The account name Claude Code stores the item under. */
+function keychainAccount(): string {
     try {
-        if (process.platform === 'darwin') {
-            const { stdout } = await execFileAsync('security', [
-                'find-generic-password',
-                '-s',
-                'Claude Code-credentials',
-                '-a',
-                os.userInfo().username,
-                '-w',
-            ]);
-            const creds = parseCredentialsBlob(stdout);
-            if (!creds) logger.warn('Keychain entry found but no accessToken could be parsed', { source });
-            else logger.debug('Read OAuth credentials', { source, subscriptionType: creds.subscriptionType ?? null });
-            return creds;
-        }
-        const credPath = path.join(os.homedir(), '.claude', '.credentials.json');
-        const contents = await readFile(credPath, 'utf8');
-        const creds = parseCredentialsBlob(contents);
-        if (!creds) logger.warn('Credentials file found but no accessToken could be parsed', { source, credPath });
-        else logger.debug('Read OAuth credentials', { source, subscriptionType: creds.subscriptionType ?? null });
+        return process.env.USER || os.userInfo().username;
+    } catch {
+        return 'claude-code-user';
+    }
+}
+
+/** Read + parse `<configDir>/.credentials.json`, or null if unusable. */
+async function readCredentialsFile(): Promise<OAuthCredentials | null> {
+    const credPath = path.join(claudeConfigDir(), '.credentials.json');
+    try {
+        const creds = parseCredentialsBlob(await readFile(credPath, 'utf8'));
+        if (!creds) logger.debug('Credentials file present but holds no accessToken', { credPath });
         return creds;
     } catch (err) {
-        // Missing keychain entry / missing file / unsupported: treat as no token.
-        logger.debug('No OAuth credentials available', {
-            source,
-            error: err instanceof Error ? err.message : String(err),
+        logger.debug('No credentials file', {
+            credPath,
+            error: redactSecrets(err instanceof Error ? err.message : String(err)),
         });
         return null;
     }
+}
+
+/**
+ * Read the Claude Code OAuth credentials from the OS credential store.
+ * - macOS: the Keychain generic password, falling back to the credentials file.
+ * - Linux/Windows: `<configDir>/.credentials.json`.
+ *
+ * Returns null when no token is found. Never throws, and never logs the token.
+ */
+export async function readOAuthCredentials(): Promise<OAuthCredentials | null> {
+    if (process.platform === 'darwin') {
+        const service = keychainServiceName();
+        try {
+            const { stdout } = await execFileAsync('security', [
+                'find-generic-password',
+                '-s',
+                service,
+                '-a',
+                keychainAccount(),
+                '-w',
+            ], { timeout: 5000 });
+            const creds = parseCredentialsBlob(stdout);
+            if (creds) {
+                logger.debug('Read OAuth credentials', {
+                    source: 'macos-keychain',
+                    subscriptionType: creds.subscriptionType ?? null,
+                });
+                return creds;
+            }
+            // An item exists but carries no claudeAiOauth block — e.g. only
+            // `mcpOAuth`, which is the normal "not signed in" state on 2.1.x.
+            logger.debug('Keychain item holds no claudeAiOauth accessToken', { source: 'macos-keychain', service });
+        } catch (err) {
+            // `security`'s stderr is echoed into err.message by execFile. It
+            // does not carry the secret today, but this is the one place in the
+            // codebase where a token is a single shell-out away from a log line.
+            logger.debug('Keychain lookup failed', {
+                source: 'macos-keychain',
+                service,
+                error: redactSecrets(err instanceof Error ? err.message : String(err)),
+            });
+        }
+        // Keychain is unreachable over SSH and inside some tmux/launchd
+        // contexts, where Claude Code itself falls back to the file. Do the
+        // same rather than reporting "no token" to a signed-in user.
+        const fromFile = await readCredentialsFile();
+        if (fromFile) {
+            logger.debug('Read OAuth credentials', {
+                source: 'credentials-file-fallback',
+                subscriptionType: fromFile.subscriptionType ?? null,
+            });
+        }
+        return fromFile;
+    }
+
+    const creds = await readCredentialsFile();
+    if (creds) {
+        logger.debug('Read OAuth credentials', {
+            source: 'credentials-file',
+            subscriptionType: creds.subscriptionType ?? null,
+        });
+    }
+    return creds;
 }
