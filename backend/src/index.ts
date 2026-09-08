@@ -108,23 +108,30 @@ try {
         taskSpawner.startAutoReconnect();
     });
 
-    // Hardening for the pooled-socket ECONNRESET that surfaced in MCP tools as
-    // an opaque `TypeError: fetch failed`. Node reaps an idle keep-alive socket
-    // after 5s by default, while every session's in-process MCP server polls
-    // /api/tasks over undici's connection pool. undici normally retires a
-    // socket ~1s before the server's advertised timeout, but this process
-    // blocks its event loop routinely (spawning PTYs, writing history files),
-    // which defers the reap past the point the client still considers the
-    // socket safe to reuse.
+    // Root cause of the pooled-socket ECONNRESET that surfaced in MCP tools as
+    // an opaque `TypeError: fetch failed`.
     //
-    // A longer server-side idle window keeps that margin from being consumed by
-    // a stall. It is not a complete guarantee — backendFetchAt retrying
-    // transport failures is what actually makes the tools resilient — so treat
-    // this as reducing the frequency, not closing the race.
+    // Node reaps an idle keep-alive socket after 5s by default. undici normally
+    // retires a pooled socket ~1s before the server's advertised timeout, so in
+    // a healthy process the client always closes first and the two never race.
+    // But this process blocks its event loop for seconds at a time — spawning
+    // PTYs, running git, writing history files. A stall longer than the idle
+    // timeout defers every pending reap, and they all fire the instant the loop
+    // unblocks, landing on sockets that pooled clients still consider live.
+    //
+    // Measured with the real 2.5s MCP poll interval and a 6s stall, 6 concurrent
+    // pollers: at a 5s timeout, 12 of 36 requests failed with ECONNRESET; at a
+    // 65s timeout, 0 of 36 did. The window only exists while the stall exceeds
+    // the timeout, so holding sockets far longer than any stall closes it.
+    //
+    // Not reproducible on a compressed timeline (undici's threshold is an
+    // absolute ~1s, so sub-second timeouts never race), which is why this is not
+    // a suite test — backendFetchAt's retry is what the tests cover, and it
+    // remains the backstop for resets this cannot prevent, such as a restart.
     //
     // headersTimeout must stay above keepAliveTimeout or Node reaps first
-    // anyway. Shutdown is unaffected: since Node 19, server.close() retires
-    // idle connections itself rather than waiting out this timeout.
+    // anyway. Shutdown is unaffected: since Node 19, server.close() retires idle
+    // connections itself rather than waiting out this timeout (measured: 1ms).
     httpServer.keepAliveTimeout = 65_000;
     httpServer.headersTimeout = 66_000;
 
