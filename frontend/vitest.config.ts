@@ -36,6 +36,9 @@ export default defineConfig({
             // not blocked. Raise as coverage improves; never lower.
             thresholds: {
                 'src/config/api-config.ts': { lines: 95 },
+                // Actual 90.21%; floor set just below so a real regression
+                // fails while ordinary churn does not.
+                'src/config/auth-client.ts': { lines: 85 },
                 'src/hooks/useTheme.ts': { lines: 95 },
                 'src/services/filePickerService.ts': { lines: 85 },
                 'src/utils/browserCapabilities.ts': { lines: 85 },
