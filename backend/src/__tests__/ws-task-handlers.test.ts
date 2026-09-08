@@ -166,7 +166,7 @@ describe.skipIf(!SUPPORTS_FAKE_CLI)('task:rename + task:reorder persist across a
         // Persistence is the real contract: boot a SECOND server on the same dir.
         const second = await env.restart();
         const persisted = await waitFor(
-            () => fetch(`http://127.0.0.1:${second.port}/api/tasks`).then(r => r.json()),
+            () => fetch(`http://127.0.0.1:${second.port}/api/tasks`, { headers: { 'x-claudia-token': env.token } }).then(r => r.json()),
             (ts: any[]) => ts.some(t => t.id === id),
             15000,
         );

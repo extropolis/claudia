@@ -27,6 +27,7 @@ import WebSocket from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createApp } from '../server.js';
+import { getAuthToken } from '../auth-token.js';
 
 const git = (cwd: string, ...args: string[]) =>
     execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' } });
@@ -53,7 +54,7 @@ async function callTool(name: string, args: Record<string, unknown> = {}) {
 
 /** Stand in for the frontend: answer every delete request with `reply`. */
 async function openFrontend(reply: (req: { taskId: string; requestId: string }) => any) {
-    const frontend = new WebSocket(`ws://127.0.0.1:${port}`);
+    const frontend = new WebSocket(`ws://127.0.0.1:${port}?token=${getAuthToken(base)}`);
     await new Promise<void>((res, rej) => {
         frontend.on('open', () => res());
         frontend.on('error', rej);
@@ -525,7 +526,7 @@ describe('claudia_delete_tasks', () => {
         // This is the whole point of the batch tool: N ids must not produce N
         // separate confirmation prompts racing each other into the UI.
         const broadcasts: any[] = [];
-        const frontend = new WebSocket(`ws://127.0.0.1:${port}`);
+        const frontend = new WebSocket(`ws://127.0.0.1:${port}?token=${getAuthToken(base)}`);
         await new Promise<void>((res, rej) => {
             frontend.on('open', () => res());
             frontend.on('error', rej);
@@ -557,7 +558,7 @@ describe('claudia_delete_tasks', () => {
     }, 30000);
 
     it('honours a partial approval — approved dies, unapproved survives', async () => {
-        const frontend = new WebSocket(`ws://127.0.0.1:${port}`);
+        const frontend = new WebSocket(`ws://127.0.0.1:${port}?token=${getAuthToken(base)}`);
         await new Promise<void>((res, rej) => {
             frontend.on('open', () => res());
             frontend.on('error', rej);

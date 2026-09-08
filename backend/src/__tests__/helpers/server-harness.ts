@@ -19,6 +19,7 @@ import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { createApp } from '../../server.js';
+import { getAuthToken } from '../../auth-token.js';
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures');
 
@@ -63,11 +64,22 @@ export interface HarnessOptions {
     fakeClaude?: boolean;
     /** Extra env applied before createApp and restored on stop(). */
     env?: Record<string, string | undefined>;
+    /**
+     * Attach the API token to every `fetch`/`req`/`send` call. Default true.
+     *
+     * Auth is mandatory on every /api route (see auth-token.ts), including from
+     * loopback, so a harness that did not authenticate would turn every suite
+     * into an assertion about 401. Set false only when the test is ABOUT
+     * authentication.
+     */
+    authenticate?: boolean;
 }
 
 export interface Harness {
     /** Isolated state dir passed to createApp. */
     base: string;
+    /** The API token this server accepts, minted under `base`. */
+    token: string;
     port: number;
     baseUrl: string;
     /** Directory the fake CLI logs argv/stdin into (only when fakeClaude). */
@@ -195,7 +207,16 @@ export async function startHarness(opts: HarnessOptions = {}): Promise<Harness> 
     const port = (parts.server.address() as { port: number }).port;
     const baseUrl = `http://127.0.0.1:${port}`;
 
-    const doFetch = (path: string, init?: RequestInit) => fetch(`${baseUrl}${path}`, init);
+    // Auth is unconditional on /api/*; the harness presents the token so suites
+    // keep testing their own routes rather than the auth middleware.
+    const token = getAuthToken(base);
+    const authenticate = opts.authenticate !== false;
+    const doFetch = (path: string, init?: RequestInit) => {
+        if (!authenticate) return fetch(`${baseUrl}${path}`, init);
+        const headers = new Headers(init?.headers);
+        if (!headers.has('x-claudia-token')) headers.set('x-claudia-token', token);
+        return fetch(`${baseUrl}${path}`, { ...init, headers });
+    };
 
     const req = async <T>(path: string, init?: RequestInit) => {
         const res = await doFetch(path, init);
@@ -231,5 +252,5 @@ export async function startHarness(opts: HarnessOptions = {}): Promise<Harness> 
         }
     };
 
-    return { base, port, baseUrl, fakeDir, server: parts, fetch: doFetch, req, send, stop };
+    return { base, token, port, baseUrl, fakeDir, server: parts, fetch: doFetch, req, send, stop };
 }
