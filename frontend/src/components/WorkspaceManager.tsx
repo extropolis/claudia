@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { Workspace } from '@claudia/shared';
 import {
     X,
@@ -10,18 +10,21 @@ import {
     Briefcase,
     Search,
     AlertCircle,
-    GripVertical
+    GripVertical,
+    GitBranch
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
 import { PathInputModal } from './PathInputModal';
 import './WorkspaceManager.css';
 
 interface WorkspaceManagerProps {
+    /** The full store list, worktree children included — this component filters them out itself. */
     workspaces: Workspace[];
     onClose: () => void;
     onCreateWorkspace: (path: string) => void;
     onDeleteWorkspace: (workspaceId: string) => void;
-    onReorderWorkspaces: (fromIndex: number, toIndex: number) => void;
+    /** Persist an explicit full ordering (all ids, worktree children included). */
+    onSetWorkspaceOrder: (orderedIds: string[]) => void;
 }
 
 export function WorkspaceManager({
@@ -29,7 +32,7 @@ export function WorkspaceManager({
     onClose,
     onCreateWorkspace,
     onDeleteWorkspace,
-    onReorderWorkspaces
+    onSetWorkspaceOrder
 }: WorkspaceManagerProps) {
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [searchQuery, setSearchQuery] = useState('');
@@ -41,28 +44,69 @@ export function WorkspaceManager({
     const [defaultBaseDirectory, setDefaultBaseDirectory] = useState<string | undefined>(undefined);
     const [workspaceCountWhenModalOpened, setWorkspaceCountWhenModalOpened] = useState<number | null>(null);
 
+    // Worktree child workspaces are per-task checkouts, not workspaces: the
+    // sidebar renders them as tasks inside their parent, and they are created
+    // and reaped automatically. Listing them here buried the handful of real
+    // workspaces under dozens of .claudia-worktrees rows.
+    //
+    // Orphans are the one exception. A worktree whose parent workspace was
+    // deleted is rendered nowhere in the sidebar, so hiding it here too would
+    // leave a record with no way to remove it. Those stay, flagged as orphaned.
+    const workspaceIds = useMemo(() => new Set(workspaces.map(ws => ws.id)), [workspaces]);
+
+    const manageableWorkspaces = useMemo(
+        () => workspaces.filter(ws => !ws.worktreeParentId || !workspaceIds.has(ws.worktreeParentId)),
+        [workspaces, workspaceIds]
+    );
+
+    // Worktree children keyed by parent id — drives the per-row count badge and
+    // keeps children adjacent to their parent when the order is persisted.
+    const worktreeChildren = useMemo(() => {
+        const byParent = new Map<string, Workspace[]>();
+        for (const ws of workspaces) {
+            if (!ws.worktreeParentId || !workspaceIds.has(ws.worktreeParentId)) continue;
+            const siblings = byParent.get(ws.worktreeParentId);
+            if (siblings) siblings.push(ws);
+            else byParent.set(ws.worktreeParentId, [ws]);
+        }
+        return byParent;
+    }, [workspaces, workspaceIds]);
+
+    const hiddenWorktreeCount = workspaces.length - manageableWorkspaces.length;
+
     // Filter workspaces by search query
-    const filteredWorkspaces = workspaces.filter(ws => {
+    const filteredWorkspaces = manageableWorkspaces.filter(ws => {
         const displayName = ws.displayName || ws.name;
         const query = searchQuery.toLowerCase();
         return displayName.toLowerCase().includes(query) ||
                ws.id.toLowerCase().includes(query);
     });
 
-    // Track when add modal opens to detect successful workspace creation
+    // Row indices only line up with the stored order when nothing is filtered out,
+    // so reordering is only allowed when the search box is empty. `draggable` is
+    // the visible half of this; the handlers re-check because a dragstart can
+    // still reach them from a nested draggable element.
+    const isReorderable = searchQuery === '';
+
+    // Track when add modal opens to detect successful workspace creation.
+    // Counted over the manageable list, not the raw store: running tasks create
+    // worktree workspaces at any moment, and counting those closed the Add
+    // Workspace dialog out from under the user mid-typing.
+    const manageableCount = manageableWorkspaces.length;
+
     useEffect(() => {
         if (showAddModal && workspaceCountWhenModalOpened === null) {
-            setWorkspaceCountWhenModalOpened(workspaces.length);
+            setWorkspaceCountWhenModalOpened(manageableCount);
         }
-    }, [showAddModal, workspaceCountWhenModalOpened, workspaces.length]);
+    }, [showAddModal, workspaceCountWhenModalOpened, manageableCount]);
 
     // Close add modal when a new workspace is successfully added
     useEffect(() => {
-        if (showAddModal && workspaceCountWhenModalOpened !== null && workspaces.length > workspaceCountWhenModalOpened) {
+        if (showAddModal && workspaceCountWhenModalOpened !== null && manageableCount > workspaceCountWhenModalOpened) {
             setShowAddModal(false);
             setWorkspaceCountWhenModalOpened(null);
         }
-    }, [showAddModal, workspaceCountWhenModalOpened, workspaces.length]);
+    }, [showAddModal, workspaceCountWhenModalOpened, manageableCount]);
 
     // Fetch default base directory from config when modal opens
     useEffect(() => {
@@ -106,12 +150,23 @@ export function WorkspaceManager({
         setSelectedIds(new Set());
     }, []);
 
+    // Worktrees are no longer listed here, so a delete confirm has to say out loud
+    // what is attached to the row — otherwise the count of records that lose their
+    // parent is invisible at the moment of deciding.
+    const worktreeWarning = useCallback((ids: string[]) => {
+        const count = ids.reduce((n, id) => n + (worktreeChildren.get(id)?.length ?? 0), 0);
+        if (count === 0) return '';
+        return ` ${count} worktree${count > 1 ? 's' : ''} will be left without a parent workspace;` +
+            ' remove them from the sidebar instead to delete them properly.';
+    }, [worktreeChildren]);
+
     // Delete selected workspaces
     const deleteSelected = useCallback(async () => {
         if (selectedIds.size === 0) return;
 
         const confirmed = window.confirm(
-            `Delete ${selectedIds.size} workspace${selectedIds.size > 1 ? 's' : ''}? Tasks will not be deleted.`
+            `Delete ${selectedIds.size} workspace${selectedIds.size > 1 ? 's' : ''}? Tasks will not be deleted.` +
+            worktreeWarning([...selectedIds])
         );
 
         if (!confirmed) return;
@@ -128,7 +183,7 @@ export function WorkspaceManager({
         } finally {
             setIsDeleting(false);
         }
-    }, [selectedIds, onDeleteWorkspace]);
+    }, [selectedIds, onDeleteWorkspace, worktreeWarning]);
 
     // Add new workspace
     const handleAddWorkspace = useCallback(() => {
@@ -165,9 +220,10 @@ export function WorkspaceManager({
 
     // Drag and drop handlers
     const handleDragStart = useCallback((index: number) => {
+        if (!isReorderable) return;
         setDragIndex(index);
         setDragOverIndex(index);
-    }, []);
+    }, [isReorderable]);
 
     const handleDragEnter = useCallback((index: number) => {
         if (dragIndex !== null) {
@@ -175,13 +231,28 @@ export function WorkspaceManager({
         }
     }, [dragIndex]);
 
+    // Guarded by `isReorderable`, so the drag indices are always positions in the
+    // unfiltered manageable list — never in a search-narrowed view.
     const handleDragEnd = useCallback(() => {
-        if (dragIndex !== null && dragOverIndex !== null && dragIndex !== dragOverIndex) {
-            onReorderWorkspaces(dragIndex, dragOverIndex);
+        if (isReorderable && dragIndex !== null && dragOverIndex !== null && dragIndex !== dragOverIndex) {
+            const reordered = [...manageableWorkspaces];
+            const [moved] = reordered.splice(dragIndex, 1);
+            reordered.splice(dragOverIndex, 0, moved);
+
+            // Send the full stored order, not a pair of indices: the visible rows
+            // are a subset of the store, so an index-based move would land on
+            // whatever worktree happened to occupy that slot. Children ride along
+            // directly behind their parent to keep the stored array grouped.
+            const orderedIds: string[] = [];
+            for (const ws of reordered) {
+                orderedIds.push(ws.id);
+                for (const child of worktreeChildren.get(ws.id) ?? []) orderedIds.push(child.id);
+            }
+            onSetWorkspaceOrder(orderedIds);
         }
         setDragIndex(null);
         setDragOverIndex(null);
-    }, [dragIndex, dragOverIndex, onReorderWorkspaces]);
+    }, [isReorderable, dragIndex, dragOverIndex, manageableWorkspaces, worktreeChildren, onSetWorkspaceOrder]);
 
     // Close on Escape
     useEffect(() => {
@@ -299,12 +370,14 @@ export function WorkspaceManager({
                                 const isDragging = dragIndex === index;
                                 const isDropTarget = dragOverIndex === index && dragIndex !== null && !isDragging;
                                 const displayName = workspace.displayName || workspace.name;
+                                const childCount = worktreeChildren.get(workspace.id)?.length ?? 0;
+                                const isOrphanedWorktree = !!workspace.worktreeParentId;
 
                                 return (
                                     <div
                                         key={workspace.id}
                                         className={`workspace-manager-item ${isSelected ? 'selected' : ''} ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
-                                        draggable
+                                        draggable={isReorderable}
                                         onDragStart={(e) => {
                                             e.dataTransfer.effectAllowed = 'move';
                                             handleDragStart(index);
@@ -313,7 +386,10 @@ export function WorkspaceManager({
                                         onDragOver={(e) => e.preventDefault()}
                                         onDragEnter={() => handleDragEnter(index)}
                                     >
-                                        <div className="workspace-item-drag-handle">
+                                        <div
+                                            className={`workspace-item-drag-handle ${isReorderable ? '' : 'disabled'}`}
+                                            title={isReorderable ? 'Drag to reorder' : 'Clear the search to reorder'}
+                                        >
                                             <GripVertical size={16} />
                                         </div>
 
@@ -333,6 +409,23 @@ export function WorkspaceManager({
                                             <div className="workspace-item-name">
                                                 <Briefcase size={16} />
                                                 <span title={workspace.id}>{displayName}</span>
+                                                {childCount > 0 && (
+                                                    <span
+                                                        className="workspace-item-worktree-badge"
+                                                        title={`${childCount} worktree${childCount > 1 ? 's' : ''} — shown as tasks under this workspace in the sidebar`}
+                                                    >
+                                                        <GitBranch size={12} />
+                                                        {childCount}
+                                                    </span>
+                                                )}
+                                                {isOrphanedWorktree && (
+                                                    <span
+                                                        className="workspace-item-orphan-badge"
+                                                        title="Worktree whose parent workspace no longer exists — safe to delete"
+                                                    >
+                                                        orphaned worktree
+                                                    </span>
+                                                )}
                                             </div>
                                             <div className="workspace-item-path" title={workspace.id}>
                                                 {workspace.id}
@@ -343,7 +436,8 @@ export function WorkspaceManager({
                                             className="workspace-item-delete"
                                             onClick={() => {
                                                 const confirmed = window.confirm(
-                                                    `Delete workspace "${displayName}"? Tasks will not be deleted.`
+                                                    `Delete workspace "${displayName}"? Tasks will not be deleted.` +
+                                                    worktreeWarning([workspace.id])
                                                 );
                                                 if (confirmed) {
                                                     onDeleteWorkspace(workspace.id);
@@ -370,7 +464,14 @@ export function WorkspaceManager({
                         {selectedIds.size > 0 ? (
                             <span>{selectedIds.size} of {filteredWorkspaces.length} selected</span>
                         ) : (
-                            <span>{filteredWorkspaces.length} workspace{filteredWorkspaces.length !== 1 ? 's' : ''}</span>
+                            <span>
+                                {filteredWorkspaces.length} workspace{filteredWorkspaces.length !== 1 ? 's' : ''}
+                                {hiddenWorktreeCount > 0 && (
+                                    <span className="workspace-manager-hidden-note">
+                                        {' '}· {hiddenWorktreeCount} worktree{hiddenWorktreeCount !== 1 ? 's' : ''} hidden
+                                    </span>
+                                )}
+                            </span>
                         )}
                     </div>
                     <button
