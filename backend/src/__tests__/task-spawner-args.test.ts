@@ -237,8 +237,15 @@ describe('TaskSpawner privacy args', () => {
         rmSync(dir, { recursive: true, force: true });
     });
 
-    const makeSpawner = (configStore?: unknown) =>
-        new TaskSpawner(join(dir, 'tasks.json'), false, configStore as never);
+    // The constructor calls configStore.getBackend() before anything privacy
+    // related runs, so a stub that only carries the privacy getter would blow up
+    // there and never reach the code under test.
+    const makeSpawner = (configStore?: Record<string, unknown>) =>
+        new TaskSpawner(
+            join(dir, 'tasks.json'),
+            false,
+            (configStore && { getBackend: () => 'claude-code', ...configStore }) as never
+        );
 
     it('pins the privacy settings file next to tasks.json by default', () => {
         spawner = makeSpawner();
