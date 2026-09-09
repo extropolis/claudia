@@ -27,19 +27,18 @@ vi.mock('node-pty', () => ({
     spawn: (file: string, args: string[], opts: Record<string, unknown>) => fakePtySpawn(file, args, opts),
 }));
 
-import { TaskSpawner } from '../task-spawner.js';
+import { TaskSpawner, SESSION_CAPTURE_TIMEOUT_MS } from '../task-spawner.js';
 
 const TASK_ID = 'task-500-sess';
 const SID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeffff0001';
 
 /**
- * Mirrors SESSION_CAPTURE_TIMEOUT_MS in task-spawner.ts, which is module-private
- * (not exported) so it cannot be imported here. #240 raised it from 30s to 10
+ * SESSION_CAPTURE_TIMEOUT_MS is imported rather than mirrored, so this test
+ * cannot silently drift from the real window. #240 raised it from 30s to 10
  * minutes: Claude Code flushes its session .jsonl lazily and can take well over
  * 30s on a slow first turn, so the old window expired before the file existed and
  * the task's history became unrecoverable on the next resume.
  */
-const SESSION_CAPTURE_TIMEOUT_MS = 10 * 60 * 1000;
 
 interface Internals {
     tasks: Map<string, Record<string, unknown>>;
