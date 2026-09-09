@@ -331,9 +331,53 @@ interface InternalTask extends Task {
  * - 'reconnectStart': When auto-reconnection begins
  * - 'reconnectComplete': When auto-reconnection finishes
  */
+
+/**
+ * How many tasks a SINGLE client may keep visible. Each visible task retains
+ * decoded scrollback in memory, so this is a memory bound as much as a UI one.
+ *
+ * Applied per client, not to the union, for two reasons. It sits above the
+ * frontend's pane cap (MAX_PANES = 6) so a full desktop layout always fits with
+ * headroom; and capping the union instead would thrash — eviction would drop an
+ * id from the effective set while the client's own declaration still listed it,
+ * so the very next recompute would put it straight back.
+ *
+ * The union stays bounded because every client is capped and each one's share
+ * is released the moment it disconnects.
+ */
+export const MAX_VISIBLE_TASKS = 8;
+
 export class TaskSpawner extends EventEmitter {
     private tasks: Map<string, InternalTask> = new Map();
     private disconnectedTasks: Map<string, PersistedTask> = new Map();
+    /**
+     * Tasks currently rendered by a client — one per split-screen pane.
+     * PTY output is streamed to EVERY id in this set. This replaced the old
+     * single-active-task assumption, under which showing 4 terminals at once
+     * left 3 of them silent because their output was dropped.
+     *
+     * `InternalTask.isActive` is a mirror of membership here, kept in sync by
+     * syncIsActiveFlag() so the field stays meaningful for callers/serialization.
+     */
+    private visibleTaskIds = new Set<string>();
+    /**
+     * The effective visible ids, in a deterministic order derived from each
+     * client's declaration. Read by getVisibleTaskIds() and the logs; eviction
+     * itself is per-client (see addForClient / setVisibleTasks), not driven from
+     * here.
+     */
+    private visibleOrder: string[] = [];
+    /**
+     * What each connected client says it is showing, keyed by connection id.
+     * The effective visible set is the UNION of these.
+     *
+     * Per-client rather than global because clients disagree: a desktop with 6
+     * split panes and a phone showing 1 task are both correct about themselves.
+     * With a single shared set, whichever client spoke last would win and
+     * silence the other's terminals — the phone's authoritative
+     * `setVisible([oneTask])` would blank all 6 desktop panes.
+     */
+    private clientVisible = new Map<string, Set<string>>();
     // Next short task number to assign (see Task.taskNumber). Loaded from
     // persistence and monotonically increasing — numbers are never reused, so
     // "#48" stays unambiguous in conversation even after the task is deleted.
@@ -3891,33 +3935,153 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         logger.info('Updated learning utilities', { taskId, success, count: learningIds.length });
     }
 
-    setTaskActive(taskId: string, active: boolean): void {
+    /**
+     * Mirror `visibleTaskIds` membership onto every task's `isActive` flag.
+     *
+     * `isActive` is read on the PTY output hot path and is serialized to
+     * clients, so rather than rewrite every consumer it is kept as a cached
+     * view of the set. The set is the single source of truth; this is its only
+     * writer.
+     */
+    private syncIsActiveFlag(): void {
+        for (const task of this.tasks.values()) {
+            const visible = this.visibleTaskIds.has(task.id);
+            if (task.isActive !== visible) {
+                task.isActive = visible;
+                // Allow the "dropping output" notice to fire once more after a flip.
+                if (!visible) task.inactiveOutputLogged = false;
+            }
+        }
+    }
+
+    /**
+     * Rebuild the effective visible set as the union of every client's
+     * declaration. Each client's Set preserves insertion order, so the result
+     * is deterministic and reflects per-client recency.
+     */
+    private recomputeVisible(): void {
+        const order: string[] = [];
+        for (const set of this.clientVisible.values()) {
+            for (const id of set) if (!order.includes(id)) order.push(id);
+        }
+        this.visibleOrder = order;
+        this.visibleTaskIds = new Set(order);
+        this.syncIsActiveFlag();
+    }
+
+    private clientSet(clientId: string): Set<string> {
+        let set = this.clientVisible.get(clientId);
+        if (!set) { set = new Set(); this.clientVisible.set(clientId, set); }
+        return set;
+    }
+
+    /**
+     * Add one task to a client's visible set, evicting that client's
+     * least-recently-shown task if it is already at the cap. Delete-then-add
+     * refreshes position, since a Set keeps insertion order.
+     */
+    private addForClient(clientId: string, taskId: string): void {
+        const set = this.clientSet(clientId);
+        set.delete(taskId);
+        set.add(taskId);
+        while (set.size > MAX_VISIBLE_TASKS) {
+            const oldest = set.values().next().value as string;
+            set.delete(oldest);
+            console.log(`[TaskSpawner] Client ${clientId} over cap ${MAX_VISIBLE_TASKS} - evicting ${oldest}`);
+        }
+    }
+
+    /** Drop a disconnected client's declaration so its panes stop streaming. */
+    releaseClient(clientId: string): void {
+        if (this.clientVisible.delete(clientId)) {
+            this.recomputeVisible();
+            console.log(`[TaskSpawner] Released visible set for client ${clientId}`);
+        }
+    }
+
+    private removeVisibleTask(taskId: string): void {
+        for (const set of this.clientVisible.values()) set.delete(taskId);
+        this.recomputeVisible();
+    }
+
+    /** Ids currently streaming output, oldest-shown first. Exposed for tests/introspection. */
+    getVisibleTaskIds(): string[] {
+        return [...this.visibleOrder];
+    }
+
+    /**
+     * Authoritative replacement of the visible set - one entry per split-screen
+     * pane. The client sends this on every layout change and after a reconnect,
+     * so anything absent from `taskIds` is pruned: a pane closed while the
+     * socket was down would otherwise stream and retain scrollback forever.
+     *
+     * Purely a streaming/retention concern - history replay stays with
+     * `setTaskActive`, which each TerminalView triggers via `task:select` when
+     * it mounts. Keeping the two apart means a divider drag or a re-render that
+     * resends the same set never re-replays scrollback into a live terminal.
+     *
+     * Returns the ids actually visible after the cap is applied.
+     */
+    setVisibleTasks(clientId: string, taskIds: string[]): string[] {
+        const deduped = Array.from(new Set(
+            (Array.isArray(taskIds) ? taskIds : []).filter(id => typeof id === 'string' && id.length > 0)
+        ));
+        // Keep the positions of ids this client already showed and append only the
+        // genuinely new ones. A client that re-sends the same set in a different
+        // order (a re-render, a divider drag) then changes nothing about which
+        // task would be evicted first.
+        const prev = this.clientVisible.get(clientId);
+        const ordered = prev
+            ? [...[...prev].filter(id => deduped.includes(id)), ...deduped.filter(id => !prev.has(id))]
+            : deduped;
+        // Cap the declaration itself, so the stored set can never disagree with
+        // what is actually being streamed.
+        this.clientVisible.set(clientId, new Set(ordered.slice(0, MAX_VISIBLE_TASKS)));
+        this.recomputeVisible();
+
+        console.log(`[TaskSpawner] setVisibleTasks(${clientId}): requested=[${deduped.join(', ')}] accepted=[${[...this.clientVisible.get(clientId)!].join(', ')}] union=[${this.visibleOrder.join(', ')}]`);
+        // Return THIS client's accepted set, not the union. The union includes other
+        // clients' tasks, which would be nonsense to echo back as "what you are
+        // showing" — and a client needs to be able to spot that the cap dropped one
+        // of its own panes by diffing what it asked for against what came back.
+        return [...this.clientVisible.get(clientId)!];
+    }
+
+    setTaskActive(taskId: string, active: boolean, clientId = '__server__'): void {
+        // Membership in the visible set - NOT an exclusive switch. Split screen
+        // shows several tasks at once, so selecting one must not silence the rest.
+        // Scoped to the calling client so one client's selection cannot evict
+        // another's panes; the effective set is the union.
         if (active) {
-            // Clear decoded history from all other tasks to free memory
-            // This prevents memory buildup when rapidly switching between tasks
-            // Use a longer delay (30 seconds) to avoid clearing history for tasks the user is actively working with
+            this.addForClient(clientId, taskId);
+            this.recomputeVisible();
+        } else {
+            // Scoped to the caller: one client closing a pane must not silence
+            // another client's pane showing the same task.
+            this.clientSet(clientId).delete(taskId);
+            this.recomputeVisible();
+        }
+
+        if (active) {
+            // Free decoded scrollback for tasks that are no longer on screen.
+            // Delayed 30s so rapid switching doesn't discard history the user is
+            // about to switch back to.
             setTimeout(() => {
                 for (const task of this.tasks.values()) {
-                    // Only clear if task is still inactive AND hasn't been recently active
-                    // This prevents clearing history for tasks you're switching between
                     const timeSinceLastActivity = Date.now() - task.lastActivity.getTime();
                     const isRecentlyActive = timeSinceLastActivity < 60000; // 60 seconds
 
-                    if (task.id !== taskId && !task.isActive && !isRecentlyActive && task.previousHistory) {
+                    // The guard is visible-set membership, not `task.id !== taskId`:
+                    // with split screen every pane's task is on screen and each one
+                    // still needs its history retained.
+                    if (!this.visibleTaskIds.has(task.id) && !isRecentlyActive && task.previousHistory) {
                         task.previousHistory = undefined;
                         // Also clear lazyHistoryBase64 if it exists (legacy)
                         task.lazyHistoryBase64 = undefined;
-                        console.log(`[TaskSpawner] Freed memory for inactive task ${task.id} (last active ${Math.round(timeSinceLastActivity / 1000)}s ago)`);
+                        console.log(`[TaskSpawner] Freed memory for hidden task ${task.id} (last active ${Math.round(timeSinceLastActivity / 1000)}s ago)`);
                     }
                 }
             }, 30000); // 30 second delay - long enough for active task switching
-
-            // Mark all other tasks as inactive immediately (don't wait for the timeout)
-            for (const task of this.tasks.values()) {
-                if (task.id !== taskId) {
-                    task.isActive = false;
-                }
-            }
         }
 
         console.log(`[TaskSpawner] setTaskActive called: taskId=${taskId}, active=${active}, inTasks=${this.tasks.has(taskId)}, inDisconnected=${this.disconnectedTasks.has(taskId)}`);
@@ -3962,8 +4126,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         const task = this.tasks.get(taskId);
         console.log(`[TaskSpawner] setTaskActive: taskId=${taskId}, active=${active}, taskFound=${!!task}, currentIsActive=${task?.isActive}, ptyPid=${task?.process?.pid}`);
         if (task) {
-            task.isActive = active;
-            console.log(`[TaskSpawner] Set task.isActive to ${active} for ${taskId}`);
+            // Derive from the set rather than trusting `active`: the LRU cap may
+            // have evicted this very task, in which case it is NOT visible and
+            // must not be flagged as such.
+            task.isActive = this.visibleTaskIds.has(taskId);
+            console.log(`[TaskSpawner] Set task.isActive to ${task.isActive} for ${taskId} (requested=${active})`);
 
             if (active) {
                 // Notify backend if using OpenCode
@@ -4526,6 +4693,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             if (taskBackend === 'opencode' && this.backend) {
                 this.backend.destroyTask(taskId);
                 this.tasks.delete(taskId);
+                this.removeVisibleTask(taskId);
                 this.taskBackends.delete(taskId);
                 destroyed = true;
                 source = 'live (opencode)';
@@ -4542,6 +4710,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
                 // Delete from map FIRST to prevent onExit handler from emitting state changes
                 this.tasks.delete(taskId);
+                this.removeVisibleTask(taskId);
                 this.taskBackends.delete(taskId);
                 try {
                     task.process.kill();
@@ -4651,6 +4820,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
             // Delete from map FIRST to prevent onExit handler from emitting state changes
             this.tasks.delete(taskId);
+            this.removeVisibleTask(taskId);
             try {
                 task.process.kill();
             } catch (_e) {
@@ -4906,6 +5076,10 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             };
             this.disconnectedTasks.set(taskId, persisted);
             this.tasks.delete(taskId);
+            // Same reasoning as disconnectTask: this demotes a live task so it
+            // can be respawned below. The client's pane never went away, so its
+            // declaration must survive or the pane would come back silent.
+            this.recomputeVisible();
             // Fall through to normal reconnect logic below
         }
 
@@ -5208,8 +5382,15 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // the response. Background reconnects (auto-reconnect, sleep/wake, continuation)
         // stay inactive until the user selects the task.
         if (pendingInput) {
-            task.isActive = true;
+            // Ensure the client that typed sees the resumed session immediately.
+            // Recorded in the set rather than written onto the task directly: a raw
+            // `task.isActive = true` is clobbered by the next syncIsActiveFlag().
+            this.addForClient('__server__', taskId);
         }
+        // Re-derive isActive from the visible set. The task was just re-entered into
+        // `this.tasks` with isActive:false, so without this a pane that stayed mounted
+        // across a server-side disconnect would never stream again.
+        this.recomputeVisible();
 
         this.scheduleSave();
 
@@ -5317,6 +5498,13 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
         this.disconnectedTasks.set(taskId, persisted);
         this.tasks.delete(taskId);
+        // Deliberately NOT removeVisibleTask(): a disconnect is the SERVER shedding
+        // a PTY (memory budget, idle reaper), not the user closing a pane. The pane
+        // is still mounted and the client's declaration is still correct. Erasing it
+        // here would leave that pane permanently silent, because nothing on the
+        // client changes and so nothing ever re-declares it. recomputeVisible keeps
+        // the id in the effective set; reconnectTask re-derives isActive from it.
+        this.recomputeVisible();
 
         this.scheduleSave();
         this.emit('taskStateChanged', { ...this.toPublicTask(task), state: 'disconnected' });

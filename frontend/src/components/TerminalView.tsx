@@ -57,9 +57,15 @@ interface TerminalViewProps {
     wsRef: React.RefObject<WebSocket | null>;
     workspace?: Workspace;
     isMobile?: boolean;
+    /**
+     * Split-screen pane chrome (split/close buttons), rendered at the end of the
+     * terminal header. Injected rather than overlaid so it shares the header's
+     * layout instead of colliding with the copy/learn/resume buttons.
+     */
+    paneControls?: React.ReactNode;
 }
 
-export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewProps) {
+export function TerminalView({ task, wsRef, workspace, isMobile, paneControls }: TerminalViewProps) {
     const effectiveTheme = useEffectiveTheme();
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
@@ -521,8 +527,15 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // fires after layout + paint have completed, so container dimensions are
         // final. A single rAF is NOT enough — flexbox/grid sizing may still be
         // in-progress during the first frame.
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
+        // Both handles are captured so the cleanup can cancel a frame that has not
+        // run yet. Without that, unmounting mid-flight still fires the inner callback
+        // (term.cols/rows read fine after dispose()) and sends a task:select for a
+        // task this pane no longer shows — which quietly re-adds it to the server's
+        // visible set and can push a real pane out past the cap.
+        let rafOuter = 0;
+        let rafInner = 0;
+        rafOuter = requestAnimationFrame(() => {
+            rafInner = requestAnimationFrame(() => {
                 try {
                     fitAddon.fit();
                 } catch (e) {
@@ -723,6 +736,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // (after fitAddon.fit()) so that history arrives at the correct terminal size.
 
         return () => {
+            if (rafOuter) cancelAnimationFrame(rafOuter);
+            if (rafInner) cancelAnimationFrame(rafInner);
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
             if (resizeBufferTimer) window.clearTimeout(resizeBufferTimer);
             resizeObserver.disconnect();
@@ -800,6 +815,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     </button>
                 )}
                 <span className={`terminal-state ${task.state}`}>{stateLabel}</span>
+                {paneControls}
             </div>
             <div className="terminal-container-wrapper">
                 <div ref={terminalRef} className="terminal-container" />

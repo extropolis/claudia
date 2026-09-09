@@ -52,6 +52,9 @@ interface TestConfig {
     backendStatus: boolean;       // Get backend status (no WebSocket needed)
     setBackend: string | null;    // Set backend ('claude-code' or 'opencode')
     watchOutput: boolean;         // Stream task output to console
+    testSplit: string | null;     // Comma-separated task ids to verify stream concurrently (split screen)
+    splitNudge: boolean;          // Send Enter to each task under --test-split
+    splitWatchMs: number;         // How long --test-split listens for output
     waitForIdle: boolean;         // Wait for task to become idle before exiting
     listMcpServers: boolean;      // List available MCP servers (no WebSocket needed)
     testMcpServer: string | null; // Test a specific MCP server by name
@@ -84,6 +87,9 @@ class TestCLI {
     private config: TestConfig;
     private chatMessages: ChatMessage[] = [];
     private tasks: Map<string, Task> = new Map();
+    /** --test-split: ids under observation, and bytes streamed per id. */
+    private splitTaskIds: string[] = [];
+    private splitOutputBytes: Map<string, number> = new Map();
     private archivedTasks: Task[] = [];
     private startTime: number = 0;
     private completionTimer: NodeJS.Timeout | null = null;
@@ -115,7 +121,9 @@ class TestCLI {
                 console.log('');
 
                 // Handle different operations based on config
-                if (this.config.listTasks) {
+                if (this.config.testSplit) {
+                    this.runSplitScreenTest(this.config.testSplit);
+                } else if (this.config.listTasks) {
                     // Wait for init message to populate tasks, then list them
                     setTimeout(() => {
                         this.listTasks();
@@ -921,6 +929,10 @@ class TestCLI {
                 this.handleTaskOutput(message.payload as { taskId: string; data: string });
                 break;
 
+            case 'task:visibleSet':
+                this.handleVisibleSet(message.payload as { taskIds?: string[] });
+                break;
+
             case 'supervisor:chat:response':
                 this.handleSupervisorChatResponse(message.payload as { message: ChatMessage });
                 break;
@@ -981,8 +993,93 @@ class TestCLI {
         }
     }
 
+    /**
+     * Split-screen verification: mark several tasks visible at once and confirm
+     * the server streams PTY output for EVERY one of them.
+     *
+     * This is the regression that matters. `setTaskActive` used to be exclusive,
+     * so with N panes open only the most recently selected task produced output
+     * and the other N-1 terminals sat frozen. A pass here means the visible set
+     * is genuinely a set.
+     */
+    private runSplitScreenTest(idsArg: string): void {
+        const ids = idsArg.split(',').map(s => s.trim()).filter(Boolean);
+        this.splitTaskIds = ids;
+        for (const id of ids) this.splitOutputBytes.set(id, 0);
+
+        console.log(`🔲 Split-screen test: marking ${ids.length} task(s) visible`);
+        for (const id of ids) console.log(`   • ${id}`);
+        console.log('');
+
+        this.ws!.send(JSON.stringify({ type: 'task:setVisible', payload: { taskIds: ids } }));
+
+        // Nudging sends a bare Enter to force a TUI redraw. It is OPT-IN because
+        // these are real sessions and poking a task another agent is driving is not
+        // something a test should do by default. Busy tasks already emit output, so
+        // observation alone is enough to prove the visible set is non-exclusive.
+        setTimeout(() => {
+            if (this.config.splitNudge) {
+                for (const id of ids) {
+                    this.ws!.send(JSON.stringify({ type: 'task:input', payload: { taskId: id, input: '\r' } }));
+                }
+                console.log('   nudged each task with Enter (--split-nudge)');
+            } else {
+                console.log('   observe-only (pass --split-nudge to force idle tasks to redraw)');
+            }
+            console.log(`⏳ Listening ${this.config.splitWatchMs}ms for output from each task...`);
+            console.log('');
+        }, 750);
+
+        setTimeout(() => {
+            console.log('');
+            console.log('─'.repeat(58));
+            console.log('Split-screen result');
+            console.log('─'.repeat(58));
+            let silent = 0;
+            for (const id of ids) {
+                const bytes = this.splitOutputBytes.get(id) ?? 0;
+                const mark = bytes > 0 ? '✅' : '❌';
+                if (bytes === 0) silent++;
+                console.log(`${mark} ${id}  ${bytes} bytes`);
+            }
+            console.log('─'.repeat(58));
+            if (silent === 0) {
+                console.log(`✅ PASS — all ${ids.length} tasks streamed concurrently`);
+            } else {
+                console.log(`❌ FAIL — ${silent}/${ids.length} task(s) produced no output (visible set is still exclusive?)`);
+            }
+            this.cleanup();
+            process.exit(silent === 0 ? 0 : 1);
+        }, this.config.splitWatchMs + 750);
+    }
+
+    private handleVisibleSet(payload: { taskIds?: string[] }): void {
+        const ids = payload.taskIds ?? [];
+        console.log(`📋 Server acked visible set (${ids.length}): ${ids.join(', ') || '(empty)'}`);
+        if (this.splitTaskIds.length) {
+            const missing = this.splitTaskIds.filter(id => !ids.includes(id));
+            if (missing.length) {
+                console.log(`⚠️  Server dropped ${missing.length} id(s) — likely over the visible cap: ${missing.join(', ')}`);
+            }
+        }
+    }
+
     private handleTaskOutput(payload: { taskId: string; data: string }): void {
         this.lastActivityTime = Date.now();
+
+        if (this.splitTaskIds.length) {
+            const prev = this.splitOutputBytes.get(payload.taskId);
+            if (prev !== undefined) {
+                const total = prev + payload.data.length;
+                this.splitOutputBytes.set(payload.taskId, total);
+                // First byte from each task is the interesting signal.
+                if (prev === 0) {
+                    const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+                    console.log(`[${elapsed}s] 📡 first output from ${payload.taskId} (${payload.data.length} bytes)`);
+                }
+            }
+            return;
+        }
 
         if (this.config.watchOutput) {
             // Stream raw output directly to console
@@ -1333,6 +1430,9 @@ function parseArgs(): TestConfig {
     let backendStatus = false;
     let setBackend: string | null = null;
     let watchOutput = false;
+    let testSplit: string | null = null;
+    let splitNudge = false;
+    let splitWatchMs = 15000;
     let waitForIdle = false;
     let listMcpServers = false;
     let testMcpServer: string | null = null;
@@ -1500,6 +1600,15 @@ function parseArgs(): TestConfig {
             case '-o':
                 watchOutput = true;
                 break;
+            case '--test-split':
+                testSplit = args[++i];
+                break;
+            case '--split-nudge':
+                splitNudge = true;
+                break;
+            case '--split-watch-ms':
+                splitWatchMs = parseInt(args[++i], 10) || 15000;
+                break;
             case '--wait-idle':
                 waitForIdle = true;
                 break;
@@ -1635,6 +1744,11 @@ TASK OPERATIONS:
   --delete-task            Delete a specific task (requires --task-id)
   --clear-tasks            Clear all tasks
   --list-tasks             List all tasks with their status
+  --test-split <ids>       Split-screen check: comma-separated task ids that must ALL
+                           stream output concurrently. Exits 1 if any stays silent.
+  --split-watch-ms <ms>    How long --test-split listens for output (default 15000)
+  --split-nudge            Send Enter to each --test-split task to force a redraw
+                           (off by default - never poke tasks other agents drive)
   --view-files             View code files for a task (requires --task-id)
   --archive-task           Archive a task (requires --task-id)
   --disconnect             Disconnect a task (requires --task-id)
@@ -1729,6 +1843,7 @@ Examples:
 
   # List all tasks
   npx tsx test-cli.ts --list-tasks
+  npx tsx test-cli.ts --test-split task-aaa,task-bbb
 
   # View code files for a task
   npx tsx test-cli.ts --view-files --task-id abc123
@@ -1863,6 +1978,9 @@ Examples:
         backendStatus,
         setBackend,
         watchOutput,
+        testSplit,
+        splitNudge,
+        splitWatchMs,
         waitForIdle,
         listMcpServers,
         testMcpServer,

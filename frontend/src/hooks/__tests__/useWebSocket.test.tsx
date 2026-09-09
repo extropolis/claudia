@@ -387,6 +387,7 @@ describe('useWebSocket — outbound messages', () => {
 
     const FRAME_CASES: FrameCase[] = [
         { name: 'selectTaskOnServer', invoke: (api) => api.selectTaskOnServer('t1'), type: 'task:select', payload: { taskId: 't1' } },
+        { name: 'setVisibleTasksOnServer', invoke: (api) => api.setVisibleTasksOnServer(['t1', 't2']), type: 'task:setVisible', payload: { taskIds: ['t1', 't2'] } },
         { name: 'sendTaskInput', invoke: (api) => api.sendTaskInput('t1', 'hi'), type: 'task:input', payload: { taskId: 't1', input: 'hi' } },
         { name: 'resizeTask', invoke: (api) => api.resizeTask('t1', 100, 30), type: 'task:resize', payload: { taskId: 't1', cols: 100, rows: 30 } },
         { name: 'destroyTask', invoke: (api) => api.destroyTask('t1'), type: 'task:destroy', payload: { taskId: 't1' } },

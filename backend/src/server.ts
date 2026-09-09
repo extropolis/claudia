@@ -55,6 +55,7 @@ const __dirname = dirname(__filename);
 const VALID_WS_MESSAGE_TYPES = new Set([
     'task:create',
     'task:select',
+    'task:setVisible',
     'task:refreshPr',
     'task:input',
     'task:resize',
@@ -1785,7 +1786,7 @@ export async function createApp(basePath?: string) {
                         const { taskId } = payload as { taskId?: string };
                         if (taskId) {
                             try {
-                                taskSpawner.setTaskActive(taskId, true);
+                                taskSpawner.setTaskActive(taskId, true, clientId);
                             } catch (error) {
                                 const errorMessage = error instanceof Error ? error.message : String(error);
                                 logger.error('Failed to activate task', { taskId, error: errorMessage });
@@ -1793,6 +1794,27 @@ export async function createApp(basePath?: string) {
                             }
                             // Immediately refresh PR info for the selected task
                             void refreshTaskPrInfo(taskId);
+                        }
+                        break;
+                    }
+
+                    case 'task:setVisible': {
+                        // Split screen: authoritative set of task ids currently mounted in
+                        // panes. Sent on every layout change and after a reconnect, so the
+                        // server can prune tasks whose pane closed while the socket was down.
+                        const { taskIds } = payload as { taskIds?: unknown };
+                        if (!Array.isArray(taskIds)) {
+                            sendWSError(ws, 'task:setVisible requires a taskIds array', message.type, 'INVALID_PAYLOAD');
+                            break;
+                        }
+                        try {
+                            const ids = taskIds.filter((id): id is string => typeof id === 'string');
+                            const visible = taskSpawner.setVisibleTasks(clientId, ids);
+                            ws.send(JSON.stringify({ type: 'task:visibleSet', payload: { taskIds: visible } }));
+                        } catch (error) {
+                            const errorMessage = error instanceof Error ? error.message : String(error);
+                            logger.error('Failed to set visible tasks', { error: errorMessage });
+                            sendWSError(ws, `Failed to set visible tasks: ${errorMessage}`, message.type, 'SET_VISIBLE_FAILED');
                         }
                         break;
                     }
@@ -2114,7 +2136,7 @@ export async function createApp(basePath?: string) {
                             if (task) {
                                 // Ensure reconnected task becomes active so output is streamed
                                 // and history is restored immediately.
-                                taskSpawner.setTaskActive(taskId, true);
+                                taskSpawner.setTaskActive(taskId, true, clientId);
                                 broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
                             }
                         } catch (error) {
@@ -3217,6 +3239,10 @@ export async function createApp(basePath?: string) {
             const reasonStr = reason.toString() || 'no reason';
             console.log(`[Server] Client disconnected - code: ${code}, reason: ${reasonStr}`);
             clients.delete(ws);
+            // Stop streaming the panes this client was showing. Without this a
+            // closed browser tab would keep its tasks in the visible set forever,
+            // retaining their scrollback and burning the global cap.
+            taskSpawner.releaseClient(clientId);
         });
 
         ws.on('error', (error: Error) => {

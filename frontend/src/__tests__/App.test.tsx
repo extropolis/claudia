@@ -42,6 +42,7 @@ const H = vi.hoisted(() => {
         'renameWorkspace', 'toggleReference', 'addCustomReference', 'removeReference',
         'createScheduledTask', 'deleteScheduledTask', 'updateScheduledTask',
         'pauseScheduledTask', 'rejectDeleteRequest',
+        'setVisibleTasksOnServer',
     ] as const;
 
     const actions: Record<string, ReturnType<typeof vi.fn>> = {};
@@ -185,6 +186,7 @@ vi.mock('../components/TaskCompletionVoiceManager', () => ({ TaskCompletionVoice
 vi.mock('../components/TaskProgressVoiceManager', () => ({ TaskProgressVoiceManager: () => null }));
 
 import App from '../App';
+import { useSplitLayoutStore, collectLeaves, countLeaves } from '../stores/splitLayoutStore';
 import { NotificationProvider } from '../components/NotificationContainer';
 
 // ---------------------------------------------------------------------------
@@ -268,6 +270,9 @@ function setViewportWidth(width: number) {
 
 beforeEach(() => {
     localStorage.clear();
+    // The split layout store lives at module scope, so a pane assigned in one
+    // test would leak into the next. localStorage.clear() does not undo it.
+    useSplitLayoutStore.getState().resetLayout();
     resetStore();
     H.terminalMounts.length = 0;
     H.lastProps = {};
@@ -903,5 +908,171 @@ describe('App — sidebar resizing', () => {
         act(() => { fireEvent.mouseMove(document, { clientX: 10 }); });
         act(() => { fireEvent.mouseUp(document); });
         expect(localStorage.getItem('claudia-sidebar-width')).toBe('420');
+    });
+});
+
+// ===========================================================================
+
+/**
+ * Split-screen integration between App and the layout store.
+ *
+ * These cover the seams the store's own unit tests structurally cannot: the
+ * store is deliberately task-agnostic (its leaves hold an opaque `taskId`), so
+ * everything about how panes relate to the SELECTED task, to the server's
+ * visible set, and to tasks disappearing lives here in App.
+ */
+describe('App - split screen integration', () => {
+    const twoTasks = () => new Map([
+        ['task-1', makeTask({ id: 'task-1' })],
+        ['task-2', makeTask({ id: 'task-2', prompt: 'second' })],
+    ]);
+
+    it('tells the server exactly which tasks are mounted in panes', async () => {
+        resetStore({ tasks: twoTasks(), workspaces: [makeWorkspace()], selectedTaskId: 'task-1' });
+        renderApp();
+
+        await waitFor(() => {
+            expect(H.actions.setVisibleTasksOnServer).toHaveBeenCalled();
+        });
+        // The bootstrap adopts the remembered selection into the single pane.
+        const calls = H.actions.setVisibleTasksOnServer.mock.calls;
+        expect(calls[calls.length - 1][0]).toEqual(['task-1']);
+    });
+
+    it('clears panes whose task was deleted, even when it was the LAST task', async () => {
+        resetStore({ tasks: twoTasks(), workspaces: [makeWorkspace()], selectedTaskId: 'task-1' });
+        renderApp();
+        await waitFor(() => {
+            expect(useSplitLayoutStore.getState().root).toMatchObject({ taskId: 'task-1' });
+        });
+
+        // Every task goes away. An early-return on `tasks.size === 0` would leave
+        // the pane pointing at a dead id and keep reporting it as visible.
+        act(() => { useTaskStore.setState({ tasks: new Map() } as never); });
+
+        await waitFor(() => {
+            expect(useSplitLayoutStore.getState().root).toMatchObject({ taskId: null });
+        });
+        const calls = H.actions.setVisibleTasksOnServer.mock.calls;
+        expect(calls[calls.length - 1][0]).toEqual([]);
+    });
+
+    it('follows the focused pane when focus moves without a click', async () => {
+        resetStore({ tasks: twoTasks(), workspaces: [makeWorkspace()], selectedTaskId: 'task-1' });
+        renderApp();
+        await waitFor(() => {
+            expect(useSplitLayoutStore.getState().root).toMatchObject({ taskId: 'task-1' });
+        });
+
+        // Split, put the second task in the new pane, then close the ORIGINAL.
+        // closePane reassigns focus programmatically — there is no click to
+        // piggyback on, so only a focus-derived effect keeps the selection honest.
+        let newPaneId: string | null = null;
+        act(() => {
+            const { focusedPaneId, splitPane } = useSplitLayoutStore.getState();
+            newPaneId = splitPane(focusedPaneId, 'row');
+        });
+        act(() => { useSplitLayoutStore.getState().setPaneTask(newPaneId!, 'task-2'); });
+
+        const firstPaneId = collectLeaves(useSplitLayoutStore.getState().root)
+            .find(l => l.taskId === 'task-1')!.id;
+        act(() => { useSplitLayoutStore.getState().closePane(firstPaneId); });
+
+        await waitFor(() => {
+            expect(useTaskStore.getState().selectedTaskId).toBe('task-2');
+        });
+    });
+
+    it('focuses the existing pane instead of moving a task already on screen', async () => {
+        resetStore({ tasks: twoTasks(), workspaces: [makeWorkspace()], selectedTaskId: 'task-1' });
+        renderApp();
+        await waitFor(() => {
+            expect(useSplitLayoutStore.getState().root).toMatchObject({ taskId: 'task-1' });
+        });
+
+        let newPaneId: string | null = null;
+        act(() => {
+            const { focusedPaneId, splitPane } = useSplitLayoutStore.getState();
+            newPaneId = splitPane(focusedPaneId, 'row');
+        });
+        act(() => { useSplitLayoutStore.getState().setPaneTask(newPaneId!, 'task-2'); });
+        // Focus the SECOND pane, then click task-1 in the sidebar.
+        act(() => { useSplitLayoutStore.getState().focusPane(newPaneId!); });
+
+        act(() => { (H.lastProps.WorkspacePanel.onSelectTask as (id: string) => void)('task-1'); });
+
+        // task-1 must still be in its original pane and task-2 must not have been
+        // blanked; only the focus moved.
+        const leaves = collectLeaves(useSplitLayoutStore.getState().root);
+        expect(leaves.map(l => l.taskId).sort()).toEqual(['task-1', 'task-2']);
+        expect(useSplitLayoutStore.getState().focusedPaneId).not.toBe(newPaneId);
+    });
+
+    it('splits and closes the focused pane from the keyboard', async () => {
+        resetStore({ tasks: twoTasks(), workspaces: [makeWorkspace()], selectedTaskId: 'task-1' });
+        renderApp();
+        await waitFor(() => {
+            expect(countLeaves(useSplitLayoutStore.getState().root)).toBe(1);
+        });
+
+        // Ctrl+\ splits right. Capture-phase listener, so dispatching on window is
+        // the faithful simulation of a key arriving while a terminal has focus.
+        act(() => {
+            window.dispatchEvent(new KeyboardEvent('keydown', { key: '\\', ctrlKey: true, bubbles: true }));
+        });
+        expect(countLeaves(useSplitLayoutStore.getState().root)).toBe(2);
+
+        // Ctrl+Alt+W closes it again.
+        act(() => {
+            window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, altKey: true, bubbles: true }));
+        });
+        expect(countLeaves(useSplitLayoutStore.getState().root)).toBe(1);
+    });
+});
+
+describe('App - split screen keyboard guards', () => {
+    it('does not split while the user is typing in a text field', async () => {
+        resetStore({
+            tasks: new Map([['task-1', makeTask({ id: 'task-1' })]]),
+            workspaces: [makeWorkspace()],
+            selectedTaskId: 'task-1',
+        });
+        renderApp();
+        await waitFor(() => {
+            expect(countLeaves(useSplitLayoutStore.getState().root)).toBe(1);
+        });
+
+        // A textarea OUTSIDE any terminal — the supervisor chat, a task input bar.
+        const field = document.createElement('textarea');
+        document.body.appendChild(field);
+        act(() => {
+            field.dispatchEvent(new KeyboardEvent('keydown', { key: '\\', ctrlKey: true, bubbles: true }));
+        });
+        expect(countLeaves(useSplitLayoutStore.getState().root)).toBe(1);
+        field.remove();
+    });
+
+    it('still splits when the key comes from inside a terminal', async () => {
+        resetStore({
+            tasks: new Map([['task-1', makeTask({ id: 'task-1' })]]),
+            workspaces: [makeWorkspace()],
+            selectedTaskId: 'task-1',
+        });
+        renderApp();
+        await waitFor(() => {
+            expect(countLeaves(useSplitLayoutStore.getState().root)).toBe(1);
+        });
+
+        // xterm's hidden textarea lives inside .xterm — these shortcuts must work there.
+        const host = document.createElement('div');
+        host.className = 'xterm';
+        const field = document.createElement('textarea');
+        host.appendChild(field);
+        document.body.appendChild(host);
+        act(() => {
+            field.dispatchEvent(new KeyboardEvent('keydown', { key: '\\', ctrlKey: true, bubbles: true }));
+        });
+        expect(countLeaves(useSplitLayoutStore.getState().root)).toBe(2);
+        host.remove();
     });
 });
