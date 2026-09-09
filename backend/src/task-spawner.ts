@@ -15,6 +15,7 @@ import { sanitizePrompt, decodeHtmlEntities } from './validation.js';
 import { createLogger } from './logger.js';
 import { getSharedMcpToken } from './mcp-auth.js';
 import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
+import { resolveAgentCapabilities } from './agents/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
@@ -589,12 +590,17 @@ export class TaskSpawner extends EventEmitter {
         this.sweepOrphanHistoryFiles();
         this.sweepAgedArchivedHistories();
 
-        // Start state polling (only for claude-code backend which uses PTY)
-        // OpenCode backend handles its own state management via HTTP API
-        if (this.backendType === 'claude-code') {
+        // Which subsystems run is a per-agent CAPABILITY, not a string check.
+        // These used to be `=== 'claude-code'`, which silently switched three
+        // subsystems off for every other agent (issue #62).
+        const caps = resolveAgentCapabilities(this.backendType);
+        if (caps.ptyStatePolling) {
             this.startStatePolling();
-            // Start idle-task reaper (claude-code only — OpenCode has its own lifecycle)
+        }
+        if (caps.idleReaper) {
             this.startIdleTaskReaper();
+        }
+        if (caps.memoryGuard) {
             this.startMemoryGuard();
         }
 
@@ -1032,17 +1038,17 @@ export class TaskSpawner extends EventEmitter {
 
         logger.info('Switching backend', { from: this.backendType, to: newBackendType });
 
-        // Stop state polling for claude-code
-        if (this.backendType === 'claude-code' && this.statePollingInterval) {
+        // Tear down whatever the OUTGOING agent had running.
+        const outgoing = resolveAgentCapabilities(this.backendType);
+        if (outgoing.ptyStatePolling && this.statePollingInterval) {
             clearInterval(this.statePollingInterval);
             this.statePollingInterval = null;
         }
-        // Stop idle-task reaper for claude-code (OpenCode has its own lifecycle)
-        if (this.backendType === 'claude-code' && this.idleReaperInterval) {
+        if (outgoing.idleReaper && this.idleReaperInterval) {
             clearInterval(this.idleReaperInterval);
             this.idleReaperInterval = null;
         }
-        if (this.backendType === 'claude-code' && this.memoryGuardInterval) {
+        if (outgoing.memoryGuard && this.memoryGuardInterval) {
             clearInterval(this.memoryGuardInterval);
             this.memoryGuardInterval = null;
         }
@@ -1055,10 +1061,15 @@ export class TaskSpawner extends EventEmitter {
         // Reinitialize the backend
         this.initializeBackend();
 
-        // Start state polling if switching to claude-code
-        if (this.backendType === 'claude-code') {
+        // Start whatever the INCOMING agent supports.
+        const incoming = resolveAgentCapabilities(this.backendType);
+        if (incoming.ptyStatePolling) {
             this.startStatePolling();
+        }
+        if (incoming.idleReaper) {
             this.startIdleTaskReaper();
+        }
+        if (incoming.memoryGuard) {
             this.startMemoryGuard();
         }
     }
@@ -5450,7 +5461,9 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
         // Arm the ready-signal fallback timer whenever we have something to deliver
         // (a continuation or the user's first message) — same race window as new tasks.
-        if (needsDelivery && taskBackendType === 'claude-code') {
+        // The ready-fallback timer watches for the interactive TUI's ready
+        // banner, which only exists for a PTY agent that polls its own state.
+        if (needsDelivery && resolveAgentCapabilities(taskBackendType).ptyStatePolling) {
             this.startReadyFallbackTimer(task);
         }
 
@@ -5467,7 +5480,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // Start session capture so we detect the new/resumed session file
         // This is critical for fresh starts (no sessionId) and also covers cases where
         // Claude Code creates a new session file even when resuming
-        if (taskBackendType === 'claude-code') {
+        if (resolveAgentCapabilities(taskBackendType).sessionFileCapture) {
             this.startSessionCapture(taskId, persisted.workspaceId);
         }
 

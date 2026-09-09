@@ -4,6 +4,10 @@ import { VoiceSettingsContent } from './VoiceSettingsContent';
 import { getApiBaseUrl } from '../config/api-config';
 import { hasBrowserNotifications, getNotificationPermission, requestNotificationPermission, sendBrowserNotification } from '../utils/browserCapabilities';
 import { useTaskStore } from '../stores/taskStore';
+// The agent union is owned by the shared registry (AGENT_IDS). This file used
+// to re-declare its own copy, which is how a newly added agent could compile
+// on the backend and be invisible in Settings.
+import type { AgentDetectResult, AgentDisplayInfo, AgentId, BackendType } from '@claudia/shared';
 import { useNotification } from './NotificationContainer';
 import './SettingsMenu.css';
 
@@ -23,7 +27,6 @@ interface MCPServerListItem {
 }
 
 type ApiMode = 'default' | 'custom-anthropic' | 'sap-ai-core' | 'hyperspace-proxy';
-type BackendType = 'claude-code' | 'opencode';
 
 interface Plugin {
     name: string;
@@ -38,13 +41,15 @@ interface Plugin {
     configSchema?: any;
 }
 
-interface BackendStatus {
+/**
+ * `GET /api/backend/status`. `availableBackends` and `statuses` are optional
+ * only so an older backend (which returned `string[]` and no `statuses`)
+ * degrades to "no agents listed" instead of crashing the panel.
+ */
+interface BackendStatus extends AgentDetectResult {
     backend: BackendType;
-    installed: boolean;
-    version?: string;
-    error?: string;
-    serverRunning?: boolean;
-    availableBackends: BackendType[];
+    availableBackends?: AgentDisplayInfo[];
+    statuses?: Partial<Record<AgentId, AgentDetectResult>>;
 }
 
 interface CollapsiblePanelProps {
@@ -863,6 +868,13 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
         }
     }, [fetchBackendStatus]);
 
+    /**
+     * The agent list comes from the server's registry — this component holds
+     * no hardcoded agent names, so registering an adapter is all it takes for
+     * an agent to appear here.
+     */
+    const agentOptions: AgentDisplayInfo[] = backendStatus?.availableBackends ?? [];
+
     const handleBackendChange = (newBackend: BackendType) => {
         setBackend(newBackend);
         // Save immediately for radio buttons
@@ -1670,39 +1682,47 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                 Choose which AI coding assistant to use.
                             </p>
 
-                            <div className="api-mode-selector">
-                                <label className={`api-mode-option ${backend === 'claude-code' ? 'selected' : ''}`}>
-                                    <input
-                                        type="radio"
-                                        name="backend"
-                                        value="claude-code"
-                                        checked={backend === 'claude-code'}
-                                        onChange={() => handleBackendChange('claude-code')}
-                                    />
-                                    <div className="api-mode-content">
-                                        <span className="api-mode-title">Claude Code</span>
-                                        <span className="api-mode-description">
-                                            Anthropic's official CLI tool for Claude
-                                        </span>
-                                    </div>
-                                </label>
-
-                                <label className={`api-mode-option ${backend === 'opencode' ? 'selected' : ''}`}>
-                                    <input
-                                        type="radio"
-                                        name="backend"
-                                        value="opencode"
-                                        checked={backend === 'opencode'}
-                                        onChange={() => handleBackendChange('opencode')}
-                                    />
-                                    <div className="api-mode-content">
-                                        <span className="api-mode-title">OpenCode</span>
-                                        <span className="api-mode-description">
-                                            Open-source AI coding agent by SST
-                                        </span>
-                                    </div>
-                                </label>
-                            </div>
+                            {agentOptions.length === 0 ? (
+                                <div className="backend-status loading">
+                                    <Loader2 size={16} className="spinning" />
+                                    <span>Loading available agents...</span>
+                                </div>
+                            ) : (
+                                <div className="api-mode-selector">
+                                    {agentOptions.map(agent => {
+                                        const agentStatus = backendStatus?.statuses?.[agent.id];
+                                        return (
+                                            <label
+                                                key={agent.id}
+                                                className={`api-mode-option ${backend === agent.id ? 'selected' : ''}`}
+                                            >
+                                                <input
+                                                    type="radio"
+                                                    name="backend"
+                                                    value={agent.id}
+                                                    checked={backend === agent.id}
+                                                    onChange={() => handleBackendChange(agent.id)}
+                                                />
+                                                <div className="api-mode-content">
+                                                    <span className="api-mode-title">{agent.name}</span>
+                                                    <span className="api-mode-description">
+                                                        {agent.description}
+                                                    </span>
+                                                    {/* Only surfaced when an agent is MISSING — the
+                                                        installed case is already covered by the status
+                                                        line below for the selected agent, and a second
+                                                        "installed" line on every row is noise. */}
+                                                    {agentStatus && !agentStatus.installed && (
+                                                        <span className="api-mode-description agent-not-installed">
+                                                            Not installed
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </label>
+                                        );
+                                    })}
+                                </div>
+                            )}
 
                             {/* Backend status */}
                             {backendStatusLoading ? (

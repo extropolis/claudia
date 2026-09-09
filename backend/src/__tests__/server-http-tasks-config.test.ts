@@ -168,22 +168,45 @@ describe('health, backend status, system stats, user-id', () => {
         expect(body).toEqual({ status: 'ok' });
     });
 
-    it('GET /api/backend/status reports the configured backend and the available set', async () => {
-        // Shells out to `claude --version` with a 5s timeout; `installed` depends
-        // on the developer's machine, so assert the contract, not the value.
+    it('GET /api/backend/status reports the configured backend and every registered agent', async () => {
+        // Shells out to `<agent> --version` with a 5s timeout; `installed`
+        // depends on the developer's machine, so assert the contract, not the
+        // value.
         const { status, body } = await h.req<{
             backend: string;
             installed: boolean;
             version?: string;
             error?: string;
-            availableBackends: string[];
+            availableBackends: Array<{
+                id: string; name: string; shortLabel: string;
+                description: string; installUrl: string; colour: string;
+            }>;
+            statuses: Record<string, { installed: boolean; version?: string; error?: string; serverRunning?: boolean }>;
         }>('/api/backend/status');
         expect(status).toBe(200);
+
+        // Top-level fields still describe the CURRENT backend — unchanged contract.
         expect(body.backend).toBe('claude-code');
-        expect(body.availableBackends).toEqual(['claude-code', 'opencode']);
         expect(typeof body.installed).toBe('boolean');
         if (body.installed) expect(typeof body.version).toBe('string');
         else expect(typeof body.error).toBe('string');
+
+        // availableBackends is now the registry's display info, so Settings can
+        // render the agent list instead of hardcoding it.
+        expect(body.availableBackends.map(a => a.id)).toEqual(['claude-code', 'opencode']);
+        for (const agent of body.availableBackends) {
+            expect(agent.name.length).toBeGreaterThan(0);
+            expect(agent.shortLabel).toBe(agent.shortLabel.toLowerCase());
+            expect(agent.installUrl).toMatch(/^https:\/\//);
+        }
+
+        // …and every agent is probed, not just the configured one.
+        expect(Object.keys(body.statuses).sort()).toEqual(['claude-code', 'opencode']);
+        for (const agentStatus of Object.values(body.statuses)) {
+            expect(typeof agentStatus.installed).toBe('boolean');
+        }
+        // The top-level fields are the current agent's entry.
+        expect(body.statuses['claude-code'].installed).toBe(body.installed);
     }, 20000);
 
     it('GET /api/system/stats returns clamped cpu percent and memory totals', async () => {

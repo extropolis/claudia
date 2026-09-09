@@ -4,6 +4,7 @@
 
 import { existsSync, statSync } from 'fs';
 import { resolve, normalize, isAbsolute, sep } from 'path';
+import { AGENT_IDS, isAgentId, type BackendType } from '@claudia/shared';
 
 /**
  * Is `child` the same as, or contained within, `parent`?
@@ -64,7 +65,7 @@ export interface ConfigUpdatePayload {
     supervisorSystemPrompt?: string;
     apiMode?: 'default' | 'custom-anthropic' | 'sap-ai-core' | 'hyperspace-proxy';
     customAnthropicApiKey?: string;
-    backend?: 'claude-code' | 'opencode';
+    backend?: BackendType;  // derived from AGENT_IDS — never re-list agents here
     opencodePort?: number;
     claudeCodeSwitches?: {
         verbose?: boolean;
@@ -325,11 +326,13 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
 
     // Validate backend (optional enum)
     if (payload.backend !== undefined) {
-        const validBackends = ['claude-code', 'opencode'];
-        if (!validBackends.includes(payload.backend as string)) {
-            return { valid: false, error: `backend must be one of: ${validBackends.join(', ')}` };
+        // Derived from AGENT_IDS: a newly registered agent is accepted here
+        // automatically. This list used to be hand-written, which is why a
+        // `codex` config PUT would have 400'd.
+        if (!isAgentId(payload.backend)) {
+            return { valid: false, error: `backend must be one of: ${AGENT_IDS.join(', ')}` };
         }
-        result.backend = payload.backend as ConfigUpdatePayload['backend'];
+        result.backend = payload.backend;
     }
 
     // Validate opencodePort (optional number)

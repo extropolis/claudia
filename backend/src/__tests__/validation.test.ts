@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, rmdirSync, existsSync, writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir, homedir } from 'os';
+import { AGENT_IDS } from '@claudia/shared';
 import {
     isPathInside,
     validateConfigUpdate,
@@ -151,6 +152,18 @@ describe('validateConfigUpdate', () => {
         expect(validateConfigUpdate({ backend: 'invalid-backend' }).valid).toBe(false);
         expect(validateConfigUpdate({ backend: 'invalid-backend' }).error).toContain('backend must be one of');
         expect(validateConfigUpdate({ backend: 123 }).valid).toBe(false);
+    });
+
+    it('accepts every agent AGENT_IDS declares, without re-listing them here', () => {
+        // The accepted set is DERIVED from the agent registry's id tuple. This
+        // list used to be hand-written in validation.ts, which is why adding an
+        // agent would have 400'd its own config PUT until someone remembered
+        // to edit a second file.
+        for (const id of AGENT_IDS) {
+            expect(validateConfigUpdate({ backend: id }).valid, id).toBe(true);
+        }
+        expect(validateConfigUpdate({ backend: 'nope' }).error)
+            .toBe(`backend must be one of: ${AGENT_IDS.join(', ')}`);
     });
 
     it('should validate opencodePort range', () => {
