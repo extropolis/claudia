@@ -11,46 +11,17 @@ import { CheckpointTimeline } from './CheckpointTimeline';
 import { TaskTokenStats } from './TaskTokenStats';
 import { useEffectiveTheme } from '../hooks/useTheme';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
-import { getApiBaseUrl } from '../config/api-config';
 import { lastKnownTerminalSize } from '../config/terminal-size';
 import '@xterm/xterm/css/xterm.css';
 import './TerminalView.css';
 
-/**
- * Strip screen-clearing escape sequences from restored history.
- * When Claude Code goes idle, it sends cleanup sequences (clear screen, cursor home, etc.)
- * that wipe all visible content. When replaying history, we strip these so the actual
- * task output remains visible instead of showing a blank screen.
- */
-function stripScreenClears(history: string): string {
-    return history
-        // \x1bc - RIS (Reset to Initial State) — causes a full terminal reset
-        // that blacks out the screen if no content follows immediately
-        .replace(/\x1bc/g, '')
-        // \x1b[2J\x1b[H - Clear screen + cursor home (common cleanup pattern)
-        // Strip as a pair so standalone \x1b[H used for TUI drawing is preserved
-        .replace(/\x1b\[2J\x1b\[H/g, '')
-        // \x1b[2J - Clear entire screen (standalone)
-        .replace(/\x1b\[2J/g, '')
-        // \x1b[3J - Clear entire screen + scrollback
-        .replace(/\x1b\[3J/g, '')
-        // \x1b[?1049h / \x1b[?1049l - Alt screen buffer enter/exit
-        .replace(/\x1b\[\?1049[hl]/g, '')
-        // Strip accumulated "Resuming session" / "Session reconnected" separator lines.
-        // These accumulate across server restarts and fill the terminal with noise,
-        // hiding the actual conversation content.
-        .replace(/\r?\n?\x1b\[90m─── (Resuming session [a-f0-9-]+|Session reconnected) ───\x1b\[0m\r?\n?\r?\n?/g, '');
-}
-
-// Query sequences are stripped via the canonical @claudia/shared implementation
-// (shared with the backend's persist-time stripping so the two lists cannot
-// drift). Replayed queries would make xterm ANSWER them into the live PTY —
-// the ";1;1R?1;2c" injection bug.
-
-function stripScreenClearsAndQueries(history: string): string {
-    return stripTerminalQueries(stripScreenClears(history));
-}
-
+// RESTORE MODEL: the backend maintains a headless terminal mirror per task
+// (backend/src/terminal-mirror.ts) and `task:restore` delivers a SERIALIZED
+// SCREEN SNAPSHOT — well-formed ANSI valid at the cols/rows in the payload.
+// No stripping of clears or queries is needed: the server-side emulator
+// consumed them. The old raw-byte replay (with strip hacks and byte-offset
+// chunk loading) is gone — it garbled cursor-positioned TUI output whenever
+// any part of history was recorded at a different width.
 
 interface TerminalViewProps {
     task: Task;
@@ -70,17 +41,6 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     const [isLoadingHistory, setIsLoadingHistory] = useState(true);
     const [showSpinner, setShowSpinner] = useState(false);
     const historyLoadedRef = useRef(false);
-
-    // Chunked history scrollback: we keep the loaded portion of the on-disk
-    // history file as a string and lazy-load earlier chunks when the user
-    // scrolls within ~100px of the top. `topOffsetRef` is the byte offset
-    // where the currently-loaded content starts in the full history file.
-    // When `topOffsetRef.current === 0` we've loaded everything.
-    const loadedHistoryRef = useRef<string>('');
-    const topOffsetRef = useRef<number>(0);
-    const totalSizeRef = useRef<number>(0);
-    const isLoadingChunkRef = useRef<boolean>(false);
-    const historyChunkUnavailableRef = useRef<boolean>(false); // true for legacy base64 histories
 
     // Show spinner after a short delay to avoid flash for fast loads
     useEffect(() => {
@@ -319,6 +279,9 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // and flush after the history write completes.
         let restoreInProgress = false;
         let restoreOutputBuffer: string[] = [];
+        // Incremented per restore; write callbacks from a superseded restore
+        // (a newer task:restore arrived mid-write) must not flush or scroll.
+        let restoreGeneration = 0;
 
         const flushRestoreBuffer = () => {
             restoreInProgress = false;
@@ -330,9 +293,30 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         };
 
 
+        // Self-heal repaint: after a resize settles, request a fresh snapshot
+        // from the server-side mirror. A TUI redraw racing SIGWINCH can leave
+        // transient garbled frames on screen; repainting from the mirror
+        // restores a known-good screen. Skipped while the user is scrolled up
+        // (a repaint would yank them to the bottom).
+        let resyncTimer: number | undefined;
+        const scheduleSnapshotResync = () => {
+            if (resyncTimer) window.clearTimeout(resyncTimer);
+            resyncTimer = window.setTimeout(() => {
+                if (userHasScrolledRef.current) return;
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    console.log(`[TerminalView] Post-resize snapshot resync for ${task.id}`);
+                    wsRef.current.send(JSON.stringify({
+                        type: 'task:restore',
+                        payload: { taskId: task.id }
+                    }));
+                }
+            }, 600);
+        };
+
         // Handle resize - sync to backend
         term.onResize(({ cols, rows }) => {
             if (initPhase) return; // Skip during init — we send one resize after fit
+            if (restoreInProgress) return; // Skip transient resizes during snapshot restore
             // Suppress small col changes (scrollbar oscillation)
             if (Math.abs(cols - lastSentCols) <= 2 && rows === lastSentRows) return;
             lastSentCols = cols;
@@ -352,6 +336,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     payload: { taskId: task.id, cols, rows }
                 }));
             }
+
+            scheduleSnapshotResync();
         });
 
         // Open terminal
@@ -407,77 +393,10 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // fitAddon.fit() can shift scrollTop slightly and break it.
         const viewport = terminalRef.current.querySelector('.xterm-viewport') as HTMLElement | null;
 
-        // Lazy-load earlier history when the user scrolls within 200px of the top.
-        // Re-entrancy guard: `isLoadingChunkRef` plus a no-op when we've already
-        // loaded everything (topOffsetRef === 0) or the on-disk file is legacy base64.
-        const loadEarlierChunkIfNeeded = async () => {
-            if (programmaticScrollRef.current) return;
-            if (isLoadingChunkRef.current) return;
-            if (historyChunkUnavailableRef.current) return;
-            if (topOffsetRef.current <= 0) return;
-            if (!viewport || viewport.scrollTop > 200) return;
-
-            const requestEndBefore = topOffsetRef.current;
-            const CHUNK_SIZE = 256 * 1024;
-            isLoadingChunkRef.current = true;
-            try {
-                const r = await fetch(
-                    `${getApiBaseUrl()}/api/task/${task.id}/history?endBefore=${requestEndBefore}&maxBytes=${CHUNK_SIZE}`
-                );
-                if (!r.ok) {
-                    console.warn('[TerminalView] history chunk fetch failed', r.status);
-                    return;
-                }
-                const { data, startOffset, totalSize, isBase64Legacy } = await r.json() as {
-                    data: string; startOffset: number; totalSize: number; isBase64Legacy: boolean;
-                };
-                if (isBase64Legacy) {
-                    historyChunkUnavailableRef.current = true;
-                    return;
-                }
-                if (!data) {
-                    // Reached the beginning of the file
-                    topOffsetRef.current = 0;
-                    return;
-                }
-                // Prepend the new chunk to the loaded buffer, then reset + rewrite.
-                // We must reset because xterm.write only appends — there's no insert API.
-                const cleanedChunk = stripScreenClearsAndQueries(data);
-                loadedHistoryRef.current = cleanedChunk + loadedHistoryRef.current;
-                topOffsetRef.current = startOffset;
-                totalSizeRef.current = totalSize;
-
-                // Capture viewport position relative to the bottom so we can restore
-                // it after rewrite (user expects to keep looking at the same content).
-                const oldTotalLines = term.buffer.active.length;
-                const oldViewportY = term.buffer.active.viewportY;
-                const linesFromBottom = oldTotalLines - oldViewportY;
-
-                // Block live output during the reset+rewrite to prevent interleaving
-                restoreInProgress = true;
-                restoreOutputBuffer = [];
-                programmaticScrollRef.current = true;
-                term.reset();
-                term.write(loadedHistoryRef.current, () => {
-                    flushRestoreBuffer();
-                    const newTotal = term.buffer.active.length;
-                    const targetViewportY = Math.max(0, newTotal - linesFromBottom);
-                    term.scrollToLine(targetViewportY);
-                    setTimeout(() => { programmaticScrollRef.current = false; }, 50);
-                });
-            } catch (err) {
-                console.warn('[TerminalView] history chunk fetch error', err);
-            } finally {
-                isLoadingChunkRef.current = false;
-            }
-        };
-
         const handleViewportScroll = () => {
             if (!viewport) return;
             const atBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 50;
             userHasScrolledRef.current = !atBottom;
-            // Fire-and-forget; loadEarlierChunkIfNeeded guards re-entrancy itself.
-            loadEarlierChunkIfNeeded();
         };
         if (viewport) {
             viewport.addEventListener('scroll', handleViewportScroll, { passive: true });
@@ -512,10 +431,10 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             }
         });
 
-        // CRITICAL: Fit the terminal BEFORE requesting history.
-        // History is raw PTY output captured at the original terminal size. If we
-        // write it at default 80x24 and then fit to the actual size, xterm reflows
-        // the content which garbles Claude Code's cursor-positioned TUI output.
+        // Fit the terminal BEFORE requesting the restore snapshot so the
+        // task:resize sent below carries the real container size — for live
+        // tasks the server resizes the PTY + mirror to it, so the snapshot
+        // arrives already at our width (no client-side reflow needed).
         //
         // Double-rAF: the first rAF fires before the browser paints; the second
         // fires after layout + paint have completed, so container dimensions are
@@ -583,21 +502,11 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 if (message.type === 'task:output' && message.payload.taskId === task.id) {
                     const data = message.payload.data;
 
-                    // Buffer output during resize transitions and history restores
+                    // Buffer output during resize transitions and snapshot restores
                     // to prevent garbled text from interleaving.
                     if (resizeBuffering || restoreInProgress) {
                         if (resizeBuffering) resizeBuffer.push(data);
                         if (restoreInProgress) restoreOutputBuffer.push(data);
-                        // Still track history so scroll-up loading stays current.
-                        // Strip query sequences: this buffer gets REPLAYED on
-                        // scroll-up (term.reset + rewrite) — replaying raw live
-                        // queries would make xterm re-answer them into the PTY.
-                        if (loadedHistoryRef.current !== '') {
-                            loadedHistoryRef.current += stripTerminalQueries(data);
-                        }
-                        if (totalSizeRef.current > 0) {
-                            totalSizeRef.current += data.length;
-                        }
                         return;
                     }
 
@@ -615,24 +524,6 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     console.log(`[TerminalView] Writing output, wasAtBottom: ${wasAtBottom}, userHasScrolled: ${userHasScrolledRef.current}, viewport: ${viewport}`);
 
                     term.write(data);
-                    // Keep our loaded-history snapshot current so a later
-                    // scroll-up rewrite (loadEarlierChunkIfNeeded) doesn't lose
-                    // live output that arrived after the initial restore.
-                    // Query-stripped: this buffer is replayed on scroll-up, and
-                    // replaying raw queries re-injects answered garbage (the
-                    // live term.write above stays raw — the live TUI needs its
-                    // queries answered in real time).
-                    if (loadedHistoryRef.current !== '') {
-                        loadedHistoryRef.current += stripTerminalQueries(message.payload.data);
-                    }
-                    if (totalSizeRef.current > 0) {
-                        // Match the byte count the backend file is growing by so
-                        // future chunk requests use the right end-of-file anchor.
-                        const bytes = typeof message.payload.data === 'string'
-                            ? new TextEncoder().encode(message.payload.data).length
-                            : 0;
-                        totalSizeRef.current += bytes;
-                    }
 
                     // Only auto-scroll if user was at bottom
                     if (wasAtBottom) {
@@ -663,50 +554,68 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                         setIsLoadingHistory(false);
                     }
                 } else if (message.type === 'task:restore' && message.payload.taskId === task.id) {
-                    const { history } = message.payload;
-                    console.log(`[TerminalView] task:restore received for ${task.id}, history size: ${history?.length || 0}, alreadyLoaded: ${historyLoadedRef.current}`);
+                    const { history, cols: snapCols, rows: snapRows } = message.payload as {
+                        history?: string; cols?: number; rows?: number;
+                    };
+                    // cols/rows present => `history` is a serialized screen snapshot
+                    // from the server-side terminal mirror, valid at that size.
+                    const isSnapshot = typeof snapCols === 'number' && typeof snapRows === 'number';
+                    console.log(`[TerminalView] task:restore received for ${task.id}, size: ${history?.length || 0}, snapshot: ${isSnapshot} (${snapCols}x${snapRows}), alreadyLoaded: ${historyLoadedRef.current}`);
                     if (history && history.length > 0) {
-                        // Block task:output writes until the history replay completes.
+                        // Block task:output writes until the restore write completes.
                         // Without this, live output arriving between reset() and write()
-                        // completion gets interleaved with history, causing garbled text.
+                        // completion gets interleaved with the restore, garbling text.
+                        // restoreInProgress also suppresses onResize forwarding, so the
+                        // temporary resize to snapshot dimensions below never reaches
+                        // the PTY (which must stay at the CLIENT's size).
                         restoreInProgress = true;
                         restoreOutputBuffer = [];
-                        term.reset();
-                        const cleaned = stripScreenClearsAndQueries(history);
+                        const generation = ++restoreGeneration;
+                        // Discard any resize-buffered output: everything received
+                        // before this task:restore is already IN the snapshot
+                        // (the server serializes after all prior writes), so
+                        // flushing it later would duplicate content.
+                        if (resizeBufferTimer) window.clearTimeout(resizeBufferTimer);
+                        resizeBuffering = false;
+                        resizeBuffer = [];
                         programmaticScrollRef.current = true;
-                        term.write(cleaned, () => {
-                            // History fully written — flush any output that arrived during restore
+                        term.reset();
+                        if (isSnapshot && (term.cols !== snapCols! || term.rows !== snapRows!)) {
+                            // Write the snapshot at the size it was serialized at,
+                            // then reflow to the container via fit() below —
+                            // deterministic, same as resizing a native terminal.
+                            try {
+                                term.resize(snapCols!, snapRows!);
+                            } catch (e) {
+                                console.warn('[TerminalView] Failed to resize for snapshot restore:', e);
+                            }
+                        }
+                        // Legacy raw fallback (no mirror/snapshot on the server):
+                        // strip device queries so xterm can't answer replayed
+                        // queries into the live PTY. Snapshots never contain them.
+                        const text = isSnapshot ? history : stripTerminalQueries(history);
+                        term.write(text, () => {
+                            // A newer restore superseded this one mid-write —
+                            // let its own callback do the fit/flush/scroll.
+                            if (generation !== restoreGeneration) return;
+                            // Reflow back to the container size (no-op when the
+                            // snapshot size already matches).
+                            try {
+                                fitAddon.fit();
+                            } catch { /* container may be hidden */ }
+                            // Flush any output that arrived during the restore
                             flushRestoreBuffer();
                             term.scrollToBottom();
                             setTimeout(() => {
                                 programmaticScrollRef.current = false;
                             }, 50);
                         });
-                        // Seed the chunked-scrollback buffer with the cleaned tail we
-                        // just wrote. We can't fully reconstruct the original byte
-                        // offset (cleaned !== raw history due to stripScreenClears),
-                        // so we ask the backend for metadata and assume the
-                        // restored tail starts at `totalSize - rawHistory.length`.
-                        loadedHistoryRef.current = cleaned;
-                        fetch(`${getApiBaseUrl()}/api/task/${task.id}/history?endBefore=0&maxBytes=0`)
-                            .then(r => r.json())
-                            .then((meta: { totalSize: number; isBase64Legacy: boolean }) => {
-                                totalSizeRef.current = meta.totalSize;
-                                topOffsetRef.current = Math.max(0, meta.totalSize - history.length);
-                                historyChunkUnavailableRef.current = !!meta.isBase64Legacy;
-                                console.log(`[TerminalView] history metadata: total=${meta.totalSize} topOffset=${topOffsetRef.current} legacy=${meta.isBase64Legacy}`);
-                            })
-                            .catch(err => {
-                                console.warn('[TerminalView] failed to fetch history metadata', err);
-                                historyChunkUnavailableRef.current = true;
-                            });
-                        console.log(`[TerminalView] History written for ${task.id} (original: ${history.length}, cleaned: ${cleaned.length})`);
                     } else {
                         term.reset();
                         term.write('\x1b[90m── Session history not available ──\x1b[0m\r\n');
                         console.log(`[TerminalView] Empty history for ${task.id}`);
                     }
-                    // Clear loading state - history has been restored
+                    // Clear loading state - the screen has been restored
                     historyLoadedRef.current = true;
                     setIsLoadingHistory(false);
                 }
@@ -725,6 +634,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         return () => {
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
             if (resizeBufferTimer) window.clearTimeout(resizeBufferTimer);
+            if (resyncTimer) window.clearTimeout(resyncTimer);
             resizeObserver.disconnect();
             window.removeEventListener('resize', handleWindowResize);
             if (viewport) {

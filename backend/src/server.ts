@@ -1418,8 +1418,15 @@ export async function createApp(basePath?: string) {
         }
     });
 
-    taskSpawner.on('taskRestore', (taskId: string, history: string) => {
-        broadcast({ type: 'task:restore', payload: { taskId, history } });
+    taskSpawner.on('taskRestore', (taskId: string, history: string, dims?: { cols: number; rows: number }) => {
+        // dims present => `history` is a serialized screen snapshot valid at
+        // those dimensions (see terminal-mirror.ts); absent => legacy raw replay.
+        broadcast({
+            type: 'task:restore',
+            payload: dims
+                ? { taskId, history, cols: dims.cols, rows: dims.rows }
+                : { taskId, history }
+        });
     });
 
     taskSpawner.on('taskDestroyed', (taskId: string) => {
@@ -2125,17 +2132,21 @@ export async function createApp(basePath?: string) {
                     }
 
                     case 'task:restore': {
-                        // Request terminal history restore
+                        // Request terminal restore — serve the serialized screen
+                        // snapshot (raw byte replay garbles TUI output).
                         const { taskId } = payload as { taskId?: string };
                         if (!taskId) break;
-                        const task = taskSpawner.getTask(taskId);
-                        if (task && task.outputHistory.length > 0) {
-                            const history = task.outputHistory.map(buf => buf.toString('utf8')).join('');
-                            ws.send(JSON.stringify({
-                                type: 'task:restore',
-                                payload: { taskId, history }
-                            }));
-                        }
+                        taskSpawner.getTaskSnapshot(taskId)
+                            .then((snap) => {
+                                if (!snap || !snap.data) return;
+                                ws.send(JSON.stringify({
+                                    type: 'task:restore',
+                                    payload: { taskId, history: snap.data, cols: snap.cols, rows: snap.rows }
+                                }));
+                            })
+                            .catch((e) => {
+                                console.error(`[Server] task:restore snapshot failed for ${taskId}:`, e);
+                            });
                         break;
                     }
 

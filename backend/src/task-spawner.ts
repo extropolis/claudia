@@ -18,6 +18,7 @@ import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
+import { TerminalMirror, buildSnapshotFromHistory, TerminalSnapshot, DEFAULT_COLS, DEFAULT_ROWS } from './terminal-mirror.js';
 import { randomBytes } from 'crypto';
 import { SharedMcpManager } from './shared-mcp-manager.js';
 import {
@@ -354,6 +355,19 @@ export class TaskSpawner extends EventEmitter {
     private sessionToTaskId: Map<string, string> = new Map(); // Map session IDs to task IDs
     /** Stores terminal size for disconnected tasks so it can be applied after reconnection */
     private pendingResizes: Map<string, { cols: number; rows: number }> = new Map();
+    /**
+     * Server-side headless terminal per live task (see terminal-mirror.ts).
+     * Fed from PTY onData in lockstep with resizes; serialized on restore so
+     * clients receive a well-formed screen snapshot instead of a raw byte
+     * replay (which garbles cursor-positioned TUI output).
+     */
+    private mirrors: Map<string, TerminalMirror> = new Map();
+    /**
+     * Task IDs whose mirror is fed by the spawner's own PTY onData handler.
+     * The CodeBackend 'task:output' event must NOT also feed those mirrors —
+     * double-fed bytes would corrupt the emulated screen.
+     */
+    private ptyFedMirrors: Set<string> = new Set();
 
     // State polling (replaces hooks and output-based streaming detection)
     private statePollingInterval: NodeJS.Timeout | null = null;
@@ -594,6 +608,13 @@ export class TaskSpawner extends EventEmitter {
                 taskBackendType,
                 dataLength: data.length
             });
+
+            // Keep the terminal mirror current for backend-managed tasks too
+            // (skip tasks whose spawner PTY handler already feeds the mirror —
+            // double-fed bytes would corrupt the emulated screen)
+            if (task && !this.ptyFedMirrors.has(taskId)) {
+                this.getOrCreateMirror(task).write(data);
+            }
 
             // For OpenCode tasks, always emit output (they don't use PTY streaming like Claude Code)
             // For Claude Code tasks, only emit if task is active (to avoid duplicate output)
@@ -1085,6 +1106,138 @@ export class TaskSpawner extends EventEmitter {
      */
     private historyAppendCarry: Map<string, string> = new Map();
 
+    // ── Terminal mirror (server-side screen state) ─────────────────────────
+
+    private getTaskSnapshotPath(taskId: string): string {
+        return join(this.getHistoryDir(), `${taskId}.snapshot.json`);
+    }
+
+    /**
+     * Get (or lazily create) the live mirror for a task. Created at the PTY's
+     * current size so history recorded before a client ever attached is still
+     * emulated at the right width.
+     */
+    private getOrCreateMirror(task: InternalTask): TerminalMirror {
+        let mirror = this.mirrors.get(task.id);
+        if (!mirror || mirror.isDisposed) {
+            const cols = typeof task.process?.cols === 'number' ? task.process.cols : DEFAULT_COLS;
+            const rows = typeof task.process?.rows === 'number' ? task.process.rows : DEFAULT_ROWS;
+            mirror = new TerminalMirror(cols, rows);
+            this.mirrors.set(task.id, mirror);
+            logger.info('Created terminal mirror', { taskId: task.id, cols: mirror.cols, rows: mirror.rows });
+        }
+        return mirror;
+    }
+
+    /**
+     * Persist the live mirror's serialized screen to disk so restores survive
+     * server restarts (mirrors are in-memory only). Cheap: snapshots measure
+     * KBs and serialize in milliseconds even for multi-MB histories.
+     */
+    private async persistMirrorSnapshot(taskId: string): Promise<void> {
+        const mirror = this.mirrors.get(taskId);
+        if (!mirror || mirror.isDisposed) return;
+        try {
+            const snap = await mirror.snapshot();
+            if (!snap.data) return;
+            const historyDir = this.getHistoryDir();
+            if (!existsSync(historyDir)) mkdirSync(historyDir, { recursive: true });
+            this.atomicWriteHistorySync(this.getTaskSnapshotPath(taskId), JSON.stringify(snap));
+        } catch (e) {
+            logger.warn('Failed to persist mirror snapshot', { taskId, error: (e as Error).message });
+        }
+    }
+
+    /**
+     * Snapshot then dispose a task's mirror — call when a task leaves the live
+     * `tasks` map (disconnect, reconnect-respawn). The persisted snapshot file
+     * remains the restore source until a new mirror exists.
+     */
+    private retireMirror(taskId: string): void {
+        const mirror = this.mirrors.get(taskId);
+        if (!mirror) return;
+        // Detach from the map immediately so a respawn creates a fresh mirror
+        // at the new PTY size instead of racing against this disposal.
+        this.mirrors.delete(taskId);
+        this.ptyFedMirrors.delete(taskId);
+        mirror.snapshot()
+            .then((snap) => {
+                if (!snap.data) return;
+                const historyDir = this.getHistoryDir();
+                if (!existsSync(historyDir)) mkdirSync(historyDir, { recursive: true });
+                this.atomicWriteHistorySync(this.getTaskSnapshotPath(taskId), JSON.stringify(snap));
+            })
+            .catch((e) => logger.warn('Failed to persist mirror snapshot on retire', { taskId, error: (e as Error).message }))
+            .finally(() => mirror.dispose());
+    }
+
+    /** Dispose a task's mirror and delete its snapshot file (task destroyed). */
+    private disposeMirror(taskId: string): void {
+        const mirror = this.mirrors.get(taskId);
+        if (mirror) {
+            mirror.dispose();
+            this.mirrors.delete(taskId);
+        }
+        this.ptyFedMirrors.delete(taskId);
+        try {
+            const p = this.getTaskSnapshotPath(taskId);
+            if (existsSync(p)) unlinkSync(p);
+        } catch { /* best effort */ }
+    }
+
+    /**
+     * The restore payload for a task: live mirror snapshot when one exists,
+     * else the persisted snapshot file, else a one-time rebuild from the raw
+     * history-file tail (legacy tasks) which is then cached as a snapshot file.
+     * Returns null when the task has no recoverable screen at all.
+     */
+    async getTaskSnapshot(taskId: string): Promise<TerminalSnapshot | null> {
+        const mirror = this.mirrors.get(taskId);
+        if (mirror && !mirror.isDisposed) {
+            return await mirror.snapshot();
+        }
+
+        const snapPath = this.getTaskSnapshotPath(taskId);
+        const historyPath = this.getTaskHistoryPath(taskId);
+        try {
+            if (existsSync(snapPath)) {
+                const snapStat = statSync(snapPath);
+                const histStat = existsSync(historyPath) ? statSync(historyPath) : null;
+                // Trust the cache unless the history file grew meaningfully after
+                // the snapshot was taken (output produced with no snapshot saved).
+                if (!histStat || histStat.mtimeMs <= snapStat.mtimeMs + 2000) {
+                    const parsed = JSON.parse(readFileSync(snapPath, 'utf8')) as TerminalSnapshot;
+                    if (parsed && typeof parsed.data === 'string' && parsed.data.length > 0) {
+                        return parsed;
+                    }
+                }
+            }
+        } catch (e) {
+            logger.warn('Failed to read snapshot cache, rebuilding', { taskId, error: (e as Error).message });
+        }
+
+        // Legacy / stale-cache path: rebuild from the raw history tail. The
+        // client's terminal size (sent via task:resize before task:select) is
+        // the best width guess available for old recordings.
+        if (!existsSync(historyPath)) return null;
+        try {
+            const fileContent = readFileSync(historyPath, 'utf8');
+            const sample = fileContent.substring(0, 100);
+            const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
+            const history = isRawText ? fileContent : Buffer.from(fileContent, 'base64').toString('utf8');
+            const size = this.pendingResizes.get(taskId);
+            const snap = await buildSnapshotFromHistory(history, size?.cols ?? DEFAULT_COLS, size?.rows ?? DEFAULT_ROWS);
+            try {
+                this.atomicWriteHistorySync(snapPath, JSON.stringify(snap));
+            } catch { /* cache write is best effort */ }
+            logger.info('Rebuilt snapshot from raw history', { taskId, historyBytes: fileContent.length, snapshotBytes: snap.data.length });
+            return snap;
+        } catch (e) {
+            logger.warn('Failed to rebuild snapshot from history', { taskId, error: (e as Error).message });
+            return null;
+        }
+    }
+
     /**
      * Atomically write history to disk via a per-process temp file + rename.
      * Mirrors the pattern used for tasks.json so a crash mid-write can't leave
@@ -1145,8 +1298,15 @@ export class TaskSpawner extends EventEmitter {
         let reclaimedBytes = 0;
         try {
             for (const entry of readdirSync(historyDir)) {
-                if (!entry.endsWith('.txt')) continue;
-                const taskId = entry.slice(0, -'.txt'.length);
+                // History files (`<id>.txt`) and mirror snapshots (`<id>.snapshot.json`)
+                let taskId: string;
+                if (entry.endsWith('.snapshot.json')) {
+                    taskId = entry.slice(0, -'.snapshot.json'.length);
+                } else if (entry.endsWith('.txt')) {
+                    taskId = entry.slice(0, -'.txt'.length);
+                } else {
+                    continue;
+                }
                 if (knownIds.has(taskId)) continue;
                 // Skip per-process tmp files from atomicWriteHistorySync — they
                 // may be mid-rename by another instance.
@@ -2014,7 +2174,7 @@ export class TaskSpawner extends EventEmitter {
         for (const [id, meta] of this.archivedTasks) {
             const last = new Date(meta.lastActivity).getTime();
             if (!Number.isFinite(last) || last >= cutoff) continue;
-            for (const path of [this.getTaskHistoryPath(id), this.getArchivedHistoryPath(id)]) {
+            for (const path of [this.getTaskHistoryPath(id), this.getArchivedHistoryPath(id), this.getTaskSnapshotPath(id)]) {
                 try {
                     if (!existsSync(path)) continue;
                     bytes += statSync(path).size;
@@ -2134,6 +2294,9 @@ export class TaskSpawner extends EventEmitter {
                             // Cap on-disk growth. Without this the file grew unbounded
                             // (files reached 50+ MB each, 3.6 GB total in prod).
                             this.rotateHistoryFileIfNeeded(historyPath);
+                            // Refresh the on-disk screen snapshot alongside the
+                            // history append (survives an abrupt server death).
+                            this.persistMirrorSnapshot(task.id).catch(() => { /* logged inside */ });
                         }
                     }
                 } catch (e) {
@@ -3359,6 +3522,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             task.outputHistory.push(buffer);
             task.totalOutputSize += buffer.length;
 
+            // Feed the server-side terminal mirror — the source of truth for
+            // restore snapshots (see terminal-mirror.ts).
+            this.ptyFedMirrors.add(task.id);
+            this.getOrCreateMirror(task).write(data);
+
             // Limit history to 2MB per task
             const MAX_HISTORY_SIZE = 2 * 1024 * 1024;
             while (task.totalOutputSize > MAX_HISTORY_SIZE && task.outputHistory.length > 0) {
@@ -3438,6 +3606,10 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                 return;
             }
             task.state = 'exited';
+
+            // Persist the final screen — the mirror stays live for viewing but
+            // the on-disk snapshot must survive a server restart.
+            this.persistMirrorSnapshot(task.id).catch(() => { /* logged inside */ });
 
             // Capture token usage before saving so the persisted record has costs.
             // Run async but schedule save only after it resolves.
@@ -3745,40 +3917,35 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
         console.log(`[TaskSpawner] setTaskActive called: taskId=${taskId}, active=${active}, inTasks=${this.tasks.has(taskId)}, inDisconnected=${this.disconnectedTasks.has(taskId)}`);
         if (active && this.disconnectedTasks.has(taskId)) {
-            // Don't auto-reconnect on click - just show the stored history.
+            // Don't auto-reconnect on click - just show the stored screen snapshot.
             // The task will be reconnected when the user actually sends input (via writeToTask).
-            console.log(`[TaskSpawner] Showing history for disconnected task ${taskId} (no auto-reconnect)`);
+            console.log(`[TaskSpawner] Showing snapshot for disconnected task ${taskId} (no auto-reconnect)`);
 
-            // Try loading history from disk file first (primary storage), then fall back to in-memory
-            let historyRestored = false;
-            const historyPath = this.getTaskHistoryPath(taskId);
-            if (existsSync(historyPath)) {
+            void (async () => {
                 try {
-                    const fileContent = readFileSync(historyPath, 'utf-8');
-                    // Detect format: raw text (contains ANSI escapes, spaces, brackets) vs base64
-                    const sample = fileContent.substring(0, 100);
-                    const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
-                    const history = isRawText ? fileContent : Buffer.from(fileContent, 'base64').toString('utf8');
-                    this.emit('taskRestore', taskId, history);
-                    historyRestored = true;
+                    let snap = await this.getTaskSnapshot(taskId);
+                    if (!snap || !snap.data) {
+                        // Last-resort fallback: legacy in-memory base64 history
+                        // (older tasks / migration edge cases with no file on disk).
+                        const persisted = this.disconnectedTasks.get(taskId);
+                        if (persisted?.outputHistory) {
+                            const history = Buffer.from(persisted.outputHistory, 'base64').toString('utf8');
+                            const size = this.pendingResizes.get(taskId);
+                            snap = await buildSnapshotFromHistory(history, size?.cols ?? DEFAULT_COLS, size?.rows ?? DEFAULT_ROWS);
+                        }
+                    }
+                    if (snap && snap.data) {
+                        this.emit('taskRestore', taskId, snap.data, { cols: snap.cols, rows: snap.rows });
+                    } else {
+                        // Always emit so the frontend clears loading state (prevents blank screen)
+                        console.warn(`[TaskSpawner] No snapshot/history found for disconnected task ${taskId}, sending empty restore`);
+                        this.emit('taskRestore', taskId, '');
+                    }
                 } catch (e) {
-                    console.error(`[TaskSpawner] Failed to read history file for ${taskId}:`, e);
+                    console.error(`[TaskSpawner] Failed to build restore snapshot for ${taskId}:`, e);
+                    this.emit('taskRestore', taskId, '');
                 }
-            } else {
-                // Fallback: check in-memory outputHistory (older tasks or migration edge cases)
-                const persisted = this.disconnectedTasks.get(taskId)!;
-                if (persisted.outputHistory) {
-                    const history = Buffer.from(persisted.outputHistory, 'base64').toString('utf8');
-                    this.emit('taskRestore', taskId, history);
-                    historyRestored = true;
-                }
-            }
-
-            // Always emit taskRestore so the frontend clears loading state (prevents blank screen)
-            if (!historyRestored) {
-                console.warn(`[TaskSpawner] No history found for disconnected task ${taskId}, sending empty restore`);
-                this.emit('taskRestore', taskId, '');
-            }
+            })();
             return;
         }
 
@@ -3795,8 +3962,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                     this.backend.setTaskActive(taskId, true);
                 }
 
-                // Send combined history (PTY output) first, then enhance with JSONL if needed
-                this.sendTaskHistory(task);
+                // Send the screen snapshot (async: serializes the mirror)
+                this.sendTaskHistory(task).catch((e) => {
+                    logger.error('sendTaskHistory failed', { taskId, error: (e as Error).message });
+                    this.emit('taskRestore', taskId, '');
+                });
             } else {
                 // Notify backend if using OpenCode
                 const taskBackend = this.taskBackends.get(taskId);
@@ -3817,7 +3987,24 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
      * Always emits taskRestore (even with empty string) so the frontend
      * knows history loading is complete and can clear the loading spinner.
      */
-    private sendTaskHistory(task: InternalTask): void {
+    private async sendTaskHistory(task: InternalTask): Promise<void> {
+        // Primary path: serialized mirror snapshot — well-formed ANSI at the
+        // exact PTY size, immune to the width/clear/query garbling of raw replay.
+        try {
+            const snap = await this.getTaskSnapshot(task.id);
+            if (snap && snap.data) {
+                let data = snap.data;
+                if (task.resumeSeparator) {
+                    data += task.resumeSeparator;
+                }
+                this.emit('taskRestore', task.id, data, { cols: snap.cols, rows: snap.rows });
+                return;
+            }
+        } catch (e) {
+            logger.warn('Snapshot restore failed, falling back to raw history', { taskId: task.id, error: (e as Error).message });
+        }
+
+        // Fallback: legacy raw replay (no mirror, no snapshot file, no history file)
         let history = this.getCombinedHistory(task);
         // Append the resume separator for display (it's not in outputHistory / not saved to disk)
         if (task.resumeSeparator) {
@@ -4211,6 +4398,10 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             return;
         }
 
+        // Keep the mirror in lockstep with the PTY — a mirror at the wrong
+        // width would serialize misrendered snapshots.
+        this.mirrors.get(taskId)?.resize(cols, rows);
+
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
         if (taskBackend === 'opencode' && this.backend) {
@@ -4386,6 +4577,9 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // Clean up any pending resize for this task
         this.pendingResizes.delete(taskId);
 
+        // Drop the mirror and its persisted snapshot
+        this.disposeMirror(taskId);
+
         // Only emit once, regardless of which map(s) the task was in
         if (destroyed) {
             logger.info(`Task destroyed`, { taskId, source });
@@ -4472,6 +4666,9 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
             // Delete from map FIRST to prevent onExit handler from emitting state changes
             this.tasks.delete(taskId);
+            // Snapshot + drop the mirror; the snapshot file serves any future
+            // restore-from-archive.
+            this.retireMirror(taskId);
             try {
                 task.process.kill();
             } catch (_e) {
@@ -4723,6 +4920,8 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             };
             this.disconnectedTasks.set(taskId, persisted);
             this.tasks.delete(taskId);
+            // Snapshot + dispose the old mirror; the respawned PTY gets a fresh one
+            this.retireMirror(taskId);
             // Fall through to normal reconnect logic below
         }
 
@@ -5132,6 +5331,10 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
         this.disconnectedTasks.set(taskId, persisted);
         this.tasks.delete(taskId);
+
+        // Snapshot the screen to disk, then drop the in-memory mirror — the
+        // snapshot file is the restore source while the task is disconnected.
+        this.retireMirror(taskId);
 
         this.scheduleSave();
         this.emit('taskStateChanged', { ...this.toPublicTask(task), state: 'disconnected' });

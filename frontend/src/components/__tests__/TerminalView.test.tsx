@@ -4,9 +4,9 @@
  * xterm.js needs a real renderer, so it is replaced at the module boundary by a
  * recording fake. That is deliberate: the interesting logic in TerminalView is
  * the code AROUND xterm — resize-oscillation suppression, the post-resize output
- * buffer, history restore/stripping and chunked scroll-up loading — and all of
- * it is observable through the calls the component makes on the terminal and the
- * frames it pushes onto the WebSocket.
+ * buffer, mirror-snapshot restore and the post-resize snapshot resync — and all
+ * of it is observable through the calls the component makes on the terminal and
+ * the frames it pushes onto the WebSocket.
  *
  * Everything time-based uses fake timers; nothing sleeps.
  */
@@ -69,6 +69,12 @@ const xterm = vi.hoisted(() => {
 
         write(data: string, cb?: () => void) { this.writes.push(data); cb?.(); }
         reset() { this.resetCount += 1; this.writes = []; }
+        /** Real xterm fires onResize synchronously from resize(). */
+        resize(cols: number, rows: number) {
+            this.cols = cols;
+            this.rows = rows;
+            this.resizeCb?.({ cols, rows });
+        }
         refresh() { this.refreshCount += 1; }
         scrollToBottom() { this.scrollToBottomCount += 1; }
         scrollToLine(line: number) { this.scrolledToLines.push(line); }
@@ -109,12 +115,10 @@ vi.mock('../TaskTokenStats', () => ({ TaskTokenStats: () => null }));
 
 import { TerminalView } from '../TerminalView';
 import { useTaskStore } from '../../stores/taskStore';
-import { getApiBaseUrl } from '../../config/api-config';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../../types/theme';
 
 const TASK_ID = 'task-1';
 const RESIZE_BUFFER_MS = 250;
-const CHUNK_SIZE = 256 * 1024;
 
 function makeTask(overrides: Partial<Task> = {}): Task {
     return {
@@ -345,18 +349,86 @@ describe('TerminalView — post-resize output buffering', () => {
     });
 });
 
-describe('TerminalView — history restore', () => {
-    it('resets and replays history with screen-clears and queries stripped', () => {
+describe('TerminalView — snapshot restore', () => {
+    it('writes a mirror snapshot VERBATIM — no stripping of clears or queries', () => {
+        const { socket, term } = mountTerminal();
+
+        // cols/rows in the payload mark this as a serialized mirror snapshot.
+        // The server-side emulator already consumed clears/queries, so the
+        // client must not mangle the well-formed stream.
+        const snapshot = '\x1b[2J\x1b[Hclean screen\x1b[0m';
+        emit(socket, {
+            type: 'task:restore',
+            payload: { taskId: TASK_ID, history: snapshot, cols: 80, rows: 24 },
+        });
+
+        expect(term.resetCount).toBe(1);
+        expect(term.screen).toBe(snapshot);
+        expect(term.scrollToBottomCount).toBeGreaterThan(0);
+    });
+
+    it('resizes to the snapshot dimensions before writing, without telling the PTY', () => {
+        const { socket, term } = mountTerminal();
+        const resizeFramesBefore = frames(socket, 'task:resize').length;
+
+        emit(socket, {
+            type: 'task:restore',
+            payload: { taskId: TASK_ID, history: 'SNAP', cols: 120, rows: 40 },
+        });
+
+        // Written at the snapshot's own size (fit() then reflows to the container)
+        expect(term.cols).toBe(120);
+        expect(term.rows).toBe(40);
+        expect(term.screen).toBe('SNAP');
+        // The transient resize is presentation-only — the PTY stays at the
+        // client's size, so no task:resize frame may leave during restore.
+        expect(frames(socket, 'task:resize')).toHaveLength(resizeFramesBefore);
+    });
+
+    it('strips device queries from a LEGACY raw restore (no dimensions in payload)', () => {
         const { socket, term } = mountTerminal();
 
         emit(socket, {
             type: 'task:restore',
-            payload: { taskId: TASK_ID, history: '\x1b[2J\x1b[Hhello\x1b[6n world\x1bc!' },
+            payload: { taskId: TASK_ID, history: 'hello\x1b[6n world' },
         });
 
-        expect(term.resetCount).toBe(1);
-        expect(term.screen).toBe('hello world!');
-        expect(term.scrollToBottomCount).toBeGreaterThan(0);
+        // Queries must not replay (xterm would answer them into the live PTY);
+        // everything else is written as-is.
+        expect(term.screen).toBe('hello world');
+    });
+
+    it('discards resize-buffered output superseded by a snapshot', () => {
+        const { socket, term } = mountTerminal();
+
+        // A resize opens the 250ms output buffer window
+        act(() => { term.resizeCb!({ cols: 100, rows: 30 }); });
+        output(socket, 'stale-chunk'); // buffered, not written
+
+        // The snapshot that then arrives already CONTAINS that output (the
+        // server serializes after all prior writes) — flushing it afterwards
+        // would duplicate content.
+        emit(socket, {
+            type: 'task:restore',
+            payload: { taskId: TASK_ID, history: 'SNAP', cols: 100, rows: 30 },
+        });
+        act(() => { vi.advanceTimersByTime(RESIZE_BUFFER_MS + 50); });
+
+        expect(term.screen).toBe('SNAP');
+    });
+
+    it('never fetches history chunks — scrollback paging is gone', async () => {
+        const { socket, viewport } = mountTerminal();
+        emit(socket, {
+            type: 'task:restore',
+            payload: { taskId: TASK_ID, history: 'SNAP', cols: 80, rows: 24 },
+        });
+        await flushPromises();
+
+        act(() => { viewport.dispatchEvent(new Event('scroll')); });
+        await flushPromises();
+
+        expect(global.fetch).not.toHaveBeenCalled();
     });
 
     it('shows a placeholder when there is no history', () => {
@@ -399,165 +471,44 @@ describe('TerminalView — history restore', () => {
     });
 });
 
-describe('TerminalView — chunked scroll-up history loading', () => {
-    /**
-     * Wires a fetch double that answers the metadata probe (maxBytes=0) and the
-     * chunk requests, and returns the recorded calls.
-     */
-    function stubHistoryApi(opts: {
-        totalSize?: number;
-        isBase64Legacy?: boolean;
-        chunk?: () => { data: string; startOffset: number };
-    } = {}) {
-        const { totalSize = 1000, isBase64Legacy = false } = opts;
-        const fetchMock = vi.fn(async (url: unknown) => {
-            const u = String(url);
-            if (u.includes('maxBytes=0')) {
-                return { ok: true, json: async () => ({ totalSize, isBase64Legacy }) };
-            }
-            const chunk = opts.chunk ? opts.chunk() : { data: 'older-', startOffset: 0 };
-            return {
-                ok: true,
-                json: async () => ({ ...chunk, totalSize, isBase64Legacy: false }),
-            };
-        });
-        global.fetch = fetchMock as unknown as typeof fetch;
-        return fetchMock;
-    }
+describe('TerminalView — post-resize snapshot resync', () => {
+    it('requests a fresh snapshot 600ms after a resize settles', () => {
+        const { socket, term } = mountTerminal();
 
-    /** Restore history, then settle the metadata fetch and the scroll guard. */
-    async function restoreAndSettle(socket: FakeSocket, history: string) {
-        emit(socket, { type: 'task:restore', payload: { taskId: TASK_ID, history } });
-        await flushPromises();
-        act(() => { vi.advanceTimersByTime(100); });
-    }
+        act(() => { term.resizeCb!({ cols: 100, rows: 30 }); });
+        expect(frames(socket, 'task:restore')).toHaveLength(0);
 
-    function scroll(viewport: HTMLElement) {
-        act(() => { viewport.dispatchEvent(new Event('scroll')); });
-    }
+        act(() => { vi.advanceTimersByTime(600); });
 
-    function chunkCalls(fetchMock: ReturnType<typeof vi.fn>) {
-        return fetchMock.mock.calls.map(c => String(c[0])).filter(u => !u.includes('maxBytes=0'));
-    }
-
-    it('requests the previous chunk when the user scrolls to the top', async () => {
-        const fetchMock = stubHistoryApi({ totalSize: 1000 });
-        const { socket, viewport, term } = mountTerminal();
-        await restoreAndSettle(socket, 'tail');
-
-        scroll(viewport);
-        await flushPromises();
-
-        // topOffset = totalSize - raw history length = 1000 - 4
-        expect(chunkCalls(fetchMock)).toEqual([
-            `${getApiBaseUrl()}/api/task/${TASK_ID}/history?endBefore=996&maxBytes=${CHUNK_SIZE}`,
+        expect(frames(socket, 'task:restore')).toEqual([
+            { type: 'task:restore', payload: { taskId: TASK_ID } },
         ]);
-        // The chunk is prepended and the whole buffer rewritten (xterm has no
-        // insert-at-top API), so the earlier text now precedes the tail.
-        expect(term.screen).toBe('older-tail');
     });
 
-    it('does not re-request a chunk it has already loaded', async () => {
-        const fetchMock = stubHistoryApi({ totalSize: 1000 });
-        const { socket, viewport } = mountTerminal();
-        await restoreAndSettle(socket, 'tail');
+    it('debounces rapid resizes into a single resync request', () => {
+        const { socket, term } = mountTerminal();
 
-        scroll(viewport);
-        await flushPromises();
-        act(() => { vi.advanceTimersByTime(100) }); // clear the programmatic-scroll guard
-        expect(chunkCalls(fetchMock)).toHaveLength(1);
+        act(() => { term.resizeCb!({ cols: 100, rows: 30 }); });
+        act(() => { vi.advanceTimersByTime(300); });
+        act(() => { term.resizeCb!({ cols: 96, rows: 28 }); });
+        act(() => { vi.advanceTimersByTime(600); });
 
-        // startOffset 0 means the whole file is loaded — further scrolls are no-ops.
-        scroll(viewport);
-        await flushPromises();
-        expect(chunkCalls(fetchMock)).toHaveLength(1);
+        expect(frames(socket, 'task:restore')).toHaveLength(1);
     });
 
-    it('does not fire a second request while one is in flight', async () => {
-        let release!: (v: unknown) => void;
-        const gate = new Promise(resolve => { release = resolve; });
-        const fetchMock = vi.fn(async (url: unknown) => {
-            const u = String(url);
-            if (u.includes('maxBytes=0')) {
-                return { ok: true, json: async () => ({ totalSize: 1000, isBase64Legacy: false }) };
-            }
-            await gate;
-            return { ok: true, json: async () => ({ data: 'older-', startOffset: 500, totalSize: 1000, isBase64Legacy: false }) };
-        });
-        global.fetch = fetchMock as unknown as typeof fetch;
+    it('skips the resync while the user is scrolled up', () => {
+        const { socket, term, viewport } = mountTerminal();
 
-        const { socket, viewport } = mountTerminal();
-        await restoreAndSettle(socket, 'tail');
+        // Simulate a viewport scrolled well away from the bottom
+        Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 1000 });
+        Object.defineProperty(viewport, 'scrollTop', { configurable: true, value: 0 });
+        Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 100 });
+        act(() => { viewport.dispatchEvent(new Event('scroll')); });
 
-        scroll(viewport);
-        await flushPromises(2);
-        scroll(viewport);
-        scroll(viewport);
-        await flushPromises(2);
+        act(() => { term.resizeCb!({ cols: 100, rows: 30 }); });
+        act(() => { vi.advanceTimersByTime(600); });
 
-        expect(chunkCalls(fetchMock)).toHaveLength(1);
-
-        release(null);
-        await flushPromises();
-    });
-
-    it('stays quiet when the viewport is not near the top', async () => {
-        const fetchMock = stubHistoryApi({ totalSize: 1000 });
-        const { socket, viewport } = mountTerminal();
-        await restoreAndSettle(socket, 'tail');
-        Object.defineProperty(viewport, 'scrollTop', { configurable: true, value: 500 });
-
-        scroll(viewport);
-        await flushPromises();
-
-        expect(chunkCalls(fetchMock)).toHaveLength(0);
-    });
-
-    it('stays quiet for legacy base64 histories that cannot be chunked', async () => {
-        const fetchMock = stubHistoryApi({ totalSize: 1000, isBase64Legacy: true });
-        const { socket, viewport } = mountTerminal();
-        await restoreAndSettle(socket, 'tail');
-
-        scroll(viewport);
-        await flushPromises();
-
-        expect(chunkCalls(fetchMock)).toHaveLength(0);
-    });
-
-    it('marks the file fully loaded when the server returns an empty chunk', async () => {
-        const fetchMock = stubHistoryApi({
-            totalSize: 1000,
-            chunk: () => ({ data: '', startOffset: 0 }),
-        });
-        const { socket, viewport, term } = mountTerminal();
-        await restoreAndSettle(socket, 'tail');
-
-        scroll(viewport);
-        await flushPromises();
-        expect(chunkCalls(fetchMock)).toHaveLength(1);
-        expect(term.screen).toBe('tail'); // nothing prepended
-
-        scroll(viewport);
-        await flushPromises();
-        expect(chunkCalls(fetchMock)).toHaveLength(1);
-    });
-
-    it('keeps live output that arrived after the restore when rewriting the buffer', async () => {
-        const fetchMock = stubHistoryApi({ totalSize: 1000 });
-        const { socket, viewport, term } = mountTerminal();
-        await restoreAndSettle(socket, 'tail');
-
-        output(socket, '+live');
-        expect(term.screen).toBe('tail+live');
-        // The auto-scroll that follows live output flags the next scroll event
-        // as programmatic for 100ms; let that lapse so ours counts as a user scroll.
-        act(() => { vi.advanceTimersByTime(100); });
-
-        scroll(viewport);
-        await flushPromises();
-
-        expect(chunkCalls(fetchMock)).toHaveLength(1);
-        expect(term.screen).toBe('older-tail+live');
+        expect(frames(socket, 'task:restore')).toHaveLength(0);
     });
 });
 
