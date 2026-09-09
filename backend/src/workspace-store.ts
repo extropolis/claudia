@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import { Workspace, RecentWorkspace, WorkspaceReference } from '@claudia/shared';
 import { randomUUID } from 'crypto';
 import { loadVersioned, saveVersioned } from './utils/schema-version.js';
-import { isLinkedWorktree, getMainWorktreePath, getCurrentBranch } from './git-utils.js';
+import { isLinkedWorktree, getMainWorktreePath, getCurrentBranch, isWorktreePath } from './git-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -35,15 +35,6 @@ const DEFAULT_CONFIG: WorkspaceConfig = {
 
 const MAX_RECENT_WORKSPACES = 10;  // Keep only the last 10 recent workspaces
 
-/**
- * Heuristic: does this path look like a Claudia-managed git worktree directory?
- * Worktrees live under a `.claudia-worktrees` (or legacy `.claude-worktrees`)
- * folder and are named `claudia-task-*`. Used to keep transient worktree dirs out
- * of the recent-workspaces list. Matches both `/` and `\` separators.
- */
-function isWorktreePath(p: string): boolean {
-    return /[\\/]\.claud(ia|e)-worktrees[\\/]/.test(p) || /[\\/]claudia-task-[0-9a-f]+/i.test(p);
-}
 
 export class WorkspaceStore {
     private config: WorkspaceConfig;
@@ -310,12 +301,13 @@ export class WorkspaceStore {
         this.prInfoCache.delete(id);
 
         // Add to recent workspaces (only if it still exists on disk).
-        // Skip worktree workspaces: they are transient per-task/per-branch dirs
-        // (e.g. .claudia-worktrees/claudia-task-*) that are created and removed
-        // constantly, and they are not standalone folders a user would re-open as
-        // a workspace. Including them floods the "recent workspaces" list in the
-        // Add Workspace dialog with worktree entries.
-        if (existsSync(id) && !workspace.worktreeParentId && !isWorktreePath(id)) {
+        // Worktrees are never re-addable workspaces — they are per-task scratch
+        // checkouts that the sidebar renders as tasks under their parent repo.
+        // Letting them into the history polluted the "Recent Workspaces" list in
+        // the Add Workspace dialog with one dead .claudia-worktrees path per
+        // reaped task.
+        const isWorktreeRecord = !!workspace.worktreeParentId || isWorktreePath(id);
+        if (existsSync(id) && !isWorktreeRecord) {
             // Remove if already in recent (to avoid duplicates)
             this.config.recentWorkspaces = this.config.recentWorkspaces.filter(w => w.id !== id);
 
@@ -427,7 +419,9 @@ export class WorkspaceStore {
     getRecentWorkspaces(): RecentWorkspace[] {
         const currentIds = new Set(this.config.workspaces.map(w => w.id));
         return this.config.recentWorkspaces
-            .filter(w => !currentIds.has(w.id) && existsSync(w.id));
+            // isWorktreePath also drops worktree entries written by older builds,
+            // which recorded them before deleteWorkspace learned to skip them.
+            .filter(w => !currentIds.has(w.id) && !isWorktreePath(w.id) && existsSync(w.id));
     }
 
     // Clear a specific recent workspace from history
