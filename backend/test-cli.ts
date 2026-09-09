@@ -2633,8 +2633,7 @@ async function handleTunnelCommand(argv: string[]): Promise<boolean> {
         show(status);
         if (status.active && status.url) {
             // The server probes asynchronously; give it a beat, then re-read.
-            console.log('
-Probing reachability...');
+            console.log('\nProbing reachability...');
             await new Promise(r => setTimeout(r, 16000));
             show(await (await fetch(`${base}/api/tunnel/status`)).json());
         }
@@ -2646,8 +2645,7 @@ Probing reachability...');
         // drops one zone by SNI makes a perfectly healthy tunnel unreachable,
         // and nothing else in the stack can tell you that.
         const zones = ['ngrok.com', 'probe.ngrok.app', 'probe.ngrok.io', 'probe.ngrok-free.app', 'probe.ngrok-free.dev'];
-        console.log('Probing ngrok domains from this machine (404 = reachable, ngrok just has no such endpoint):
-');
+        console.log('Probing ngrok domains from this machine (404 = reachable, ngrok just has no such endpoint):\n');
         for (const host of zones) {
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), 12000);
@@ -2660,8 +2658,7 @@ Probing reachability...');
                 clearTimeout(timer);
             }
         }
-        console.log('
-If one zone is BLOCKED while others are OK, this network filters that domain.');
+        console.log('\nIf one zone is BLOCKED while others are OK, this network filters that domain.');
         console.log('Pin a reserved domain on a working zone:  --tunnel-domain <your>.ngrok.app');
         return true;
     }
