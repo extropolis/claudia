@@ -32,6 +32,15 @@ import { TaskSpawner } from '../task-spawner.js';
 const TASK_ID = 'task-500-sess';
 const SID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeffff0001';
 
+/**
+ * Mirrors SESSION_CAPTURE_TIMEOUT_MS in task-spawner.ts, which is module-private
+ * (not exported) so it cannot be imported here. #240 raised it from 30s to 10
+ * minutes: Claude Code flushes its session .jsonl lazily and can take well over
+ * 30s on a slow first turn, so the old window expired before the file existed and
+ * the task's history became unrecoverable on the next resume.
+ */
+const SESSION_CAPTURE_TIMEOUT_MS = 10 * 60 * 1000;
+
 interface Internals {
     tasks: Map<string, Record<string, unknown>>;
     disconnectedTasks: Map<string, Record<string, unknown>>;
@@ -213,25 +222,55 @@ describe('CHARACTERIZATION: startSessionCapture', () => {
         expect(emit).not.toHaveBeenCalled();
     });
 
-    it('does NOT overwrite a session the task already has, but still stops polling', () => {
-        const task = liveTask({ sessionId: 'already-mine' });
+    it('does NOT overwrite a LIVE session the task already has, but still stops polling', () => {
+        // "Live" means the id still resolves to a .jsonl on disk. Since #240 every
+        // fresh task carries a pre-assigned session id, so this guard is what stops
+        // the fallback loop from stealing a file that belongs to another task.
+        const mine = 'aaaaaaaa-bbbb-cccc-dddd-eeeeffff0002';
+        writeFileSync(join(claudeDir, `${mine}.jsonl`), '{}\n');
+        const task = liveTask({ sessionId: mine });
+
         internals.startSessionCapture(TASK_ID, workspace);
         writeFileSync(join(claudeDir, `${SID}.jsonl`), '{}\n');
 
         vi.advanceTimersByTime(500);
 
-        expect(task.sessionId).toBe('already-mine');
+        expect(task.sessionId).toBe(mine);
         expect(internals.sessionCaptureIntervals.has(TASK_ID)).toBe(false);
     });
 
-    it('gives up after 30s of no new session file', () => {
+    it('DOES adopt the new session when the id it holds is STALE (its .jsonl is gone)', () => {
+        // #240 made reconnect non-destructive: skipping --resume no longer nulls the
+        // session pointer, so a task whose file vanished keeps a DEAD id while Claude
+        // starts a brand-new session. Without this branch the task would stay pinned
+        // to the dead id forever and its real conversation would be orphaned.
+        const dead = 'aaaaaaaa-bbbb-cccc-dddd-eeeeffff0003';
+        const task = liveTask({ sessionId: dead });
+        internals.sessionToTaskId.set(dead, TASK_ID);
+
+        internals.startSessionCapture(TASK_ID, workspace);
+        writeFileSync(join(claudeDir, `${SID}.jsonl`), '{}\n');
+
+        vi.advanceTimersByTime(500);
+
+        expect(task.sessionId).toBe(SID);
+        expect(internals.sessionToTaskId.get(SID)).toBe(TASK_ID);
+        // The dead pointer is retired, not left aliasing the task.
+        expect(internals.sessionToTaskId.has(dead)).toBe(false);
+    });
+
+    it('polls for the FULL capture window (10 minutes, not 30s) before giving up', () => {
         liveTask();
         internals.startSessionCapture(TASK_ID, workspace);
 
-        vi.advanceTimersByTime(30_000);
+        // Still armed right up to the boundary — the 30s this test used to assert
+        // is nowhere near the give-up point since #240. The guard is a strict `>`,
+        // so the tick landing exactly ON the timeout does not fire it.
+        vi.advanceTimersByTime(SESSION_CAPTURE_TIMEOUT_MS);
         expect(internals.pendingSessionCapture.has(TASK_ID)).toBe(true);
+        expect(internals.sessionCaptureIntervals.has(TASK_ID)).toBe(true);
 
-        vi.advanceTimersByTime(500); // the tick that crosses 30_000
+        vi.advanceTimersByTime(500); // the first tick to cross the timeout
         expect(internals.pendingSessionCapture.has(TASK_ID)).toBe(false);
         expect(internals.sessionCaptureIntervals.has(TASK_ID)).toBe(false);
     });
@@ -350,12 +389,20 @@ describe('CHARACTERIZATION: resume existence gate', () => {
         expect(argvOf()).not.toContain('--resume');
     });
 
-    it('clears the dead session pointer so the fresh PTY can capture a new one', () => {
+    it('PRESERVES the dead session pointer even though it skips --resume', () => {
+        // #240 made this non-destructive. Nulling the pointer used to be permanent:
+        // a single transient miss (worktree briefly unmounted, FS hiccup, .jsonl not
+        // yet flushed) threw the session away for good and made recovery impossible
+        // even after the file reappeared. Keeping the id lets a later reconnect
+        // resume it; if Claude starts a genuinely new session instead, the capture
+        // loop notices the id is stale and swaps in the new one (see above).
         seedTasks();
         boot();
         spawner.reconnectTask(TASK_ID);
 
-        expect(internals.tasks.get(TASK_ID)?.sessionId).toBeNull();
+        expect(internals.tasks.get(TASK_ID)?.sessionId).toBe(SID);
+        // ...but --resume is still skipped for THIS launch, since the file is gone.
+        expect(argvOf()).not.toContain('--resume');
     });
 
     it('substitutes the recovered session when exactly one transcript owns the task', () => {
@@ -407,8 +454,19 @@ describe('CHARACTERIZATION: fresh task wiring', () => {
         expect(t.initialPromptSent).toBe(false);
         expect(t.pendingPrompt).toBe('build the thing');
         expect(t.hasStartedProcessing).toBe(false);
-        expect(t.sessionId).toBeNull();
         expect(t.isActive).toBe(false);
+
+        // #240: the session id is PRE-ASSIGNED via --session-id rather than
+        // discovered by watching the filesystem, so it is known the moment the PTY
+        // spawns. The old capture race lost history whenever Claude had not flushed
+        // its .jsonl yet (it flushes lazily, sometimes only on clean exit) — a
+        // restart before that left sessionId null and the conversation orphaned.
+        const sessionId = t.sessionId as string;
+        expect(sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+        const args = ptys[0].args;
+        expect(args[args.indexOf('--session-id') + 1]).toBe(sessionId);
+        // Registered immediately so output routing works from the first byte.
+        expect(internals.sessionToTaskId.get(sessionId)).toBe(task.id);
     });
 
     it('arms BOTH the 15s ready fallback and the 500ms session-capture loop', async () => {

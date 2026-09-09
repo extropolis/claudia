@@ -401,13 +401,23 @@ describe('CHARACTERIZATION: writeToTask framing', () => {
         expect(task.process.writes).toEqual([paste('ok')]);
     });
 
-    it('writes paste AND Enter as ONE write when the task is busy', () => {
+    it('writes a BUSY task message RAW and whole — no paste framing, no split Enter', () => {
         const task = makeTask({ state: 'busy' });
 
         internals.writeToTask(task.id, 'hello\r', 'client');
 
-        // Single atomic write — no split, no delay, no retry.
-        expect(task.process.writes).toEqual([`${paste('hello')}\r`]);
+        // One atomic write of EXACTLY what arrived: message and Enter together,
+        // with no bracketed-paste framing.
+        //
+        // #69 wrapped this path in bracketed paste to stop front-truncation of
+        // large pastes; #240 took that back out. While Claude is mid-turn its TUI
+        // re-renders constantly, and a paste sequence landing in that window gets
+        // mishandled, so the queued message was silently DROPPED. Raw passthrough
+        // makes the input look exactly like local typing — which is why the plain
+        // `claude` CLI never had this bug: nothing wraps its stdin. The idle path
+        // above keeps the paste framing, where it is correct and needed.
+        expect(task.process.writes).toEqual(['hello\r']);
+        // No delayed Enter and no Enter-retry loop on this path either.
         vi.advanceTimersByTime(60_000);
         expect(task.process.writes).toHaveLength(1);
     });
@@ -444,14 +454,21 @@ describe('CHARACTERIZATION: writeToTask framing', () => {
         expect(task.process.writes).toEqual([paste('yes')]);
     });
 
-    it('strips a stray paste END marker on both the idle and busy paths', () => {
+    it('strips a stray paste END marker on the idle path ONLY — busy input goes through verbatim', () => {
+        // Idle path: the body is wrapped in bracketed paste, so an embedded ESC[201~
+        // would close that paste early and split the message in two. It is scrubbed
+        // out before the wrap.
         const idle = makeTask({ id: 'task-idle', state: 'idle' });
         internals.writeToTask(idle.id, `a\x1b[201~b\r`, 'client');
         expect(idle.process.writes[0]).toBe(paste('ab'));
 
+        // Busy path: since #240 there is no paste framing here at all, so there is
+        // nothing for a stray END marker to terminate — and nothing strips it. The
+        // bytes reach the TUI exactly as the client sent them, unmatched marker
+        // included. Pinned as the real contract of "write raw, exactly as received".
         const busy = makeTask({ id: 'task-busy', state: 'busy' });
         internals.writeToTask(busy.id, `a\x1b[201~b\r`, 'client');
-        expect(busy.process.writes[0]).toBe(`${paste('ab')}\r`);
+        expect(busy.process.writes[0]).toBe(`a\x1b[201~b\r`);
     });
 
     it('silently drops a write to an unknown task', () => {
