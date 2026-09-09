@@ -12,7 +12,7 @@ import { existsSync, lstatSync, appendFileSync, readFileSync, writeFileSync } fr
 import { join, resolve, basename, normalize } from 'path';
 import { WorktreeInfo } from '@claudia/shared';
 import { createLogger } from './logger.js';
-import { getDefaultBranch, getCurrentBranch } from './git-utils.js';
+import { getDefaultBranch, getCurrentBranch, WORKTREE_DIR_NAME } from './git-utils.js';
 
 const execFileAsync = promisify(execFile);
 const logger = createLogger('[WorktreeManager]');
@@ -204,7 +204,7 @@ export class WorktreeManager {
         }
 
         const slug = branchToDirectoryName(branch);
-        const targetDir = opts.targetDir ?? join(mainPath, '.claudia-worktrees', slug);
+        const targetDir = opts.targetDir ?? join(mainPath, WORKTREE_DIR_NAME, slug);
 
         // Build git worktree add args
         const args: string[] = ['worktree', 'add'];

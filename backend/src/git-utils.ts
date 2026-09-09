@@ -245,6 +245,23 @@ export async function captureGitStateAfter(
 const MAX_REVERT_COMMITS = 5;
 
 /**
+ * Directory name Claudia creates its per-task worktrees under, inside the repo root.
+ * Shared so path-shape checks can't drift from where worktrees are actually made.
+ */
+export const WORKTREE_DIR_NAME = '.claudia-worktrees';
+
+/**
+ * True when a path lives inside a Claudia-managed worktree directory.
+ *
+ * Purely a path-shape check — no filesystem or git access — so it still
+ * classifies records whose directory has already been removed from disk
+ * (which is exactly when stale entries leak into recent-workspace history).
+ */
+export function isWorktreePath(path: string): boolean {
+    return path.split(/[\\/]+/).includes(WORKTREE_DIR_NAME);
+}
+
+/**
  * Detect if a directory is a git-linked worktree (not the main working tree).
  * In a linked worktree, `.git` is a FILE; in the main working tree it is a DIRECTORY.
  */

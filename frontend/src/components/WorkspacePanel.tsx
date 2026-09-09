@@ -2947,7 +2947,7 @@ export function WorkspacePanel({
                     onClose={() => setShowWorkspaceManager(false)}
                     onCreateWorkspace={onCreateWorkspace}
                     onDeleteWorkspace={onDeleteWorkspace}
-                    onReorderWorkspaces={onReorderWorkspaces}
+                    onSetWorkspaceOrder={onSetWorkspaceOrder}
                 />
             )}
 

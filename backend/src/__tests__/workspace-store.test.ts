@@ -247,6 +247,36 @@ describe('WorkspaceStore', () => {
             expect(recent.some(w => w.id === testWorkspace1)).toBe(true);
         });
 
+        it('does not record a worktree workspace as a recent workspace', async () => {
+            store.addWorkspace(testWorkspace1);
+            const worktreeDir = join(testBaseDir, 'wt-recent');
+            mkdirSync(worktreeDir, { recursive: true });
+            await store.addWorktreeWorkspace(worktreeDir, testWorkspace1, 'feature-x');
+
+            store.deleteWorkspace(worktreeDir);
+
+            // The directory still exists on disk, which is what used to qualify it for
+            // the history. Worktrees are per-task checkouts, never re-addable workspaces.
+            expect(existsSync(worktreeDir)).toBe(true);
+            expect(store.getRecentWorkspaces().some(w => w.id === worktreeDir)).toBe(false);
+        });
+
+        it('hides .claudia-worktrees entries written by older builds', () => {
+            store.addWorkspace(testWorkspace1); // force the config file to exist
+            const stale = join(testBaseDir, '.claudia-worktrees', 'claudia-task-abc123');
+            mkdirSync(stale, { recursive: true });
+
+            const configPath = join(testBaseDir, 'workspace-config.json');
+            const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+            config.data.recentWorkspaces = [
+                { id: stale, name: 'claudia-task-abc123', removedAt: new Date().toISOString() }
+            ];
+            writeFileSync(configPath, JSON.stringify(config));
+
+            const reloaded = new WorkspaceStore(testBaseDir);
+            expect(reloaded.getRecentWorkspaces().some(w => w.id === stale)).toBe(false);
+        });
+
         it('should include removedAt timestamp in recent workspace', () => {
             store.addWorkspace(testWorkspace1);
             store.deleteWorkspace(testWorkspace1);
