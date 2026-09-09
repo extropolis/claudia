@@ -1,0 +1,163 @@
+/*
+ * Split-pane layout primitive.
+ *
+ * All colours come from the app-wide custom properties defined in
+ * src/styles/index.css (:root / [data-theme="light"]), so this respects
+ * useTheme's light/dark switch automatically. No hardcoded hex values.
+ */
+
+.split-root {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--bg-primary);
+}
+
+.split-root > * {
+    flex: 1 1 0%;
+    min-width: 0;
+    min-height: 0;
+}
+
+.split-container {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.split-container--row {
+    flex-direction: row;
+}
+
+.split-container--column {
+    flex-direction: column;
+}
+
+/* Suppress text selection and pointer-events churn while a divider is dragged. */
+.split-container--dragging {
+    user-select: none;
+}
+
+.split-container--dragging .split-pane {
+    pointer-events: none;
+}
+
+.split-pane {
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.split-pane > * {
+    flex: 1 1 0%;
+    min-width: 0;
+    min-height: 0;
+}
+
+/* --- Leaf ---------------------------------------------------------------- */
+
+.split-leaf {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--bg-primary);
+    border: 1px solid transparent;
+    border-radius: 4px;
+}
+
+.split-leaf > * {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+}
+
+.split-leaf--focused {
+    border-color: var(--accent-secondary);
+    box-shadow: inset 0 0 0 1px var(--accent-secondary);
+}
+
+/* --- Divider ------------------------------------------------------------- */
+
+/*
+ * The divider is a 6px hit strip with a 1px visible line centred in it, plus a
+ * wider invisible grab zone via the ::before pseudo-element so the cursor
+ * catches it without pixel-hunting.
+ */
+.split-divider {
+    position: relative;
+    flex: 0 0 6px;
+    background: transparent;
+    z-index: 2;
+}
+
+.split-divider::before {
+    content: '';
+    position: absolute;
+    inset: -3px;
+}
+
+.split-divider--row {
+    cursor: col-resize;
+    width: 6px;
+    height: 100%;
+}
+
+.split-divider--column {
+    cursor: row-resize;
+    width: 100%;
+    height: 6px;
+}
+
+.split-divider__line {
+    position: absolute;
+    background: var(--border-color);
+    transition: background 0.12s ease;
+}
+
+.split-divider--row .split-divider__line {
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 1px;
+    transform: translateX(-50%);
+}
+
+.split-divider--column .split-divider__line {
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 1px;
+    transform: translateY(-50%);
+}
+
+.split-divider:hover .split-divider__line,
+.split-divider:focus-visible .split-divider__line,
+.split-container--dragging .split-divider .split-divider__line {
+    background: var(--accent-secondary);
+}
+
+.split-divider--row:hover .split-divider__line,
+.split-divider--row:focus-visible .split-divider__line {
+    width: 2px;
+}
+
+.split-divider--column:hover .split-divider__line,
+.split-divider--column:focus-visible .split-divider__line {
+    height: 2px;
+}
+
+.split-divider:focus-visible {
+    outline: none;
+}
