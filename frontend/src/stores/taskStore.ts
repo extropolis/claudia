@@ -114,6 +114,8 @@ interface TaskStore {
     supervisorEnabled: boolean;
     aiCoreConfigured: boolean | null; // null = not checked yet, false = not configured, true = configured
     showSystemStats: boolean;
+    /** Show the plan-usage indicator in the header. */
+    showUsageLimits: boolean;
     browserNotificationsEnabled: boolean;
     notifyOnCompletion: boolean;
     notifyOnWaitingInput: boolean;
@@ -223,6 +225,7 @@ interface TaskStore {
     setSupervisorEnabled: (enabled: boolean) => void;
     setAiCoreConfigured: (configured: boolean | null) => void;
     setShowSystemStats: (show: boolean) => void;
+    setShowUsageLimits: (show: boolean) => void;
     setBrowserNotificationsEnabled: (enabled: boolean) => void;
     setNotifyOnCompletion: (enabled: boolean) => void;
     setNotifyOnWaitingInput: (enabled: boolean) => void;
@@ -264,6 +267,7 @@ interface PersistedState {
     autoFocusOnInput: boolean;
     supervisorEnabled: boolean;
     showSystemStats: boolean;
+    showUsageLimits: boolean;
     browserNotificationsEnabled: boolean;
     notifyOnCompletion: boolean;
     notifyOnWaitingInput: boolean;
@@ -368,6 +372,7 @@ export const useTaskStore = create<TaskStore>()(
             supervisorEnabled: false,
             aiCoreConfigured: null,
             showSystemStats: false,
+            showUsageLimits: true,
             browserNotificationsEnabled: false,
             notifyOnCompletion: true,
             notifyOnWaitingInput: true,
@@ -886,6 +891,7 @@ export const useTaskStore = create<TaskStore>()(
             setSupervisorEnabled: (enabled) => set({ supervisorEnabled: enabled }),
             setAiCoreConfigured: (configured) => set({ aiCoreConfigured: configured }),
             setShowSystemStats: (show) => set({ showSystemStats: show }),
+            setShowUsageLimits: (show) => set({ showUsageLimits: show }),
             setBrowserNotificationsEnabled: (enabled) => set({ browserNotificationsEnabled: enabled }),
             setNotifyOnCompletion: (enabled) => set({ notifyOnCompletion: enabled }),
             setNotifyOnWaitingInput: (enabled) => set({ notifyOnWaitingInput: enabled }),
@@ -927,6 +933,7 @@ export const useTaskStore = create<TaskStore>()(
                 autoFocusOnInput: state.autoFocusOnInput,
                 supervisorEnabled: state.supervisorEnabled,
                 showSystemStats: state.showSystemStats,
+                showUsageLimits: state.showUsageLimits,
                 browserNotificationsEnabled: state.browserNotificationsEnabled,
                 notifyOnCompletion: state.notifyOnCompletion,
                 notifyOnWaitingInput: state.notifyOnWaitingInput,
@@ -985,6 +992,7 @@ export const useTaskStore = create<TaskStore>()(
                     autoFocusOnInput: persisted.autoFocusOnInput ?? currentState.autoFocusOnInput,
                     supervisorEnabled: persisted.supervisorEnabled ?? currentState.supervisorEnabled,
                     showSystemStats: persisted.showSystemStats ?? currentState.showSystemStats,
+                    showUsageLimits: persisted.showUsageLimits ?? currentState.showUsageLimits,
                     browserNotificationsEnabled: persisted.browserNotificationsEnabled ?? currentState.browserNotificationsEnabled,
                     notifyOnCompletion: persisted.notifyOnCompletion ?? currentState.notifyOnCompletion,
                     notifyOnWaitingInput: persisted.notifyOnWaitingInput ?? currentState.notifyOnWaitingInput,

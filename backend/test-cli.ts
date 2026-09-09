@@ -50,6 +50,9 @@ interface TestConfig {
     archiveTask: boolean;         // Archive a task
     gitPush: boolean;             // Push to GitHub
     backendStatus: boolean;       // Get backend status (no WebSocket needed)
+    httpPort: number | null;      // Override the HTTP API port (default 4001)
+    usageLimits: boolean;         // Show Claude plan usage limits (no WebSocket needed)
+    usageLimitsRefresh: boolean;  // Bypass the server-side cache when showing limits
     setBackend: string | null;    // Set backend ('claude-code' or 'opencode')
     watchOutput: boolean;         // Stream task output to console
     waitForIdle: boolean;         // Wait for task to become idle before exiting
@@ -1331,6 +1334,9 @@ function parseArgs(): TestConfig {
     let archiveTask = false;
     let gitPush = false;
     let backendStatus = false;
+    let httpPort: number | null = null;
+    let usageLimits = false;
+    let usageLimitsRefresh = false;
     let setBackend: string | null = null;
     let watchOutput = false;
     let waitForIdle = false;
@@ -1489,6 +1495,15 @@ function parseArgs(): TestConfig {
                 break;
             case '--git-push':
                 gitPush = true;
+                break;
+            case '--http-port':
+                httpPort = parseInt(args[++i], 10);
+                break;
+            case '--usage-limits':
+                usageLimits = true;
+                break;
+            case '--refresh':
+                usageLimitsRefresh = true;
                 break;
             case '--backend-status':
                 backendStatus = true;
@@ -1681,6 +1696,11 @@ PLAN OPERATIONS:
 CONFIGURATION:
   --get-config             Get orchestrator configuration
 
+USAGE / PLAN LIMITS:
+  --usage-limits           Show Claude plan usage limits (session + weekly bars)
+  --http-port <port>       Override the HTTP API port (default 4001)
+  --refresh                With --usage-limits, bypass the server-side cache
+
 BACKEND OPERATIONS:
   --backend-status         Get current backend status (claude-code or opencode)
   --set-backend <name>     Set the AI backend ('claude-code' or 'opencode')
@@ -1769,6 +1789,7 @@ Examples:
   npx tsx test-cli.ts --delete-archived --task-id task-123456
 
   # Check backend status
+  npx tsx test-cli.ts --usage-limits
   npx tsx test-cli.ts --backend-status
 
   # Switch to opencode backend
@@ -1866,6 +1887,9 @@ Examples:
         archiveTask,
         gitPush,
         backendStatus,
+        httpPort,
+        usageLimits,
+        usageLimitsRefresh,
         setBackend,
         watchOutput,
         waitForIdle,
@@ -2050,6 +2074,93 @@ async function cronPauseTask(baseHttpUrl: string, cronId: string, paused: boolea
 }
 
 // Backend status and configuration functions (no WebSocket needed)
+/** Renders a text progress bar, e.g. [#####-----------] */
+function renderUsageBar(percent: number, width = 32): string {
+    const filled = Math.max(0, Math.min(width, Math.round((percent / 100) * width)));
+    return `[${'#'.repeat(filled)}${'-'.repeat(width - filled)}]`;
+}
+
+/** Formats an ISO reset timestamp as "in 2h 36m (9/2/2026, 8:19 PM)". */
+function formatResetsAt(iso: string | null): string {
+    if (!iso) return 'unknown';
+    const at = new Date(iso).getTime();
+    if (Number.isNaN(at)) return iso;
+    const deltaMs = at - Date.now();
+    if (deltaMs <= 0) return 'resetting now';
+    const mins = Math.floor(deltaMs / 60000);
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    const rel = h > 0 ? `${h}h ${m}m` : `${m}m`;
+    return `in ${rel} (${new Date(at).toLocaleString()})`;
+}
+
+/**
+ * Prints the account's Claude plan usage limits, mirroring what the header
+ * pill and the "Plan limits" dashboard section render in the UI.
+ */
+async function showUsageLimits(baseHttpUrl: string, refresh: boolean): Promise<void> {
+    const url = `${baseHttpUrl}/api/usage/limits${refresh ? '?refresh=1' : ''}`;
+    console.log(`Fetching plan usage limits${refresh ? ' (cache bypassed)' : ''}...`);
+    console.log('');
+
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            console.error(`Failed to fetch usage limits: ${response.status} ${response.statusText}`);
+            return;
+        }
+        const data = await response.json();
+
+        if (!data.ok) {
+            console.log('PLAN LIMITS UNAVAILABLE');
+            console.log('='.repeat(64));
+            console.log(`  Reason:  ${data.reason}`);
+            console.log(`  Message: ${data.message}`);
+            console.log('');
+            return;
+        }
+
+        console.log('PLAN USAGE LIMITS');
+        console.log('='.repeat(64));
+        console.log(`  Plan: ${data.planLabel || 'unknown'}${data.rateLimitTier ? `  (${data.rateLimitTier})` : ''}`);
+        console.log(`  Data: ${data.cached ? 'cached' : 'fresh'} at ${data.fetchedAt}`);
+        console.log('');
+
+        if (data.session) {
+            const s = data.session;
+            console.log('  Current session');
+            console.log(`    ${renderUsageBar(s.percent)} ${String(s.percent).padStart(3)}% used  [${s.severity}]`);
+            console.log(`    Resets ${formatResetsAt(s.resetsAt)}`);
+            console.log('');
+        } else {
+            console.log('  Current session: not reported');
+            console.log('');
+        }
+
+        if (Array.isArray(data.weekly) && data.weekly.length > 0) {
+            console.log('  Weekly limits');
+            for (const bar of data.weekly) {
+                console.log(`    ${bar.label}`);
+                console.log(`      ${renderUsageBar(bar.percent)} ${String(bar.percent).padStart(3)}% used  [${bar.severity}]`);
+                console.log(`      Resets ${formatResetsAt(bar.resetsAt)}`);
+            }
+            console.log('');
+        }
+
+        if (data.credits) {
+            const c = data.credits;
+            const money = (minor: number | null) => minor === null ? 'n/a' : `$${(minor / 100).toFixed(2)}`;
+            console.log('  Usage credits');
+            console.log(`    Enabled: ${c.enabled ? 'yes' : 'no'}`);
+            console.log(`    Spent:   ${money(c.usedMinor)}${c.limitMinor !== null ? ` of ${money(c.limitMinor)}` : ''} (${c.percent}%)`);
+            if (c.balanceMinor !== null) console.log(`    Balance: ${money(c.balanceMinor)}`);
+            console.log('');
+        }
+    } catch (error) {
+        console.error('Failed to fetch usage limits:', error);
+    }
+}
+
 async function getBackendStatus(baseHttpUrl: string): Promise<void> {
     console.log('🔍 Checking backend status...');
     console.log('');
@@ -2573,8 +2684,7 @@ async function handleTunnelCommand(argv: string[]): Promise<boolean> {
         show(status);
         if (status.active && status.url) {
             // The server probes asynchronously; give it a beat, then re-read.
-            console.log('
-Probing reachability...');
+            console.log('\nProbing reachability...');
             await new Promise(r => setTimeout(r, 16000));
             show(await (await fetch(`${base}/api/tunnel/status`)).json());
         }
@@ -2586,8 +2696,7 @@ Probing reachability...');
         // drops one zone by SNI makes a perfectly healthy tunnel unreachable,
         // and nothing else in the stack can tell you that.
         const zones = ['ngrok.com', 'probe.ngrok.app', 'probe.ngrok.io', 'probe.ngrok-free.app', 'probe.ngrok-free.dev'];
-        console.log('Probing ngrok domains from this machine (404 = reachable, ngrok just has no such endpoint):
-');
+        console.log('Probing ngrok domains from this machine (404 = reachable, ngrok just has no such endpoint):\n');
         for (const host of zones) {
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), 12000);
@@ -2600,8 +2709,7 @@ Probing reachability...');
                 clearTimeout(timer);
             }
         }
-        console.log('
-If one zone is BLOCKED while others are OK, this network filters that domain.');
+        console.log('\nIf one zone is BLOCKED while others are OK, this network filters that domain.');
         console.log('Pin a reserved domain on a working zone:  --tunnel-domain <your>.ngrok.app');
         return true;
     }
@@ -2623,12 +2731,22 @@ async function main() {
     const config = parseArgs() as any;
 
     // Derive HTTP URL from WebSocket URL for API calls
+    // The HTTP API normally lives on 4001 regardless of the WS URL's port, so
+    // the port is rewritten by default. --http-port overrides that, which is
+    // what lets a throwaway probe server on another port be exercised without
+    // ever touching the real backend.
+    const httpPort = config.httpPort ?? 4001;
     const baseHttpUrl = config.backendUrl
         .replace('ws://', 'http://')
         .replace('wss://', 'https://')
-        .replace(/:\d+$/, ':4001');  // Ensure correct port
+        .replace(/:\d+$/, `:${httpPort}`);
 
     // Handle backend commands that don't need WebSocket
+    if (config.usageLimits) {
+        await showUsageLimits(baseHttpUrl, config.usageLimitsRefresh);
+        process.exit(0);
+    }
+
     if (config.backendStatus) {
         await getBackendStatus(baseHttpUrl);
         process.exit(0);

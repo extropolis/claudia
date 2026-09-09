@@ -1,0 +1,105 @@
+/* Always-visible plan-usage indicator in the app header. Sized to sit beside
+   the CPU/MEM stat chips without changing the header's height. */
+.usage-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, monospace;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+
+.usage-pill:hover {
+    border-color: var(--text-muted);
+}
+
+.usage-pill-track {
+    position: relative;
+    width: 64px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg-primary, rgba(255, 255, 255, 0.08));
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.usage-pill-fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    border-radius: 3px;
+    background: currentColor;
+    transition: width 0.4s ease;
+}
+
+.usage-pill-value {
+    font-weight: 600;
+    min-width: 30px;
+    text-align: right;
+}
+
+.usage-pill-reset {
+    color: var(--text-muted);
+    font-size: 0.625rem;
+}
+
+/* Severity bands mirror the backend's thresholds:
+   normal <50%, warning 50-79%, critical 80-99%, exhausted >=100%. */
+.usage-pill-normal {
+    color: var(--accent-green);
+    border-color: rgba(63, 185, 80, 0.3);
+}
+
+.usage-pill-warning {
+    color: var(--accent-yellow);
+    border-color: rgba(210, 153, 34, 0.35);
+}
+
+.usage-pill-critical,
+.usage-pill-exhausted {
+    color: var(--accent-red);
+    border-color: rgba(248, 81, 73, 0.45);
+}
+
+/* At critical/exhausted the pill breathes so it is impossible to miss while
+   you are heads-down in a terminal. */
+.usage-pill-critical,
+.usage-pill-exhausted {
+    animation: usage-pill-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes usage-pill-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0); }
+    50% { box-shadow: 0 0 0 3px rgba(248, 81, 73, 0.18); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .usage-pill-critical,
+    .usage-pill-exhausted {
+        animation: none;
+    }
+}
+
+.usage-pill-unavailable {
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.usage-pill-label {
+    color: var(--text-muted);
+    font-size: 0.625rem;
+    text-transform: uppercase;
+}
+
+/* On narrow screens keep the percentage but drop the bar and countdown. */
+@media (max-width: 900px) {
+    .usage-pill-track,
+    .usage-pill-reset {
+        display: none;
+    }
+}

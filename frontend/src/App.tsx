@@ -11,6 +11,7 @@ import { TaskCompletionVoiceManager } from './components/TaskCompletionVoiceMana
 import { TaskProgressVoiceManager } from './components/TaskProgressVoiceManager';
 import { GlobalVoiceToggle } from './components/GlobalVoiceToggle';
 import { SystemStats } from './components/SystemStats';
+import { UsageLimitPill } from './components/UsageLimitPill';
 import { MobileAccessModal } from './components/MobileAccessModal';
 import { FileExplorer } from './components/FileExplorer';
 import { ShellTerminalView } from './components/ShellTerminalView';
@@ -80,7 +81,7 @@ function App() {
         wsRef
     } = useWebSocket();
 
-    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats, errorNotification, clearErrorNotification, unreadTaskIds, pendingJiraWrite, setPendingJiraWrite } = useTaskStore();
+    const { selectedTaskId, tasks, workspaces, setShowProjectPicker, chatMessages, chatTyping, isConnected, isServerReloading, isOffline, supervisorEnabled, aiCoreConfigured, showSystemStats, showUsageLimits, errorNotification, clearErrorNotification, unreadTaskIds, pendingJiraWrite, setPendingJiraWrite } = useTaskStore();
     const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) : null;
     const selectedWorkspace = selectedTask ? workspaces.find(w => w.id === selectedTask.workspaceId) : undefined;
 
@@ -537,6 +538,7 @@ function App() {
                         )}
                     </button>
 
+                    {showUsageLimits && <UsageLimitPill onOpenDashboard={() => setShowUsageDashboard(true)} />}
                     {showSystemStats && <SystemStats />}
                     {!isMobile && supervisorEnabled && (
                         <button

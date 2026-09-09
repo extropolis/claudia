@@ -75,7 +75,7 @@ function CollapsiblePanel({ title, icon, isExpanded, onToggle, children }: Colla
 }
 
 export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProps) {
-    const { showSystemStats, setShowSystemStats, browserNotificationsEnabled, setBrowserNotificationsEnabled, notifyOnCompletion, setNotifyOnCompletion, notifyOnWaitingInput, setNotifyOnWaitingInput, themePreference, setThemePreference } = useTaskStore();
+    const { showSystemStats, setShowSystemStats, showUsageLimits, setShowUsageLimits, browserNotificationsEnabled, setBrowserNotificationsEnabled, notifyOnCompletion, setNotifyOnCompletion, notifyOnWaitingInput, setNotifyOnWaitingInput, themePreference, setThemePreference } = useTaskStore();
     const { showWarning } = useNotification();
     const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>({
         appearance: false,
@@ -1617,6 +1617,22 @@ export function SettingsMenu({ isOpen, onClose, initialPanel }: SettingsMenuProp
                                         type="checkbox"
                                         checked={showSystemStats}
                                         onChange={(e) => setShowSystemStats(e.target.checked)}
+                                    />
+                                    <span className="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div className="permission-item">
+                                <div className="permission-info">
+                                    <span className="permission-label">Show Plan Usage Limits</span>
+                                    <span className="permission-description">
+                                        Display your Claude session usage bar in the header, so you can see how close you are to the limit.
+                                    </span>
+                                </div>
+                                <label className="toggle-switch">
+                                    <input
+                                        type="checkbox"
+                                        checked={showUsageLimits}
+                                        onChange={(e) => setShowUsageLimits(e.target.checked)}
                                     />
                                     <span className="toggle-slider"></span>
                                 </label>

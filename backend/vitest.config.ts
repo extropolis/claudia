@@ -45,6 +45,7 @@ export default defineConfig({
                 'src/task-persistence.ts': { lines: 80 },
                 'src/learnings-store.ts': { lines: 88 },
                 'src/usage-reporter.ts': { lines: 100 },
+                'src/claude-usage-limits.ts': { lines: 90 },
                 'src/worktree-reaper.ts': { lines: 100 },
                 'src/utils/atomic-write.ts': { lines: 88 },
                 'src/utils/schema-version.ts': { lines: 80 },

@@ -1,0 +1,139 @@
+/* "Plan usage limits" block at the top of the usage dashboard — a local
+   replica of claude.ai → Settings → Usage. */
+.plan-limits-panel {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin-bottom: 20px;
+    background: var(--bg-secondary);
+}
+
+.plan-limits-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+}
+
+.plan-limits-header h3 {
+    margin: 0;
+    font-size: 0.95rem;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+
+.plan-limits-plan {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    font-weight: 500;
+}
+
+.plan-limits-refresh {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+}
+
+.plan-limits-refresh:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.plan-limits-subhead {
+    margin: 18px 0 10px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-secondary, var(--text-muted));
+}
+
+.plan-limit-row {
+    display: grid;
+    grid-template-columns: minmax(140px, 1fr) minmax(120px, 2.4fr) auto;
+    align-items: center;
+    gap: 14px;
+    padding: 8px 0;
+}
+
+.plan-limit-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.plan-limit-name {
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.plan-limit-reset {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+
+.plan-limit-track {
+    position: relative;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.plan-limit-fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    border-radius: 3px;
+    background: currentColor;
+    transition: width 0.4s ease;
+}
+
+.plan-limit-percent {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    min-width: 68px;
+    text-align: right;
+}
+
+/* Same severity bands as the header pill. */
+.plan-limit-normal { color: var(--accent-blue, #4493f8); }
+.plan-limit-warning { color: var(--accent-yellow); }
+.plan-limit-critical,
+.plan-limit-exhausted { color: var(--accent-red); }
+
+.plan-limits-unavailable {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--accent-yellow);
+    font-size: 0.82rem;
+    padding: 6px 0;
+}
+
+.plan-limits-note {
+    margin: 6px 0 0;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+.plan-limits-updated {
+    margin: 16px 0 0;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+
+@media (max-width: 640px) {
+    .plan-limit-row {
+        grid-template-columns: 1fr auto;
+    }
+
+    .plan-limit-track {
+        grid-column: 1 / -1;
+        order: 3;
+    }
+}

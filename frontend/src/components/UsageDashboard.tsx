@@ -4,6 +4,7 @@ import { UsageDashboardData, ModelPricing, ModelTokenUsage } from '@claudia/shar
 import { getApiBaseUrl } from '../config/api-config';
 import { useTaskStore } from '../stores/taskStore';
 import { formatTokenCount, formatModelName, formatCost } from './TaskTokenStats';
+import { PlanLimitsPanel } from './PlanLimitsPanel';
 import './UsageDashboard.css';
 
 interface PricingConfig {
@@ -119,6 +120,7 @@ export function UsageDashboard({ isOpen, onClose }: UsageDashboardProps) {
                 </div>
 
                 <div className="usage-dashboard-body">
+                <PlanLimitsPanel isOpen={isOpen} />
                 {error && (
                     <div className="usage-error">{error}</div>
                 )}

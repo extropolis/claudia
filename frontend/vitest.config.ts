@@ -40,6 +40,8 @@ export default defineConfig({
                 'src/services/filePickerService.ts': { lines: 85 },
                 'src/utils/browserCapabilities.ts': { lines: 85 },
                 'src/stores/taskStore.ts': { lines: 70 },
+                'src/components/UsageLimitPill.tsx': { lines: 90 },
+                'src/components/PlanLimitsPanel.tsx': { lines: 90 },
             },
         },
     },

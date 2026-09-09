@@ -606,6 +606,27 @@ describe('usage config and dashboard', () => {
         enabled: boolean;
     }
 
+    // The harness points $HOME at a sandbox with no Claude login, so this
+    // exercises the degraded path end to end: the route must still answer 200
+    // with a typed reason, never a 500 and never a hang, so the always-visible
+    // header indicator can render a muted hint instead of breaking.
+    it('GET /api/usage/limits answers 200 with a typed reason when nobody is logged in', async () => {
+        const { status, body } = await h.req<{ ok: boolean; reason?: string; message?: string }>(
+            '/api/usage/limits'
+        );
+        expect(status).toBe(200);
+        expect(body.ok).toBe(false);
+        expect(body.reason).toBe('no-credentials');
+        expect(typeof body.message).toBe('string');
+    });
+
+    it('GET /api/usage/limits?refresh=1 bypasses the cache and still answers 200', async () => {
+        const { status, body } = await h.req<{ ok: boolean; reason?: string }>('/api/usage/limits?refresh=1');
+        expect(status).toBe(200);
+        expect(body.ok).toBe(false);
+        expect(body.reason).toBe('no-credentials');
+    });
+
     it('GET /api/usage/config returns the default pricing table and the enabled flag', async () => {
         const { status, body } = await h.req<UsageConfig>('/api/usage/config');
         expect(status).toBe(200);

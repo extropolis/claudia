@@ -16,6 +16,7 @@ import { ConfigStore, type AppConfig } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
+import { getUsageLimits } from './claude-usage-limits.js';
 import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, Checkpoint, PORTS, TaskTokenUsage, UsageDashboardData, TaskWorkStatus } from '@claudia/shared';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { TodoStore } from './todo-store.js';
@@ -7305,6 +7306,29 @@ Guidelines:
     });
 
     // ===== Token Usage / Dashboard Endpoints =====
+
+    /**
+     * Current Claude plan usage limits (5-hour session + weekly bars), read
+     * from Anthropic's OAuth usage API using the locally stored Claude Code
+     * login. Cached ~60s server-side; ?refresh=1 bypasses the cache.
+     * Always 200 — failures come back as { ok: false, reason, message } so
+     * the header indicator can degrade to a muted hint.
+     */
+    app.get('/api/usage/limits', async (req, res) => {
+        const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
+        try {
+            const result = await getUsageLimits(forceRefresh);
+            res.json(result);
+        } catch (error) {
+            logger.error('Failed to get plan usage limits', { error });
+            res.json({
+                ok: false,
+                reason: 'api-error',
+                message: 'Failed to read plan usage limits.',
+                fetchedAt: new Date().toISOString(),
+            });
+        }
+    });
 
     app.get('/api/usage/dashboard', (_req, res) => {
         try {

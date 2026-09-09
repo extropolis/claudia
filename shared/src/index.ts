@@ -377,4 +377,80 @@ export interface UsageDashboardData {
     taskCount: number;
     lastUpdated: string;
 }
+
+// ===== Claude plan usage limits (from the Claude OAuth usage API) =====
+
+/** Severity as reported by the usage API; drives the colour of a bar. */
+export type UsageLimitSeverity = 'normal' | 'warning' | 'critical' | 'exhausted';
+
+/** A single rate-limit bar (session, weekly-all, or a per-model weekly bar). */
+export interface UsageLimitBar {
+    /** Raw kind from the API: 'session' | 'weekly_all' | 'weekly_scoped' | ... */
+    kind: string;
+    /** Grouping the API assigns: 'session' | 'weekly' | ... */
+    group: string;
+    /** Human label, e.g. 'Current session', 'All models', 'Fable'. */
+    label: string;
+    /** 0-100. */
+    percent: number;
+    severity: UsageLimitSeverity;
+    /** ISO timestamp when this window resets, or null if unknown. */
+    resetsAt: string | null;
+    /** Model display name for a scoped bar, else null. */
+    scopeLabel: string | null;
+}
+
+/** Usage-credit (extra usage) state, mirroring the 'Usage credits' card. */
+export interface UsageCreditsInfo {
+    enabled: boolean;
+    /** Minor units (cents) already spent this cycle. */
+    usedMinor: number;
+    /** Monthly spend limit in minor units, or null if unset. */
+    limitMinor: number | null;
+    /** Remaining prepaid balance in minor units, or null if unknown. */
+    balanceMinor: number | null;
+    currency: string;
+    percent: number;
+    resetsAt: string | null;
+    autoReload: boolean | null;
+}
+
+/** Normalised snapshot of the account's plan limits. */
+export interface ClaudeUsageLimits {
+    ok: true;
+    /** e.g. 'max' — from the stored OAuth credentials. */
+    subscriptionType: string | null;
+    /** e.g. 'default_claude_max_20x'. */
+    rateLimitTier: string | null;
+    /** Friendly plan name, e.g. 'Max (20x)'. */
+    planLabel: string | null;
+    /** The 5-hour session bar, or null if the API did not report one. */
+    session: UsageLimitBar | null;
+    /** Weekly bars: all-models first, then any per-model scoped bars. */
+    weekly: UsageLimitBar[];
+    credits: UsageCreditsInfo | null;
+    /** ISO timestamp of when this snapshot was fetched. */
+    fetchedAt: string;
+    /** True when served from the in-process cache rather than a fresh call. */
+    cached: boolean;
+}
+
+/** Why a limits lookup failed. Rendered as a muted hint, never as a crash. */
+export type UsageLimitsErrorReason =
+    | 'no-credentials'
+    | 'expired'
+    | 'unauthorized'
+    | 'network'
+    | 'api-error'
+    | 'unsupported';
+
+export interface ClaudeUsageLimitsError {
+    ok: false;
+    reason: UsageLimitsErrorReason;
+    message: string;
+    fetchedAt: string;
+}
+
+export type ClaudeUsageLimitsResult = ClaudeUsageLimits | ClaudeUsageLimitsError;
+
 export * from './terminal';
