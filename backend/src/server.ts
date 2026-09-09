@@ -2123,14 +2123,30 @@ export async function createApp(basePath?: string) {
                     }
 
                     case 'task:deleteRequest': {
-                        // MCP agent is requesting to delete a task — broadcast to
-                        // frontend so it can show a confirmation dialog to the user.
-                        const { taskId, requestId, taskName } = payload as { taskId?: string; requestId?: string; taskName?: string };
-                        if (taskId && requestId) {
-                            logger.info('task:deleteRequest from MCP agent', { taskId, requestId });
+                        // MCP agent is requesting deletion of one or more tasks —
+                        // broadcast so the frontend can show ONE confirmation dialog
+                        // covering the whole batch. Accepts either the batch shape
+                        // ({ requests: [...] }) or the legacy single-task shape.
+                        const raw = payload as {
+                            requests?: { taskId?: string; requestId?: string; taskName?: string }[];
+                            taskId?: string; requestId?: string; taskName?: string;
+                        };
+                        const requests = (raw.requests ?? [raw])
+                            .filter((r): r is { taskId: string; requestId: string; taskName?: string } =>
+                                !!r?.taskId && !!r?.requestId)
+                            .map(r => ({ taskId: r.taskId, requestId: r.requestId, taskName: r.taskName }));
+                        if (requests.length > 0) {
+                            logger.info('task:deleteRequest from MCP agent', {
+                                count: requests.length,
+                                taskIds: requests.map(r => r.taskId),
+                            });
                             broadcast({
                                 type: 'task:deleteRequest' as WSMessageType,
-                                payload: { taskId, requestId, taskName }
+                                // `requests` is the shape new clients read. The first
+                                // request is also spread at the top level so a client
+                                // that predates batching still sees a valid single
+                                // request instead of an undefined taskId.
+                                payload: { requests, ...requests[0] }
                             });
                         }
                         break;
