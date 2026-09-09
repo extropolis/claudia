@@ -1,5 +1,9 @@
-import { describe, it, expect } from 'vitest';
-import { buildClaudeCodeSwitchArgs } from '../task-spawner.js';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, readFileSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
+import { buildClaudeCodeSwitchArgs, TaskSpawner } from '../task-spawner.js';
+import { CLAUDE_PRIVACY_SETTINGS, PRIVACY_SETTINGS_FILENAME } from '../claude-privacy.js';
 import type { ClaudeCodeSwitches } from '../config-store.js';
 
 const BASE: ClaudeCodeSwitches = {
@@ -207,5 +211,62 @@ describe('buildClaudeCodeSwitchArgs', () => {
             });
             expect(args).toHaveLength(0);
         });
+    });
+});
+
+/**
+ * Wiring guard for the claude.ai privacy pinning.
+ *
+ * claude-privacy.test.ts covers the arg builder in isolation. What that cannot
+ * catch is the spawner forgetting to call it, or calling it with the wrong data
+ * directory — so this drives the real TaskSpawner and checks the args it would
+ * hand to the CLI.
+ */
+describe('TaskSpawner privacy args', () => {
+    let dir: string;
+    let spawner: any;
+
+    beforeEach(() => {
+        // Under homedir(), not os.tmpdir(): /tmp resolves under /var on macOS,
+        // which validateWorkspacePath blocklists as a system path.
+        dir = mkdtempSync(join(homedir(), 'claudia-spawner-privacy-'));
+    });
+
+    afterEach(() => {
+        try { spawner?.destroy?.(); } catch { /* best effort */ }
+        rmSync(dir, { recursive: true, force: true });
+    });
+
+    const makeSpawner = (configStore?: unknown) =>
+        new TaskSpawner(join(dir, 'tasks.json'), false, configStore as never);
+
+    it('pins the privacy settings file next to tasks.json by default', () => {
+        spawner = makeSpawner();
+        const args = spawner.buildPrivacyArgs([]);
+
+        expect(args[0]).toBe('--settings');
+        expect(args[1]).toBe(join(dir, PRIVACY_SETTINGS_FILENAME));
+        // The file must actually exist — a path to nothing silently disables the CLI flag.
+        expect(JSON.parse(readFileSync(args[1], 'utf8'))).toEqual(CLAUDE_PRIVACY_SETTINGS);
+    });
+
+    it('defaults to private when no config store is wired in at all', () => {
+        spawner = makeSpawner(undefined);
+        expect(spawner.buildPrivacyArgs([])).toHaveLength(2);
+    });
+
+    it('stays private when the config store says cloud sync is off', () => {
+        spawner = makeSpawner({ isClaudeCloudSyncEnabled: () => false });
+        expect(spawner.buildPrivacyArgs([])).toHaveLength(2);
+    });
+
+    it('steps aside when the user explicitly opted into cloud sync', () => {
+        spawner = makeSpawner({ isClaudeCloudSyncEnabled: () => true });
+        expect(spawner.buildPrivacyArgs([])).toEqual([]);
+    });
+
+    it('does not clobber an operator-supplied --settings', () => {
+        spawner = makeSpawner();
+        expect(spawner.buildPrivacyArgs(['--settings', '/custom.json'])).toEqual([]);
     });
 });
