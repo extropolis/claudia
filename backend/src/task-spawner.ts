@@ -9,6 +9,7 @@ import { tmpdir, homedir } from 'os';
 import { execSync } from 'child_process';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { buildSettingsLocalContent } from './settings-local.js';
+import { buildClaudePrivacyArgs, ensurePrivacySettingsFile } from './claude-privacy.js';
 import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
 import { sanitizePrompt, decodeHtmlEntities } from './validation.js';
@@ -1290,6 +1291,24 @@ export class TaskSpawner extends EventEmitter {
      */
     private getHistoryDir(): string {
         return join(dirname(this.persistencePath), 'task-histories');
+    }
+
+    /**
+     * `--settings` args pinning Claude Code's cloud features off for a spawned
+     * session, so Claudia task transcripts never mirror to claude.ai and no
+     * mobile push fires for a background task. See claude-privacy.ts.
+     *
+     * Returns [] when the user opted into cloud sync, when a --settings arg is
+     * already present, or when the file could not be written — each logged by
+     * buildClaudePrivacyArgs. Spawning must never fail because of this.
+     */
+    private buildPrivacyArgs(existingArgs: string[]): string[] {
+        const settingsFilePath = ensurePrivacySettingsFile(dirname(this.persistencePath));
+        return buildClaudePrivacyArgs({
+            cloudSyncEnabled: this.configStore?.isClaudeCloudSyncEnabled() ?? false,
+            existingArgs,
+            settingsFilePath,
+        });
     }
 
     /**
@@ -3691,6 +3710,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - Each spawned task prompt should be fully self-contained — include file paths, context, and constraints so it can work independently
 - While waiting for spawned tasks, do NOT start implementing features that overlap with what they're doing
 - **Deleting tasks**: You can request task deletion via \`claudia_delete_task\`, but it requires **explicit user approval** — a confirmation popup appears in the UI and the user must click "Delete" before the task is removed. NEVER call this automatically after tasks complete. Only call it when the user explicitly asks to delete/remove/clean up tasks.
+- **Deleting MANY tasks**: use \`claudia_delete_tasks\` with every id in ONE call. It shows the user a single popup listing all of them (each with a checkbox) instead of one popup per task. Never loop over \`claudia_delete_task\` for a batch.
 
 ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the toolbar):**
 - The Claudia toolbar shows a live TODO work-plan for this task. Treat it as YOUR working plan and keep it current so the user can watch progress at a glance.
@@ -3767,6 +3787,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                 logger.info('Applied CLI switches', { switchArgs });
             }
         }
+
+        // Keep this session off claude.ai (no transcript mirroring, no Remote
+        // Control, no mobile push). Must land before the `--` terminator below,
+        // or the CLI stops parsing flags and treats it as a positional.
+        claudeArgs.push(...this.buildPrivacyArgs(claudeArgs));
 
         // Add -- to terminate argument parsing (workaround for Claude CLI bug with --mcp-config)
         // See: https://github.com/anthropics/claude-code/issues/22404
@@ -5604,6 +5629,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                     console.log(`[TaskSpawner] Applied CLI switches for reconnect`, { switchArgs });
                 }
             }
+
+            // Same privacy pinning as the create path — a reconnect spawns a
+            // fresh CLI process, so it re-opts into the cloud features unless
+            // told otherwise.
+            claudeArgs.push(...this.buildPrivacyArgs(claudeArgs));
 
             // Add MCP server configurations for reconnection
             const mcpResult = this.buildMcpConfig(persisted.workspaceId, taskId);
