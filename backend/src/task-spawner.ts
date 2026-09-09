@@ -58,7 +58,7 @@ if (USE_WINPTY) {
  * How long the fallback session-file watcher keeps polling before giving up.
  * Only a fallback path now that tasks pre-assign their session id via --session-id.
  */
-const SESSION_CAPTURE_TIMEOUT_MS = 10 * 60 * 1000;
+export const SESSION_CAPTURE_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
  * Map legacy permission mode values to actual Claude Code CLI values.
