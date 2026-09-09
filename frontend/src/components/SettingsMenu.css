@@ -1214,6 +1214,12 @@
     line-height: 1.4;
 }
 
+/* Per-agent install state in the AI Backend list. Only rendered for agents
+   that are NOT installed, so the default look is unchanged. */
+.agent-not-installed {
+    color: var(--warning-color, #d98b2b);
+}
+
 .api-mode-fields {
     margin-top: 16px;
     padding-top: 16px;

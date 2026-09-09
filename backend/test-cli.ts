@@ -53,7 +53,7 @@ interface TestConfig {
     archiveTask: boolean;         // Archive a task
     gitPush: boolean;             // Push to GitHub
     backendStatus: boolean;       // Get backend status (no WebSocket needed)
-    setBackend: string | null;    // Set backend ('claude-code' or 'opencode')
+    setBackend: string | null;    // Set the default agent (any id from --backend-status)
     watchOutput: boolean;         // Stream task output to console
     waitForIdle: boolean;         // Wait for task to become idle before exiting
     listMcpServers: boolean;      // List available MCP servers (no WebSocket needed)
@@ -1778,8 +1778,10 @@ CONFIGURATION:
   --get-config             Get orchestrator configuration
 
 BACKEND OPERATIONS:
-  --backend-status         Get current backend status (claude-code or opencode)
-  --set-backend <name>     Set the AI backend ('claude-code' or 'opencode')
+  --backend-status         Show every registered coding agent: install state,
+                           version, server health and task-row badge label
+  --set-backend <name>     Set the default AI agent. Valid ids come from the
+                           agent registry — run --backend-status to list them
 
 MCP SERVER OPERATIONS:
   --list-mcp-servers       List all available MCP servers (global and project-specific)
@@ -2184,10 +2186,27 @@ async function getBackendStatus(baseHttpUrl: string): Promise<void> {
         }
 
         console.log('');
-        console.log('Available Backends:');
-        for (const backend of status.availableBackends || []) {
-            const isCurrent = backend === status.backend;
-            console.log(`  ${isCurrent ? '►' : ' '} ${backend}`);
+        console.log('Registered Agents:');
+        // availableBackends is AgentDisplayInfo[] from the agent registry.
+        // Older backends returned a plain string[] — handle both so the CLI
+        // still works against a server that has not been restarted.
+        const agents: Array<Record<string, unknown> | string> = status.availableBackends || [];
+        for (const entry of agents) {
+            const display = typeof entry === 'string' ? { id: entry } : entry;
+            const id = String(display.id ?? entry);
+            const isCurrent = id === status.backend;
+            const perAgent = status.statuses?.[id];
+            const bits: string[] = [];
+            if (display.name) bits.push(String(display.name));
+            if (display.shortLabel) bits.push(`badge="${display.shortLabel}"`);
+            if (perAgent) {
+                bits.push(perAgent.installed ? `installed ${perAgent.version ?? ''}`.trim() : 'NOT installed');
+                if (perAgent.serverRunning !== undefined) {
+                    bits.push(perAgent.serverRunning ? 'server up' : 'server down');
+                }
+                if (perAgent.error) bits.push(perAgent.error);
+            }
+            console.log(`  ${isCurrent ? '►' : ' '} ${id.padEnd(14)} ${bits.join(' | ')}`);
         }
         console.log('');
     } catch (error) {

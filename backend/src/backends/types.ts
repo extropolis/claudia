@@ -3,8 +3,9 @@
  * Supports Claude Code (PTY-based) and OpenCode (HTTP API-based)
  */
 
-import type { TaskState, WaitingInputType, TaskGitState, BackendType } from '@claudia/shared';
+import type { TaskState, WaitingInputType, TaskGitState, BackendType, AgentDisplayInfo } from '@claudia/shared';
 import { EventEmitter } from 'events';
+import { listAgents } from '../agents/index.js';
 
 // Re-export BackendType from shared
 export type { BackendType };
@@ -171,17 +172,12 @@ export interface CodeBackend extends EventEmitter {
 export type BackendFactory = (configStore: unknown) => CodeBackend;
 
 /**
- * Registry of available backends
+ * Registry of available backends.
+ *
+ * DERIVED, not hand-written: the entries come from the agent registry, so a
+ * new agent shows up here the moment its adapter is registered. This used to
+ * be one of six independent copies of the agent list; forgetting one of them
+ * was a silent runtime omission rather than a compile error.
  */
-export const BACKEND_INFO: Record<BackendType, { name: string; description: string; installUrl: string }> = {
-    'claude-code': {
-        name: 'Claude Code',
-        description: "Anthropic's official CLI tool for Claude",
-        installUrl: 'https://claude.ai/code'
-    },
-    'opencode': {
-        name: 'OpenCode',
-        description: 'Open-source AI coding agent by SST',
-        installUrl: 'https://opencode.ai'
-    }
-};
+export const BACKEND_INFO: Record<BackendType, AgentDisplayInfo> =
+    Object.fromEntries(listAgents().map(a => [a.id, a.display])) as Record<BackendType, AgentDisplayInfo>;
