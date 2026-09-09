@@ -963,8 +963,11 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
                 taskRestorePending[taskId] = true;
             }
 
-            // Tell server to activate this task (triggers task:restore with history)
+            // Tell server to activate this task (triggers task:restore with history).
+            // Mobile shows exactly one task, so setVisible first prunes the previously
+            // opened task — otherwise the server's visible set would grow forever.
             if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'task:setVisible', payload: { taskIds: [taskId] } }));
                 ws.send(JSON.stringify({ type: 'task:select', payload: { taskId: taskId } }));
             }
 
@@ -1206,6 +1209,8 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
                             selectedTaskId = p.task.id;
                             taskRestorePending[p.task.id] = true;
                             if (ws && ws.readyState === WebSocket.OPEN) {
+                                // Single-view client: replace the visible set, don't accumulate.
+                                ws.send(JSON.stringify({ type: 'task:setVisible', payload: { taskIds: [p.task.id] } }));
                                 ws.send(JSON.stringify({ type: 'task:select', payload: { taskId: p.task.id } }));
                             }
                         }

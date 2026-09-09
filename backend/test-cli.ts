@@ -77,6 +77,11 @@ interface TestConfig {
     cronRecurring: boolean;           // Whether the cron is recurring (default true)
     cronPause: boolean | null;        // true to pause, false to resume, null = not set
     complexity: string | null;        // Optional complexity tier for task:create (low/medium/high)
+    // Split-screen / visible-set operations
+    setVisible: string[] | null;      // Task IDs to mark visible (task:setVisible)
+    deselectTask: boolean;            // Remove one task from the visible set (task:deselect)
+    watchMulti: string[] | null;      // Make these tasks visible, then tally output per task
+    watchSeconds: number;             // How long --watch-multi listens before reporting
 }
 
 class TestCLI {
@@ -88,6 +93,8 @@ class TestCLI {
     private startTime: number = 0;
     private completionTimer: NodeJS.Timeout | null = null;
     private lastActivityTime: number = 0;
+    /** Per-task output tally for --watch-multi (null when not in that mode). */
+    private multiWatchCounts: Map<string, { chunks: number; bytes: number }> | null = null;
 
     constructor(config: TestConfig) {
         this.config = config;
@@ -127,6 +134,14 @@ class TestCLI {
                 } else if (this.config.getConfig) {
                     await this.getConfig();
                     setTimeout(() => this.cleanup(), 1000);
+                } else if (this.config.watchMulti) {
+                    this.watchMultipleTasks(this.config.watchMulti, this.config.watchSeconds);
+                } else if (this.config.setVisible) {
+                    this.sendSetVisible(this.config.setVisible);
+                    setTimeout(() => this.cleanup(), 1500);
+                } else if (this.config.deselectTask && this.config.taskId) {
+                    this.sendDeselectTask(this.config.taskId);
+                    setTimeout(() => this.cleanup(), 1500);
                 } else if (this.config.taskInput && this.config.taskId) {
                     this.sendTaskInput(this.config.taskId, this.config.testMessage);
                 } else if (this.config.stopTask && this.config.taskId) {
@@ -394,6 +409,59 @@ class TestCLI {
 
         console.log(`📥 Sending input to task ${taskId}: "${input}"`);
         this.ws.send(JSON.stringify(message));
+    }
+
+    /** Replace the server's visible set (the split-screen pane layout). */
+    private sendSetVisible(taskIds: string[]): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot set visible tasks: WebSocket not connected');
+            return;
+        }
+        console.log(`👁️  Setting visible tasks (${taskIds.length}): ${taskIds.join(', ')}`);
+        this.ws.send(JSON.stringify({ type: 'task:setVisible', payload: { taskIds } }));
+    }
+
+    /** Drop a single task from the visible set, leaving the other panes alone. */
+    private sendDeselectTask(taskId: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot deselect task: WebSocket not connected');
+            return;
+        }
+        console.log(`🙈 Deselecting task ${taskId}`);
+        this.ws.send(JSON.stringify({ type: 'task:deselect', payload: { taskId } }));
+    }
+
+    /**
+     * The split-screen proof: mark N tasks visible, select each one (so history
+     * restores like a real pane would), then tally task:output per task.
+     *
+     * Before the visible-set change only ONE task could report bytes here.
+     */
+    private watchMultipleTasks(taskIds: string[], seconds: number): void {
+        this.sendSetVisible(taskIds);
+        for (const id of taskIds) {
+            this.ws?.send(JSON.stringify({ type: 'task:select', payload: { taskId: id } }));
+        }
+
+        const counts = new Map<string, { chunks: number; bytes: number }>();
+        for (const id of taskIds) counts.set(id, { chunks: 0, bytes: 0 });
+
+        this.multiWatchCounts = counts;
+        console.log(`⏱️  Watching ${taskIds.length} task(s) for ${seconds}s — send input to them to generate output...`);
+
+        setTimeout(() => {
+            console.log('\n📊 Output received per visible task:');
+            let silent = 0;
+            for (const [id, c] of counts) {
+                const flag = c.chunks === 0 ? '❌ SILENT' : '✅';
+                if (c.chunks === 0) silent++;
+                console.log(`   ${flag} ${id}: ${c.chunks} chunk(s), ${c.bytes} byte(s)`);
+            }
+            console.log(silent === 0
+                ? '✅ Every visible task streamed output (split-screen works)'
+                : `⚠️  ${silent} visible task(s) produced no output — idle tasks are silent, so send them input first`);
+            this.cleanup();
+        }, seconds * 1000);
     }
 
     private sendStopTask(taskId: string): void {
@@ -984,6 +1052,16 @@ class TestCLI {
     private handleTaskOutput(payload: { taskId: string; data: string }): void {
         this.lastActivityTime = Date.now();
 
+        // --watch-multi: tally per task so a silent pane is obvious in the report.
+        const tally = this.multiWatchCounts?.get(payload.taskId);
+        if (tally) {
+            tally.chunks++;
+            tally.bytes += payload.data.length;
+            const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+            console.log(`[${elapsed}s] OUTPUT    │ [${payload.taskId.substring(0, 12)}] +${payload.data.length}B (total ${tally.bytes}B)`);
+            return;
+        }
+
         if (this.config.watchOutput) {
             // Stream raw output directly to console
             process.stdout.write(payload.data);
@@ -1304,6 +1382,10 @@ function parseArgs(): TestConfig {
     let taskInput = false;
     let taskId: string | null = null;
     let stopTask = false;
+    let setVisible: string[] | null = null;
+    let deselectTask = false;
+    let watchMulti: string[] | null = null;
+    let watchSeconds = 15;
     let deleteTask = false;
     let clearTasks = false;
     let approvePlan = false;
@@ -1411,6 +1493,19 @@ function parseArgs(): TestConfig {
                 break;
             case '--stop-task':
                 stopTask = true;
+                break;
+            case '--set-visible':
+                // Comma-separated task IDs -> task:setVisible
+                setVisible = (args[++i] || '').split(',').map(s2 => s2.trim()).filter(Boolean);
+                break;
+            case '--deselect':
+                deselectTask = true;
+                break;
+            case '--watch-multi':
+                watchMulti = (args[++i] || '').split(',').map(s2 => s2.trim()).filter(Boolean);
+                break;
+            case '--watch-seconds':
+                watchSeconds = parseInt(args[++i], 10) || 15;
                 break;
             case '--delete-task':
                 deleteTask = true;
@@ -1642,6 +1737,14 @@ TASK OPERATIONS:
   --rename-task            Rename a task (requires --task-id and --rename-to)
   --rename-to <name>       New display name for rename operations
 
+SPLIT-SCREEN / VISIBLE SET (multiple tasks streaming at once):
+  --set-visible <ids>      Comma-separated task IDs that are on screen (task:setVisible).
+                           Authoritative: any task not listed stops streaming. Max 8.
+  --deselect               Remove ONE task from the visible set (requires --task-id)
+  --watch-multi <ids>      Mark those tasks visible, select each, then tally task:output
+                           per task and report which panes stayed silent
+  --watch-seconds <n>      How long --watch-multi listens (default 15)
+
 WORKSPACE OPERATIONS (rename/references):
   --rename-workspace       Rename a workspace (requires --workspace and --rename-to)
   --add-reference          Add a reference to a workspace (requires --workspace and --reference-path)
@@ -1835,6 +1938,10 @@ Examples:
         taskInput,
         taskId,
         stopTask,
+        setVisible,
+        deselectTask,
+        watchMulti,
+        watchSeconds,
         deleteTask,
         clearTasks,
         approvePlan,

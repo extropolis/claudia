@@ -55,6 +55,8 @@ const __dirname = dirname(__filename);
 const VALID_WS_MESSAGE_TYPES = new Set([
     'task:create',
     'task:select',
+    'task:deselect',
+    'task:setVisible',
     'task:refreshPr',
     'task:input',
     'task:resize',
@@ -1776,6 +1778,55 @@ export async function createApp(basePath?: string) {
                             }
                             // Immediately refresh PR info for the selected task
                             void refreshTaskPrInfo(taskId);
+                        }
+                        break;
+                    }
+
+                    case 'task:deselect': {
+                        // A split-screen pane closed — stop streaming that task,
+                        // leaving every other visible task untouched.
+                        const { taskId } = payload as { taskId?: string };
+                        if (typeof taskId !== 'string' || !taskId) {
+                            sendWSError(ws, 'task:deselect requires a taskId string', message.type, 'MISSING_PARAMS');
+                            break;
+                        }
+                        try {
+                            taskSpawner.setTaskActive(taskId, false);
+                            logger.info('Task deselected', { taskId });
+                        } catch (error) {
+                            const errorMessage = error instanceof Error ? error.message : String(error);
+                            logger.error('Failed to deselect task', { taskId, error: errorMessage });
+                            sendWSError(ws, `Failed to deselect task: ${errorMessage}`, message.type, 'TASK_DESELECT_FAILED');
+                        }
+                        break;
+                    }
+
+                    case 'task:setVisible': {
+                        // Authoritative pane layout from the client: exactly these
+                        // tasks are on screen. Does NOT restore history — each pane
+                        // sends its own task:select for that.
+                        const { taskIds } = payload as { taskIds?: unknown };
+                        if (!Array.isArray(taskIds)) {
+                            sendWSError(ws, 'task:setVisible requires taskIds to be an array', message.type, 'INVALID_PARAMS');
+                            break;
+                        }
+                        // Defensive: a buggy/hostile client must not be able to make
+                        // us iterate an unbounded list. Cap before filtering.
+                        const MAX_VISIBLE_PAYLOAD = 64;
+                        const cleaned = taskIds
+                            .slice(0, MAX_VISIBLE_PAYLOAD)
+                            .filter((id): id is string => typeof id === 'string' && id.length > 0);
+                        try {
+                            taskSpawner.setVisibleTasks(cleaned);
+                            logger.info('Visible tasks updated', {
+                                requested: taskIds.length,
+                                accepted: cleaned.length,
+                                visible: taskSpawner.getVisibleTaskIds(),
+                            });
+                        } catch (error) {
+                            const errorMessage = error instanceof Error ? error.message : String(error);
+                            logger.error('Failed to set visible tasks', { error: errorMessage });
+                            sendWSError(ws, `Failed to set visible tasks: ${errorMessage}`, message.type, 'TASK_SET_VISIBLE_FAILED');
                         }
                         break;
                     }

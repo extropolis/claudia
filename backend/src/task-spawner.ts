@@ -328,6 +328,24 @@ interface InternalTask extends Task {
 export class TaskSpawner extends EventEmitter {
     private tasks: Map<string, InternalTask> = new Map();
     private disconnectedTasks: Map<string, PersistedTask> = new Map();
+    /**
+     * The set of tasks the UI is currently SHOWING (one entry per visible pane).
+     *
+     * Historically the backend assumed exactly one visible task: selecting one
+     * flipped `isActive = false` on every other task, and PTY output for an
+     * inactive task is dropped on the floor. With split-screen panes that made
+     * every pane but the focused one go silent.
+     *
+     * `task.isActive` still exists and every READ of it is unchanged — it is now
+     * simply DERIVED from membership in this set (see `syncActiveFlags`), so the
+     * hot output path stays a single boolean check.
+     *
+     * Insertion order is the recency order: re-adding an existing id deletes and
+     * re-inserts it so eviction always drops the least-recently-added pane.
+     */
+    private visibleTaskIds: Set<string> = new Set();
+    /** Safety valve: a buggy client must not pin unbounded scrollback in memory. */
+    private static readonly MAX_VISIBLE_TASKS = 8;
     private archivedTasks: Map<string, ArchivedTaskMetadata> = new Map();
     private persistencePath: string;
     private saveDebounceTimer: NodeJS.Timeout | null = null;
@@ -3714,11 +3732,109 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         logger.info('Updated learning utilities', { taskId, success, count: learningIds.length });
     }
 
+    /**
+     * Derive `task.isActive` from visible-set membership.
+     *
+     * The single writer of `isActive` for live tasks. Called on every mutation of
+     * `visibleTaskIds` so the output gates (`if (task.isActive)`) and the history
+     * eviction sweep (`if (!task.isActive)`) never see a stale flag.
+     */
+    private syncActiveFlags(): void {
+        for (const task of this.tasks.values()) {
+            task.isActive = this.visibleTaskIds.has(task.id);
+        }
+    }
+
+    /**
+     * Add a task to the visible set (or refresh its recency if already there),
+     * evicting the least-recently-added entries past MAX_VISIBLE_TASKS.
+     */
+    private addVisibleTask(taskId: string): void {
+        // delete-then-add refreshes insertion order → this id is now the newest.
+        const wasVisible = this.visibleTaskIds.delete(taskId);
+        this.visibleTaskIds.add(taskId);
+        this.evictExcessVisibleTasks();
+        this.syncActiveFlags();
+        console.log(`[TaskSpawner] visible+ ${taskId} (${wasVisible ? 'refreshed' : 'added'}), visible=[${[...this.visibleTaskIds].join(', ')}]`);
+    }
+
+    /** Remove a task from the visible set. No-op if it was not visible. */
+    private removeVisibleTask(taskId: string): void {
+        const wasVisible = this.visibleTaskIds.delete(taskId);
+        if (wasVisible) this.syncActiveFlags();
+        console.log(`[TaskSpawner] visible- ${taskId} (${wasVisible ? 'removed' : 'was not visible'}), visible=[${[...this.visibleTaskIds].join(', ')}]`);
+    }
+
+    /** Drop the oldest entries until the set fits MAX_VISIBLE_TASKS. */
+    private evictExcessVisibleTasks(): void {
+        while (this.visibleTaskIds.size > TaskSpawner.MAX_VISIBLE_TASKS) {
+            // Sets iterate in insertion order → the first entry is the oldest.
+            const oldest = this.visibleTaskIds.values().next().value as string | undefined;
+            if (oldest === undefined) break;
+            this.visibleTaskIds.delete(oldest);
+            console.warn(`[TaskSpawner] visible-set over cap (${TaskSpawner.MAX_VISIBLE_TASKS}), evicting oldest task ${oldest}`);
+        }
+    }
+
+    /**
+     * Authoritatively replace the visible set (split-screen pane layout changed).
+     *
+     * Deliberately does NOT restore history — history restore stays driven by
+     * `task:select`, which is sent per pane when that pane actually mounts.
+     */
+    setVisibleTasks(taskIds: string[]): void {
+        if (!Array.isArray(taskIds)) {
+            console.warn('[TaskSpawner] setVisibleTasks ignored: taskIds is not an array');
+            return;
+        }
+
+        const cleaned: string[] = [];
+        for (const id of taskIds) {
+            if (typeof id !== 'string' || id.length === 0) continue;
+            if (cleaned.includes(id)) continue; // de-dupe, keep first occurrence
+            cleaned.push(id);
+        }
+
+        const previous = [...this.visibleTaskIds];
+        this.visibleTaskIds = new Set(cleaned);
+        this.evictExcessVisibleTasks();
+        this.syncActiveFlags();
+
+        const now = [...this.visibleTaskIds];
+        const added = now.filter(id => !previous.includes(id));
+        const removed = previous.filter(id => !now.includes(id));
+        console.log(`[TaskSpawner] setVisibleTasks: visible=[${now.join(', ')}] (+${added.length} -${removed.length}), requested=${taskIds.length}`);
+
+        // OpenCode keeps its own per-task active flag; keep it in step with ours.
+        if (this.backend) {
+            for (const id of added) {
+                if (this.taskBackends.get(id) === 'opencode') this.backend.setTaskActive(id, true);
+            }
+            for (const id of removed) {
+                if (this.taskBackends.get(id) === 'opencode') this.backend.setTaskActive(id, false);
+            }
+        }
+    }
+
+    /** The tasks currently shown by the UI, oldest-added first. Used by tests/diagnostics. */
+    getVisibleTaskIds(): string[] {
+        return [...this.visibleTaskIds];
+    }
+
     setTaskActive(taskId: string, active: boolean): void {
+        // Additive: selecting a task ADDS a pane, it no longer hides the others.
+        if (active) {
+            this.addVisibleTask(taskId);
+        } else {
+            this.removeVisibleTask(taskId);
+        }
+
         if (active) {
             // Clear decoded history from all other tasks to free memory
             // This prevents memory buildup when rapidly switching between tasks
             // Use a longer delay (30 seconds) to avoid clearing history for tasks the user is actively working with
+            // NOTE: the sweep skips any task with isActive === true, which is exactly
+            // the visible set — so a task in another pane never loses its history.
             setTimeout(() => {
                 for (const task of this.tasks.values()) {
                     // Only clear if task is still inactive AND hasn't been recently active
@@ -3734,13 +3850,6 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                     }
                 }
             }, 30000); // 30 second delay - long enough for active task switching
-
-            // Mark all other tasks as inactive immediately (don't wait for the timeout)
-            for (const task of this.tasks.values()) {
-                if (task.id !== taskId) {
-                    task.isActive = false;
-                }
-            }
         }
 
         console.log(`[TaskSpawner] setTaskActive called: taskId=${taskId}, active=${active}, inTasks=${this.tasks.has(taskId)}, inDisconnected=${this.disconnectedTasks.has(taskId)}`);
@@ -3785,8 +3894,8 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         const task = this.tasks.get(taskId);
         console.log(`[TaskSpawner] setTaskActive: taskId=${taskId}, active=${active}, taskFound=${!!task}, currentIsActive=${task?.isActive}, ptyPid=${task?.process?.pid}`);
         if (task) {
-            task.isActive = active;
-            console.log(`[TaskSpawner] Set task.isActive to ${active} for ${taskId}`);
+            // isActive is derived from the visible set (already synced above).
+            console.log(`[TaskSpawner] Set task.isActive to ${task.isActive} for ${taskId} (requested ${active})`);
 
             if (active) {
                 // Notify backend if using OpenCode
@@ -4319,6 +4428,9 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         let destroyed = false;
         let source = '';
 
+        // A destroyed task can never be shown again — drop its pane slot.
+        this.removeVisibleTask(taskId);
+
         // Clean up any pending session capture for this task
         this.clearSessionCapture(taskId);
 
@@ -4401,6 +4513,9 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // Archive moves task from active list to archived storage
         let archived = false;
         let wasLive = false;
+
+        // An archived task is no longer shown in any pane.
+        this.removeVisibleTask(taskId);
 
         const task = this.tasks.get(taskId);
         if (task) {
@@ -5024,7 +5139,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // the response. Background reconnects (auto-reconnect, sleep/wake, continuation)
         // stay inactive until the user selects the task.
         if (pendingInput) {
-            task.isActive = true;
+            this.addVisibleTask(taskId);
+        } else {
+            // The task object was just rebuilt with isActive=false. If a pane is
+            // already showing this task, re-derive so its output keeps flowing.
+            this.syncActiveFlags();
         }
 
         this.scheduleSave();
