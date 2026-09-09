@@ -11,6 +11,7 @@ import { lastKnownTerminalSize } from '../config/terminal-size';
 import { PrBadge } from './PrBadge';
 import { SystemPromptModal } from './SystemPromptModal';
 import { ConfirmModal } from './ConfirmModal';
+import { BulkDeleteModal } from './BulkDeleteModal';
 import { ScheduledTasksModal } from './ScheduledTasksModal';
 import { WorkspaceManager } from './WorkspaceManager';
 import './WorkspacePanel.css';
@@ -2407,7 +2408,7 @@ interface WorkspacePanelProps {
     onAddCustomReference?: (workspaceId: string, path: string, description?: string) => void;
     onRemoveReference?: (workspaceId: string, referenceId: string) => void;
     onResetWorkspace?: (workspaceId: string) => void;
-    onRejectDeleteRequest?: (taskId: string, requestId: string) => void;
+    onResolveDeleteRequest?: (requestId: string, approvedIds: string[], rejectedIds: string[]) => void;
     onRefreshTaskPr?: (taskId: string) => void;
     onCollapse?: () => void;
 }
@@ -2439,7 +2440,7 @@ export function WorkspacePanel({
     onAddCustomReference,
     onRemoveReference,
     onResetWorkspace,
-    onRejectDeleteRequest,
+    onResolveDeleteRequest,
     onRefreshTaskPr,
     onCollapse
 }: WorkspacePanelProps) {
@@ -2482,16 +2483,7 @@ export function WorkspacePanel({
     // Workspace manager modal state
     const [showWorkspaceManager, setShowWorkspaceManager] = useState(false);
 
-    // Batch delete: track which pending requests are checked (approved) by the user
-    const [checkedDeleteIds, setCheckedDeleteIds] = useState<Set<string>>(new Set());
-    // When new requests arrive, auto-check them
-    const prevDeleteCountRef = useRef(0);
-    if (pendingDeleteRequests.length > prevDeleteCountRef.current) {
-        const newChecked = new Set(checkedDeleteIds);
-        pendingDeleteRequests.forEach(r => newChecked.add(r.requestId));
-        setCheckedDeleteIds(newChecked);
-    }
-    prevDeleteCountRef.current = pendingDeleteRequests.length;
+    // Delete-confirmation selection state now lives in BulkDeleteModal.
 
     // Close menu when clicking outside (capture phase so stopPropagation on child elements doesn't block it)
     // or when the panel scrolls (menu is position:fixed and would detach from its trigger).
@@ -2952,46 +2944,15 @@ export function WorkspacePanel({
             )}
 
             {pendingDeleteRequests.length > 0 && (
-                <ConfirmModal
-                    title={pendingDeleteRequests.length === 1 ? 'Delete Task' : `Delete ${pendingDeleteRequests.length} Tasks`}
-                    variant="danger"
-                    confirmLabel={checkedDeleteIds.size === 0 ? 'Reject All' : `Delete ${checkedDeleteIds.size === pendingDeleteRequests.length ? 'All' : checkedDeleteIds.size}`}
-                    cancelLabel="Cancel"
-                    onConfirm={() => {
-                        const approved = pendingDeleteRequests.filter(r => checkedDeleteIds.has(r.requestId));
-                        const rejected = pendingDeleteRequests.filter(r => !checkedDeleteIds.has(r.requestId));
-                        approved.forEach(r => onArchiveTask(r.taskId));
-                        rejected.forEach(r => onRejectDeleteRequest?.(r.taskId, r.requestId));
-                        removePendingDeleteRequests(pendingDeleteRequests.map(r => r.requestId));
-                        setCheckedDeleteIds(new Set());
+                <BulkDeleteModal
+                    requests={pendingDeleteRequests}
+                    onResolve={resolutions => {
+                        for (const { requestId, approvedIds, rejectedIds } of resolutions) {
+                            onResolveDeleteRequest?.(requestId, approvedIds, rejectedIds);
+                        }
+                        removePendingDeleteRequests(resolutions.map(r => r.requestId));
                     }}
-                    onCancel={() => {
-                        pendingDeleteRequests.forEach(r => onRejectDeleteRequest?.(r.taskId, r.requestId));
-                        removePendingDeleteRequests(pendingDeleteRequests.map(r => r.requestId));
-                        setCheckedDeleteIds(new Set());
-                    }}
-                >
-                    <p>{pendingDeleteRequests.length === 1 ? 'An agent is requesting to delete this task:' : 'An agent is requesting to delete the following tasks:'}</p>
-                    <div className="delete-request-list">
-                        {pendingDeleteRequests.map(r => (
-                            <label key={r.requestId} className="delete-request-item">
-                                <input
-                                    type="checkbox"
-                                    checked={checkedDeleteIds.has(r.requestId)}
-                                    onChange={e => {
-                                        const next = new Set(checkedDeleteIds);
-                                        if (e.target.checked) next.add(r.requestId); else next.delete(r.requestId);
-                                        setCheckedDeleteIds(next);
-                                    }}
-                                />
-                                <span>{r.taskName}</span>
-                            </label>
-                        ))}
-                    </div>
-                    <div className="confirm-note">
-                        Checked tasks will be archived and can be restored later. Unchecked tasks will be kept.
-                    </div>
-                </ConfirmModal>
+                />
             )}
         </div>
     );

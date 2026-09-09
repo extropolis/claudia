@@ -92,7 +92,7 @@ function makeProps(overrides: Partial<PanelProps> = {}): PanelProps {
         onAddCustomReference: vi.fn(),
         onRemoveReference: vi.fn(),
         onResetWorkspace: vi.fn(),
-        onRejectDeleteRequest: vi.fn(),
+        onResolveDeleteRequest: vi.fn(),
         onCollapse: vi.fn(),
         ...overrides,
     };
@@ -837,16 +837,17 @@ describe('WorkspacePanel', () => {
     // ── agent-requested deletion ────────────────────────────────────────────
 
     /**
-     * The single-request "Delete / Keep" prompt became a batch dialog: every
-     * pending request gets a checkbox, arrives pre-checked, and confirming
-     * archives the checked ones while *rejecting* the unchecked ones.
+     * The prompt is now a single dialog over every pending request, and each
+     * request can itself name many tasks. Confirming resolves each request with
+     * ITS OWN approved/kept split — one agent's answer must never be inferred
+     * from another's.
      */
-    it('archives checked agent delete requests and rejects the unchecked ones', () => {
+    it('resolves each pending request with its own approved and kept split', () => {
         const { props } = renderWorkspacePanel({
             store: {
                 pendingDeleteRequests: [
-                    { taskId: 't1', requestId: 'req-1', taskName: 'Doomed task' },
-                    { taskId: 't2', requestId: 'req-2', taskName: 'Spared task' },
+                    { requestId: 'req-1', tasks: [{ taskId: 't1', taskName: 'Doomed task' }] },
+                    { requestId: 'req-2', tasks: [{ taskId: 't2', taskName: 'Spared task' }] },
                 ],
             },
         });
@@ -863,10 +864,11 @@ describe('WorkspacePanel', () => {
         fireEvent.click(spared);
         fireEvent.click(screen.getByRole('button', { name: 'Delete 1' }));
 
-        expect(props.onArchiveTask).toHaveBeenCalledWith('t1');
-        expect(props.onArchiveTask).not.toHaveBeenCalledWith('t2');
-        expect(props.onRejectDeleteRequest).toHaveBeenCalledWith('t2', 'req-2');
-        expect(props.onRejectDeleteRequest).not.toHaveBeenCalledWith('t1', 'req-1');
+        expect(props.onResolveDeleteRequest).toHaveBeenCalledWith('req-1', ['t1'], []);
+        expect(props.onResolveDeleteRequest).toHaveBeenCalledWith('req-2', [], ['t2']);
+        // The backend archives the approved set now — the panel must NOT also
+        // emit one task:archive per id, or every task would be archived twice.
+        expect(props.onArchiveTask).not.toHaveBeenCalled();
         expect(useTaskStore.getState().pendingDeleteRequests).toEqual([]);
     });
 
@@ -874,7 +876,7 @@ describe('WorkspacePanel', () => {
         const { props } = renderWorkspacePanel({
             store: {
                 pendingDeleteRequests: [
-                    { taskId: 't1', requestId: 'req-1', taskName: 'Doomed task' },
+                    { requestId: 'req-1', tasks: [{ taskId: 't1', taskName: 'Doomed task' }] },
                 ],
             },
         });
@@ -883,9 +885,28 @@ describe('WorkspacePanel', () => {
 
         fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
-        expect(props.onRejectDeleteRequest).toHaveBeenCalledWith('t1', 'req-1');
+        expect(props.onResolveDeleteRequest).toHaveBeenCalledWith('req-1', [], ['t1']);
         expect(props.onArchiveTask).not.toHaveBeenCalled();
         expect(useTaskStore.getState().pendingDeleteRequests).toEqual([]);
+    });
+
+    it("carries a parent's subtasks into the same confirmation", () => {
+        const { props } = renderWorkspacePanel({
+            store: {
+                pendingDeleteRequests: [{
+                    requestId: 'req-1',
+                    tasks: [
+                        { taskId: 'parent', taskName: 'Coordinator' },
+                        { taskId: 'child', taskName: 'Subtask', parentTaskId: 'parent', impliedByParent: true },
+                    ],
+                }],
+            },
+        });
+
+        expect(screen.getByText('Delete 2 Tasks')).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Delete 2' }));
+
+        expect(props.onResolveDeleteRequest).toHaveBeenCalledWith('req-1', ['parent', 'child'], []);
     });
 
     // ── header controls ─────────────────────────────────────────────────────

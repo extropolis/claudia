@@ -218,24 +218,58 @@ describe.skipIf(!SUPPORTS_FAKE_CLI)('task:restore', () => {
     });
 });
 
-describe.skipIf(!SUPPORTS_FAKE_CLI)('task:deleteRequest / task:deleteRejected broadcast to the waiting MCP client', () => {
-    it('deleteRequest reaches OTHER clients (the MCP agent waits on this)', async () => {
-        client.send('task:deleteRequest', { taskId: 'task-x', requestId: 'req-1', taskName: 'Some Task' });
+describe.skipIf(!SUPPORTS_FAKE_CLI)('task:deleteRequest / task:deleteResolved broadcast to the waiting MCP client', () => {
+    it('deleteRequest reaches OTHER clients with its whole task list', async () => {
+        client.send('task:deleteRequest', {
+            requestId: 'req-1',
+            tasks: [
+                { taskId: 'task-x', taskName: 'Some Task' },
+                { taskId: 'task-y', taskName: 'Its Subtask', parentTaskId: 'task-x', impliedByParent: true },
+            ],
+        });
         const f = await observer.waitForMessage('task:deleteRequest', m => m.payload?.requestId === 'req-1');
-        expect(f.payload.taskId).toBe('task-x');
-        expect(f.payload.taskName).toBe('Some Task');
+        expect(f.payload.tasks).toHaveLength(2);
+        expect(f.payload.tasks[0].taskName).toBe('Some Task');
+        // The hierarchy has to survive the hop, or the dialog cannot show the
+        // subtree the user is actually approving.
+        expect(f.payload.tasks[1].parentTaskId).toBe('task-x');
+        expect(f.payload.tasks[1].impliedByParent).toBe(true);
     }, 15000);
 
-    it('deleteRejected reaches OTHER clients', async () => {
-        client.send('task:deleteRejected', { taskId: 'task-x', requestId: 'req-1' });
-        const f = await observer.waitForMessage('task:deleteRejected', m => m.payload?.requestId === 'req-1');
-        expect(f.payload.taskId).toBe('task-x');
+    /**
+     * The resolution is where the archiving happens, so the reply must name what
+     * actually went. An id the server does not know is a FAILURE, never a silent
+     * success — otherwise the agent tells the user a task was deleted when it
+     * was not.
+     */
+    it('deleteResolved archives the approved set and reports the split', async () => {
+        client.send('task:deleteResolved', {
+            requestId: 'req-1',
+            approvedIds: ['task-ghost'],
+            rejectedIds: ['task-spared'],
+        });
+        const f = await observer.waitForMessage('task:deleteResolved', m => m.payload?.requestId === 'req-1');
+        expect(f.payload.archivedIds).toEqual([]);
+        expect(f.payload.keptIds).toEqual(['task-spared']);
+        expect(f.payload.failed).toEqual([{ taskId: 'task-ghost', reason: 'task not found' }]);
     }, 15000);
 
     it('drops delete frames missing requestId instead of broadcasting a half-formed dialog', async () => {
         const before = observer.all('task:deleteRequest').length;
-        await client.sendAndProveAlive('task:deleteRequest', { taskId: 'task-y' });
+        await client.sendAndProveAlive('task:deleteRequest', { tasks: [{ taskId: 'task-y', taskName: 'y' }] });
         expect(observer.all('task:deleteRequest').length).toBe(before);
+    });
+
+    it('drops a deleteRequest with an empty task list', async () => {
+        const before = observer.all('task:deleteRequest').length;
+        await client.sendAndProveAlive('task:deleteRequest', { requestId: 'req-empty', tasks: [] });
+        expect(observer.all('task:deleteRequest').length).toBe(before);
+    });
+
+    it('drops a malformed deleteResolved rather than archiving on a guess', async () => {
+        const before = observer.all('task:deleteResolved').length;
+        await client.sendAndProveAlive('task:deleteResolved', { requestId: 'req-bad', approvedIds: 'not-an-array' });
+        expect(observer.all('task:deleteResolved').length).toBe(before);
     });
 });
 

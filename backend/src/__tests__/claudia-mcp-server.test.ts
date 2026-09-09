@@ -104,6 +104,19 @@ beforeAll(async () => {
             // Spawned child with a fixed short number — exercises refs + hierarchy.
             mkTask('task-child-1', worktree, { parentTaskId: SELF_TASK, taskNumber: 77 }),
             mkTask('task-other-1', other),
+            // A parent/child/grandchild chain clear of SELF_TASK, so bulk delete
+            // can be tested on a subtree the session is allowed to remove.
+            mkTask('task-fam-parent', repo, { taskNumber: 80 }),
+            mkTask('task-fam-child', worktree, { parentTaskId: 'task-fam-parent' }),
+            mkTask('task-fam-grandchild', worktree, { parentTaskId: 'task-fam-child' }),
+            // Throwaway tasks the bulk-delete tests may actually archive.
+            mkTask('task-del-a', repo),
+            mkTask('task-del-b', repo),
+            mkTask('task-del-c', repo),
+            // A second family, so the "spare one child" test is not reading the
+            // corpse of the family the previous test already archived.
+            mkTask('task-fam2-parent', repo),
+            mkTask('task-fam2-child', worktree, { parentTaskId: 'task-fam2-parent' }),
         ],
         archivedTasks: [],
     }, null, 2));
@@ -215,7 +228,7 @@ describe('tool schema integrity', () => {
             claudia_stop_task: ['taskId'],
             claudia_stop_all_tasks: [],
             claudia_rename_task: ['taskId', 'displayName'],
-            claudia_delete_task: ['taskId'],
+            claudia_delete_task: ['taskIds'],
             claudia_cron_create: ['taskId', 'prompt', 'cronExpression'],
             claudia_cron_list: [],
             claudia_cron_delete: ['cronId'],
@@ -463,45 +476,170 @@ describe('claudia_rename_task guardrail', () => {
 });
 
 describe('claudia_delete_task guardrail', () => {
+    /**
+     * Stand in for the frontend: wait for the confirmation broadcast, hand the
+     * chosen split back as `task:deleteResolved`, and report what was listed.
+     */
+    function fakeFrontend(decide: (tasks: any[]) => { approvedIds: string[]; rejectedIds: string[] }) {
+        const seen: { tasks: any[] }[] = [];
+        const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+        const ready = new Promise<void>((res, rej) => {
+            ws.on('open', () => res());
+            ws.on('error', rej);
+        });
+        ws.on('message', (data: Buffer) => {
+            let msg: any;
+            try { msg = JSON.parse(data.toString()); } catch { return; }
+            if (msg.type !== 'task:deleteRequest') return;
+            seen.push({ tasks: msg.payload.tasks });
+            const { approvedIds, rejectedIds } = decide(msg.payload.tasks);
+            ws.send(JSON.stringify({
+                type: 'task:deleteResolved',
+                payload: { requestId: msg.payload.requestId, approvedIds, rejectedIds },
+            }));
+        });
+        return { ws, ready, seen };
+    }
+
     it('refuses to delete the session that is making the call', async () => {
-        const { json } = await callTool('claudia_delete_task', { taskId: SELF_TASK });
+        const { json } = await callTool('claudia_delete_task', { taskIds: [SELF_TASK] });
         expect(json.success).toBe(false);
         expect(json.message).toMatch(/currently running session/i);
     });
 
     it('reports a clean failure for an unknown task', async () => {
-        const { json } = await callTool('claudia_delete_task', { taskId: 'ghost-task' });
+        const { json } = await callTool('claudia_delete_task', { taskIds: ['ghost-task'] });
         expect(json.success).toBe(false);
-        expect(json.message).toMatch(/not found/i);
+        expect(json.message).toMatch(/none of the requested tasks exist/i);
+        expect(json.notFound).toEqual(['ghost-task']);
     });
 
     it('does NOT delete without user approval — a rejection leaves the task alive', async () => {
-        // Stand in for the frontend: wait for the confirmation broadcast, then deny it.
-        const frontend = new WebSocket(`ws://127.0.0.1:${port}`);
-        await new Promise<void>((res, rej) => {
-            frontend.on('open', () => res());
-            frontend.on('error', rej);
-        });
-        frontend.on('message', (data: Buffer) => {
-            let msg: any;
-            try { msg = JSON.parse(data.toString()); } catch { return; }
-            if (msg.type === 'task:deleteRequest') {
-                frontend.send(JSON.stringify({
-                    type: 'task:deleteRejected',
-                    payload: { taskId: msg.payload.taskId, requestId: msg.payload.requestId },
-                }));
-            }
-        });
+        const fe = fakeFrontend(tasks => ({ approvedIds: [], rejectedIds: tasks.map(t => t.taskId) }));
+        await fe.ready;
 
-        const { json } = await callTool('claudia_delete_task', { taskId: 'task-wt-1' });
-        frontend.close();
+        const { json } = await callTool('claudia_delete_task', { taskIds: ['task-wt-1'] });
+        fe.ws.close();
 
         expect(json.success).toBe(false);
-        expect(json.message).toMatch(/rejected/i);
+        expect(json.deleted).toEqual([]);
+        expect(json.kept).toHaveLength(1);
 
         // The critical assertion: the task actually survived.
         const list = await callTool('claudia_list_tasks');
         expect(list.json.map((t: any) => t.id)).toContain('task-wt-1');
+    }, 30000);
+
+    /**
+     * The whole point of the bulk form: N tasks must cost ONE prompt, not N.
+     * A per-id loop is what made cleaning up a backlog unusable.
+     */
+    it('raises exactly one confirmation for many tasks', async () => {
+        const fe = fakeFrontend(tasks => ({ approvedIds: tasks.map(t => t.taskId), rejectedIds: [] }));
+        await fe.ready;
+
+        const { json } = await callTool('claudia_delete_task', {
+            taskIds: ['task-del-a', 'task-del-b'],
+        });
+        fe.ws.close();
+
+        expect(fe.seen).toHaveLength(1);
+        expect(fe.seen[0].tasks.map((t: any) => t.taskId).sort())
+            .toEqual(['task-del-a', 'task-del-b']);
+        expect(json.success).toBe(true);
+        expect(json.deleted).toHaveLength(2);
+
+        const list = await callTool('claudia_list_tasks');
+        const ids = list.json.map((t: any) => t.id);
+        expect(ids).not.toContain('task-del-a');
+        expect(ids).not.toContain('task-del-b');
+    }, 30000);
+
+    /**
+     * Deleting a coordinator and silently leaving its fleet behind is the
+     * surprise the dialog exists to prevent — the subtree is listed, flagged as
+     * implied, and carries the worktree each child runs in.
+     */
+    it('pulls a parent’s descendants into the same confirmation', async () => {
+        const fe = fakeFrontend(tasks => ({ approvedIds: tasks.map(t => t.taskId), rejectedIds: [] }));
+        await fe.ready;
+
+        const { json } = await callTool('claudia_delete_task', { taskIds: ['task-fam-parent'] });
+        fe.ws.close();
+
+        const listed = fe.seen[0].tasks;
+        expect(listed.map((t: any) => t.taskId))
+            .toEqual(['task-fam-parent', 'task-fam-child', 'task-fam-grandchild']);
+
+        // The named task is not "implied"; everything pulled in by it is.
+        expect(listed[0].impliedByParent).toBeUndefined();
+        expect(listed[1].impliedByParent).toBe(true);
+        expect(listed[2].impliedByParent).toBe(true);
+        expect(json.includedSubtasks).toBe(2);
+
+        // Parent links are only carried when the parent is in the same dialog.
+        expect(listed[1].parentTaskId).toBe('task-fam-parent');
+        expect(listed[2].parentTaskId).toBe('task-fam-child');
+
+        // Worktree-resident children are labelled, so the dialog can say the
+        // branch survives archiving.
+        expect(listed[1].worktree).toBe('claudia/task-wt');
+        expect(listed[0].worktree).toBeUndefined();
+    }, 30000);
+
+    it('honours a user who spares one task out of a requested subtree', async () => {
+        const SPARED = 'task-fam2-child';
+        const fe = fakeFrontend(tasks => ({
+            approvedIds: tasks.filter((t: any) => t.taskId !== SPARED).map((t: any) => t.taskId),
+            rejectedIds: tasks.filter((t: any) => t.taskId === SPARED).map((t: any) => t.taskId),
+        }));
+        await fe.ready;
+
+        const { json } = await callTool('claudia_delete_task', { taskIds: ['task-fam2-parent'] });
+        fe.ws.close();
+
+        expect(json.success).toBe(true);
+        expect(json.kept).toHaveLength(1);
+
+        // The spared subtask survives its parent — it just loses its parent row
+        // and renders at the sidebar's top level, which the dialog warns about.
+        const list = await callTool('claudia_list_tasks');
+        const ids = list.json.map((t: any) => t.id);
+        expect(ids).not.toContain('task-fam2-parent');
+        expect(ids).toContain(SPARED);
+    }, 30000);
+
+    it('resolves short refs and still refuses the session’s own ref', async () => {
+        const listing = await callTool('claudia_list_tasks');
+        const self = listing.json.find((t: any) => t.id === SELF_TASK);
+
+        // '#N' for SELF used to slip past the id comparison entirely.
+        const { json } = await callTool('claudia_delete_task', { taskIds: [self.ref] });
+        expect(json.success).toBe(false);
+        expect(json.message).toMatch(/currently running session/i);
+    });
+
+    it('deletes the rest when the session names itself alongside other tasks', async () => {
+        const fe = fakeFrontend(tasks => ({ approvedIds: tasks.map(t => t.taskId), rejectedIds: [] }));
+        await fe.ready;
+
+        const { json } = await callTool('claudia_delete_task', {
+            taskIds: [SELF_TASK, 'task-del-c'],
+        });
+        fe.ws.close();
+
+        // SELF is dropped, not fatal — and the drop is reported, not silent.
+        // Crucially the walk PRUNES there: task-child-1 only exists in this
+        // request via SELF, and archiving an agent's fleet right after refusing
+        // to archive the agent is the worse surprise.
+        const listed = fe.seen[0].tasks.map((t: any) => t.taskId);
+        expect(listed).toEqual(['task-del-c']);
+        expect(listed).not.toContain('task-child-1');
+        expect(json.skipped).toMatch(/cannot delete itself/i);
+        expect(json.deleted).toHaveLength(1);
+
+        const list = await callTool('claudia_list_tasks');
+        expect(list.json.map((t: any) => t.id)).toContain('task-child-1');
     }, 30000);
 });
 

@@ -41,7 +41,7 @@ const H = vi.hoisted(() => {
         'continueArchivedTask', 'pushToGithub', 'resetWorkspace', 'renameTask',
         'renameWorkspace', 'toggleReference', 'addCustomReference', 'removeReference',
         'createScheduledTask', 'deleteScheduledTask', 'updateScheduledTask',
-        'pauseScheduledTask', 'rejectDeleteRequest',
+        'pauseScheduledTask', 'resolveDeleteRequest',
     ] as const;
 
     const actions: Record<string, ReturnType<typeof vi.fn>> = {};

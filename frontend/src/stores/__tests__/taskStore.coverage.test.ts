@@ -880,32 +880,50 @@ describe('draft inputs', () => {
 });
 
 describe('pending delete requests', () => {
-    // The single-slot `pendingDeleteRequest` / `setPendingDeleteRequest` pair was
-    // replaced by a queue (batch delete) — add/remove many, confirm in one dialog.
+    // Each request now carries a LIST of tasks (one agent call can name many),
+    // and the queue is still a list because two agents can each raise a request
+    // while a dialog is open — collapsing to one slot would drop the first and
+    // leave that agent waiting on a reply that never comes.
+    const reqOne = { requestId: 'req-1', tasks: [{ taskId: 't1', taskName: 'Build API' }] };
+    const reqTwo = { requestId: 'req-2', tasks: [{ taskId: 't2', taskName: 'Write tests' }] };
+
     it('queues MCP delete confirmations and removes them by request id', () => {
         const store = () => useTaskStore.getState();
 
-        store().addPendingDeleteRequest({ taskId: 't1', requestId: 'req-1', taskName: 'Build API' });
-        store().addPendingDeleteRequest({ taskId: 't2', requestId: 'req-2', taskName: 'Write tests' });
+        store().addPendingDeleteRequest(reqOne);
+        store().addPendingDeleteRequest(reqTwo);
 
         expect(store().pendingDeleteRequests.map(r => r.requestId)).toEqual(['req-1', 'req-2']);
 
         store().removePendingDeleteRequests(['req-1']);
-        expect(store().pendingDeleteRequests).toEqual([
-            { taskId: 't2', requestId: 'req-2', taskName: 'Write tests' },
-        ]);
+        expect(store().pendingDeleteRequests).toEqual([reqTwo]);
 
         store().removePendingDeleteRequests(['req-2']);
         expect(store().pendingDeleteRequests).toEqual([]);
     });
 
+    it('keeps every task of a multi-task request together under one id', () => {
+        const store = () => useTaskStore.getState();
+        store().addPendingDeleteRequest({
+            requestId: 'req-bulk',
+            tasks: [
+                { taskId: 't1', taskName: 'Build API' },
+                { taskId: 't2', taskName: 'Write tests', parentTaskId: 't1', impliedByParent: true },
+            ],
+        });
+
+        expect(store().pendingDeleteRequests).toHaveLength(1);
+        expect(store().pendingDeleteRequests[0].tasks.map(t => t.taskId)).toEqual(['t1', 't2']);
+    });
+
     it('ignores a duplicate request id instead of queueing it twice', () => {
-        const request = { taskId: 't1', requestId: 'req-1', taskName: 'Build API' };
+        useTaskStore.getState().addPendingDeleteRequest(reqOne);
+        useTaskStore.getState().addPendingDeleteRequest({
+            ...reqOne,
+            tasks: [{ taskId: 't1', taskName: 'renamed' }],
+        });
 
-        useTaskStore.getState().addPendingDeleteRequest(request);
-        useTaskStore.getState().addPendingDeleteRequest({ ...request, taskName: 'renamed' });
-
-        expect(useTaskStore.getState().pendingDeleteRequests).toEqual([request]);
+        expect(useTaskStore.getState().pendingDeleteRequests).toEqual([reqOne]);
     });
 });
 

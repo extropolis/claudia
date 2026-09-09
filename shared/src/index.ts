@@ -241,7 +241,7 @@ export type WSMessageType =
     | 'task:waitingInput'
     | 'task:revertResult'
     | 'task:deleteRequest'
-    | 'task:deleteRejected'
+    | 'task:deleteResolved'
     | 'tasks:updated'
     | 'task:renamed'
     // Archived tasks
@@ -321,6 +321,38 @@ export type WSMessageType =
 export interface WSMessage {
     type: WSMessageType;
     payload: unknown;
+}
+
+/**
+ * One row in an agent-requested delete confirmation (`task:deleteRequest`).
+ *
+ * The agent names the tasks it wants gone; the backend expands that set with
+ * each task's descendants so the dialog can show the user the whole subtree
+ * rather than surprising them after the fact.
+ */
+export interface DeleteRequestTask {
+    taskId: string;
+    taskName: string;
+    /** Parent task id, when the parent is also part of this same request. */
+    parentTaskId?: string;
+    /** Branch of the git worktree this task runs in, when it runs in one. */
+    worktree?: string;
+    /** True when the agent did not name this task — it came in via its parent. */
+    impliedByParent?: boolean;
+}
+
+/** Payload of `task:deleteRequest`: one dialog covering any number of tasks. */
+export interface DeleteRequestPayload {
+    requestId: string;
+    tasks: DeleteRequestTask[];
+}
+
+/** Payload of `task:deleteResolved`: what the backend actually did. */
+export interface DeleteResolvedPayload {
+    requestId: string;
+    archivedIds: string[];
+    keptIds: string[];
+    failed: { taskId: string; reason: string }[];
 }
 
 /**

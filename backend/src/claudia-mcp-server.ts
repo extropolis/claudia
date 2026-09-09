@@ -85,6 +85,11 @@ const log = {
     }
 };
 
+/** Wrap a value as the JSON text payload an MCP tool returns. */
+function jsonResult(value: unknown) {
+    return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] };
+}
+
 /**
  * Get all workspace IDs that belong to the current workspace scope.
  * Includes the workspace itself plus any child worktree workspaces.
@@ -1347,96 +1352,162 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_delete_task',
-    'Request deletion (archival) of a task. This sends a confirmation popup to the user — the task is only deleted if the user approves. IMPORTANT: Only call this when the user explicitly asks to delete/remove a task. Never delete tasks automatically after completion — users want to review outputs.',
+    'Request deletion (archival) of one or more tasks. This sends a SINGLE confirmation popup listing every task, each pre-checked; the user unchecks any they want to keep and confirms once. Pass every task you want removed in ONE call rather than calling this repeatedly — one call is one prompt, N calls are N prompts. Subtasks are included automatically: naming a parent also lists its children in the dialog, so the user sees the whole subtree before approving. IMPORTANT: Only call this when the user explicitly asks to delete/remove tasks. Never delete tasks automatically after completion — users want to review outputs.',
     {
-        taskId: z.string().describe('The task ID to delete. ' + TASK_REF_HINT),
+        taskIds: z.array(z.string()).min(1).describe(
+            'The task IDs to delete. Pass all of them in one call to get a single confirmation prompt. ' + TASK_REF_HINT
+        ),
     },
-    async ({ taskId }) => {
-        // Resolve short refs FIRST: the self-guard must catch "#77" for the
-        // caller's own task, and the task:destroyed approval matcher below
-        // compares against the broadcast's CANONICAL id — with a raw short ref
-        // it never matched, and an approved deletion reported as a timeout.
-        const canonicalId = await resolveRefToCanonicalId(taskId);
-        if (!canonicalId) {
-            return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
-        }
-        taskId = canonicalId;
-        if (SELF_TASK_ID && taskId === SELF_TASK_ID) {
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify({
-                        success: false,
-                        message: `Cannot delete task '${taskId}' because it is the currently running session.`,
-                    }, null, 2)
-                }]
-            };
-        }
-
+    async ({ taskIds }) => {
         try {
-            // Look up task name for the confirmation dialog
-            let taskName = taskId;
-            try {
-                const tasksResponse = await backendFetch('/api/tasks');
-                if (tasksResponse.ok) {
-                    const tasks = await tasksResponse.json();
-                    const task = matchTaskRef(tasks, taskId) as any;
-                    if (!task) {
-                        return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
-                    }
-                    taskName = task.displayName || task.prompt?.substring(0, 60) || taskId;
-                }
-            } catch { /* use taskId as fallback name */ }
+            // One fetch for the whole call: names, short-ref resolution, the
+            // self-guard and the subtask walk all read the same task list.
+            // Resolving refs one at a time (as the single-task version did) meant
+            // one HTTP round trip per id.
+            const tasksResponse = await backendFetch('/api/tasks');
+            if (!tasksResponse.ok) {
+                return jsonResult({
+                    success: false,
+                    message: `Failed to list tasks (HTTP ${tasksResponse.status}); nothing was deleted.`,
+                });
+            }
+            const allTasks: any[] = await tasksResponse.json();
+            const byId = new Map<string, any>(allTasks.map(t => [t.id, t]));
+
+            // Resolve short refs FIRST. The self-guard has to catch "#77" for the
+            // caller's own task, and the resolution matcher keys off canonical
+            // ids — a raw short ref never matched, and an approved deletion came
+            // back to the agent as a timeout.
+            const requested: string[] = [];
+            const notFound: string[] = [];
+            for (const ref of [...new Set(taskIds)]) {
+                const task = matchTaskRef(allTasks, ref);
+                if (task) requested.push(task.id); else notFound.push(ref);
+            }
+
+            // Pull in each requested task's descendants. Deleting a coordinator
+            // and silently leaving its fleet behind is the surprise the dialog
+            // exists to prevent, so the children are listed too (pre-checked, and
+            // individually uncheckable). Cycle-guarded: cyclic parentTaskId
+            // values have occurred in practice.
+            const childrenOf = new Map<string, string[]>();
+            for (const t of allTasks) {
+                if (!t.parentTaskId || t.parentTaskId === t.id) continue;
+                childrenOf.set(t.parentTaskId, [...(childrenOf.get(t.parentTaskId) ?? []), t.id]);
+            }
+            // The session cannot archive itself — that would kill the process
+            // mid-call. The walk PRUNES at the session rather than skipping just
+            // that one row: a subtask that only came in through the session was
+            // never something the agent named, and archiving an agent's fleet
+            // after refusing to archive the agent is the worse surprise.
+            let selfRequested = false;
+            const explicit = new Set(requested);
+            const ordered: string[] = [];
+            const visited = new Set<string>();
+            const visit = (id: string) => {
+                if (visited.has(id)) return;
+                visited.add(id);
+                if (SELF_TASK_ID && id === SELF_TASK_ID) { selfRequested = true; return; }
+                ordered.push(id);
+                for (const child of childrenOf.get(id) ?? []) visit(child);
+            };
+            for (const id of requested) visit(id);
+
+            const deletable = ordered;
+
+            if (deletable.length === 0) {
+                return jsonResult({
+                    success: false,
+                    message: selfRequested
+                        ? 'Cannot delete the currently running session, and no other tasks were requested.'
+                        : `None of the requested tasks exist: ${notFound.join(', ') || '(none provided)'}`,
+                    ...(notFound.length > 0 && { notFound }),
+                });
+            }
+
+            // Annotate each row with the worktree it runs in, so the dialog can
+            // warn that archiving leaves the branch and any uncommitted work on
+            // disk — consistent with the single-task delete path, which has never
+            // removed worktrees either.
+            const { wsById } = WORKSPACE_ID
+                ? await getWorkspaceScope()
+                : { wsById: new Map<string, any>() };
+            const worktreeOf = (task: any): string | undefined => {
+                const ws = wsById.get(task.workspaceId);
+                if (!ws?.worktreeParentId) return undefined;
+                return ws.worktreeBranch || String(task.workspaceId).split('/').pop();
+            };
+
+            const included = new Set(deletable);
+            const names = new Map<string, string>();
+            const tasks = deletable.map(id => {
+                const task = byId.get(id);
+                const taskName = task?.displayName || task?.prompt?.substring(0, 60) || id;
+                names.set(id, taskName);
+                const parentTaskId = task?.parentTaskId;
+                return {
+                    taskId: id,
+                    taskName,
+                    // Only carry a parent link the dialog can actually render.
+                    ...(parentTaskId && included.has(parentTaskId) ? { parentTaskId } : {}),
+                    ...(explicit.has(id) ? {} : { impliedByParent: true }),
+                    ...(worktreeOf(task ?? {}) ? { worktree: worktreeOf(task) } : {}),
+                };
+            });
 
             const requestId = `del-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-            log.info(`Requesting user confirmation to delete task: ${taskId}`, { requestId });
+            const impliedCount = tasks.filter(t => t.impliedByParent).length;
+            log.info(
+                `Requesting user confirmation to delete ${tasks.length} task(s)` +
+                (impliedCount > 0 ? ` (${impliedCount} pulled in as subtasks)` : ''),
+                { requestId }
+            );
 
-            // Send deleteRequest — backend broadcasts to frontend which shows
-            // a confirmation modal. We wait for either task:destroyed (approved)
-            // or task:deleteRejected (denied).
+            // One request, one dialog. The backend archives the approved subset
+            // and replies with task:deleteResolved naming exactly what it did —
+            // a client-side archive-per-id loop could fail partway and leave this
+            // call waiting on a reply that never comes.
             const result = await sendWSMessageWithMultiResponse(
                 'task:deleteRequest',
-                { taskId, requestId, taskName },
+                { requestId, tasks },
                 (msg) => {
-                    if (msg.type === 'task:destroyed' && msg.payload?.taskId === taskId) {
-                        return { outcome: 'approved' };
-                    }
-                    if (msg.type === 'task:deleteRejected' && msg.payload?.requestId === requestId) {
-                        return { outcome: 'rejected' };
+                    if (msg.type === 'task:deleteResolved' && msg.payload?.requestId === requestId) {
+                        return msg.payload as {
+                            archivedIds: string[];
+                            keptIds: string[];
+                            failed: Array<{ taskId: string; reason: string }>;
+                        };
                     }
                     return null;
                 },
-                60000
+                300000
             );
 
-            if (result.outcome === 'approved') {
-                return {
-                    content: [{
-                        type: 'text',
-                        text: JSON.stringify({
-                            success: true,
-                            message: `Task '${taskName}' deleted (archived) by user.`,
-                        }, null, 2)
-                    }]
-                };
-            } else {
-                return {
-                    content: [{
-                        type: 'text',
-                        text: JSON.stringify({
-                            success: false,
-                            message: `User rejected deletion of task '${taskName}'.`,
-                        }, null, 2)
-                    }]
-                };
-            }
+            const nameOf = (id: string) => names.get(id) ?? id;
+            const failed = result.failed ?? [];
+            return jsonResult({
+                success: result.archivedIds.length > 0,
+                deleted: result.archivedIds.map(nameOf),
+                kept: result.keptIds.map(nameOf),
+                ...(failed.length > 0 && {
+                    failed: failed.map(f => ({ task: nameOf(f.taskId), reason: f.reason })),
+                }),
+                ...(notFound.length > 0 && { notFound }),
+                ...(impliedCount > 0 && { includedSubtasks: impliedCount }),
+                ...(selfRequested && { skipped: 'the currently running session cannot delete itself' }),
+                message: `${result.archivedIds.length} deleted, ${result.keptIds.length} kept by the user`
+                    + (failed.length > 0 ? `, ${failed.length} failed to archive` : ''),
+            });
         } catch (error) {
-            log.error('Failed to delete task:', error);
+            log.error('Failed to delete tasks:', error);
             const msg = error instanceof Error ? error.message : String(error);
             if (msg.includes('timed out')) {
-                return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: 'User did not respond to the deletion confirmation within 60 seconds.' }, null, 2) }] };
+                return jsonResult({
+                    success: false,
+                    message: 'User did not respond to the deletion confirmation within 5 minutes. Nothing was deleted.',
+                });
             }
-            return { content: [{ type: 'text', text: `Error deleting task: ${msg}` }] };
+            return { content: [{ type: 'text', text: `Error deleting tasks: ${msg}` }] };
         }
     }
 );

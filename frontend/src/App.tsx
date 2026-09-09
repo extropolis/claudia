@@ -73,7 +73,7 @@ function App() {
         removeReference,
         requestRecentWorkspaces,
         clearRecentWorkspace,
-        rejectDeleteRequest,
+        resolveDeleteRequest,
         refreshTaskPr,
         approveJiraWrite,
         rejectJiraWrite,
@@ -657,7 +657,7 @@ function App() {
                                 onAddCustomReference={addCustomReference}
                                 onRemoveReference={removeReference}
                                 onResetWorkspace={resetWorkspace}
-                                onRejectDeleteRequest={rejectDeleteRequest}
+                                onResolveDeleteRequest={resolveDeleteRequest}
                                 onRefreshTaskPr={refreshTaskPr}
                             />
                         </aside>
@@ -709,7 +709,7 @@ function App() {
                                 onAddCustomReference={addCustomReference}
                                 onRemoveReference={removeReference}
                                 onResetWorkspace={resetWorkspace}
-                                onRejectDeleteRequest={rejectDeleteRequest}
+                                onResolveDeleteRequest={resolveDeleteRequest}
                                 onRefreshTaskPr={refreshTaskPr}
                                 onCollapse={toggleSidebar}
                             />

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask, TaskTokenUsage, TodoItem } from '@claudia/shared';
+import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask, TaskTokenUsage, TodoItem, DeleteRequestPayload } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
 import { ThemePreference } from '../types/theme';
 
@@ -95,9 +95,13 @@ interface TaskStore {
     unreadTaskIds: Set<string>;
     activityLog: ActivityEvent[];
 
-    // Pending delete confirmations (from MCP agent) — batched into one modal
-    pendingDeleteRequests: { taskId: string; requestId: string; taskName: string }[];
-    addPendingDeleteRequest: (request: { taskId: string; requestId: string; taskName: string }) => void;
+    // Pending delete confirmations (from MCP agent) — batched into one modal.
+    // A single request can now cover many tasks: the dialog lists them all and
+    // the user unchecks any to keep. Kept as an ARRAY because two agents in a
+    // fleet can each raise a request while a dialog is already open; collapsing
+    // to one slot would silently drop the first and hang that agent.
+    pendingDeleteRequests: DeleteRequestPayload[];
+    addPendingDeleteRequest: (request: DeleteRequestPayload) => void;
     removePendingDeleteRequests: (requestIds: string[]) => void;
 
     // A Jira ticket key a session asked to open on the Jira tab (via jira:focusTicket).

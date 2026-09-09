@@ -420,7 +420,7 @@ describe('useWebSocket — outbound messages', () => {
         { name: 'addCustomReference', invoke: (api) => api.addCustomReference('/ws/alpha', 'docs/x.md', 'notes'), type: 'workspace:references:add', payload: { workspaceId: '/ws/alpha', path: 'docs/x.md', description: 'notes' } },
         { name: 'removeReference', invoke: (api) => api.removeReference('/ws/alpha', 'ref1'), type: 'workspace:references:remove', payload: { workspaceId: '/ws/alpha', referenceId: 'ref1' } },
         { name: 'deleteScheduledTask', invoke: (api) => api.deleteScheduledTask('c1'), type: 'cron:delete', payload: { cronId: 'c1' } },
-        { name: 'rejectDeleteRequest', invoke: (api) => api.rejectDeleteRequest('t1', 'req1'), type: 'task:deleteRejected', payload: { taskId: 't1', requestId: 'req1' } },
+        { name: 'resolveDeleteRequest', invoke: (api) => api.resolveDeleteRequest('req1', ['t1', 't2'], ['t3']), type: 'task:deleteResolved', payload: { requestId: 'req1', approvedIds: ['t1', 't2'], rejectedIds: ['t3'] } },
     ];
 
     it.each(FRAME_CASES)('$name sends the right frame', ({ invoke, type, payload }) => {
@@ -713,14 +713,63 @@ describe('useWebSocket — inbound dispatch', () => {
 
     it('task:deleteRequest parks the agent request for user confirmation', () => {
         const { ws } = mountConnected();
-        const request = { taskId: 't1', requestId: 'req1', taskName: 'Cleanup' };
+        const request = {
+            requestId: 'req1',
+            tasks: [
+                { taskId: 't1', taskName: 'Cleanup' },
+                { taskId: 't2', taskName: 'Cleanup subtask', parentTaskId: 't1', impliedByParent: true },
+            ],
+        };
 
         act(() => {
             ws.simulateMessage('task:deleteRequest', request);
         });
 
-        // Requests queue up now (batch delete) rather than occupying a single slot.
+        // Requests queue up (two agents can ask at once) and each carries its
+        // whole task list, so one dialog covers the lot.
         expect(useTaskStore.getState().pendingDeleteRequests).toEqual([request]);
+    });
+
+    it('task:deleteResolved clears the request another client already answered', () => {
+        const { ws } = mountConnected();
+
+        act(() => {
+            ws.simulateMessage('task:deleteRequest', {
+                requestId: 'req1',
+                tasks: [{ taskId: 't1', taskName: 'Cleanup' }],
+            });
+        });
+        expect(useTaskStore.getState().pendingDeleteRequests).toHaveLength(1);
+
+        act(() => {
+            ws.simulateMessage('task:deleteResolved', {
+                requestId: 'req1', archivedIds: ['t1'], keptIds: [], failed: [],
+            });
+        });
+
+        // Otherwise a second browser tab keeps showing a dialog for a decision
+        // that has already been made.
+        expect(useTaskStore.getState().pendingDeleteRequests).toEqual([]);
+    });
+
+    it('task:deleteResolved logs the tasks the backend could not archive', () => {
+        const { ws } = mountConnected();
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        act(() => {
+            ws.simulateMessage('task:deleteResolved', {
+                requestId: 'req-x',
+                archivedIds: ['t1'],
+                keptIds: ['t2'],
+                failed: [{ taskId: 't3', reason: 'task not found' }],
+            });
+        });
+
+        expect(errorSpy).toHaveBeenCalledWith(
+            '[WebSocket] Some tasks could not be archived:',
+            [{ taskId: 't3', reason: 'task not found' }],
+        );
+        errorSpy.mockRestore();
     });
 
     it('workspace:created / workspace:deleted add and remove a workspace', () => {

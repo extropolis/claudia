@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
-import { WSMessage, WSErrorPayload, Task, Workspace, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
+import { WSMessage, WSErrorPayload, Task, Workspace, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType, DeleteRequestPayload, DeleteResolvedPayload } from '@claudia/shared';
 import { getWebSocketUrl, getApiBaseUrl, isTunnelAccess } from '../config/api-config';
 import { playTaskCompletionSound, sendTaskCompletionNotification, sendTaskWaitingInputNotification } from '../utils/browserCapabilities';
 
@@ -294,8 +294,8 @@ export function useWebSocket() {
                         break;
                     }
                     case 'task:deleteRequest': {
-                        const payload = message.payload as { taskId: string; requestId: string; taskName: string };
-                        console.log(`[WebSocket] Delete request from agent: ${payload.taskId}`);
+                        const payload = message.payload as DeleteRequestPayload;
+                        console.log(`[WebSocket] Delete request from agent: ${payload.tasks.length} task(s)`, payload.requestId);
                         useTaskStore.getState().addPendingDeleteRequest(payload);
                         break;
                     }
@@ -315,6 +315,20 @@ export function useWebSocket() {
                     case 'jira:writeRejected': {
                         // Resolution arrived (from this or another client) — dismiss the modal.
                         useTaskStore.getState().setPendingJiraWrite(null);
+                        break;
+                    }
+                    case 'task:deleteResolved': {
+                        const payload = message.payload as DeleteResolvedPayload;
+                        // Another client may have answered the dialog — drop our copy
+                        // of the request so a stale modal does not linger here.
+                        useTaskStore.getState().removePendingDeleteRequests([payload.requestId]);
+                        console.log(
+                            `[WebSocket] Delete resolved: ${payload.archivedIds.length} archived, ` +
+                            `${payload.keptIds.length} kept, ${payload.failed.length} failed`, payload.requestId
+                        );
+                        if (payload.failed.length > 0) {
+                            console.error('[WebSocket] Some tasks could not be archived:', payload.failed);
+                        }
                         break;
                     }
                     case 'workspace:created': {
@@ -792,8 +806,10 @@ export function useWebSocket() {
         sendMessage('task:archive', { taskId });
     }, [sendMessage]);
 
-    const rejectDeleteRequest = useCallback((taskId: string, requestId: string) => {
-        sendMessage('task:deleteRejected', { taskId, requestId });
+    // Answer a bulk delete confirmation. The backend archives `approvedIds` and
+    // reports back, so the frontend never has to emit one archive per task.
+    const resolveDeleteRequest = useCallback((requestId: string, approvedIds: string[], rejectedIds: string[]) => {
+        sendMessage('task:deleteResolved', { requestId, approvedIds, rejectedIds });
     }, [sendMessage]);
 
     const refreshTaskPr = useCallback((taskId: string) => {
@@ -981,7 +997,7 @@ export function useWebSocket() {
         deleteScheduledTask,
         updateScheduledTask,
         pauseScheduledTask,
-        rejectDeleteRequest,
+        resolveDeleteRequest,
         refreshTaskPr,
         approveJiraWrite,
         rejectJiraWrite,
