@@ -21,6 +21,7 @@
  *   - claudia_stop_all_tasks: Stop all running tasks in the workspace
  *   - claudia_rename_task: Set a display name for a task
  *   - claudia_delete_task: Archive/remove a task from the sidebar
+ *   - claudia_delete_tasks: Archive/remove MANY tasks under ONE confirmation popup
  *   - claudia_cron_create / claudia_cron_list / claudia_cron_delete / claudia_cron_pause:
  *     Manage scheduled (cron) prompts attached to tasks
  *
@@ -384,6 +385,83 @@ async function sendWSMessageWithMultiResponseAt<T>(
 }
 
 /**
+ * Send SEVERAL WS messages over ONE connection and collect a response for each.
+ *
+ * Why this exists: the single-message helper opens a socket, sends one request
+ * and closes on the first match. Bulk delete used to mean calling that N times
+ * in sequence, which meant the frontend only ever saw ONE pending delete
+ * request at a time — so the user got N confirmation popups, one after another,
+ * even though the modal already knows how to list many requests at once. Firing
+ * all the requests in a single burst is what lets that batched modal do its job.
+ *
+ * Resolves once every key has a result, or on timeout with whatever arrived —
+ * partial outcomes are far more useful here than a thrown error, because some
+ * of the deletions may genuinely have been approved.
+ */
+async function sendWSBatchWithMultiResponseAt<T>(
+    baseUrl: string,
+    messages: { type: string; payload: Record<string, unknown> }[],
+    keys: string[],
+    matcher: (msg: { type: string; payload?: any }) => { key: string; value: T } | null,
+    timeoutMs: number = 120000
+): Promise<Map<string, T>> {
+    const WebSocket = (await import('ws')).default;
+    const results = new Map<string, T>();
+    const pending = new Set(keys);
+
+    return new Promise((resolve, reject) => {
+        const wsUrl = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+        const ws = new WebSocket(wsUrl);
+        let settled = false;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            ws.close();
+            resolve(results);
+        };
+        const timeout = setTimeout(() => {
+            log.error(`Batch WS timed out after ${timeoutMs / 1000}s with ${pending.size}/${keys.length} unresolved`);
+            finish();
+        }, timeoutMs);
+
+        ws.on('open', () => {
+            log.debug(`Batch WS connected, sending ${messages.length} message(s)`);
+            for (const m of messages) ws.send(JSON.stringify({ type: m.type, payload: m.payload }));
+        });
+
+        ws.on('message', (data: Buffer) => {
+            if (settled) return;
+            try {
+                const msg = JSON.parse(data.toString());
+                const hit = matcher(msg);
+                if (hit && pending.has(hit.key)) {
+                    results.set(hit.key, hit.value);
+                    pending.delete(hit.key);
+                    if (pending.size === 0) finish();
+                }
+            } catch {
+                // Ignore parse errors
+            }
+        });
+
+        ws.on('error', (err: Error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            reject(new Error(`WebSocket error: ${err.message}. Is the Claudia server running?`));
+        });
+
+        ws.on('close', () => {
+            clearTimeout(timeout);
+            // A socket closed by the server before every outcome arrived still
+            // yields the partial map rather than hanging the tool call.
+            finish();
+        });
+    });
+}
+
+/**
  * Per-session scope. In stdio mode this comes from the env vars the
  * task-spawner sets on the child process. In shared/HTTP mode there is no child
  * process to carry env, so it comes from request headers instead — which is the
@@ -543,6 +621,12 @@ export function createClaudiaMcpServer(scope: ClaudiaMcpScope): McpServer {
         matcher: (msg: { type: string; payload?: any }) => T | null,
         timeoutMs: number = 30000,
     ) => sendWSMessageWithMultiResponseAt(BASE_URL, type, payload, matcher, timeoutMs);
+    const sendWSBatchWithMultiResponse = <T>(
+        messages: { type: string; payload: Record<string, unknown> }[],
+        keys: string[],
+        matcher: (msg: { type: string; payload?: any }) => { key: string; value: T } | null,
+        timeoutMs: number = 120000,
+    ) => sendWSBatchWithMultiResponseAt(BASE_URL, messages, keys, matcher, timeoutMs);
 
     /**
      * READ scope for a session: the ROOT workspace plus every workspace whose own
@@ -1449,7 +1533,7 @@ server.tool(
 // ============================================================================
 server.tool(
     'claudia_delete_task',
-    'Request deletion (archival) of a task. This sends a confirmation popup to the user — the task is only deleted if the user approves. IMPORTANT: Only call this when the user explicitly asks to delete/remove a task. Never delete tasks automatically after completion — users want to review outputs.',
+    'Request deletion (archival) of ONE task. This sends a confirmation popup to the user — the task is only deleted if the user approves. To delete MORE THAN ONE task, use claudia_delete_tasks with all the ids in a single call: calling this tool in a loop makes the user dismiss a separate popup for every task. IMPORTANT: Only call this when the user explicitly asks to delete/remove a task. Never delete tasks automatically after completion — users want to review outputs.',
     {
         taskId: z.string().describe('The task ID to delete. ' + TASK_REF_HINT),
     },
@@ -1539,6 +1623,110 @@ server.tool(
                 return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: 'User did not respond to the deletion confirmation within 60 seconds.' }, null, 2) }] };
             }
             return { content: [{ type: 'text', text: `Error deleting task: ${msg}` }] };
+        }
+    }
+);
+
+// ============================================================================
+// Tool: claudia_delete_tasks (bulk)
+// ============================================================================
+server.tool(
+    'claudia_delete_tasks',
+    'Request deletion (archival) of SEVERAL tasks in ONE call. The user gets a SINGLE confirmation popup listing every task, with a checkbox each, instead of one popup per task — always use this instead of calling claudia_delete_task in a loop. Nothing is deleted unless the user approves. The calling session is excluded automatically. IMPORTANT: Only call this when the user explicitly asks to delete/remove/clean up tasks. Never delete tasks automatically after completion — users want to review outputs.',
+    {
+        taskIds: z.array(z.string()).min(1).describe('The task IDs to delete. ' + TASK_REF_HINT),
+    },
+    async ({ taskIds }) => {
+        // De-dupe first: two refs pointing at the same task (e.g. "#48" and its
+        // full id) would otherwise produce two rows in the user's popup and two
+        // pending outcomes, one of which can never be satisfied.
+        const requested = Array.from(new Set(taskIds.map(t => t.trim()).filter(Boolean)));
+
+        const skipped: { taskId: string; reason: string }[] = [];
+        const targets: { taskId: string; taskName: string; requestId: string }[] = [];
+
+        // One task-list fetch for the whole batch rather than one per id.
+        let allTasks: any[] = [];
+        try {
+            const res = await backendFetch('/api/tasks');
+            if (res.ok) allTasks = await res.json();
+        } catch { /* fall back to id-as-name below */ }
+
+        const seenCanonical = new Set<string>();
+        for (const ref of requested) {
+            const match = matchTaskRef(allTasks, ref) as any;
+            const canonicalId = match?.id ?? (await resolveRefToCanonicalId(ref));
+            if (!canonicalId || (allTasks.length > 0 && !match)) {
+                skipped.push({ taskId: ref, reason: 'not found' });
+                continue;
+            }
+            if (SELF_TASK_ID && canonicalId === SELF_TASK_ID) {
+                skipped.push({ taskId: ref, reason: 'is the currently running session' });
+                continue;
+            }
+            if (seenCanonical.has(canonicalId)) continue;
+            seenCanonical.add(canonicalId);
+            targets.push({
+                taskId: canonicalId,
+                taskName: match?.displayName || match?.prompt?.substring(0, 60) || canonicalId,
+                // The index is part of the id on purpose: the whole batch is
+                // minted in the same millisecond, and the frontend de-dupes
+                // pending requests BY requestId — a collision would silently
+                // drop a task from the popup while the tool still waited on it.
+                requestId: `del-${Date.now()}-${targets.length}-${Math.random().toString(36).slice(2, 8)}`,
+            });
+        }
+
+        if (targets.length === 0) {
+            return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: 'No deletable tasks in the request.', skipped }, null, 2) }] };
+        }
+
+        log.info(`Requesting user confirmation to delete ${targets.length} task(s)`, { taskIds: targets.map(t => t.taskId) });
+
+        try {
+            // All requests go out on ONE socket in one burst, so the frontend
+            // collects them into a single batched confirmation modal.
+            const outcomes = await sendWSBatchWithMultiResponse<'approved' | 'rejected'>(
+                targets.map(t => ({
+                    type: 'task:deleteRequest',
+                    payload: { taskId: t.taskId, requestId: t.requestId, taskName: t.taskName },
+                })),
+                targets.map(t => t.taskId),
+                (msg) => {
+                    if (msg.type === 'task:destroyed' && msg.payload?.taskId) {
+                        return { key: msg.payload.taskId as string, value: 'approved' as const };
+                    }
+                    if (msg.type === 'task:deleteRejected' && msg.payload?.requestId) {
+                        const t = targets.find(x => x.requestId === msg.payload.requestId);
+                        if (t) return { key: t.taskId, value: 'rejected' as const };
+                    }
+                    return null;
+                },
+                120000
+            );
+
+            const deleted = targets.filter(t => outcomes.get(t.taskId) === 'approved');
+            const rejected = targets.filter(t => outcomes.get(t.taskId) === 'rejected');
+            const noResponse = targets.filter(t => !outcomes.has(t.taskId));
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                        success: deleted.length > 0,
+                        message: `${deleted.length} deleted (archived), ${rejected.length} kept by user`
+                            + (noResponse.length > 0 ? `, ${noResponse.length} with no response within 120s` : ''),
+                        deleted: deleted.map(t => ({ taskId: t.taskId, taskName: t.taskName })),
+                        kept: rejected.map(t => ({ taskId: t.taskId, taskName: t.taskName })),
+                        ...(noResponse.length > 0 ? { noResponse: noResponse.map(t => ({ taskId: t.taskId, taskName: t.taskName })) } : {}),
+                        ...(skipped.length > 0 ? { skipped } : {}),
+                    }, null, 2)
+                }]
+            };
+        } catch (error) {
+            log.error('Failed to bulk-delete tasks:', error);
+            const msg = error instanceof Error ? error.message : String(error);
+            return { content: [{ type: 'text', text: `Error deleting tasks: ${msg}` }] };
         }
     }
 );

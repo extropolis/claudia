@@ -157,6 +157,23 @@
 }
 
 /* Batch delete task list */
+.delete-request-toggle-all {
+    align-self: flex-start;
+    margin-top: 8px;
+    padding: 2px 8px;
+    font-size: 12px;
+    background: transparent;
+    border: 1px solid var(--border-color, #30363d);
+    border-radius: 5px;
+    color: var(--text-secondary, #8b949e);
+    cursor: pointer;
+}
+
+.delete-request-toggle-all:hover {
+    color: var(--text-primary, #e6edf3);
+    background: rgba(255, 255, 255, 0.05);
+}
+
 .delete-request-list {
     display: flex;
     flex-direction: column;

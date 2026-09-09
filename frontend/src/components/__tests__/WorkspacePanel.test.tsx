@@ -871,6 +871,45 @@ describe('WorkspacePanel', () => {
         expect(useTaskStore.getState().pendingDeleteRequests).toEqual([]);
     });
 
+    /**
+     * With bulk delete routing many requests into one dialog, unchecking twenty
+     * boxes by hand is the difference between one click and twenty. The toggle
+     * only appears once there is more than one request to toggle.
+     */
+    it('offers a check-all/uncheck-all toggle only for multi-task batches', () => {
+        const { props } = renderWorkspacePanel({
+            store: {
+                pendingDeleteRequests: [
+                    { taskId: 't1', requestId: 'req-1', taskName: 'One' },
+                    { taskId: 't2', requestId: 'req-2', taskName: 'Two' },
+                    { taskId: 't3', requestId: 'req-3', taskName: 'Three' },
+                ],
+            },
+        });
+
+        // All pre-checked, so the toggle offers the clearing action.
+        fireEvent.click(screen.getByRole('button', { name: 'Uncheck all' }));
+        expect((screen.getByLabelText('One') as HTMLInputElement).checked).toBe(false);
+        expect((screen.getByLabelText('Three') as HTMLInputElement).checked).toBe(false);
+        expect(screen.getByRole('button', { name: 'Reject All' })).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Check all' }));
+        expect((screen.getByLabelText('One') as HTMLInputElement).checked).toBe(true);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Delete All' }));
+        expect(props.onArchiveTask).toHaveBeenCalledTimes(3);
+        expect(props.onRejectDeleteRequest).not.toHaveBeenCalled();
+    });
+
+    it('shows no check-all toggle for a single request', () => {
+        renderWorkspacePanel({
+            store: {
+                pendingDeleteRequests: [{ taskId: 't1', requestId: 'req-1', taskName: 'Only' }],
+            },
+        });
+        expect(screen.queryByRole('button', { name: /check all/i })).not.toBeInTheDocument();
+    });
+
     it('rejects every pending delete request when the dialog is cancelled', () => {
         const { props } = renderWorkspacePanel({
             store: {

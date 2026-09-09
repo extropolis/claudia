@@ -2972,6 +2972,19 @@ export function WorkspacePanel({
                     }}
                 >
                     <p>{pendingDeleteRequests.length === 1 ? 'An agent is requesting to delete this task:' : 'An agent is requesting to delete the following tasks:'}</p>
+                    {pendingDeleteRequests.length > 1 && (
+                        <button
+                            type="button"
+                            className="delete-request-toggle-all"
+                            onClick={() => setCheckedDeleteIds(
+                                checkedDeleteIds.size === pendingDeleteRequests.length
+                                    ? new Set()
+                                    : new Set(pendingDeleteRequests.map(r => r.requestId))
+                            )}
+                        >
+                            {checkedDeleteIds.size === pendingDeleteRequests.length ? 'Uncheck all' : 'Check all'}
+                        </button>
+                    )}
                     <div className="delete-request-list">
                         {pendingDeleteRequests.map(r => (
                             <label key={r.requestId} className="delete-request-item">

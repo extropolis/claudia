@@ -173,7 +173,7 @@ describe('tool schema integrity', () => {
         'claudia_create_task', 'claudia_create_tasks', 'claudia_wait_for_task',
         'claudia_send_input', 'claudia_continue_task',
         'claudia_stop_task', 'claudia_stop_all_tasks', 'claudia_rename_task',
-        'claudia_delete_task', 'claudia_cron_create', 'claudia_cron_list',
+        'claudia_delete_task', 'claudia_delete_tasks', 'claudia_cron_create', 'claudia_cron_list',
         'claudia_cron_delete', 'claudia_cron_pause',
         // The Jira surface is registered unconditionally by the same server; the
         // backend's /api/jira/* routes are what enforce the enabled/configured
@@ -216,6 +216,7 @@ describe('tool schema integrity', () => {
             claudia_stop_all_tasks: [],
             claudia_rename_task: ['taskId', 'displayName'],
             claudia_delete_task: ['taskId'],
+            claudia_delete_tasks: ['taskIds'],
             claudia_cron_create: ['taskId', 'prompt', 'cronExpression'],
             claudia_cron_list: [],
             claudia_cron_delete: ['cronId'],
@@ -502,6 +503,120 @@ describe('claudia_delete_task guardrail', () => {
         // The critical assertion: the task actually survived.
         const list = await callTool('claudia_list_tasks');
         expect(list.json.map((t: any) => t.id)).toContain('task-wt-1');
+    }, 30000);
+});
+
+// ============================================================================
+// Bulk delete — one popup, not N
+//
+// The regression this pins: deleting many tasks used to mean calling
+// claudia_delete_task in a loop, and because each call waited for its own
+// approval before the next one was sent, the frontend only ever held ONE
+// pending request at a time — so the user had to dismiss a separate popup per
+// task. claudia_delete_tasks must emit every confirmation request in a single
+// burst, which is what lets the frontend's batched modal list them all at once.
+// ============================================================================
+describe('claudia_delete_tasks (bulk)', () => {
+    /**
+     * Stand in for the frontend: collect every task:deleteRequest, and answer
+     * each one via `decide`. `arrivedBeforeFirstReply` records how many requests
+     * were already in hand at the moment the first answer was sent — that is the
+     * "one popup" property, expressed as a number.
+     */
+    async function fakeFrontend(decide: (taskId: string) => 'approve' | 'reject') {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+        await new Promise<void>((res, rej) => {
+            ws.on('open', () => res());
+            ws.on('error', rej);
+        });
+        const requests: { taskId: string; requestId: string; taskName?: string }[] = [];
+        const state = { arrivedBeforeFirstReply: 0, replied: false };
+
+        // Give the burst a moment to land in full before answering, exactly as a
+        // human staring at the modal would. Without the batching fix only one
+        // request can ever be here.
+        const answerAll = () => {
+            if (!state.replied) {
+                state.replied = true;
+                state.arrivedBeforeFirstReply = requests.length;
+            }
+            for (const r of requests.splice(0)) {
+                ws.send(JSON.stringify(decide(r.taskId) === 'approve'
+                    ? { type: 'task:archive', payload: { taskId: r.taskId } }
+                    : { type: 'task:deleteRejected', payload: { taskId: r.taskId, requestId: r.requestId } }));
+            }
+        };
+        let settle: ReturnType<typeof setTimeout> | undefined;
+
+        ws.on('message', (data: Buffer) => {
+            let msg: any;
+            try { msg = JSON.parse(data.toString()); } catch { return; }
+            if (msg.type !== 'task:deleteRequest') return;
+            requests.push(msg.payload);
+            if (settle) clearTimeout(settle);
+            settle = setTimeout(answerAll, 300);
+        });
+
+        return { close: () => ws.close(), state };
+    }
+
+    it('sends every confirmation request in ONE burst (a single popup, not one per task)', async () => {
+        const fe = await fakeFrontend(() => 'reject');
+        const { json } = await callTool('claudia_delete_tasks', {
+            taskIds: ['task-wt-1', 'task-root-1', 'task-child-1'],
+        });
+        fe.close();
+
+        // The whole point: all three were pending simultaneously.
+        expect(fe.state.arrivedBeforeFirstReply).toBe(3);
+
+        expect(json.success).toBe(false);
+        expect(json.deleted).toEqual([]);
+        expect(json.kept.map((t: any) => t.taskId).sort())
+            .toEqual(['task-child-1', 'task-root-1', 'task-wt-1']);
+
+        // Rejected means alive.
+        const list = await callTool('claudia_list_tasks');
+        const ids = list.json.map((t: any) => t.id);
+        expect(ids).toContain('task-wt-1');
+        expect(ids).toContain('task-root-1');
+    }, 30000);
+
+    it('skips the calling session and unknown ids, and still processes the rest', async () => {
+        const fe = await fakeFrontend(() => 'reject');
+        const { json } = await callTool('claudia_delete_tasks', {
+            taskIds: [SELF_TASK, 'ghost-task', 'task-wt-1', 'task-wt-1'],
+        });
+        fe.close();
+
+        expect(json.kept.map((t: any) => t.taskId)).toEqual(['task-wt-1']);
+        const reasons = Object.fromEntries(json.skipped.map((s: any) => [s.taskId, s.reason]));
+        expect(reasons[SELF_TASK]).toMatch(/currently running session/i);
+        expect(reasons['ghost-task']).toMatch(/not found/i);
+    }, 30000);
+
+    it('refuses outright when nothing in the batch is deletable', async () => {
+        const { json } = await callTool('claudia_delete_tasks', { taskIds: [SELF_TASK, 'ghost-task'] });
+        expect(json.success).toBe(false);
+        expect(json.message).toMatch(/no deletable tasks/i);
+        expect(json.skipped).toHaveLength(2);
+    });
+
+    it('honours a per-task decision — approved ones archive, unchecked ones survive', async () => {
+        const fe = await fakeFrontend(id => (id === 'task-wt-1' ? 'reject' : 'approve'));
+        const { json } = await callTool('claudia_delete_tasks', {
+            taskIds: ['task-locked', 'task-child-1', 'task-wt-1'],
+        });
+        fe.close();
+
+        expect(json.success).toBe(true);
+        expect(json.deleted.map((t: any) => t.taskId).sort()).toEqual(['task-child-1', 'task-locked']);
+        expect(json.kept.map((t: any) => t.taskId)).toEqual(['task-wt-1']);
+
+        const ids = (await callTool('claudia_list_tasks')).json.map((t: any) => t.id);
+        expect(ids).not.toContain('task-locked');
+        expect(ids).not.toContain('task-child-1');
+        expect(ids).toContain('task-wt-1');
     }, 30000);
 });
 
