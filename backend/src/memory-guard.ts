@@ -43,6 +43,13 @@ export interface SelectionInput {
     rssByPid: Map<number, number>;
     budgetBytes: number;
     minLive: number;
+    /**
+     * Hard cap on live task count, independent of RSS. Lets a caller shed on
+     * "too many concurrent sessions" (e.g. under sustained CPU pressure) using
+     * the same coldest-first, minLive-respecting mechanics as the RSS budget,
+     * without a second selection pass. Omit to disable this trigger.
+     */
+    maxLive?: number;
 }
 
 export interface SelectionResult {
@@ -68,15 +75,16 @@ export interface SelectionResult {
  * touching working agents.
  */
 export function selectTasksToDisconnect(input: SelectionInput): SelectionResult {
-    const { tasks, rssByPid, budgetBytes, minLive } = input;
+    const { tasks, rssByPid, budgetBytes, minLive, maxLive } = input;
 
     const rssOf = (t: GuardCandidate) =>
         t.pid !== undefined ? rssByPid.get(t.pid) ?? 0 : 0;
 
     const live = tasks.filter(t => t.pid !== undefined);
     const usedBytes = live.reduce((s, t) => s + rssOf(t), 0);
+    const cap = maxLive ?? Infinity;
 
-    if (usedBytes <= budgetBytes) {
+    if (usedBytes <= budgetBytes && live.length <= cap) {
         return { toDisconnect: [], usedBytes, projectedBytes: usedBytes };
     }
 
@@ -89,7 +97,7 @@ export function selectTasksToDisconnect(input: SelectionInput): SelectionResult 
     let liveCount = live.length;
 
     for (const t of coldestFirst) {
-        if (projectedBytes <= budgetBytes) break;
+        if (projectedBytes <= budgetBytes && liveCount <= cap) break;
         if (liveCount <= minLive) break;
         toDisconnect.push(t.id);
         projectedBytes -= rssOf(t);
@@ -157,4 +165,35 @@ export function budgetBytesFromPct(pct: number): number {
 
 export function formatMB(bytes: number): number {
     return Math.round(bytes / 1048576);
+}
+
+/**
+ * System-wide CPU busy percentage between two `os.cpus()` samples.
+ *
+ * `os.loadavg()` always returns `[0, 0, 0]` on Windows, so it can't drive a
+ * cross-platform CPU trigger. `os.cpus()[i].times` are cumulative tick
+ * counters since boot on every platform, so diffing two samples a tick apart
+ * gives a real busy percentage everywhere. A single `os.cpus()` call is a
+ * snapshot, not a rate — hence the two-sample delta.
+ *
+ * Pure by design: callers own sampling cadence and state, so this is testable
+ * with synthetic tick data and no timers.
+ */
+export function computeCpuBusyPct(prev: os.CpuInfo[], curr: os.CpuInfo[]): number {
+    let totalIdleDiff = 0;
+    let totalTickDiff = 0;
+
+    for (let i = 0; i < curr.length; i++) {
+        const c = curr[i];
+        const p = prev[i] || c;
+
+        const currentTotal = c.times.user + c.times.nice + c.times.sys + c.times.idle + c.times.irq;
+        const prevTotal = p.times.user + p.times.nice + p.times.sys + p.times.idle + p.times.irq;
+
+        totalIdleDiff += c.times.idle - p.times.idle;
+        totalTickDiff += currentTotal - prevTotal;
+    }
+
+    if (totalTickDiff <= 0) return 0;
+    return Math.max(0, Math.min(100, (1 - totalIdleDiff / totalTickDiff) * 100));
 }

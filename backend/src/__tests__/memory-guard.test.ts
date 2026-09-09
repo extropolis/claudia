@@ -6,10 +6,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import type { CpuInfo } from 'os';
 import {
     selectTasksToDisconnect,
     budgetBytesFromPct,
     measureRssByPid,
+    computeCpuBusyPct,
     GuardCandidate,
 } from '../memory-guard.js';
 
@@ -132,6 +134,100 @@ describe('selectTasksToDisconnect', () => {
         });
         expect(r.toDisconnect).toEqual([]);
         expect(r.usedBytes).toBe(0);
+    });
+
+    it('does nothing when live count is within maxLive, regardless of budget slack', () => {
+        const r = selectTasksToDisconnect({
+            tasks: [task('a', 'idle', 10, 1), task('b', 'idle', 10, 2)],
+            rssByPid: rss([[1, 10], [2, 10]]),
+            budgetBytes: 1000 * MB,
+            minLive: 0,
+            maxLive: 5,
+        });
+        expect(r.toDisconnect).toEqual([]);
+    });
+
+    it('sheds the coldest down to maxLive even when well under the memory budget', () => {
+        const r = selectTasksToDisconnect({
+            tasks: [
+                task('warm', 'idle', 10, 1),
+                task('coldest', 'idle', 900, 2),
+                task('cold', 'idle', 300, 3),
+            ],
+            rssByPid: rss([[1, 10], [2, 10], [3, 10]]),
+            budgetBytes: 1000 * MB, // nowhere close
+            minLive: 1,
+            maxLive: 2, // 3 live -> shed the single coldest
+        });
+        expect(r.toDisconnect).toEqual(['coldest']);
+    });
+
+    it('respects minLive even when maxLive demands shedding further', () => {
+        const r = selectTasksToDisconnect({
+            tasks: [
+                task('a', 'idle', 900, 1),
+                task('b', 'idle', 800, 2),
+                task('c', 'idle', 700, 3),
+            ],
+            rssByPid: rss([[1, 10], [2, 10], [3, 10]]),
+            budgetBytes: 1000 * MB,
+            minLive: 2,
+            maxLive: 1, // would want to shed to 1 live, but the floor is 2
+        });
+        expect(r.toDisconnect).toEqual(['a']);
+    });
+
+    it('sheds enough to satisfy whichever of budget or maxLive demands more', () => {
+        const r = selectTasksToDisconnect({
+            tasks: [
+                task('a', 'idle', 900, 1),
+                task('b', 'idle', 800, 2),
+                task('c', 'idle', 10, 3),
+            ],
+            rssByPid: rss([[1, 50], [2, 50], [3, 50]]), // 150MB used
+            budgetBytes: 120 * MB, // shedding 'a' alone satisfies the budget
+            minLive: 0,
+            maxLive: 1, // but the session cap wants live count down to 1
+        });
+        expect(r.toDisconnect).toEqual(['a', 'b']);
+    });
+});
+
+describe('computeCpuBusyPct', () => {
+    function cpu(idle: number, other: number): CpuInfo {
+        return { model: 'test', speed: 0, times: { user: other, nice: 0, sys: 0, idle, irq: 0 } };
+    }
+
+    it('reports 0% when the two samples have not advanced', () => {
+        const sample = [cpu(1000, 0)];
+        expect(computeCpuBusyPct(sample, sample)).toBe(0);
+    });
+
+    it('reports 100% busy when idle ticks never advance but total ticks do', () => {
+        const prev = [cpu(1000, 0)];
+        const curr = [cpu(1000, 100)]; // all 100 new ticks went to "user", none to idle
+        expect(computeCpuBusyPct(prev, curr)).toBe(100);
+    });
+
+    it('reports a proportional busy percentage', () => {
+        const prev = [cpu(1000, 0)];
+        const curr = [cpu(1050, 50)]; // 100 new ticks total, half idle
+        expect(computeCpuBusyPct(prev, curr)).toBe(50);
+    });
+
+    it('sums across cores rather than averaging per-core percentages', () => {
+        const prev = [cpu(1000, 0), cpu(1000, 0)];
+        // core 0 fully busy (100 new ticks, 0 idle), core 1 fully idle (100 new ticks, all idle)
+        const curr = [cpu(1000, 100), cpu(1100, 0)];
+        expect(computeCpuBusyPct(prev, curr)).toBe(50);
+    });
+
+    it('treats a missing previous sample (new core coming online) as a zero baseline', () => {
+        const prev: CpuInfo[] = [];
+        const curr = [cpu(1000, 0)];
+        // No prior sample for this core -> prev falls back to curr, so the
+        // diff is zero and it must not be misread as "fully busy".
+        expect(computeCpuBusyPct(prev, curr)).toBe(0);
     });
 });
 
