@@ -3,6 +3,7 @@ import { useTaskStore } from '../stores/taskStore';
 import { WSMessage, WSErrorPayload, Task, Workspace, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
 import { getWebSocketUrl, getApiBaseUrl, isTunnelAccess } from '../config/api-config';
 import { playTaskCompletionSound, sendTaskCompletionNotification, sendTaskWaitingInputNotification } from '../utils/browserCapabilities';
+import { clientIdentity } from '../config/client-identity';
 
 const WS_URL = getWebSocketUrl();
 const API_URL = getApiBaseUrl();
@@ -207,7 +208,12 @@ export function useWebSocket() {
                         const payload = message.payload as {
                             tasks: Task[];
                             workspaces: Workspace[];
+                            clientId?: string;
                         };
+                        // Remember who we are: TerminalView compares this to the
+                        // ownerClientId in task:viewers to decide whether its own
+                        // resizes will be honoured by the PTY.
+                        if (payload.clientId) clientIdentity.id = payload.clientId;
                         setTasks(payload.tasks);
                         if (payload.workspaces) {
                             setWorkspaces(payload.workspaces);

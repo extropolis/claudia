@@ -11,6 +11,7 @@ import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
 import { TaskSpawner } from './task-spawner.js';
+import { ViewerRegistry } from './viewer-registry.js';
 import { WorkspaceStore } from './workspace-store.js';
 import { ConfigStore, type AppConfig } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
@@ -60,6 +61,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'task:refreshPr',
     'task:input',
     'task:resize',
+    'task:focus',
     'task:destroy',
     'task:stop',
     'task:stopAll',
@@ -790,6 +792,14 @@ export async function createApp(basePath?: string) {
 
     // Track connected clients with their alive status for heartbeat
     const clients = new Set<WebSocket>();
+    // Per-task terminal ownership. One backend serves many clients, but a PTY
+    // has exactly one size — see viewer-registry.ts for the model. Only the
+    // owning client's `task:resize` reaches the PTY; everyone else watches at
+    // the owner's dimensions.
+    const viewers = new ViewerRegistry();
+    // Last dimensions broadcast per task, so an owner resize that lands on the
+    // same size does not re-broadcast on every debounce tick.
+    const lastBroadcastDims = new Map<string, string>();
     const clientAliveMap = new WeakMap<WebSocket, boolean>();
     // Clients connected from loopback (localhost). Used to scope broadcasts that
     // may carry sensitive data (e.g. Jira ticket content) so they never reach a
@@ -875,6 +885,31 @@ export async function createApp(basePath?: string) {
                 clients.delete(client);
             }
         }
+    }
+
+    /**
+     * Tell every client who owns a task's terminal, how many people are
+     * watching it, and what size the PTY is actually running at.
+     *
+     * `count` is the number of connected clients CURRENTLY FOCUSED on the task
+     * (the UI mounts one terminal at a time, so focused == viewing). Non-owners
+     * use `cols`/`rows` to render at the owner's size instead of reflowing to
+     * their own width and fighting over the PTY.
+     */
+    function broadcastViewers(taskId: string): void {
+        const snap = viewers.snapshot(taskId);
+        const dims = taskSpawner.getTaskDimensions(taskId);
+        if (dims) lastBroadcastDims.set(taskId, `${dims.cols}x${dims.rows}`);
+        broadcast({
+            type: 'task:viewers',
+            payload: {
+                taskId,
+                count: snap.count,
+                ownerClientId: snap.ownerClientId,
+                cols: dims?.cols,
+                rows: dims?.rows,
+            },
+        });
     }
 
     // Flush batched broadcasts
@@ -1567,6 +1602,10 @@ export async function createApp(basePath?: string) {
 
     taskSpawner.on('taskDestroyed', (taskId: string) => {
         broadcast({ type: 'task:destroyed', payload: { taskId } });
+        // Drop viewer/ownership bookkeeping for a task that no longer exists,
+        // so the maps track live tasks rather than growing for the process life.
+        viewers.dropTask(taskId);
+        lastBroadcastDims.delete(taskId);
         // Clean up any scheduled tasks for this task
         const removed = cronScheduler.removeAllForTask(taskId);
         if (removed > 0) {
@@ -1729,7 +1768,9 @@ export async function createApp(basePath?: string) {
         const workspaces = workspaceStore.getWorkspaces();
         ws.send(JSON.stringify({
             type: 'init',
-            payload: { tasks, workspaces }
+            // clientId: the client compares this against `ownerClientId` in
+            // task:viewers to know whether its own resizes will be honoured.
+            payload: { tasks, workspaces, clientId }
         }));
         // Send tunnel status so reconnecting clients (e.g. after tsx watch restart) know
         // the tunnel is still active without waiting for a user action to trigger it.
@@ -2033,9 +2074,46 @@ export async function createApp(basePath?: string) {
                     }
 
                     case 'task:resize': {
-                        // Resize a task's terminal
+                        // Resize a task's terminal — ONLY if this client owns it.
+                        //
+                        // A PTY has one size. Before ownership, every connected
+                        // client's width was applied unconditionally and the last
+                        // writer won, so three viewers with three window widths
+                        // produced a continuous SIGWINCH fight and a garbled TUI.
+                        // A non-owner's resize is dropped SILENTLY: a background
+                        // tab reflowing is normal, not a fault, so it must not
+                        // generate an error frame.
                         const { taskId, cols, rows } = payload as { taskId?: string; cols?: number; rows?: number };
-                        if (taskId && cols && rows) taskSpawner.resizeTask(taskId, cols, rows);
+                        if (taskId && cols && rows) {
+                            // claim() also covers the no-owner case: a client
+                            // that never sends task:focus (older frontend, a
+                            // script) still gets a working terminal.
+                            if (!viewers.claim(taskId, clientId)) {
+                                logger.debug('Ignoring resize from non-owner client', { taskId, clientId });
+                                break;
+                            }
+                            taskSpawner.resizeTask(taskId, cols, rows);
+                            // Re-broadcast only when the size actually moved, so
+                            // the debounced stream of identical resizes does not
+                            // turn into a broadcast storm.
+                            if (lastBroadcastDims.get(taskId) !== `${cols}x${rows}`) {
+                                broadcastViewers(taskId);
+                            }
+                        }
+                        break;
+                    }
+
+                    case 'task:focus': {
+                        // This client is now displaying `taskId`, making it the
+                        // owner of that terminal. Focus is the primary way
+                        // ownership moves: whoever is actually looking at the
+                        // task gets to decide how wide it is.
+                        const { taskId } = payload as { taskId?: string };
+                        if (taskId) {
+                            for (const affected of viewers.focus(taskId, clientId)) {
+                                broadcastViewers(affected);
+                            }
+                        }
                         break;
                     }
 
@@ -3404,6 +3482,12 @@ export async function createApp(basePath?: string) {
             const reasonStr = reason.toString() || 'no reason';
             console.log(`[Server] Client disconnected - code: ${code}, reason: ${reasonStr}`);
             clients.delete(ws);
+            // Release every terminal this client owned. Without this a closed
+            // laptop lid would pin a task's PTY at a dead client's width
+            // forever; the next focus or resize re-claims it.
+            for (const affected of viewers.dropClient(clientId)) {
+                broadcastViewers(affected);
+            }
         });
 
         ws.on('error', (error: Error) => {

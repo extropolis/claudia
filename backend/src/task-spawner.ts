@@ -572,6 +572,16 @@ export class TaskSpawner extends EventEmitter {
     private sessionToTaskId: Map<string, string> = new Map(); // Map session IDs to task IDs
     /** Stores terminal size for disconnected tasks so it can be applied after reconnection */
     private pendingResizes: Map<string, { cols: number; rows: number }> = new Map();
+    /**
+     * The size each live PTY is actually running at.
+     *
+     * Under the multi-client viewer model only the task's OWNER may resize it,
+     * and every other viewer renders at the owner's dimensions rather than its
+     * own. That means the true PTY size is no longer a private detail of the
+     * process — the server broadcasts it in `task:viewers` so non-owners know
+     * what to render at. Written on spawn and on every applied resize.
+     */
+    private taskDimensions: Map<string, { cols: number; rows: number }> = new Map();
 
     // State polling (replaces hooks and output-based streaming detection)
     private statePollingInterval: NodeJS.Timeout | null = null;
@@ -4034,6 +4044,8 @@ export class TaskSpawner extends EventEmitter {
             process: 'opencode'
         } as unknown as IPty;
 
+        this.taskDimensions.set(backendTask.id, { cols: 120, rows: 40 });
+
         const now = new Date();
         const task: InternalTask = {
             id: backendTask.id,
@@ -4287,6 +4299,10 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             env: taskEnv,
             ...(USE_WINPTY ? { useConpty: false } : {}),
         });
+
+        // Seed the live-dimension map so `task:viewers` can report the real PTY
+        // size before anyone has resized it.
+        this.taskDimensions.set(id, { cols: initialCols || 120, rows: initialRows || 40 });
 
         const now = new Date();
         const task: InternalTask = {
@@ -5435,6 +5451,17 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         }
     }
 
+    /**
+     * The size a task's terminal is running at — the dimensions it was spawned
+     * with, updated by every applied resize. Undefined for a task this process
+     * has never spawned. A disconnected task keeps its last size, because that
+     * is what it will respawn at. Used by the server to tell non-owner viewers
+     * what dimensions to render at (see viewer-registry.ts).
+     */
+    getTaskDimensions(taskId: string): { cols: number; rows: number } | undefined {
+        return this.taskDimensions.get(taskId);
+    }
+
     resizeTask(taskId: string, cols: number, rows: number): void {
         const task = this.tasks.get(taskId);
         if (!task) {
@@ -5443,6 +5470,8 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             this.pendingResizes.set(taskId, { cols, rows });
             return;
         }
+
+        this.taskDimensions.set(taskId, { cols, rows });
 
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
@@ -5617,6 +5646,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
         // Clean up any pending resize for this task
         this.pendingResizes.delete(taskId);
+        this.taskDimensions.delete(taskId);
 
         // Only emit once, regardless of which map(s) the task was in
         if (destroyed) {
@@ -6060,6 +6090,10 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             }
 
             const pendingSizeOC = this.pendingResizes.get(taskId);
+            this.taskDimensions.set(taskId, {
+                cols: pendingSizeOC?.cols || 120,
+                rows: pendingSizeOC?.rows || 40,
+            });
             ptyProcess = spawn(exe('opencode'), opencodeArgs, {
                 name: 'xterm-256color',
                 cols: pendingSizeOC?.cols || 120,
@@ -6135,6 +6169,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             const pendingSize = this.pendingResizes.get(taskId);
             const spawnCols = pendingSize?.cols || 120;
             const spawnRows = pendingSize?.rows || 40;
+            this.taskDimensions.set(taskId, { cols: spawnCols, rows: spawnRows });
             const { command: claudeCmd2, prefixArgs: claudePrefix2 } = resolveClaudeSpawn();
             ptyProcess = spawn(claudeCmd2, [...claudePrefix2, ...claudeArgs], {
                 name: 'xterm-256color',

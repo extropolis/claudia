@@ -67,6 +67,12 @@ const xterm = vi.hoisted(() => {
             this.element = root;
         }
 
+        /** Real xterm applies the size and then fires onResize; so does this. */
+        resize(cols: number, rows: number) {
+            this.cols = cols;
+            this.rows = rows;
+            this.resizeCb?.({ cols, rows });
+        }
         write(data: string, cb?: () => void) { this.writes.push(data); cb?.(); }
         reset() { this.resetCount += 1; this.writes = []; }
         refresh() { this.refreshCount += 1; }
@@ -109,6 +115,7 @@ vi.mock('../TaskTokenStats', () => ({ TaskTokenStats: () => null }));
 
 import { TerminalView } from '../TerminalView';
 import { useTaskStore } from '../../stores/taskStore';
+import { clientIdentity } from '../../config/client-identity';
 import { getApiBaseUrl } from '../../config/api-config';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../../types/theme';
 
@@ -173,6 +180,9 @@ function mountTerminal(props: { task?: Partial<Task>; workspace?: Workspace; isM
 beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();
+    // The server hands this out in `init`; the viewer model compares it to the
+    // ownerClientId in task:viewers.
+    clientIdentity.id = 'web:127.0.0.1#1';
     xterm.instances.length = 0;
     useTaskStore.setState({ themePreference: 'dark' });
 
@@ -205,7 +215,10 @@ describe('TerminalView — mount handshake', () => {
         const { socket, term } = mountTerminal();
 
         expect(term.container).not.toBeNull();
+        // task:focus comes FIRST: it claims ownership of the terminal, and only
+        // the owner's resize is applied to the PTY.
         expect(frames(socket)).toEqual([
+            { type: 'task:focus', payload: { taskId: TASK_ID } },
             { type: 'task:resize', payload: { taskId: TASK_ID, cols: 80, rows: 24 } },
             { type: 'task:select', payload: { taskId: TASK_ID } },
         ]);
@@ -765,5 +778,161 @@ describe('TerminalView — theming', () => {
         act(() => { useTaskStore.setState({ themePreference: 'light' }); });
 
         expect(term.options.theme).toEqual(LIGHT_TERMINAL_THEME);
+    });
+});
+
+describe('TerminalView — multi-client viewer model', () => {
+    const ME = 'web:127.0.0.1#1';
+    const OTHER = 'web:127.0.0.1#2';
+
+    function viewers(
+        socket: FakeSocket,
+        payload: { ownerClientId: string | null; count?: number; cols?: number; rows?: number },
+    ) {
+        emit(socket, {
+            type: 'task:viewers',
+            payload: { taskId: TASK_ID, count: 1, ...payload },
+        });
+    }
+
+    it('claims the terminal on mount before sending its size', () => {
+        const { socket } = mountTerminal();
+
+        const sent = frames(socket).map(f => f.type);
+        expect(sent.indexOf('task:focus')).toBeLessThan(sent.indexOf('task:resize'));
+    });
+
+    it('does NOT emit task:resize once another client owns the terminal', () => {
+        const { socket, term } = mountTerminal();
+        viewers(socket, { ownerClientId: OTHER, cols: 120, rows: 40 });
+        socket.send.mockClear();
+
+        // A real local resize (well past the 2-column suppression window).
+        act(() => { term.resizeCb?.({ cols: 60, rows: 20 }); });
+
+        expect(frames(socket, 'task:resize')).toHaveLength(0);
+    });
+
+    it('renders at the owner\'s dimensions instead of its own', () => {
+        const { socket, term } = mountTerminal();
+
+        viewers(socket, { ownerClientId: OTHER, cols: 120, rows: 40 });
+
+        expect({ cols: term.cols, rows: term.rows }).toEqual({ cols: 120, rows: 40 });
+    });
+
+    it('following the owner does not echo back as a resize request', () => {
+        // term.resize() fires xterm's onResize. Without the ownership guard that
+        // would bounce straight back to the server as a task:resize, which is
+        // exactly the ping-pong this model removes.
+        const { socket, term } = mountTerminal();
+        socket.send.mockClear();
+
+        viewers(socket, { ownerClientId: OTHER, cols: 120, rows: 40 });
+
+        expect(term.cols).toBe(120);
+        expect(frames(socket, 'task:resize')).toHaveLength(0);
+    });
+
+    it('stops fitting to its own container while following', () => {
+        const { socket, view, term } = mountTerminal();
+        const fitAddon = term.addons[0] as { fitCount: number };
+        const container = view.container.querySelector('.terminal-container') as HTMLElement;
+        Object.defineProperty(container, 'clientWidth', { configurable: true, value: 800 });
+        Object.defineProperty(container, 'clientHeight', { configurable: true, value: 600 });
+
+        viewers(socket, { ownerClientId: OTHER, cols: 120, rows: 40 });
+        const fitsBefore = fitAddon.fitCount;
+
+        act(() => { window.dispatchEvent(new Event('resize')); });
+        act(() => { vi.advanceTimersByTime(150); });
+
+        expect(fitAddon.fitCount).toBe(fitsBefore);
+    });
+
+    it('keeps sending resizes while it owns the terminal', () => {
+        const { socket, term } = mountTerminal();
+        viewers(socket, { ownerClientId: ME, cols: 80, rows: 24 });
+        socket.send.mockClear();
+
+        act(() => { term.resizeCb?.({ cols: 90, rows: 24 }); });
+
+        expect(frames(socket, 'task:resize')).toEqual([
+            { type: 'task:resize', payload: { taskId: TASK_ID, cols: 90, rows: 24 } },
+        ]);
+    });
+
+    it('treats an unowned task as claimable and resumes resizing', () => {
+        const { socket, term } = mountTerminal();
+        viewers(socket, { ownerClientId: OTHER, cols: 120, rows: 40 });
+        socket.send.mockClear();
+
+        // The owner disconnected: the server broadcasts a null owner.
+        viewers(socket, { ownerClientId: null, cols: 120, rows: 40 });
+        act(() => { term.resizeCb?.({ cols: 70, rows: 20 }); });
+
+        expect(frames(socket, 'task:resize')).toEqual([
+            { type: 'task:resize', payload: { taskId: TASK_ID, cols: 70, rows: 20 } },
+        ]);
+    });
+
+    it('refits to its own container the moment it regains ownership', () => {
+        const { socket, view, term } = mountTerminal();
+        const fitAddon = term.addons[0] as { fitCount: number };
+        const container = view.container.querySelector('.terminal-container') as HTMLElement;
+        Object.defineProperty(container, 'clientWidth', { configurable: true, value: 800 });
+        Object.defineProperty(container, 'clientHeight', { configurable: true, value: 600 });
+
+        viewers(socket, { ownerClientId: OTHER, cols: 120, rows: 40 });
+        const fitsBefore = fitAddon.fitCount;
+
+        viewers(socket, { ownerClientId: ME, cols: 120, rows: 40 });
+
+        expect(fitAddon.fitCount).toBe(fitsBefore + 1);
+    });
+
+    it('shows the owner\'s size as an unobtrusive badge, only while following', () => {
+        const { socket } = mountTerminal();
+        expect(screen.queryByText(/viewing at/)).toBeNull();
+
+        viewers(socket, { ownerClientId: OTHER, count: 3, cols: 120, rows: 40 });
+        expect(screen.getByText(/viewing at 120×40/)).toBeTruthy();
+        expect(screen.getByText(/3 viewers/)).toBeTruthy();
+
+        viewers(socket, { ownerClientId: ME, count: 1, cols: 120, rows: 40 });
+        expect(screen.queryByText(/viewing at/)).toBeNull();
+    });
+
+    it('scrolls rather than clips while following the owner', () => {
+        const { socket, view } = mountTerminal();
+        viewers(socket, { ownerClientId: OTHER, cols: 200, rows: 60 });
+
+        const container = view.container.querySelector('.terminal-container') as HTMLElement;
+        expect(container.className).toContain('terminal-container--follower');
+    });
+
+    it('claims the terminal when the user clicks into it', () => {
+        const { socket, view } = mountTerminal();
+        viewers(socket, { ownerClientId: OTHER, cols: 120, rows: 40 });
+        socket.send.mockClear();
+
+        const container = view.container.querySelector('.terminal-container') as HTMLElement;
+        act(() => { fireEvent.mouseDown(container); });
+
+        expect(frames(socket, 'task:focus')).toEqual([
+            { type: 'task:focus', payload: { taskId: TASK_ID } },
+        ]);
+    });
+
+    it('ignores viewer frames for a different task', () => {
+        const { socket, term } = mountTerminal();
+
+        emit(socket, {
+            type: 'task:viewers',
+            payload: { taskId: 'other-task', count: 1, ownerClientId: OTHER, cols: 200, rows: 60 },
+        });
+
+        expect(term.cols).toBe(80);
+        expect(screen.queryByText(/viewing at/)).toBeNull();
     });
 });
