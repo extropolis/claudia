@@ -51,18 +51,25 @@ configured" if run somewhere without one).
       workspace).
 
    2. Cross-reference against live Claudia tasks so you never duplicate work
-      already in flight. Call claudia_list_tasks. In practice, tasks rarely
-      have their sessionWorktreePrInfo field populated, and a PR's number
-      rarely appears verbatim in a task's prompt/displayName (e.g. a task
-      titled "Audio transcription pipeline" owns a PR with no mention of its
-      number anywhere) — number-substring matching alone WILL miss real
-      ownership. Use branch name as the primary signal instead: run
-      `git worktree list` (or check each task's known worktree path) to see
-      which branch each active task is actually on, and match that against
-      each PR's headRefName. Only fall back to number-substring-in-text
-      matching when you can't resolve a task's branch at all. Log any PR you
-      couldn't confidently resolve either way as "ownership unclear" rather
-      than silently guessing.
+      already in flight. In practice, tasks rarely have their
+      sessionWorktreePrInfo field populated, and a PR's number rarely
+      appears verbatim in a task's prompt/displayName (e.g. a task titled
+      "Audio transcription pipeline" owns a PR with no mention of its number
+      anywhere) — number-substring matching alone WILL miss real ownership.
+      Use branch name as the primary signal instead, via a concrete two-step
+      join:
+        a. Call claudia_list_tasks and note each task's `workspaceId` — for
+           an isolated (worktree) task this IS the absolute path of its
+           worktree (a Claudia workspace's id is always its filesystem path).
+        b. Run `git worktree list` in this repo to get every worktree's path
+           and current branch. Match each task's workspaceId against a
+           worktree path (normalize slashes before comparing), read off that
+           worktree's branch, and compare it to each PR's headRefName.
+      A task whose workspaceId isn't a worktree path at all (i.e. it's
+      working directly in the main workspace, not isolated) can't own a PR
+      this way — fall back to number-substring-in-text matching only for
+      those. Log any PR you couldn't confidently resolve either way as
+      "ownership unclear" rather than silently guessing.
 
    3. For each unowned PR, categorize:
       - NEEDS REBASE: mergeable state shows conflicts.

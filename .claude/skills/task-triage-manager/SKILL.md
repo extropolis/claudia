@@ -53,10 +53,16 @@ wrong place.
         specific follow-up.
       - DONE AND LANDED: idle or exited, and its own work is already merged
         into main. Don't rely solely on a task's sessionWorktreePrInfo field —
-        in practice it's frequently empty. If the task is running in its own
-        worktree, check directly: run `git branch --show-current` and
-        `git log main..<that-branch>` in the task's own working directory,
-        or `gh pr view --json state,mergedAt` if you know its PR. Action:
+        in practice it's frequently empty. Check directly instead: a task's
+        `workspaceId` (from claudia_list_tasks) IS the absolute path of its
+        worktree if it's isolated (a Claudia workspace's id is always its
+        filesystem path) — run `git -C <workspaceId> branch --show-current`
+        to get its branch, then `git -C <workspaceId> log main..<branch>` to
+        see if anything is still unmerged (empty output = fully landed), or
+        `gh pr view --json state,mergedAt` if you know its PR. A task that
+        isn't isolated (workspaceId is just the main workspace, not a
+        worktree) is never "done and landed" in this sense — it's working
+        directly in the shared tree, so skip this check for it. Action:
         propose archiving it in your summary. Do NOT archive it yourself —
         always ask first.
       - WAITING ON YOU: state is waiting_input. Read the actual question. If
