@@ -11,6 +11,7 @@
  */
 
 import { writeFileSync, renameSync, unlinkSync, mkdirSync, existsSync } from 'fs';
+import { writeFile, rename, unlink, mkdir } from 'fs/promises';
 import { dirname } from 'path';
 
 export interface AtomicWriteOptions {
@@ -74,6 +75,57 @@ export function atomicWriteFileSync(
         // Clean up our tmp file on failure so we don't leave junk behind.
         try {
             if (existsSync(tmpPath)) unlinkSync(tmpPath);
+        } catch {
+            // Ignore cleanup errors
+        }
+        throw error;
+    }
+}
+
+/**
+ * Async twin of {@link atomicWriteFileSync}, for callers on a non-blocking save
+ * path (e.g. a debounced background save with many concurrent writers) that must
+ * not stall the event loop. Same tmp-file + optional `.bak` rollover + rename
+ * semantics — just via `fs/promises` instead of the sync fs API.
+ *
+ * Not a replacement for the sync version: callers that must guarantee a write
+ * completes before the next synchronous statement runs (e.g. immediately before
+ * process exit on shutdown) should keep using `atomicWriteFileSync`.
+ */
+export async function atomicWriteFileAsync(
+    filePath: string,
+    data: string | Buffer,
+    options?: AtomicWriteOptions
+): Promise<void> {
+    const { encoding, backup = false } = options ?? {};
+
+    const tmpPath = `${filePath}.${process.pid}.tmp`;
+    const bakPath = `${filePath}.bak`;
+    const dir = dirname(filePath);
+
+    if (!existsSync(dir)) {
+        await mkdir(dir, { recursive: true });
+    }
+
+    try {
+        if (typeof data === 'string') {
+            await writeFile(tmpPath, data, encoding ?? 'utf-8');
+        } else {
+            await writeFile(tmpPath, data);
+        }
+
+        if (backup && existsSync(filePath)) {
+            try {
+                await rename(filePath, bakPath);
+            } catch {
+                // Backup is best-effort; continue with the rename.
+            }
+        }
+
+        await rename(tmpPath, filePath);
+    } catch (error) {
+        try {
+            if (existsSync(tmpPath)) await unlink(tmpPath);
         } catch {
             // Ignore cleanup errors
         }
