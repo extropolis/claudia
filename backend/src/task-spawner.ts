@@ -1352,6 +1352,72 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Async twin of the tail-read half of {@link readTaskHistoryRange}, used
+     * when a user clicks a disconnected task in setTaskActive(). A click used
+     * to trigger a fully synchronous, UNBOUNDED readFileSync of the entire
+     * history file (archived/disconnected histories run up to the 10MB
+     * on-disk cap) plus a full base64 decode of that — both blocking the
+     * single event loop, and with it every other task's WebSocket traffic
+     * (including keystrokes to a completely unrelated, already-open task),
+     * for however long that took.
+     *
+     * Two fixes, not one: bound the read to the same 2MB tail every other
+     * history-display path already uses (getCombinedHistory, reconnect), AND
+     * do the read itself off the blocking path via fs/promises, so even that
+     * bounded read can't stall other tasks while it's in flight. The frontend
+     * already re-fetches earlier content on scroll-up via
+     * `/api/task/:id/history` (readTaskHistoryRange) regardless of how the
+     * initial tail arrived, so nothing here is permanently out of reach —
+     * only the very first render is capped, to make "the recent page" (the
+     * common case) fast without walling off full history.
+     */
+    private async loadDisconnectedTaskHistoryAsync(taskId: string): Promise<void> {
+        const MAX_CLICK_HISTORY = 2 * 1024 * 1024; // 2MB — matches getCombinedHistory's send cap
+        const historyPath = this.getTaskHistoryPath(taskId);
+        try {
+            if (existsSync(historyPath)) {
+                const stat = await statAsync(historyPath);
+                const handle = await openAsync(historyPath, 'r');
+                try {
+                    const sampleLen = Math.min(100, stat.size);
+                    const sampleBuf = Buffer.alloc(sampleLen);
+                    await handle.read(sampleBuf, 0, sampleLen, 0);
+                    const sample = sampleBuf.toString('utf8');
+                    const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
+
+                    const readLen = Math.min(stat.size, MAX_CLICK_HISTORY);
+                    const offset = stat.size - readLen;
+                    const buf = Buffer.alloc(readLen);
+                    await handle.read(buf, 0, readLen, offset);
+                    const history = isRawText ? buf.toString('utf8') : Buffer.from(buf.toString('utf-8'), 'base64').toString('utf8');
+                    if (readLen < stat.size) {
+                        console.log(`[TaskSpawner] Large history file (${stat.size} bytes), loaded tail ${MAX_CLICK_HISTORY} bytes for ${taskId} on select (async)`);
+                    }
+                    this.emit('taskRestore', taskId, history);
+                } finally {
+                    await handle.close();
+                }
+                return;
+            }
+
+            // Fallback: check in-memory outputHistory (older tasks or migration edge cases)
+            const persisted = this.disconnectedTasks.get(taskId);
+            if (persisted?.outputHistory) {
+                const history = Buffer.from(persisted.outputHistory, 'base64').toString('utf8');
+                this.emit('taskRestore', taskId, history);
+                return;
+            }
+
+            // Always emit taskRestore so the frontend clears loading state (prevents blank screen)
+            console.warn(`[TaskSpawner] No history found for disconnected task ${taskId}, sending empty restore`);
+            this.emit('taskRestore', taskId, '');
+        } catch (e) {
+            console.error(`[TaskSpawner] Failed to read history file for ${taskId}:`, e);
+            this.emit('taskRestore', taskId, '');
+        }
+    }
+
+    /**
      * Per-task carry-over of an incomplete trailing escape sequence between
      * incremental history appends. Without this, a query split across two save
      * batches (batch 1 ends "\x1b[", batch 2 starts "?6n") matches neither
@@ -4987,37 +5053,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             // Don't auto-reconnect on click - just show the stored history.
             // The task will be reconnected when the user actually sends input (via writeToTask).
             console.log(`[TaskSpawner] Showing history for disconnected task ${taskId} (no auto-reconnect)`);
-
-            // Try loading history from disk file first (primary storage), then fall back to in-memory
-            let historyRestored = false;
-            const historyPath = this.getTaskHistoryPath(taskId);
-            if (existsSync(historyPath)) {
-                try {
-                    const fileContent = readFileSync(historyPath, 'utf-8');
-                    // Detect format: raw text (contains ANSI escapes, spaces, brackets) vs base64
-                    const sample = fileContent.substring(0, 100);
-                    const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
-                    const history = isRawText ? fileContent : Buffer.from(fileContent, 'base64').toString('utf8');
-                    this.emit('taskRestore', taskId, history);
-                    historyRestored = true;
-                } catch (e) {
-                    console.error(`[TaskSpawner] Failed to read history file for ${taskId}:`, e);
-                }
-            } else {
-                // Fallback: check in-memory outputHistory (older tasks or migration edge cases)
-                const persisted = this.disconnectedTasks.get(taskId)!;
-                if (persisted.outputHistory) {
-                    const history = Buffer.from(persisted.outputHistory, 'base64').toString('utf8');
-                    this.emit('taskRestore', taskId, history);
-                    historyRestored = true;
-                }
-            }
-
-            // Always emit taskRestore so the frontend clears loading state (prevents blank screen)
-            if (!historyRestored) {
-                console.warn(`[TaskSpawner] No history found for disconnected task ${taskId}, sending empty restore`);
-                this.emit('taskRestore', taskId, '');
-            }
+            void this.loadDisconnectedTaskHistoryAsync(taskId);
             return;
         }
 
