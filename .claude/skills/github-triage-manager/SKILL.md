@@ -123,10 +123,13 @@ configured" if run somewhere without one).
       `.claudia-manager/github-triage-state.json` in this workspace's root
       (create the directory if needed), keyed by `<owner/repo>#<number>`,
       with { decidedAt, decision, note }, plus one top-level `cronExpression`
-      field recording your own current cadence. Read it at the start of each
-      run so you don't re-spawn a worker for a PR you already handled, and
-      don't re-flag the same ready-to-merge PR identically every single run
-      (a quiet reminder in the summary is fine; don't repeat the full
+      field recording your own current cadence. Whenever step 8 shows you an
+      active schedule (whether or not it needed renewing), write its
+      cronExpression here too, so the field is never stale even on runs where
+      nothing else changed. Read the whole file at the start of each run so
+      you don't re-spawn a worker for a PR you already handled, and don't
+      re-flag the same ready-to-merge PR identically every single run (a
+      quiet reminder in the summary is fine; don't repeat the full
       write-up).
 
    7. End every run with a short written summary: what's moving (workers

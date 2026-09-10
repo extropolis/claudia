@@ -86,8 +86,11 @@ wrong place.
       (create the directory if needed). Keep it small: one entry per taskId
       with { decidedAt, decision, note }, plus one top-level `cronExpression`
       field recording your own current cadence (so you can recreate your
-      schedule later if it lapses — see step 5). Read it at the start of
-      each run so you don't repeat yourself.
+      schedule later if it lapses — see step 5). Whenever step 5 shows you an
+      active schedule (whether or not it needed renewing), write its
+      cronExpression here too, so the field is never stale even on runs where
+      nothing else changed. Read the whole file at the start of each run so
+      you don't repeat yourself.
 
    4. End every run with a short written summary as your final message:
       what you found, what you did, what you're proposing (archive
