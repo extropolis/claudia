@@ -225,9 +225,19 @@ describe('atomicWriteFileAsync', () => {
             let missingCount = 0;
             let stop = false;
 
+            // 20 iterations with a small pacing delay -- enough repetition to make
+            // the interleaving reliably observable (the pre-fix code fails this
+            // reliably even at far fewer iterations), without hammering the OS
+            // rename call harder than production ever does: real saves are
+            // debounced to at most one per 500ms, never back-to-back. Back-to-back
+            // hammering with zero delay was found to manufacture real, sustained
+            // Windows file-lock contention (observed on CI) that isn't
+            // representative of anything the app actually does -- that's a
+            // separate concern from the gap this test exists to catch.
             const writer = (async () => {
-                for (let i = 1; i <= 60 && !stop; i++) {
+                for (let i = 1; i <= 20 && !stop; i++) {
                     await atomicWriteFileAsync(filePath, JSON.stringify({ n: i }), { backup: true });
+                    await new Promise(res => setTimeout(res, 3));
                 }
                 stop = true;
             })();
@@ -265,14 +275,14 @@ describe('atomicWriteFileAsync', () => {
         });
 
         it('retries a transient EBUSY too, and gives up after exhausting its retry budget', async () => {
-            // More failures than renameWithRetry's budget (4 delayed retries -> 5
+            // More failures than renameWithRetry's budget (6 delayed retries -> 7
             // total attempts) — the write must still fail, not retry forever.
-            renameMockState.failuresRemaining = 10;
+            renameMockState.failuresRemaining = 20;
             renameMockState.errorCode = 'EBUSY';
 
             const filePath = join(testBaseDir, 'stillbusy.txt');
             await expect(atomicWriteFileAsync(filePath, 'data')).rejects.toThrow(/EBUSY/);
-            expect(renameMockState.calls).toBe(5);
+            expect(renameMockState.calls).toBe(7);
         }, 20000);
 
         it('does not retry (and fails immediately) on a non-transient error', async () => {

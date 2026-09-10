@@ -34,7 +34,7 @@ import { dirname } from 'path';
  * it rather than dropping an otherwise-successful save on a transient lock.
  */
 async function renameWithRetry(from: string, to: string): Promise<void> {
-    const delaysMs = [10, 25, 50, 100];
+    const delaysMs = [10, 25, 50, 100, 200, 400];
     for (let attempt = 0; ; attempt++) {
         try {
             await rename(from, to);
