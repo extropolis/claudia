@@ -24,6 +24,7 @@ interface TestConfig {
     taskId: string | null;    // Task ID for operations
     stopTask: boolean;        // Stop a running task
     deleteTask: boolean;      // Delete a specific task
+    deleteRequest: boolean;   // Send a batched task:deleteRequest (confirmation prompt) and watch the broadcast
     clearTasks: boolean;      // Clear all tasks
     approvePlan: boolean;     // Approve current plan
     rejectPlan: boolean;      // Reject current plan
@@ -52,7 +53,7 @@ interface TestConfig {
     archiveTask: boolean;         // Archive a task
     gitPush: boolean;             // Push to GitHub
     backendStatus: boolean;       // Get backend status (no WebSocket needed)
-    setBackend: string | null;    // Set backend ('claude-code' or 'opencode')
+    setBackend: string | null;    // Set the default agent (any id from --backend-status)
     watchOutput: boolean;         // Stream task output to console
     waitForIdle: boolean;         // Wait for task to become idle before exiting
     listMcpServers: boolean;      // List available MCP servers (no WebSocket needed)
@@ -137,6 +138,9 @@ class TestCLI {
                 } else if (this.config.deleteTask && this.config.taskId) {
                     this.sendDeleteTask(this.config.taskId);
                     setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.deleteRequest && this.config.taskId) {
+                    this.sendDeleteRequest(this.config.taskId);
+                    setTimeout(() => this.cleanup(), 4000);
                 } else if (this.config.clearTasks) {
                     this.sendClearTasks();
                     setTimeout(() => this.cleanup(), 2000);
@@ -414,6 +418,28 @@ class TestCLI {
 
         console.log(`⏹️  Stopping task ${taskId}...`);
         this.ws.send(JSON.stringify(message));
+    }
+
+    /**
+     * Exercise the batched delete-confirmation protocol the `claudia_delete_tasks`
+     * MCP tool speaks: send ONE task:deleteRequest carrying N tasks and print the
+     * broadcast that comes back, so you can see that N tasks produce one prompt.
+     * Nothing is deleted — the broadcast only asks the UI to confirm.
+     */
+    private sendDeleteRequest(taskIds: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot send delete request: WebSocket not connected');
+            return;
+        }
+        const requests = taskIds.split(',').map(id => id.trim()).filter(Boolean).map(taskId => ({
+            taskId,
+            requestId: `cli-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            taskName: taskId,
+        }));
+        console.log(`\nSending ONE task:deleteRequest for ${requests.length} task(s):`);
+        requests.forEach(r => console.log(`   - ${r.taskId}  (requestId ${r.requestId})`));
+        console.log('Watching for the broadcast the frontend would render...\n');
+        this.ws.send(JSON.stringify({ type: 'task:deleteRequest', payload: { requests, ...requests[0] } }));
     }
 
     private sendDeleteTask(taskId: string): void {
@@ -933,6 +959,15 @@ class TestCLI {
         }
 
         switch (message.type) {
+            case 'task:deleteRequest': {
+                // What the frontend receives for --delete-request: ONE message
+                // carrying every task, which is what makes it ONE dialog.
+                const reqs = (message.payload?.requests ?? [message.payload]) as any[];
+                console.log(`[${elapsed}s] DELETE-REQ │ one broadcast carrying ${reqs.length} request(s)`);
+                reqs.forEach((r: any) => console.log(`             │   ${r.taskId}  requestId=${r.requestId}  name=${r.taskName}`));
+                console.log(`             │ legacy top-level taskId=${message.payload?.taskId} (for pre-batch clients)`);
+                break;
+            }
             case 'init':
                 this.handleInit(message.payload);
                 break;
@@ -1349,6 +1384,7 @@ function parseArgs(): TestConfig {
     let taskId: string | null = null;
     let stopTask = false;
     let deleteTask = false;
+    let deleteRequest = false;
     let clearTasks = false;
     let approvePlan = false;
     let rejectPlan = false;
@@ -1457,6 +1493,9 @@ function parseArgs(): TestConfig {
                 break;
             case '--stop-task':
                 stopTask = true;
+                break;
+            case '--delete-request':
+                deleteRequest = true;
                 break;
             case '--delete-task':
                 deleteTask = true;
@@ -1685,6 +1724,8 @@ TASK OPERATIONS:
   --task-input             Send input to a task (requires --task-id and --message)
   --stop-task              Stop a running task (requires --task-id)
   --delete-task            Delete a specific task (requires --task-id)
+  --delete-request         Send ONE batched delete-confirmation request for a comma-separated
+                           --task-id list and print the broadcast (deletes nothing)
   --clear-tasks            Clear all tasks
   --list-tasks             List all tasks with their status
   --tunnel-status          Show tunnel state (url, token, domain, reachability)
@@ -1737,8 +1778,10 @@ CONFIGURATION:
   --get-config             Get orchestrator configuration
 
 BACKEND OPERATIONS:
-  --backend-status         Get current backend status (claude-code or opencode)
-  --set-backend <name>     Set the AI backend ('claude-code' or 'opencode')
+  --backend-status         Show every registered coding agent: install state,
+                           version, server health and task-row badge label
+  --set-backend <name>     Set the default AI agent. Valid ids come from the
+                           agent registry — run --backend-status to list them
 
 MCP SERVER OPERATIONS:
   --list-mcp-servers       List all available MCP servers (global and project-specific)
@@ -1786,6 +1829,7 @@ Examples:
 
   # Delete a task
   npx tsx test-cli.ts --delete-task --task-id abc123
+  npx tsx test-cli.ts --delete-request --task-id abc123,def456
 
   # List all tasks
   npx tsx test-cli.ts --list-tasks
@@ -1899,6 +1943,7 @@ Examples:
         taskId,
         stopTask,
         deleteTask,
+        deleteRequest,
         clearTasks,
         approvePlan,
         rejectPlan,
@@ -2141,10 +2186,27 @@ async function getBackendStatus(baseHttpUrl: string): Promise<void> {
         }
 
         console.log('');
-        console.log('Available Backends:');
-        for (const backend of status.availableBackends || []) {
-            const isCurrent = backend === status.backend;
-            console.log(`  ${isCurrent ? '►' : ' '} ${backend}`);
+        console.log('Registered Agents:');
+        // availableBackends is AgentDisplayInfo[] from the agent registry.
+        // Older backends returned a plain string[] — handle both so the CLI
+        // still works against a server that has not been restarted.
+        const agents: Array<Record<string, unknown> | string> = status.availableBackends || [];
+        for (const entry of agents) {
+            const display = typeof entry === 'string' ? { id: entry } : entry;
+            const id = String(display.id ?? entry);
+            const isCurrent = id === status.backend;
+            const perAgent = status.statuses?.[id];
+            const bits: string[] = [];
+            if (display.name) bits.push(String(display.name));
+            if (display.shortLabel) bits.push(`badge="${display.shortLabel}"`);
+            if (perAgent) {
+                bits.push(perAgent.installed ? `installed ${perAgent.version ?? ''}`.trim() : 'NOT installed');
+                if (perAgent.serverRunning !== undefined) {
+                    bits.push(perAgent.serverRunning ? 'server up' : 'server down');
+                }
+                if (perAgent.error) bits.push(perAgent.error);
+            }
+            console.log(`  ${isCurrent ? '►' : ' '} ${id.padEnd(14)} ${bits.join(' | ')}`);
         }
         console.log('');
     } catch (error) {

@@ -16,7 +16,8 @@ import { ConfigStore, type AppConfig } from './config-store.js';
 import { SupervisorChat } from './supervisor-chat.js';
 import { getConversationHistory, getWorkspaceSessions } from './conversation-parser.js';
 import { setUserId } from './usage-reporter.js';
-import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, Checkpoint, PORTS, TaskTokenUsage, UsageDashboardData, TaskWorkStatus } from '@claudia/shared';
+import { Task, Workspace, WorkspaceReference, WSMessage, WSMessageType, WSErrorPayload, ChatMessage, SuggestedAction, WaitingInputType, ScheduledTask, Checkpoint, PORTS, TaskTokenUsage, UsageDashboardData, TaskWorkStatus, type AgentDetectResult, type AgentId } from '@claudia/shared';
+import { listAgents, setOpencodePortProvider } from './agents/index.js';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
@@ -528,6 +529,10 @@ export async function createApp(basePath?: string) {
 
     // Initialize configStore first to determine API mode
     const configStore = new ConfigStore(dataDir);
+
+    // The agent registry is loaded at import time (no config store yet), so
+    // hand the OpenCode adapter's health probe the configured port now.
+    setOpencodePortProvider(() => configStore.getOpencodePort());
 
     // Pin the tunnel to a reserved ngrok domain if one is configured. NGROK_DOMAIN
     // wins over the stored setting so a deployment can force it without touching
@@ -2123,14 +2128,30 @@ export async function createApp(basePath?: string) {
                     }
 
                     case 'task:deleteRequest': {
-                        // MCP agent is requesting to delete a task — broadcast to
-                        // frontend so it can show a confirmation dialog to the user.
-                        const { taskId, requestId, taskName } = payload as { taskId?: string; requestId?: string; taskName?: string };
-                        if (taskId && requestId) {
-                            logger.info('task:deleteRequest from MCP agent', { taskId, requestId });
+                        // MCP agent is requesting deletion of one or more tasks —
+                        // broadcast so the frontend can show ONE confirmation dialog
+                        // covering the whole batch. Accepts either the batch shape
+                        // ({ requests: [...] }) or the legacy single-task shape.
+                        const raw = payload as {
+                            requests?: { taskId?: string; requestId?: string; taskName?: string }[];
+                            taskId?: string; requestId?: string; taskName?: string;
+                        };
+                        const requests = (raw.requests ?? [raw])
+                            .filter((r): r is { taskId: string; requestId: string; taskName?: string } =>
+                                !!r?.taskId && !!r?.requestId)
+                            .map(r => ({ taskId: r.taskId, requestId: r.requestId, taskName: r.taskName }));
+                        if (requests.length > 0) {
+                            logger.info('task:deleteRequest from MCP agent', {
+                                count: requests.length,
+                                taskIds: requests.map(r => r.taskId),
+                            });
                             broadcast({
                                 type: 'task:deleteRequest' as WSMessageType,
-                                payload: { taskId, requestId, taskName }
+                                // `requests` is the shape new clients read. The first
+                                // request is also spread at the top level so a client
+                                // that predates batching still sees a valid single
+                                // request instead of an undefined taskId.
+                                payload: { requests, ...requests[0] }
                             });
                         }
                         break;
@@ -4360,52 +4381,37 @@ export async function createApp(basePath?: string) {
         }
     });
 
-    // Backend status endpoint - check which backend is configured and its status
+    // Backend status endpoint - probes EVERY registered agent, not just the
+    // configured one, so Settings can show install state per agent. The
+    // top-level fields still describe the CURRENT backend (unchanged contract).
     app.get('/api/backend/status', async (_req, res) => {
         const currentBackend = configStore.getBackend();
-        let status: { installed: boolean; version?: string; error?: string; serverRunning?: boolean };
+        const agents = listAgents();
 
-        try {
-            if (currentBackend === 'opencode') {
-                // Check OpenCode installation
-                const { execSync } = await import('child_process');
-                try {
-                    const version = execSync('opencode --version', { encoding: 'utf8', timeout: 5000 }).trim();
-
-                    // Check if server is running
-                    let serverRunning = false;
-                    const port = configStore.getOpencodePort();
-                    try {
-                        const response = await fetch(`http://127.0.0.1:${port}/global/health`, {
-                            signal: AbortSignal.timeout(2000)
-                        });
-                        serverRunning = response.ok;
-                    } catch {
-                        serverRunning = false;
-                    }
-
-                    status = { installed: true, version, serverRunning };
-                } catch {
-                    status = { installed: false, error: 'OpenCode is not installed. Install from: https://opencode.ai' };
-                }
-            } else {
-                // Check Claude Code installation
-                const { execSync } = await import('child_process');
-                try {
-                    const version = execSync('claude --version', { encoding: 'utf8', timeout: 5000 }).trim();
-                    status = { installed: true, version };
-                } catch {
-                    status = { installed: false, error: 'Claude Code is not installed. Install from: https://claude.ai/code' };
-                }
+        // Probe in parallel: each detect() shells out with a 5s timeout, and
+        // OpenCode's also does a 2s health fetch. Serially that is 7s+ per
+        // agent and grows with every agent added.
+        const results = await Promise.all(agents.map(async agent => {
+            try {
+                return [agent.id, await agent.detect()] as const;
+            } catch (error) {
+                console.error(`[Server] Agent detect failed for ${agent.id}:`, error);
+                return [agent.id, {
+                    installed: false,
+                    error: `Failed to check ${agent.display.name} status`,
+                }] as const;
             }
-        } catch (error) {
-            status = { installed: false, error: 'Failed to check backend status' };
-        }
+        }));
+
+        const statuses = Object.fromEntries(results) as Record<AgentId, AgentDetectResult>;
+        const status: AgentDetectResult = statuses[currentBackend]
+            ?? { installed: false, error: 'Failed to check backend status' };
 
         res.json({
             backend: currentBackend,
             ...status,
-            availableBackends: ['claude-code', 'opencode']
+            availableBackends: agents.map(a => a.display),
+            statuses,
         });
     });
 

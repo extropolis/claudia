@@ -2482,16 +2482,28 @@ export function WorkspacePanel({
     // Workspace manager modal state
     const [showWorkspaceManager, setShowWorkspaceManager] = useState(false);
 
-    // Batch delete: track which pending requests are checked (approved) by the user
+    // Batch delete: track which pending requests are checked (approved) by the user.
     const [checkedDeleteIds, setCheckedDeleteIds] = useState<Set<string>>(new Set());
-    // When new requests arrive, auto-check them
-    const prevDeleteCountRef = useRef(0);
-    if (pendingDeleteRequests.length > prevDeleteCountRef.current) {
-        const newChecked = new Set(checkedDeleteIds);
-        pendingDeleteRequests.forEach(r => newChecked.add(r.requestId));
-        setCheckedDeleteIds(newChecked);
-    }
-    prevDeleteCountRef.current = pendingDeleteRequests.length;
+    // Auto-check each request once, on arrival. Keyed on requestId rather than on
+    // the list length: keying on length re-checked *every* pending request whenever
+    // a new one arrived, silently re-arming a task the user had deliberately
+    // unchecked to keep.
+    const autoCheckedRef = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        const pendingIds = new Set(pendingDeleteRequests.map(r => r.requestId));
+        // Forget resolved requests so a recycled id would be treated as new again.
+        for (const id of autoCheckedRef.current) {
+            if (!pendingIds.has(id)) autoCheckedRef.current.delete(id);
+        }
+        const unseen = pendingDeleteRequests.filter(r => !autoCheckedRef.current.has(r.requestId));
+        if (unseen.length === 0) return;
+        unseen.forEach(r => autoCheckedRef.current.add(r.requestId));
+        setCheckedDeleteIds(prev => {
+            const next = new Set(prev);
+            unseen.forEach(r => next.add(r.requestId));
+            return next;
+        });
+    }, [pendingDeleteRequests]);
 
     // Close menu when clicking outside (capture phase so stopPropagation on child elements doesn't block it)
     // or when the panel scrolls (menu is position:fixed and would detach from its trigger).
@@ -2947,7 +2959,7 @@ export function WorkspacePanel({
                     onClose={() => setShowWorkspaceManager(false)}
                     onCreateWorkspace={onCreateWorkspace}
                     onDeleteWorkspace={onDeleteWorkspace}
-                    onReorderWorkspaces={onReorderWorkspaces}
+                    onSetWorkspaceOrder={onSetWorkspaceOrder}
                 />
             )}
 
