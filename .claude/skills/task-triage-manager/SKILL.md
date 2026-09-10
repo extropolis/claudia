@@ -8,8 +8,8 @@ allowed-tools: mcp__claudia__claudia_create_task, mcp__claudia__claudia_cron_cre
 
 Spawns a Claudia task whose job is to keep the *current workspace's* task fleet
 tidy: catch thrashing tasks, nudge stalled ones, and flag work that's already
-landed on `main` so it can be archived — without ever taking a destructive
-action without your say-so.
+landed on the repo's default branch so it can be archived — without ever
+taking a destructive action without your say-so.
 
 **Precondition:** this skill must be invoked from within an actual Claudia
 *task* whose own workspace is the one you want triaged — `claudia_create_task`
@@ -41,8 +41,10 @@ wrong place.
 
    1. Call claudia_list_tasks to enumerate every task in this workspace's
       family (including worktree siblings). For any task you haven't looked
-      at recently, call claudia_get_task_status for its state, idle duration,
-      and a snippet of recent output.
+      at recently, call claudia_get_task_status for its state and a snippet
+      of recent output. Neither tool hands you an "idle duration" directly —
+      compute it yourself from the task's lastActivity timestamp (runningFor
+      is only populated while a task is busy/starting, and is null when idle).
 
    2. Classify each task:
       - THRASHING: repeatedly restarting/erroring within a short window,
@@ -52,19 +54,24 @@ wrong place.
         is obvious and safe. Action: claudia_continue_task with a short,
         specific follow-up.
       - DONE AND LANDED: idle or exited, and its own work is already merged
-        into main. Don't rely solely on a task's sessionWorktreePrInfo field —
-        in practice it's frequently empty. Check directly instead: a task's
-        `workspaceId` (from claudia_list_tasks) IS the absolute path of its
-        worktree if it's isolated (a Claudia workspace's id is always its
-        filesystem path) — run `git -C <workspaceId> branch --show-current`
-        to get its branch, then `git -C <workspaceId> log main..<branch>` to
-        see if anything is still unmerged (empty output = fully landed), or
-        `gh pr view --json state,mergedAt` if you know its PR. A task that
-        isn't isolated (workspaceId is just the main workspace, not a
-        worktree) is never "done and landed" in this sense — it's working
-        directly in the shared tree, so skip this check for it. Action:
-        propose archiving it in your summary. Do NOT archive it yourself —
-        always ask first.
+        into the repo's default branch. Don't rely solely on a task's
+        sessionWorktreePrInfo field — in practice it's frequently empty.
+        Check directly instead: claudia_list_tasks does NOT hand you a raw
+        workspace path, but a worktree-isolated task carries a `worktree`
+        field (its branch name at creation — treat as a lookup key, since
+        branches get renamed after creation). Run `git worktree list` in this
+        repo to find the worktree whose path or original-branch-name matches
+        that value, then `git -C <that path> branch --show-current` for its
+        real current branch (catches renames) and `git -C <that path> log
+        <default-branch>..<branch>` to see if anything is still unmerged
+        (empty output = fully landed) — resolve `<default-branch>` per-repo
+        (e.g. `git symbolic-ref refs/remotes/origin/HEAD`) rather than
+        assuming `main`, since not every repo uses that name. Or, if you know
+        its PR, `gh pr view --json state,mergedAt`. A task with no `worktree`
+        field is working directly in the shared tree, not isolated — it's
+        never "done and landed" in this sense, so skip this check for it.
+        Action: propose archiving it in your summary. Do NOT archive it
+        yourself — always ask first.
       - WAITING ON YOU: state is waiting_input. Read the actual question. If
         it's a routine, already-approved-pattern permission prompt, answer it
         safely. Otherwise leave it and call it out clearly in your summary —
@@ -77,14 +84,26 @@ wrong place.
    3. Persist your decisions to a small JSON file at
       `.claudia-manager/task-triage-state.json` in this workspace's root
       (create the directory if needed). Keep it small: one entry per taskId
-      with { decidedAt, decision, note }. Read it at the start of each run so
-      you don't repeat yourself.
+      with { decidedAt, decision, note }, plus one top-level `cronExpression`
+      field recording your own current cadence (so you can recreate your
+      schedule later if it lapses — see step 5). Read it at the start of
+      each run so you don't repeat yourself.
 
    4. End every run with a short written summary as your final message:
       what you found, what you did, what you're proposing (archive
       candidates, anything still waiting on the user). This is the only
       "notification" mechanism — it surfaces via the normal task list/
       activity log, so keep it scannable, not verbose.
+
+   5. If you were invoked by a scheduled prompt (i.e. this isn't your very
+      first run), call claudia_cron_list for yourself and check: is there
+      still an active, non-expired recurring schedule pointed at you?
+      Recurring schedules auto-expire after 3 days with no notification other
+      than a log line the user won't see — if yours is gone or about to
+      lapse, recreate it with claudia_cron_create (same cadence as before,
+      read from your state file if you saved it) and say so plainly in this
+      run's summary so the user knows it needed renewing, rather than
+      silently going quiet three days from now.
 
    Be conservative by default: continuing and reporting are cheap and
    reversible, so do those freely. Stopping a task or proposing an archive
@@ -101,7 +120,10 @@ wrong place.
 4. **Ask the user how they want it to run** (use `AskUserQuestion`):
    - "Run continuously" — pick a cadence (default every 20 minutes: sensible
      range 15-30 min; tighter than this risks burning through the user's
-     Claude usage for little benefit, since most sweeps will find nothing new).
+     Claude usage for little benefit, since most sweeps will find nothing
+     new). Mention that recurring schedules auto-expire after 3 days —
+     the manager renews its own schedule each run (see step 5 above), so
+     this is normally invisible, but it's worth knowing it's there.
    - "Single-run only" — leave it as just created; the user (or you) can
      trigger another sweep later with `claudia_continue_task(<id>, "run a
      triage sweep now")`.

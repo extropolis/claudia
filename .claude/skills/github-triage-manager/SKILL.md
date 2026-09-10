@@ -42,9 +42,11 @@ configured" if run somewhere without one).
    (triggered by a scheduled prompt or a manual "run a sweep now" message).
    Each run, do the following:
 
-   1. Enumerate open work:
-      `gh pr list --repo <owner/repo> --json number,title,url,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefName`
-      `gh issue list --repo <owner/repo> --json number,title,url,labels,assignees --state open`
+   1. Enumerate open work (pass --limit explicitly — both commands default to
+      only 30 results, which silently drops the tail on any repo with more
+      open PRs/issues than that):
+      `gh pr list --repo <owner/repo> --limit 200 --json number,title,url,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefName`
+      `gh issue list --repo <owner/repo> --limit 200 --json number,title,url,labels,assignees --state open`
       and check for anything needing your attention in notifications:
       `gh api notifications` filtered to this repo (or ask about
       GET /api/github/notifications if this repo is registered as a Claudia
@@ -56,20 +58,26 @@ configured" if run somewhere without one).
       appears verbatim in a task's prompt/displayName (e.g. a task titled
       "Audio transcription pipeline" owns a PR with no mention of its number
       anywhere) — number-substring matching alone WILL miss real ownership.
-      Use branch name as the primary signal instead, via a concrete two-step
-      join:
-        a. Call claudia_list_tasks and note each task's `workspaceId` — for
-           an isolated (worktree) task this IS the absolute path of its
-           worktree (a Claudia workspace's id is always its filesystem path).
-        b. Run `git worktree list` in this repo to get every worktree's path
-           and current branch. Match each task's workspaceId against a
-           worktree path (normalize slashes before comparing), read off that
-           worktree's branch, and compare it to each PR's headRefName.
-      A task whose workspaceId isn't a worktree path at all (i.e. it's
-      working directly in the main workspace, not isolated) can't own a PR
-      this way — fall back to number-substring-in-text matching only for
-      those. Log any PR you couldn't confidently resolve either way as
-      "ownership unclear" rather than silently guessing.
+      Use branch name as the primary signal instead, via this join (`claudia_list_tasks`
+      does NOT return a raw workspace path — don't look for one; it returns a
+      `worktree` field instead, which is what to use):
+        a. Call claudia_list_tasks. Each worktree-isolated task carries a
+           `worktree` field — usually its branch name as recorded at creation
+           time, but it's a label to look up with, not a final answer:
+           branches often get renamed after creation (e.g. `claudia/task-xxx`
+           renamed to something descriptive once real work starts), so the
+           recorded name can be stale.
+        b. Run `git worktree list` in this repo to get every live worktree's
+           path and its CURRENT branch. Find the worktree whose path or
+           original-branch-name matches a task's `worktree` value, then run
+           `git -C <that worktree's path> branch --show-current` to get its
+           real, current branch (this is what actually catches a rename).
+           Compare that branch to each PR's headRefName.
+      A task with no `worktree` field (i.e. it's working directly in the main
+      workspace, not isolated) can't own a PR this way — fall back to
+      number-substring-in-text matching only for those. Log any PR you
+      couldn't confidently resolve either way as "ownership unclear" rather
+      than silently guessing.
 
    3. For each unowned PR, categorize:
       - NEEDS REBASE: mergeable state shows conflicts.
@@ -98,10 +106,12 @@ configured" if run somewhere without one).
    4. For NEEDS REBASE / NEEDS CI FIX / NEEDS REVIEW RESPONSE items, spawn a
       worker: claudia_create_task with isolate: true and a short, specific
       prompt in the same style you'd write by hand, e.g. "Rebase PR #<N> in
-      <owner/repo> onto latest origin/main, resolve conflicts, verify, and
-      push." or "Diagnose PR #<N>'s failing CI: if it's a genuine code
-      failure, fix it; if the run was cancelled/aborted, just re-trigger it."
-      or "Address the unresolved review comments on PR #<N>."
+      <owner/repo> onto the latest default branch, resolve conflicts, verify,
+      and push." (don't hardcode "main" — resolve the repo's actual default
+      branch, e.g. via `gh repo view --json defaultBranchRef`, since not
+      every repo uses that name) or "Diagnose PR #<N>'s failing CI: if it's a
+      genuine code failure, fix it; if the run was cancelled/aborted, just
+      re-trigger it." or "Address the unresolved review comments on PR #<N>."
 
    5. For READY TO MERGE, NEEDS REVIEW, STALE/BACKLOG, or anything that would
       require merging, closing, commenting, or relabeling: do NOT act. List
@@ -112,15 +122,27 @@ configured" if run somewhere without one).
    6. Persist your decisions to a small JSON file at
       `.claudia-manager/github-triage-state.json` in this workspace's root
       (create the directory if needed), keyed by `<owner/repo>#<number>`,
-      with { decidedAt, decision, note }. Read it at the start of each run
-      so you don't re-spawn a worker for a PR you already handled, and don't
-      re-flag the same ready-to-merge PR identically every single run (a
-      quiet reminder in the summary is fine; don't repeat the full write-up).
+      with { decidedAt, decision, note }, plus one top-level `cronExpression`
+      field recording your own current cadence. Read it at the start of each
+      run so you don't re-spawn a worker for a PR you already handled, and
+      don't re-flag the same ready-to-merge PR identically every single run
+      (a quiet reminder in the summary is fine; don't repeat the full
+      write-up).
 
    7. End every run with a short written summary: what's moving (workers
       spawned and for what, including any shared-root-cause consolidation),
       what's stuck (blocked on you), and what's ready for your approval. Keep
       it scannable.
+
+   8. If you were invoked by a scheduled prompt (i.e. this isn't your very
+      first run), call claudia_cron_list for yourself and check: is there
+      still an active, non-expired recurring schedule pointed at you?
+      Recurring schedules auto-expire after 3 days with no notification other
+      than a log line the user won't see — if yours is gone or about to
+      lapse, recreate it with claudia_cron_create (same cadence as before,
+      from your state file) and say so plainly in this run's summary so the
+      user knows it needed renewing, rather than silently going quiet three
+      days from now.
 
    Be conservative: spawning a worker to fix something is safe and
    reversible (it's just another Claudia task you can stop), so do that
@@ -138,7 +160,9 @@ configured" if run somewhere without one).
    - "Run continuously" — pick a cadence (default every 45 minutes: PR/issue
      churn is bursty rather than continuous, and each sweep costs several
      `gh` calls plus an LLM pass, so tighter than 30 min mostly burns quota
-     for no new information).
+     for no new information). Mention that recurring schedules auto-expire
+     after 3 days — the manager renews its own schedule each run (see step 8
+     above), so this is normally invisible, but it's worth knowing it's there.
    - "Single-run only" — leave it as just created; trigger another sweep
      later with `claudia_continue_task(<id>, "run a triage sweep now")`.
    - "Not yet — let me review the first summary" — do nothing further.
