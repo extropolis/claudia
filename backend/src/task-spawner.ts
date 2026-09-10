@@ -6,8 +6,8 @@ import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { writeFile as writeFileAsync, rename as renameAsync, unlink as unlinkAsync, appendFile as appendFileAsync, stat as statAsync, open as openAsync } from 'fs/promises';
-import { tmpdir, homedir } from 'os';
-import { execSync } from 'child_process';
+import { tmpdir, homedir, cpus, CpuInfo } from 'os';
+import { execFileSync, execSync } from 'child_process';
 import { atomicWriteFileSync, atomicWriteFileAsync } from './utils/atomic-write.js';
 import { buildSettingsLocalContent } from './settings-local.js';
 import { buildClaudePrivacyArgs, ensurePrivacySettingsFile } from './claude-privacy.js';
@@ -28,9 +28,11 @@ import {
     measureRssByPid,
     budgetBytesFromPct,
     formatMB,
+    computeCpuBusyPct,
     DEFAULT_BUDGET_PCT,
     DEFAULT_MIN_LIVE,
     GuardCandidate,
+    SHEDDABLE_STATES,
 } from './memory-guard.js';
 
 /**
@@ -235,6 +237,24 @@ const DEFAULT_HISTORY_RETENTION_DAYS = 0;
 /** Grace period after startup before the idle reaper acts. */
 const REAP_STARTUP_GRACE_MS = 10 * 60 * 1000;
 
+/**
+ * States the idle reaper may disconnect. Everything here holds a live PTY —
+ * a Claude CLI plus its MCP children — so leaving them parked indefinitely is
+ * what let agents accumulate for days.
+ *
+ * `waiting_input` is included deliberately: it means the task is blocked on a
+ * human who, past the threshold, has not returned. Reaping only disconnects —
+ * metadata and sessionId survive and the task resumes on demand — so the cost
+ * of reaping a task the user did want is one reconnect.
+ *
+ * `busy` is excluded (real work in flight) and `exited` is excluded (no process
+ * left to reclaim; those are freed in the exit handler instead).
+ *
+ * Same set the resource guard uses (memory-guard.ts's SHEDDABLE_STATES) — one
+ * definition of "safe to disconnect" shared by both triggers.
+ */
+const REAPABLE_STATES: TaskState[] = SHEDDABLE_STATES as TaskState[];
+
 const DEFAULT_PERSISTENCE_PATH = join(__dirname, '..', 'tasks.json');
 
 // Persisted task data (no process, just metadata)
@@ -244,6 +264,12 @@ interface PersistedTask {
     workspaceId: string;
     createdAt: string;
     lastActivity: string;
+    /**
+     * Last user action. Optional so older tasks.json files still load — absent
+     * means "fall back to lastActivity". Persisted so a server restart cannot
+     * reset the reap clock and hand every stale task another full threshold.
+     */
+    lastUserActivity?: string;
     lastState: TaskState;
     sessionId: string | null;
     outputHistory?: string;
@@ -393,6 +419,15 @@ interface TaskPersistence {
 
 interface InternalTask extends Task {
     process: IPty;
+    /**
+     * Last time the USER acted on this task (created it, or sent it input).
+     *
+     * Distinct from `lastActivity`, which the PTY handler refreshes on every
+     * byte the child emits — including spinner frames and terminal repaints.
+     * A live Claude TUI therefore never looks idle by `lastActivity`, which
+     * made the reap threshold unreachable. Reaping keys off this instead.
+     */
+    lastUserActivity: Date;
     outputHistory: Buffer[];
     previousHistory?: Buffer; // Historical output from before reconnection (kept separate)
     resumeSeparator?: string; // "─── Resuming session ───" shown live but NOT saved to history file
@@ -561,6 +596,14 @@ export class TaskSpawner extends EventEmitter {
     private readonly memoryMinLiveTasks: number;
     private readonly memoryGuardIntervalMs: number;
     private memoryGuardInterval: NodeJS.Timeout | null = null;
+    /** CPU busy% (system-wide) that, combined with too many live sessions, triggers shedding. 0 disables. */
+    private readonly cpuBusyThresholdPct: number;
+    /** Live-session cap = logical cores * this multiplier. Only enforced once CPU is also busy. */
+    private readonly cpuSessionMultiplier: number;
+    /** Previous os.cpus() sample, diffed against the current one each guard tick. */
+    private lastCpuSample: CpuInfo[] = cpus();
+    /** Consecutive overloaded ticks; the cap only applies once this crosses the hysteresis threshold. */
+    private cpuOverloadTicks = 0;
     /**
      * Archived tasks are immutable once written, but they made up 71% of
      * tasks.json (6.8MB of 9.5MB) and were re-serialized on EVERY debounced
@@ -662,6 +705,29 @@ export class TaskSpawner extends EventEmitter {
         this.memoryGuardIntervalMs = !isNaN(envGuardInterval) && envGuardInterval >= 10_000
             ? envGuardInterval
             : 60_000;
+
+        // CPU/session-count guard config. RAM alone missed the case where 35
+        // idle-ish sessions saturate CPU well under the memory budget — this
+        // sheds the coldest sessions once BOTH the machine is genuinely busy
+        // AND there are more live sessions than cores can reasonably serve.
+        // 0 disables.
+        //
+        // Defaults measured against a real incident, not guessed: on a 32-core
+        // box, ~28 concurrent Claude CLI + MCP process trees made the backend's
+        // own single-threaded event loop stall for 5+ seconds at a time (a
+        // plain GET timing out), while SYSTEM-WIDE average CPU sat at just
+        // ~50%. Contention concentrated on the handful of cores the backend
+        // and its neighbors actually schedule onto gets diluted into
+        // invisibility once averaged across all 32 — an 85%-wide threshold
+        // and a 1:1 core cap would never have fired during that incident.
+        const envCpuThreshold = parseFloat(process.env.CLAUDIA_CPU_BUSY_THRESHOLD_PCT || '');
+        this.cpuBusyThresholdPct = !isNaN(envCpuThreshold) && envCpuThreshold >= 0
+            ? envCpuThreshold
+            : 60;
+        const envCpuMultiplier = parseFloat(process.env.CLAUDIA_CPU_SESSION_MULTIPLIER || '');
+        this.cpuSessionMultiplier = !isNaN(envCpuMultiplier) && envCpuMultiplier > 0
+            ? envCpuMultiplier
+            : 0.4;
 
         const envRetention = parseFloat(process.env.HISTORY_RETENTION_DAYS || '');
         this.historyRetentionDays = !isNaN(envRetention) && envRetention >= 0
@@ -1555,41 +1621,54 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
-     * Start the memory guard. Runs `enforceMemoryBudget` on an interval.
+     * Start the resource guard. Runs `enforceResourceBudget` on an interval.
      *
      * This complements the idle reaper rather than duplicating it: the reaper
      * sheds on AGE (idle >24h) regardless of pressure, while the guard sheds on
      * PRESSURE regardless of age. Twenty agents idle for an hour never trip the
-     * reaper but will happily exhaust RAM.
+     * reaper but will happily exhaust RAM or CPU.
      */
     private startMemoryGuard(): void {
         if (this.memoryGuardInterval) return;
-        if (this.memoryBudgetPct <= 0) {
-            logger.info('Memory guard disabled (CLAUDIA_MEMORY_BUDGET_PCT=0)');
+        if (this.memoryBudgetPct <= 0 && this.cpuBusyThresholdPct <= 0) {
+            logger.info('Resource guard disabled (CLAUDIA_MEMORY_BUDGET_PCT=0 and CLAUDIA_CPU_BUSY_THRESHOLD_PCT=0)');
             return;
         }
         this.memoryGuardInterval = setInterval(() => {
             try {
-                this.enforceMemoryBudget();
+                this.enforceResourceBudget();
             } catch (e) {
-                logger.error('Memory guard threw', { error: (e as Error).message });
+                logger.error('Resource guard threw', { error: (e as Error).message });
             }
         }, this.memoryGuardIntervalMs);
         this.memoryGuardInterval.unref?.();
-        logger.info('Memory guard started', {
+        logger.info('Resource guard started', {
             budgetPct: this.memoryBudgetPct,
-            budgetMB: formatMB(budgetBytesFromPct(this.memoryBudgetPct)),
+            budgetMB: this.memoryBudgetPct > 0 ? formatMB(budgetBytesFromPct(this.memoryBudgetPct)) : undefined,
+            cpuBusyThresholdPct: this.cpuBusyThresholdPct,
+            sessionCap: this.cpuBusyThresholdPct > 0 ? this.computeSessionCap() : undefined,
             minLiveTasks: this.memoryMinLiveTasks,
             intervalMs: this.memoryGuardIntervalMs,
         });
     }
 
+    /** Live-session cap for the CPU trigger: logical cores * multiplier, floored at 1. */
+    private computeSessionCap(): number {
+        return Math.max(1, Math.round(cpus().length * this.cpuSessionMultiplier));
+    }
+
     /**
-     * Disconnect the coldest idle agents when live tasks exceed the memory
-     * budget. Disconnected tasks keep their sessionId and resume on click, so
-     * this sheds memory without losing work.
+     * Disconnect the coldest idle-or-forgotten agents when EITHER live tasks
+     * exceed the memory budget OR the machine is under sustained CPU pressure
+     * with more live sessions than cores can reasonably serve. Disconnected
+     * tasks keep their sessionId and resume on click, so this sheds resources
+     * without losing work.
+     *
+     * "Coldest" is measured by `lastUserActivity`, not `lastActivity` — a task
+     * whose Claude CLI is repainting a spinner looks busy by output alone even
+     * when the human walked away hours ago.
      */
-    private enforceMemoryBudget(): void {
+    private enforceResourceBudget(): void {
         const candidates: GuardCandidate[] = [];
         for (const task of this.tasks.values()) {
             const pid = task.process?.pid;
@@ -1597,28 +1676,55 @@ export class TaskSpawner extends EventEmitter {
             candidates.push({
                 id: task.id,
                 state: task.state,
-                lastActivity: task.lastActivity,
+                lastActivity: task.lastUserActivity ?? task.lastActivity,
                 pid,
             });
         }
+
+        // Sample every tick, independent of candidate count, so the delta
+        // against next tick's sample stays accurate.
+        const currentCpuSample = cpus();
+        const cpuBusyPct = computeCpuBusyPct(this.lastCpuSample, currentCpuSample);
+        this.lastCpuSample = currentCpuSample;
+
+        let maxLive: number | undefined;
+        let sessionCap: number | undefined;
+        if (this.cpuBusyThresholdPct > 0) {
+            sessionCap = this.computeSessionCap();
+            const overloaded = cpuBusyPct >= this.cpuBusyThresholdPct && candidates.length > sessionCap;
+            // Require two consecutive overloaded ticks (~2 guard intervals)
+            // before capping, so a transient spike (a build compiling) doesn't
+            // cost anyone a live session.
+            this.cpuOverloadTicks = overloaded ? this.cpuOverloadTicks + 1 : 0;
+            if (this.cpuOverloadTicks >= 2) maxLive = sessionCap;
+        }
+
         if (candidates.length === 0) return;
 
         const rssByPid = measureRssByPid(candidates.map(c => c.pid!));
-        const budgetBytes = budgetBytesFromPct(this.memoryBudgetPct);
+        const budgetBytes = this.memoryBudgetPct > 0 ? budgetBytesFromPct(this.memoryBudgetPct) : Infinity;
         const { toDisconnect, usedBytes, projectedBytes } = selectTasksToDisconnect({
             tasks: candidates,
             rssByPid,
             budgetBytes,
             minLive: this.memoryMinLiveTasks,
+            maxLive,
         });
 
         if (toDisconnect.length === 0) return;
 
-        logger.info('Memory budget exceeded; disconnecting coldest idle agents', {
+        const reasons: string[] = [];
+        if (this.memoryBudgetPct > 0 && usedBytes > budgetBytes) reasons.push('memory');
+        if (maxLive !== undefined && candidates.length > maxLive) reasons.push('cpu+session-count');
+
+        logger.info('Resource budget exceeded; disconnecting coldest idle agents', {
+            reasons,
             liveTasks: candidates.length,
             usedMB: formatMB(usedBytes),
-            budgetMB: formatMB(budgetBytes),
+            budgetMB: this.memoryBudgetPct > 0 ? formatMB(budgetBytes) : undefined,
             projectedMB: formatMB(projectedBytes),
+            cpuBusyPct: Math.round(cpuBusyPct),
+            sessionCap,
             disconnecting: toDisconnect.length,
         });
 
@@ -1649,9 +1755,52 @@ export class TaskSpawner extends EventEmitter {
      * the task metadata is preserved with its sessionId — the user can still
      * resume it, and the backend will --resume cleanly.
      *
-     * Skips tasks that are starting/busy/waiting_input (they aren't actually
-     * idle, just quiet). State 'exited' tasks have no process to reclaim.
+     * Reaps the states in REAPABLE_STATES — including `waiting_input`, which is
+     * a task blocked on a human who never came back. Skips `busy` (real work in
+     * flight) and `exited` (no process left to reclaim).
+     *
+     * Age is measured from `lastUserActivity`, not `lastActivity`.
      */
+    /**
+     * Force-kill whole process trees on Windows.
+     *
+     * node-pty tears down the ConPTY and signals the direct child, but that does
+     * not reach grandchildren — an agent's MCP servers, or a shell command it
+     * spawned, survive as orphans and accumulate. `taskkill /T` walks the tree.
+     *
+     * PIDs are batched into one invocation: process creation is expensive on
+     * endpoint-protected machines, so shutdown pays one spawn, not one per task.
+     * Best-effort — a non-zero exit usually just means the tree was already gone.
+     */
+    private taskkillTrees(pids: number[]): void {
+        if (process.platform !== 'win32' || pids.length === 0) return;
+        const args: string[] = [];
+        for (const pid of pids) args.push('/PID', String(pid));
+        args.push('/T', '/F');
+        try {
+            execFileSync('taskkill', args, { stdio: 'ignore', timeout: 15000 });
+        } catch (_e) {
+            // Already reaped, or partially reaped — nothing actionable.
+        }
+    }
+
+    /**
+     * Kill a single task's PTY and any descendants it left behind.
+     *
+     * `process` is optional in practice — placeholder tasks and already-reaped
+     * ones carry no PTY — so every access is guarded. The code this replaced
+     * hid that behind a try/catch.
+     */
+    private killTaskTree(task: InternalTask): void {
+        const pid = task.process?.pid;
+        try {
+            task.process?.kill();
+        } catch (_e) {
+            // Process might already be dead
+        }
+        if (pid) this.taskkillTrees([pid]);
+    }
+
     private reapIdleTasks(): void {
         const now = Date.now();
 
@@ -1667,8 +1816,10 @@ export class TaskSpawner extends EventEmitter {
         if (now - this.startedAt.getTime() < REAP_STARTUP_GRACE_MS) return;
         const toReap: string[] = [];
         for (const task of this.tasks.values()) {
-            if (task.state !== 'idle') continue;
-            const age = now - task.lastActivity.getTime();
+            if (!REAPABLE_STATES.includes(task.state)) continue;
+            // lastUserActivity, not lastActivity: the latter is refreshed by any
+            // PTY byte (spinner frames, repaints), so it never crosses the threshold.
+            const age = now - (task.lastUserActivity ?? task.lastActivity).getTime();
             if (age >= this.idleReapMs) toReap.push(task.id);
         }
         if (toReap.length === 0) return;
@@ -2699,6 +2850,7 @@ export class TaskSpawner extends EventEmitter {
                     workspaceId: task.workspaceId,
                     createdAt: task.createdAt.toISOString(),
                     lastActivity: task.lastActivity.toISOString(),
+                    lastUserActivity: (task.lastUserActivity ?? task.lastActivity).toISOString(),
                     lastState: task.state,
                     sessionId: task.sessionId,
                     // outputHistory removed from JSON
@@ -3891,6 +4043,7 @@ export class TaskSpawner extends EventEmitter {
             state: backendTask.state,
             outputHistory: [],
             lastActivity: now,
+            lastUserActivity: now,
             createdAt: now,
             isActive: false,
             initialPromptSent: true,  // OpenCode handles prompt submission
@@ -4145,6 +4298,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             processStartedAt: now,
             outputHistory: [],
             lastActivity: now,
+            lastUserActivity: now,
             createdAt: now,
             isActive: false,
             initialPromptSent: false,
@@ -5134,6 +5288,12 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // to idle) bypass the guard entirely: the external entry point that first
         // received the command already counted it, so counting it again here would
         // spuriously trip the guard and drop a legitimate command.
+        // Real user intent — the only signal the idle reaper trusts.
+        const writeTarget = this.tasks.get(taskId);
+        if (writeTarget && !isInternalRedelivery) {
+            writeTarget.lastUserActivity = new Date();
+        }
+
         if (!isInternalRedelivery && isContextDestroyingInput(data)) {
             const destructiveCmd = data.replace(/[\r\n]+$/, '').trim();
             const now = Date.now();
@@ -5442,11 +5602,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                 // Delete from map FIRST to prevent onExit handler from emitting state changes
                 this.tasks.delete(taskId);
                 this.taskBackends.delete(taskId);
-                try {
-                    task.process.kill();
-                } catch (_e) {
-                    // Process might already be dead
-                }
+                this.killTaskTree(task);
                 destroyed = true;
                 source = 'live';
             }
@@ -5556,11 +5712,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
             // Delete from map FIRST to prevent onExit handler from emitting state changes
             this.tasks.delete(taskId);
-            try {
-                task.process.kill();
-            } catch (_e) {
-                // Process might already be dead
-            }
+            this.killTaskTree(task);
             archived = true;
             wasLive = true;
         }
@@ -6081,6 +6233,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             previousHistory, // Historical output from before reconnect (loaded from file or in-memory)
             resumeSeparator: resumeMessage, // Shown live when task becomes active, not saved to disk
             lastActivity: now,
+            // Carry the persisted timestamp, NOT `now`: a startup auto-reconnect is
+            // not the user touching the task, and resetting here would make every
+            // reconnected task immortal across restarts. Falls back to lastActivity
+            // for tasks.json files written before this field existed.
+            lastUserActivity: new Date(persisted.lastUserActivity ?? persisted.lastActivity),
             createdAt: new Date(persisted.createdAt),
             isActive: false,
             initialPromptSent: !needsDelivery,  // False if we have a prompt/message to deliver on ready
@@ -6200,15 +6357,19 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             this.clearSessionCapture(taskId);
         }
 
+        const destroyPids: number[] = [];
         for (const task of this.tasks.values()) {
             // Clean up MCP temp files
             this.cleanupMcpTempFiles(task.id);
+            const destroyPid = task.process?.pid;
+            if (destroyPid) destroyPids.push(destroyPid);
             try {
-                task.process.kill();
+                task.process?.kill();
             } catch (_e) {
                 // Process might already be dead
             }
         }
+        this.taskkillTrees(destroyPids);
         this.tasks.clear();
     }
 
@@ -6256,12 +6417,8 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             }
         }
 
-        // Kill the process
-        try {
-            task.process.kill();
-        } catch (e) {
-            console.error(`[TaskSpawner] Failed to kill process for ${taskId}:`, e);
-        }
+        // Kill the process (and anything it spawned)
+        this.killTaskTree(task);
 
         // Create persisted task entry - preserve all metadata from the active task
         const persisted: PersistedTask = {
@@ -6270,6 +6427,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             workspaceId: task.workspaceId,
             createdAt: task.createdAt.toISOString(),
             lastActivity: task.lastActivity.toISOString(),
+            lastUserActivity: (task.lastUserActivity ?? task.lastActivity).toISOString(),
             lastState: task.state,
             sessionId: task.sessionId,
             // We don't save full history to memory here, it's already on disk/in memory
@@ -6307,12 +6465,16 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
     clearAllTasks(): void {
         console.log('[TaskSpawner] Clearing ALL tasks');
 
-        // 1. Kill all active tasks
+        // 1. Kill all active tasks (and anything they spawned)
+        const clearPids: number[] = [];
         for (const task of this.tasks.values()) {
+            const clearPid = task.process?.pid;
+            if (clearPid) clearPids.push(clearPid);
             try {
-                task.process.kill();
+                task.process?.kill();
             } catch (e) { }
         }
+        this.taskkillTrees(clearPids);
         this.tasks.clear();
 
         // 2. Clear persisted maps
