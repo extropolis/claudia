@@ -8,6 +8,20 @@ import WebSocket from 'ws';
 import { WSMessage, ChatMessage, Task } from './src/types.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { httpBaseFromWsUrl } from './src/utils/backend-url.js';
+
+const DEFAULT_BACKEND_URL = 'ws://localhost:4001';
+
+/**
+ * Read `--url` straight from argv for subcommands that run before parseArgs()
+ * (Jira, tunnel). Returns the HTTP base so those handlers hit the same host
+ * and port as the WebSocket client would.
+ */
+function httpBaseFromArgv(argv: string[]): string {
+    const i = argv.indexOf('--url');
+    const wsUrl = i >= 0 && argv[i + 1] ? argv[i + 1] : DEFAULT_BACKEND_URL;
+    return httpBaseFromWsUrl(wsUrl);
+}
 
 interface TestConfig {
     backendUrl: string;
@@ -270,7 +284,10 @@ class TestCLI {
             });
 
             this.ws.on('error', (error: Error) => {
-                console.error('❌ WebSocket error:', error.message);
+                // ws reports ECONNREFUSED with an empty message; name the URL so
+                // a wrong --url host/port is obvious from the output.
+                const code = (error as NodeJS.ErrnoException).code;
+                console.error(`❌ WebSocket error connecting to ${this.config.backendUrl}: ${error.message || code || String(error)}`);
                 clearTimeout(timeout);
                 reject(error);
             });
@@ -883,7 +900,7 @@ class TestCLI {
     }
 
     private async viewTaskFiles(taskId: string): Promise<void> {
-        const httpUrl = this.config.backendUrl.replace('ws://', 'http://').replace('ws', '3000');
+        const httpUrl = httpBaseFromWsUrl(this.config.backendUrl);
         const url = `${httpUrl}/api/tasks/${taskId}/files`;
 
         console.log(`📄 Fetching files for task ${taskId}...`);
@@ -926,7 +943,7 @@ class TestCLI {
     }
 
     private async getConfig(): Promise<void> {
-        const httpUrl = this.config.backendUrl.replace('ws://', 'http://').replace('ws', '3000');
+        const httpUrl = httpBaseFromWsUrl(this.config.backendUrl);
         const url = `${httpUrl}/api/config`;
 
         console.log('⚙️  Fetching orchestrator configuration...');
@@ -1371,7 +1388,7 @@ class TestCLI {
 function parseArgs(): TestConfig {
     const args = process.argv.slice(2);
 
-    let backendUrl = 'ws://localhost:4001';
+    let backendUrl = DEFAULT_BACKEND_URL;
     let testMessage = 'echo hello world';
     let timeoutMs = 120000; // 120 seconds
     let testClear = false;
@@ -2217,7 +2234,7 @@ async function getBackendStatus(baseHttpUrl: string): Promise<void> {
         }
         console.log('');
     } catch (error) {
-        console.error('Failed to get backend status:', error);
+        console.error(`Failed to get backend status from ${baseHttpUrl}:`, error);
     }
 }
 
@@ -2448,10 +2465,10 @@ async function checkApiConfig(baseHttpUrl: string): Promise<void> {
         console.log('🌍 ENVIRONMENT VARIABLES FOR TASKS');
         console.log('-'.repeat(80));
         if (config.apiMode === 'sap-ai-core') {
-            console.log(`  ANTHROPIC_BASE_URL: http://localhost:4001/anthropic`);
+            console.log(`  ANTHROPIC_BASE_URL: ${baseHttpUrl}/anthropic`);
             console.log(`  ANTHROPIC_API_KEY:  sap-ai-core-proxy (placeholder)`);
         } else if (config.apiMode === 'hyperspace-proxy') {
-            console.log(`  ANTHROPIC_BASE_URL: http://localhost:4001/anthropic`);
+            console.log(`  ANTHROPIC_BASE_URL: ${baseHttpUrl}/anthropic`);
             console.log(`  ANTHROPIC_API_KEY:  hyperspace-proxy (placeholder)`);
         } else if (config.apiMode === 'custom-anthropic') {
             console.log(`  ANTHROPIC_API_KEY:  [CUSTOM KEY]`);
@@ -2569,7 +2586,7 @@ async function toggleAutoWorktreeCmd(baseHttpUrl: string, workspaceId: string, e
 //   --jira-security-check                      run the S1/token-leak checks
 // ============================================================================
 async function handleJiraCommand(argv: string[]): Promise<boolean> {
-    const base = 'http://localhost:4001';
+    const base = httpBaseFromArgv(argv);
     const idx = (flag: string) => argv.indexOf(flag);
     const val = (flag: string) => { const i = idx(flag); return i >= 0 ? argv[i + 1] : undefined; };
 
@@ -2757,7 +2774,7 @@ async function handleExportCommand(argv: string[]): Promise<boolean> {
 }
 
 async function handleTunnelCommand(argv: string[]): Promise<boolean> {
-    const base = 'http://localhost:4001';
+    const base = httpBaseFromArgv(argv);
     const idx = (flag: string) => argv.indexOf(flag);
     const val = (flag: string) => { const i = idx(flag); return i >= 0 ? argv[i + 1] : undefined; };
 
@@ -2860,10 +2877,7 @@ async function main() {
     const config = parseArgs() as any;
 
     // Derive HTTP URL from WebSocket URL for API calls
-    const baseHttpUrl = config.backendUrl
-        .replace('ws://', 'http://')
-        .replace('wss://', 'https://')
-        .replace(/:\d+$/, ':4001');  // Ensure correct port
+    const baseHttpUrl = httpBaseFromWsUrl(config.backendUrl);
 
     // Handle backend commands that don't need WebSocket
     if (config.backendStatus) {
