@@ -73,8 +73,24 @@ describe('selectTasksToDisconnect', () => {
         expect(r.toDisconnect).toEqual(['a', 'b', 'c']);
     });
 
-    it('never touches busy or waiting_input agents', () => {
-        // Busy agents are mid-work; waiting_input holds an unanswered question.
+    it('never touches busy agents, however tight the budget', () => {
+        // Busy agents are mid-work; disconnecting one would drop real progress.
+        const r = selectTasksToDisconnect({
+            tasks: [
+                task('busy', 'busy', 999, 1),
+                task('idle', 'idle', 5, 2),
+            ],
+            rssByPid: rss([[1, 500], [2, 100]]),
+            budgetBytes: 100 * MB,
+            minLive: 0,
+        });
+        // Only the idle one is eligible even though it is by far the newest.
+        expect(r.toDisconnect).toEqual(['idle']);
+    });
+
+    it('sheds waiting_input agents too, coldest first alongside idle ones', () => {
+        // waiting_input holds an unanswered prompt — not busy, and disconnecting
+        // only kills the PTY; sessionId and history survive for the next click.
         const r = selectTasksToDisconnect({
             tasks: [
                 task('busy', 'busy', 999, 1),
@@ -85,8 +101,8 @@ describe('selectTasksToDisconnect', () => {
             budgetBytes: 100 * MB,
             minLive: 1,
         });
-        // Only the idle one is eligible even though it is by far the newest.
-        expect(r.toDisconnect).toEqual(['idle']);
+        // busy is still never touched; waiting_input sheds before idle since it's colder.
+        expect(r.toDisconnect).toEqual(['waiting', 'idle']);
     });
 
     it('respects the minimum-live floor even when far over budget', () => {

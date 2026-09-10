@@ -29,6 +29,7 @@ import {
     DEFAULT_BUDGET_PCT,
     DEFAULT_MIN_LIVE,
     GuardCandidate,
+    SHEDDABLE_STATES,
 } from './memory-guard.js';
 
 /**
@@ -245,8 +246,11 @@ const REAP_STARTUP_GRACE_MS = 10 * 60 * 1000;
  *
  * `busy` is excluded (real work in flight) and `exited` is excluded (no process
  * left to reclaim; those are freed in the exit handler instead).
+ *
+ * Same set the resource guard uses (memory-guard.ts's SHEDDABLE_STATES) — one
+ * definition of "safe to disconnect" shared by both triggers.
  */
-const REAPABLE_STATES: TaskState[] = ['idle', 'waiting_input', 'starting'];
+const REAPABLE_STATES: TaskState[] = SHEDDABLE_STATES as TaskState[];
 
 const DEFAULT_PERSISTENCE_PATH = join(__dirname, '..', 'tasks.json');
 

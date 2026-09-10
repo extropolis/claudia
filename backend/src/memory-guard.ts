@@ -30,12 +30,24 @@ export const DEFAULT_MIN_LIVE = 3;
 
 export interface GuardCandidate {
     id: string;
-    /** Only 'idle' tasks are eligible; others are doing or awaiting work. */
+    /** Only states in SHEDDABLE_STATES are eligible; others are doing or awaiting real work. */
     state: string;
     lastActivity: Date;
     /** PTY pid, used to attribute memory. Undefined when not running. */
     pid?: number;
 }
+
+/**
+ * States eligible for shedding under resource pressure. Shared with the
+ * idle-age reaper's REAPABLE_STATES in task-spawner.ts so "what's safe to
+ * disconnect" has one definition instead of two that can drift apart.
+ *
+ * `waiting_input` is included deliberately: a task blocked on an unanswered
+ * prompt isn't doing work, and disconnecting only kills the PTY — sessionId
+ * and history survive, so it resumes cleanly on next click. `busy` (actually
+ * running) and `exited` (no process left to reclaim) are excluded.
+ */
+export const SHEDDABLE_STATES: readonly string[] = ['idle', 'waiting_input', 'starting'];
 
 export interface SelectionInput {
     tasks: GuardCandidate[];
@@ -60,12 +72,13 @@ export interface SelectionResult {
 }
 
 /**
- * Choose the coldest idle agents to shed until projected usage fits the budget.
+ * Choose the coldest idle-or-forgotten agents to shed until projected usage
+ * fits the budget.
  *
  * Rules, in order:
- * - Only `idle` tasks are eligible. A busy agent is mid-work and a
- *   `waiting_input` agent holds a question the user hasn't answered yet;
- *   disconnecting either would look like data loss even though it isn't.
+ * - Only states in SHEDDABLE_STATES are eligible. A `busy` agent is mid-work;
+ *   disconnecting it would look like data loss even though disconnecting
+ *   never actually loses anything (sessionId and history survive either way).
  * - Oldest `lastActivity` goes first — least likely to be missed.
  * - Stop once projected usage fits, or once `minLive` agents remain, so the
  *   guard can never empty the workspace.
@@ -89,7 +102,7 @@ export function selectTasksToDisconnect(input: SelectionInput): SelectionResult 
     }
 
     const coldestFirst = live
-        .filter(t => t.state === 'idle')
+        .filter(t => SHEDDABLE_STATES.includes(t.state))
         .sort((a, b) => a.lastActivity.getTime() - b.lastActivity.getTime());
 
     const toDisconnect: string[] = [];
