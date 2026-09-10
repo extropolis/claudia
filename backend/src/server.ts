@@ -42,6 +42,7 @@ import { createClaudiaMcpServer } from './claudia-mcp-server.js';
 import { isValidSharedMcpToken } from './mcp-auth.js';
 import { JiraClient, JiraError, parseIssueKey } from './jira-client.js';
 import { ensureDataDir, dataPath, describeDataDir } from './paths.js';
+import { exportState } from './export-import/export.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
 // - config-routes.ts: Config API routes template
@@ -7528,6 +7529,48 @@ Guidelines:
         } catch (error) {
             logger.error('Failed to update usage config', { error });
             res.status(500).json({ error: 'Failed to update usage config' });
+        }
+    });
+
+    // Portable state export (P0 task 10, spec §11.1). Writes a directory the
+    // operator can copy to another machine; see backend/src/export-import/export.ts
+    // for the format and for what is deliberately never included.
+    //
+    // The export is written server-side because the data directory is
+    // server-side — the caller names a destination path on the host, it does
+    // not download a bundle.
+    app.post('/api/export', async (req, res) => {
+        try {
+            const { out, withSecrets, withHistories, withAgentSessions } = req.body ?? {};
+            if (typeof out !== 'string' || out.trim() === '') {
+                res.status(400).json({ error: 'out is required and must be a non-empty path' });
+                return;
+            }
+
+            logger.info('State export requested', {
+                out,
+                withSecrets: !!withSecrets,
+                withHistories: !!withHistories,
+                withAgentSessions: !!withAgentSessions,
+            });
+
+            const manifest = await exportState(dataDir, {
+                out,
+                withSecrets: !!withSecrets,
+                withHistories: !!withHistories,
+                withAgentSessions: !!withAgentSessions,
+            });
+
+            logger.info('State export complete', {
+                out,
+                workspaces: manifest.workspaces.length,
+                stateFiles: Object.keys(manifest.schemaVersions).length,
+            });
+            res.json({ ok: true, manifest });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error('State export failed', { error: message });
+            res.status(500).json({ error: message });
         }
     });
 

@@ -1733,6 +1733,13 @@ TASK OPERATIONS:
   --tunnel-stop            Stop the tunnel
   --tunnel-domain <host>   Pin a reserved ngrok domain ("" clears it)
   --tunnel-diagnose        Probe which ngrok domains this network allows
+
+STATE EXPORT (P0 task 10, spec §11.1):
+  --export <dir>           Write a portable state export to <dir> (server-side path)
+                           Respects --url to target a backend other than :4001
+  --with-secrets           Also write secrets.json (mode 0600) — API keys, MCP env/headers
+  --with-histories         Also copy task-histories/ + archived-histories/ (gigabytes)
+  --with-agent-sessions    Also copy session JSONL transcripts for non-archived tasks
   --view-files             View code files for a task (requires --task-id)
   --archive-task           Archive a task (requires --task-id)
   --disconnect             Disconnect a task (requires --task-id)
@@ -2643,6 +2650,112 @@ async function handleJiraCommand(argv: string[]): Promise<boolean> {
 //   --tunnel-domain <host|"">       pin a reserved ngrok domain ("" clears it)
 //   --tunnel-diagnose               probe which ngrok zones this network allows
 // ============================================================================
+// ============================================================================
+// Portable state export (P0 task 10, spec §11.1). Pure HTTP, no WebSocket.
+//   --export <dir> [--with-secrets] [--with-histories] [--with-agent-sessions]
+//
+// The backend writes the export; <dir> is a path on the machine running the
+// backend, not on this CLI's machine. When the two are the same box (the dev
+// case) the byte total below is measured by walking the tree locally.
+// ============================================================================
+async function handleExportCommand(argv: string[]): Promise<boolean> {
+    const i = argv.indexOf('--export');
+    if (i < 0) return false;
+
+    // Honour --url so this can be pointed at a backend other than the dev
+    // server on 4001 — which is how the happy path gets exercised without
+    // going anywhere near the running instance.
+    const urlIdx = argv.indexOf('--url');
+    const base = (urlIdx >= 0 && argv[urlIdx + 1] ? argv[urlIdx + 1] : 'http://localhost:4001')
+        .replace(/^ws:/, 'http:')
+        .replace(/^wss:/, 'https:')
+        .replace(/\/$/, '');
+
+    const out = argv[i + 1];
+    if (!out || out.startsWith('--')) {
+        console.error('❌ --export requires an output directory');
+        process.exitCode = 1;
+        return true;
+    }
+
+    const body = {
+        out,
+        withSecrets: argv.includes('--with-secrets'),
+        withHistories: argv.includes('--with-histories'),
+        withAgentSessions: argv.includes('--with-agent-sessions'),
+    };
+
+    console.log(`📦 Exporting state → ${out}`);
+    console.log(`   tiers: ${Object.entries(body)
+        .filter(([k, v]) => k !== 'out' && v)
+        .map(([k]) => k)
+        .join(', ') || 'state only (no secrets, histories or agent sessions)'}`);
+
+    const res = await fetch(`${base}/api/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const payload = await res.json().catch(() => ({})) as any;
+
+    if (!res.ok) {
+        console.error(`❌ Export failed (HTTP ${res.status}): ${payload.error ?? JSON.stringify(payload)}`);
+        process.exitCode = 1;
+        return true;
+    }
+
+    const m = payload.manifest;
+    if (!m) {
+        // A backend predating this route answers 404/HTML rather than a manifest.
+        console.error(`❌ No manifest in the response (HTTP ${res.status}). Is the backend running this build?`);
+        process.exitCode = 1;
+        return true;
+    }
+    console.log('\n✅ Export complete\n');
+    console.log(`   format version : ${m.formatVersion}`);
+    console.log(`   claudia version: ${m.claudiaVersion}`);
+    console.log(`   exported at    : ${m.exportedAt}`);
+    console.log(`   source         : ${m.source.hostname} (${m.source.platform})`);
+    console.log(`   data dir       : ${m.source.dataDir}`);
+    console.log(`   instance id    : ${m.source.instanceId ?? '(none)'}`);
+    console.log(`   tiers          : secrets=${m.tiers.secrets} histories=${m.tiers.histories} agentSessions=${m.tiers.agentSessions}`);
+
+    console.log(`\n   state files (${Object.keys(m.schemaVersions).length}):`);
+    for (const [file, version] of Object.entries(m.schemaVersions)) {
+        console.log(`     - ${file.padEnd(24)} schemaVersion=${version ?? 'legacy (unversioned)'}`);
+    }
+
+    console.log(`\n   workspaces (${m.workspaces.length}):`);
+    for (const ws of m.workspaces.slice(0, 25)) {
+        const parent = ws.worktreeParentId ? `  ↳ worktree of ${ws.worktreeParentId}` : '';
+        console.log(`     - ${ws.name}  ${ws.id}${parent}`);
+    }
+    if (m.workspaces.length > 25) console.log(`     … and ${m.workspaces.length - 25} more`);
+
+    // Byte total, measured by walking the produced tree. Only possible when the
+    // backend shares a filesystem with this CLI.
+    try {
+        const fs = await import('fs');
+        const pathMod = await import('path');
+        let files = 0;
+        let bytes = 0;
+        const walk = (dir: string) => {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const full = pathMod.join(dir, entry.name);
+                if (entry.isDirectory()) walk(full);
+                else { files++; bytes += fs.statSync(full).size; }
+            }
+        };
+        walk(out);
+        const mb = bytes / 1e6;
+        console.log(`\n   total: ${files} file(s), ${bytes.toLocaleString()} bytes (${mb.toFixed(2)} MB)`);
+    } catch {
+        console.log('\n   total: not measurable from here (backend is on another host)');
+    }
+
+    return true;
+}
+
 async function handleTunnelCommand(argv: string[]): Promise<boolean> {
     const base = 'http://localhost:4001';
     const idx = (flag: string) => argv.indexOf(flag);
@@ -2737,6 +2850,11 @@ async function main() {
     // Tunnel commands likewise — pure HTTP, no WebSocket needed.
     if (await handleTunnelCommand(process.argv.slice(2))) {
         process.exit(0);
+    }
+
+    // State export — pure HTTP too.
+    if (await handleExportCommand(process.argv.slice(2))) {
+        process.exit(process.exitCode ?? 0);
     }
 
     const config = parseArgs() as any;
