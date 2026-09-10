@@ -5,9 +5,10 @@ import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, Ta
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
+import { writeFile as writeFileAsync, rename as renameAsync, unlink as unlinkAsync, appendFile as appendFileAsync, stat as statAsync, open as openAsync } from 'fs/promises';
 import { tmpdir, homedir } from 'os';
 import { execSync } from 'child_process';
-import { atomicWriteFileSync } from './utils/atomic-write.js';
+import { atomicWriteFileSync, atomicWriteFileAsync } from './utils/atomic-write.js';
 import { buildSettingsLocalContent } from './settings-local.js';
 import { buildClaudePrivacyArgs, ensurePrivacySettingsFile } from './claude-privacy.js';
 import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
@@ -508,6 +509,11 @@ export class TaskSpawner extends EventEmitter {
     private archivedTasks: Map<string, ArchivedTaskMetadata> = new Map();
     private persistencePath: string;
     private saveDebounceTimer: NodeJS.Timeout | null = null;
+    /** True while a debounced async save (`saveTasksAsync`) is in flight. */
+    private saveInFlight: boolean = false;
+    /** Set when `scheduleSave` fires again while `saveInFlight` — coalesces into
+     *  one more run after the current save finishes, instead of overlapping. */
+    private saveAgainRequested: boolean = false;
     private fileModTimeOnLoad: number | null = null; // Track file mtime when we loaded it
     /** Periodic heartbeat save — always fires every HEARTBEAT_SAVE_MS regardless of activity.
      * Safety net against lost tasks when the process dies without a clean shutdown
@@ -1298,6 +1304,22 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Async twin of {@link atomicWriteHistorySync}, used only by the debounced
+     * background save path (`saveTasksAsync`) so a slow history write can't block
+     * the event loop. The synchronous version stays as-is for `saveNow`/shutdown.
+     */
+    private async atomicWriteHistoryAsync(historyPath: string, data: string): Promise<void> {
+        const tmpPath = `${historyPath}.${process.pid}.tmp`;
+        await writeFileAsync(tmpPath, stripTerminalQueries(data));
+        try {
+            await renameAsync(tmpPath, historyPath);
+        } catch (e) {
+            try { if (existsSync(tmpPath)) await unlinkAsync(tmpPath); } catch (_e) { /* ignore */ }
+            throw e;
+        }
+    }
+
+    /**
      * Get the directory for task histories
      */
     private getHistoryDir(): string {
@@ -1454,6 +1476,52 @@ export class TaskSpawner extends EventEmitter {
             }
 
             this.atomicWriteHistorySync(historyPath, payload.toString('utf8'));
+            logger.info('Rotated history file', {
+                file: historyPath,
+                originalBytes: stat.size,
+                newBytes: payload.length,
+            });
+        } catch (e) {
+            logger.warn('Failed to rotate history file', { file: historyPath, error: (e as Error).message });
+        }
+    }
+
+    /**
+     * Async twin of {@link rotateHistoryFileIfNeeded}, used only by the debounced
+     * background save path. Same trim-to-tail logic, via `fs/promises`.
+     */
+    private async rotateHistoryFileIfNeededAsync(historyPath: string): Promise<void> {
+        if (this.historyFileMaxBytes <= 0) return;
+        if (!existsSync(historyPath)) return;
+
+        let stat;
+        try {
+            stat = await statAsync(historyPath);
+        } catch (_e) {
+            return;
+        }
+        if (stat.size <= this.historyFileMaxBytes) return;
+
+        const keep = this.historyFileKeepBytes;
+        try {
+            let payload: Buffer;
+            const handle = await openAsync(historyPath, 'r');
+            try {
+                const start = Math.max(0, stat.size - keep);
+                const buf = Buffer.alloc(stat.size - start);
+                await handle.read(buf, 0, buf.length, start);
+
+                let offset = 0;
+                const nl = buf.indexOf(0x0a, 0);
+                if (nl >= 0 && nl < Math.min(1024, buf.length)) offset = nl + 1;
+
+                const marker = Buffer.from(`\x1b[90m── history trimmed (${Math.round((stat.size - start) / 1024)} KB shown of ${Math.round(stat.size / 1024)} KB) ──\x1b[0m\r\n`);
+                payload = Buffer.concat([marker, buf.subarray(offset)]);
+            } finally {
+                await handle.close();  // Close before rename — critical on Windows
+            }
+
+            await this.atomicWriteHistoryAsync(historyPath, payload.toString('utf8'));
             logger.info('Rotated history file', {
                 file: historyPath,
                 originalBytes: stat.size,
@@ -2430,7 +2498,41 @@ export class TaskSpawner extends EventEmitter {
         if (this.saveDebounceTimer) {
             clearTimeout(this.saveDebounceTimer);
         }
-        this.saveDebounceTimer = setTimeout(() => this.saveTasks(), 500);
+        this.saveDebounceTimer = setTimeout(() => {
+            this.saveDebounceTimer = null;
+            void this.runDebouncedSave();
+        }, 500);
+    }
+
+    /**
+     * Entry point for the debounce timer. Runs the async, parallelized
+     * `saveTasksAsync` instead of the synchronous `saveTasks` — this is the save
+     * that fires often (nearly every task state change), so it must not block
+     * every other task's PTY I/O while it writes. `saveNow`/shutdown are
+     * unaffected: they still call synchronous `saveTasks` directly.
+     *
+     * Coalesces overlapping triggers: if `scheduleSave`'s timer fires again while
+     * a save from a previous tick is still running (I/O took >500ms), this does
+     * not start a second concurrent save — it flags one more run to happen right
+     * after the current one finishes, so at most one save is ever in flight.
+     */
+    private async runDebouncedSave(): Promise<void> {
+        if (this.saveInFlight) {
+            this.saveAgainRequested = true;
+            return;
+        }
+        this.saveInFlight = true;
+        try {
+            await this.saveTasksAsync();
+        } catch (e) {
+            console.error('[TaskSpawner] Debounced async save threw:', e);
+        } finally {
+            this.saveInFlight = false;
+            if (this.saveAgainRequested) {
+                this.saveAgainRequested = false;
+                this.scheduleSave();
+            }
+        }
     }
 
     /**
@@ -2682,6 +2784,210 @@ export class TaskSpawner extends EventEmitter {
             console.log(`[TaskSpawner] Saved ${tasksToSave.length} tasks, ${archivedTasksToSave.length} archived (metadata only)`);
         } catch (error) {
             console.error('[TaskSpawner] Failed to save tasks:', error);
+        }
+    }
+
+    /**
+     * Async twin of {@link saveArchivedTasks}, used only by the debounced
+     * background save path.
+     */
+    private async saveArchivedTasksAsync(archived: ArchivedTaskMetadata[]): Promise<void> {
+        try {
+            const path = this.getArchivedPersistencePath();
+            if (archived.length === 0 && existsSync(path)) {
+                try {
+                    const existing = JSON.parse(readFileSync(path, 'utf-8')) as { archivedTasks?: unknown[] };
+                    if ((existing.archivedTasks?.length || 0) > 0) {
+                        console.error(
+                            `[TaskSpawner] REFUSING to save archived tasks: would overwrite ` +
+                            `${existing.archivedTasks!.length} archived with empty state.`
+                        );
+                        return;
+                    }
+                } catch (_e) {
+                    // Unparseable — fall through and overwrite.
+                }
+            }
+            await atomicWriteFileAsync(path, JSON.stringify({ archivedTasks: archived }), { backup: true });
+            this.archivedDirty = false;
+            console.log(`[TaskSpawner] Saved ${archived.length} archived tasks`);
+        } catch (error) {
+            // Leave archivedDirty set so the next save retries.
+            console.error('[TaskSpawner] Failed to save archived tasks:', error);
+        }
+    }
+
+    /**
+     * Async, parallelized twin of {@link saveTasks}. Used ONLY by the debounced
+     * background save (`runDebouncedSave`, invoked from `scheduleSave`'s timer) —
+     * `saveNow`/shutdown keep calling the synchronous `saveTasks` unchanged, since
+     * that path must complete before an abrupt process kill can interrupt it.
+     *
+     * Same logic and same safety nets (mod-time conflict guard, refuse-to-overwrite
+     * -non-empty-with-empty guard, `.bak` rollover) as `saveTasks`. The only
+     * structural difference: each live task's history-file handling is an
+     * independent async job, run concurrently via `Promise.allSettled` instead of
+     * a sequential blocking loop — this is what actually parallelizes the I/O.
+     *
+     * Known accepted trade-off: if a synchronous `saveNow()` (e.g. shutdown) lands
+     * while a task's history job here is mid-flight, both could append the same
+     * slice of new terminal output once each — a rare, cosmetic duplicate-lines
+     * possibility in that task's history file. This can never corrupt or lose data
+     * in tasks.json itself: that file is always a full atomic overwrite derived
+     * fresh from current in-memory state into a private tmp file before an atomic
+     * rename, so whichever of two concurrent writers renames last simply wins, and
+     * both would contain valid, current state.
+     */
+    private async saveTasksAsync(): Promise<void> {
+        try {
+            if (this.fileModTimeOnLoad !== null && existsSync(this.persistencePath)) {
+                const currentStats = statSync(this.persistencePath);
+                if (currentStats.mtimeMs > this.fileModTimeOnLoad) {
+                    console.error(`[TaskSpawner] ⚠️  WARNING: tasks.json was modified by another process!`);
+                    console.error(`[TaskSpawner]     Loaded at:  ${new Date(this.fileModTimeOnLoad).toISOString()}`);
+                    console.error(`[TaskSpawner]     Modified at: ${new Date(currentStats.mtimeMs).toISOString()}`);
+                    console.error(`[TaskSpawner]     REFUSING TO SAVE to prevent data loss!`);
+                    console.error(`[TaskSpawner]     This indicates multiple server instances are running.`);
+                    return;
+                }
+            }
+
+            const tasksToSave: PersistedTask[] = [];
+            const historyJobs: Promise<void>[] = [];
+
+            const historyDir = this.getHistoryDir();
+            if (!existsSync(historyDir)) {
+                mkdirSync(historyDir, { recursive: true });
+            }
+
+            for (const task of this.tasks.values()) {
+                const historyPath = this.getTaskHistoryPath(task.id);
+                historyJobs.push((async () => {
+                    try {
+                        if (task.previousHistory && !existsSync(historyPath)) {
+                            const buffers: Buffer[] = [task.previousHistory];
+                            if (task.outputHistory.length > 0) {
+                                buffers.push(...task.outputHistory);
+                            }
+                            const fullHistory = Buffer.concat(buffers);
+                            await this.atomicWriteHistoryAsync(historyPath, fullHistory.toString('utf8'));
+                            task.savedBufferCount = task.outputHistory.length;
+                        } else if (!existsSync(historyPath)) {
+                            if (task.outputHistory.length > 0) {
+                                const fullHistory = Buffer.concat(task.outputHistory);
+                                await this.atomicWriteHistoryAsync(historyPath, fullHistory.toString('utf8'));
+                                task.savedBufferCount = task.outputHistory.length;
+                            }
+                        } else if (task.savedBufferCount < task.outputHistory.length) {
+                            const newBuffers = task.outputHistory.slice(task.savedBufferCount);
+                            if (newBuffers.length > 0) {
+                                let raw = (this.historyAppendCarry.get(task.id) || '') + Buffer.concat(newBuffers).toString('utf8');
+                                const cut = incompleteEscapeSuffixStart(raw);
+                                if (cut >= 0 && raw.length - cut <= 16) {
+                                    this.historyAppendCarry.set(task.id, raw.slice(cut));
+                                    raw = raw.slice(0, cut);
+                                } else {
+                                    this.historyAppendCarry.delete(task.id);
+                                }
+                                const newData = stripTerminalQueries(raw);
+                                await appendFileAsync(historyPath, newData);
+                                task.savedBufferCount = task.outputHistory.length;
+                                await this.rotateHistoryFileIfNeededAsync(historyPath);
+                            }
+                        }
+                    } catch (e) {
+                        console.error(`[TaskSpawner] Failed to save history for task ${task.id}:`, e);
+                    }
+                })());
+
+                const wasInterrupted = true;
+                const wasMidTurn = task.state === 'busy' || task.state === 'starting';
+                const shouldContinue = wasMidTurn && task.sessionId != null;
+                const taskBackendType = this.taskBackends.get(task.id);
+
+                tasksToSave.push({
+                    id: task.id,
+                    prompt: task.prompt,
+                    workspaceId: task.workspaceId,
+                    createdAt: task.createdAt.toISOString(),
+                    lastActivity: task.lastActivity.toISOString(),
+                    lastState: task.state,
+                    sessionId: task.sessionId,
+                    wasInterrupted,
+                    shouldContinue,
+                    systemPrompt: task.systemPrompt,
+                    backendType: taskBackendType,
+                    displayName: task.displayName,
+                    displayNameEditedByUser: task.displayNameEditedByUser,
+                    processStartedAt: task.processStartedAt?.toISOString(),
+                    order: task.order,
+                    tokenUsage: task.tokenUsage,
+                    parentTaskId: task.parentTaskId,
+                    taskNumber: task.taskNumber,
+                });
+            }
+
+            // Parallelize: every task's history file is independent, so there is no
+            // reason to write them one at a time. allSettled — one task's history
+            // failure (already logged above) must not abort the others or the main
+            // tasks.json write below.
+            await Promise.allSettled(historyJobs);
+
+            for (const task of this.disconnectedTasks.values()) {
+                tasksToSave.push(task);
+            }
+
+            const archivedTasksToSave: ArchivedTaskMetadata[] = Array.from(this.archivedTasks.values());
+
+            const persistence: TaskPersistence = {
+                tasks: tasksToSave,
+                archivedTasks: [],
+                nextTaskNumber: this.nextTaskNumber,
+                ...(this.pendingParentNotifications.size > 0
+                    ? { pendingParentNotifications: Object.fromEntries(this.pendingParentNotifications) }
+                    : {}),
+            };
+            const dir = dirname(this.persistencePath);
+            if (!existsSync(dir)) {
+                mkdirSync(dir, { recursive: true });
+            }
+
+            const newTotal = tasksToSave.length + archivedTasksToSave.length;
+            if (newTotal === 0 && existsSync(this.persistencePath)) {
+                try {
+                    const existingRaw = readFileSync(this.persistencePath, 'utf-8');
+                    const existing = JSON.parse(existingRaw) as { tasks?: any[]; archivedTasks?: any[] };
+                    const existingTotal = (existing.tasks?.length || 0) + (existing.archivedTasks?.length || 0);
+                    if (existingTotal > 0) {
+                        console.error(
+                            `[TaskSpawner] REFUSING to save: would overwrite ${existingTotal} tasks ` +
+                            `with empty state. This is almost certainly a bug. ` +
+                            `In-memory: ${this.tasks.size} live, ${this.disconnectedTasks.size} disconnected, ` +
+                            `${this.archivedTasks.size} archived.`
+                        );
+                        return;
+                    }
+                } catch (_e) {
+                    // Existing file unparseable — fall through and overwrite
+                }
+            }
+
+            await atomicWriteFileAsync(
+                this.persistencePath,
+                JSON.stringify(persistence),
+                { backup: true }
+            );
+
+            if (this.archivedDirty) {
+                await this.saveArchivedTasksAsync(archivedTasksToSave);
+            }
+
+            const newStats = statSync(this.persistencePath);
+            this.fileModTimeOnLoad = newStats.mtimeMs;
+
+            console.log(`[TaskSpawner] Saved ${tasksToSave.length} tasks, ${archivedTasksToSave.length} archived (metadata only) [async]`);
+        } catch (error) {
+            console.error('[TaskSpawner] Failed to save tasks (async):', error);
         }
     }
 
