@@ -42,11 +42,13 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { createClaudiaMcpServer } from './claudia-mcp-server.js';
 import { isValidSharedMcpToken } from './mcp-auth.js';
 import { JiraClient, JiraError, parseIssueKey } from './jira-client.js';
-import { ensureDataDir, dataPath, describeDataDir } from './paths.js';
+import { ensureDataDir, dataPath, describeDataDir, LEGACY_DATA_DIR } from './paths.js';
 import { exportState } from './export-import/export.js';
 import { resolveBackendVersion, type InstanceInfo } from './instance-lock.js';
 import { getAuthToken, validateAuthToken } from './auth-token.js';
 import { isLoopbackPeer, isSecureRequest } from './request-peer.js';
+import { importState } from './export-import/import.js';
+import { clearHandoffMark, readHandoffMark } from './export-import/handoff.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
 // - config-routes.ts: Config API routes template
@@ -7810,7 +7812,7 @@ Guidelines:
     // not download a bundle.
     app.post('/api/export', async (req, res) => {
         try {
-            const { out, withSecrets, withHistories, withAgentSessions } = req.body ?? {};
+            const { out, withSecrets, withHistories, withAgentSessions, handoff, allowNoRemote } = req.body ?? {};
             if (typeof out !== 'string' || out.trim() === '') {
                 res.status(400).json({ error: 'out is required and must be a non-empty path' });
                 return;
@@ -7821,14 +7823,43 @@ Guidelines:
                 withSecrets: !!withSecrets,
                 withHistories: !!withHistories,
                 withAgentSessions: !!withAgentSessions,
+                handoff: !!handoff,
             });
 
-            const manifest = await exportState(dataDir, {
-                out,
-                withSecrets: !!withSecrets,
-                withHistories: !!withHistories,
-                withAgentSessions: !!withAgentSessions,
-            });
+            const manifest = await exportState(
+                dataDir,
+                {
+                    out,
+                    withSecrets: !!withSecrets,
+                    withHistories: !!withHistories,
+                    withAgentSessions: !!withAgentSessions,
+                    handoff: !!handoff,
+                    allowNoRemote: !!allowNoRemote,
+                },
+                {
+                    // A handoff has to stop the tasks so each runtime exits and
+                    // flushes its session JSONL. disconnectTask is the right
+                    // primitive: it kills the PTY and persists the task as
+                    // `wasInterrupted`, which is exactly the state the target's
+                    // existing auto-reconnect resumes from. No new mechanism.
+                    stopTasks: async () => {
+                        const live = taskSpawner.getAllTasks().filter(t => t.state !== 'exited');
+                        logger.info('Handoff: disconnecting live tasks so transcripts flush', {
+                            count: live.length,
+                        });
+                        for (const task of live) {
+                            try {
+                                taskSpawner.disconnectTask(task.id);
+                            } catch (error) {
+                                logger.warn('Handoff: failed to disconnect task', {
+                                    taskId: task.id,
+                                    error: error instanceof Error ? error.message : String(error),
+                                });
+                            }
+                        }
+                    },
+                }
+            );
 
             logger.info('State export complete', {
                 out,
@@ -7839,6 +7870,104 @@ Guidelines:
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             logger.error('State export failed', { error: message });
+            res.status(500).json({ error: message });
+        }
+    });
+
+    // Portable state import (P0 task 11, spec §11.2). The inverse of /api/export.
+    //
+    // Path remapping is the whole reason this route exists rather than "copy the
+    // directory": a workspace's id IS its absolute path, and workspace-store
+    // drops any workspace whose path is missing — so an unremapped copy does not
+    // degrade gracefully, it deletes. See export-import/import.ts.
+    //
+    // NOTE: importing into the data directory THIS server is using will be
+    // refused by importState's live-instance check, which is the intended
+    // behaviour — an import is an offline operation.
+    app.post('/api/import', async (req, res) => {
+        try {
+            const { exportDir, map, dryRun, handoff, force } = req.body ?? {};
+            if (typeof exportDir !== 'string' || exportDir.trim() === '') {
+                res.status(400).json({ error: 'exportDir is required and must be a non-empty path' });
+                return;
+            }
+
+            // `map` arrives as [[from, to], ...]. Validate the shape rather than
+            // trusting it: a malformed pair would otherwise become a silent
+            // no-op rule and the operator would never learn their mapping was
+            // ignored.
+            const pairs: Array<[string, string]> = [];
+            if (map !== undefined) {
+                if (!Array.isArray(map)) {
+                    res.status(400).json({ error: 'map must be an array of [from, to] pairs' });
+                    return;
+                }
+                for (const pair of map) {
+                    if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== 'string' || typeof pair[1] !== 'string') {
+                        res.status(400).json({ error: `invalid mapping ${JSON.stringify(pair)}; expected [from, to] strings` });
+                        return;
+                    }
+                    pairs.push([pair[0], pair[1]]);
+                }
+            }
+
+            logger.info('State import requested', {
+                exportDir,
+                mappings: pairs.length,
+                dryRun: !!dryRun,
+                handoff: !!handoff,
+                force: !!force,
+            });
+
+            const report = await importState(exportDir, dataDir, {
+                map: pairs,
+                dryRun: !!dryRun,
+                handoff: !!handoff,
+                force: !!force,
+            });
+
+            logger.info('State import complete', {
+                dryRun: report.dryRun,
+                filesWritten: report.filesWritten.length,
+                workspaces: report.workspaces.length,
+                unavailable: report.workspaces.filter(w => !w.exists).length,
+                sessionsPlaced: report.sessionsPlaced,
+                warnings: report.warnings.length,
+            });
+            res.json({ ok: true, report });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error('State import failed', { error: message });
+            res.status(500).json({ error: message });
+        }
+    });
+
+    // Handoff status + reclaim (P0 task 11, spec §11.3).
+    //
+    // Reclaim is a deliberate human decision, not something the backend infers.
+    // Nothing here can distinguish "the target machine never came up" from "the
+    // target is running right now", and guessing wrong re-creates the exact
+    // double-writer the handoff mark exists to prevent.
+    app.get('/api/handoff', (_req, res) => {
+        const mark = readHandoffMark(dataDir ?? LEGACY_DATA_DIR);
+        res.json({ handedOff: mark !== null, mark });
+    });
+
+    app.post('/api/handoff/reclaim', (_req, res) => {
+        try {
+            const dir = dataDir ?? LEGACY_DATA_DIR;
+            const had = clearHandoffMark(dir);
+            logger.info('Handoff reclaimed', { dataDir: dir, hadMark: had });
+            res.json({
+                ok: true,
+                reclaimed: had,
+                message: had
+                    ? 'Handoff cleared — this instance can start and resume tasks again.'
+                    : 'No handoff mark was set; this instance was already free to run tasks.',
+            });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error('Handoff reclaim failed', { error: message });
             res.status(500).json({ error: message });
         }
     });

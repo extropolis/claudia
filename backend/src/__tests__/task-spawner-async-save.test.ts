@@ -32,6 +32,16 @@ interface Ctx {
 
 const active: Ctx[] = [];
 
+/**
+ * Both save paths write tasks.json in the { schemaVersion, data } envelope
+ * (#252). Assert the envelope, then hand back its payload.
+ */
+function readTasksEnvelope(path: string): { tasks: { id: string }[] } {
+    const raw = JSON.parse(readFileSync(path, 'utf-8'));
+    expect(raw.schemaVersion).toBe(1);
+    return raw.data;
+}
+
 function seed(taskIds: string[]): Ctx {
     const base = mkdtempSync(join(homedir(), '.claudia-asyncsave-test-'));
     const tasksFile = join(base, 'tasks.json');
@@ -93,7 +103,7 @@ describe('saveTasksAsync — parity with the synchronous save path', () => {
 
         await internals(s).saveTasksAsync();
 
-        const onDisk = JSON.parse(readFileSync(ctx.tasksFile, 'utf-8')) as { tasks: { id: string }[] };
+        const onDisk = readTasksEnvelope(ctx.tasksFile);
         expect(onDisk.tasks.map(t => t.id).sort()).toEqual(['task-a', 'task-b']);
     });
 
@@ -128,7 +138,7 @@ describe('saveTasksAsync — parity with the synchronous save path', () => {
 
         await internals(s).saveTasksAsync();
 
-        const onDisk = JSON.parse(readFileSync(ctx.tasksFile, 'utf-8')) as { tasks: unknown[] };
+        const onDisk = readTasksEnvelope(ctx.tasksFile);
         expect(onDisk.tasks.length).toBeGreaterThan(0);
     });
 });
@@ -249,7 +259,7 @@ describe('runDebouncedSave — overlap coalescing', () => {
         expect(inner.saveAgainRequested).toBe(false);
         expect((s as unknown as { saveDebounceTimer: unknown }).saveDebounceTimer).not.toBeNull();
 
-        const onDisk = JSON.parse(readFileSync(ctx.tasksFile, 'utf-8')) as { tasks: { id: string }[] };
+        const onDisk = readTasksEnvelope(ctx.tasksFile);
         expect(onDisk.tasks.map(t => t.id)).toContain('task-a');
     });
 });

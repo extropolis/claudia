@@ -85,8 +85,9 @@ function seedTasks(sessionId: string | null) {
 }
 
 function readPersisted(taskId = 'task-100-abc') {
+    // tasks.json is a { schemaVersion, data } envelope once the spawner has saved.
     const parsed = JSON.parse(readFileSync(join(base, 'tasks.json'), 'utf8'));
-    return parsed.tasks.find((t: { id: string }) => t.id === taskId);
+    return parsed.data.tasks.find((t: { id: string }) => t.id === taskId);
 }
 
 function makeLiveTask(overrides: Record<string, unknown> = {}) {

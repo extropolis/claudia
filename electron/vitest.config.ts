@@ -17,7 +17,7 @@ export default defineConfig({
         root: __dirname,
         coverage: {
             provider: 'v8',
-            include: ['updater-policy.ts'],
+            include: ['updater-policy.ts', 'server-manager.ts'],
             reporter: ['text', 'json', 'lcov'],
             thresholds: {
                 // This module is pure and fully reachable; hold it high.
