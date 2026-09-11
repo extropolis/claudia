@@ -29,6 +29,29 @@ test('boot produces no console errors', async ({ page, consoleErrors, pageErrors
     expect(pageErrors, 'uncaught exceptions during boot').toEqual([]);
 });
 
+test('the browser authenticates through the real loopback bootstrap', async ({ page }) => {
+    // Auth is mandatory (#261). The suite must NOT hand the browser a token —
+    // no ?token= URL, no pre-seeded sessionStorage — or it would stop covering
+    // the path every real "open a browser on this machine" user takes.
+    const bootstrap = page.waitForResponse((res) => new URL(res.url()).pathname === '/api/auth/local');
+    const sockets: string[] = [];
+    page.on('websocket', (ws) => sockets.push(ws.url()));
+
+    await openApp(page);
+
+    const res = await bootstrap;
+    expect(new URL(res.url()).origin, 'bootstrap must hit the sandboxed backend').toBe(BACKEND_URL);
+    expect(res.status(), 'loopback bootstrap must grant a token to a local browser').toBe(200);
+    await expect(page.locator('.auth-gate'), 'the token gate must not appear').toHaveCount(0);
+
+    // The socket that reached "connected" presented the token in its URL —
+    // browsers cannot set headers on a WS handshake, so this is the only place.
+    expect(sockets.length, 'the app opened a WebSocket').toBeGreaterThan(0);
+    for (const url of sockets) {
+        expect(new URL(url).searchParams.get('token'), `WS ${url} must carry the token`).toMatch(/^[0-9a-f]{64}$/);
+    }
+});
+
 test('the browser talks to the sandboxed backend, never the dev server', async ({ page }) => {
     const seen = new Set<string>();
     page.on('request', (req) => {

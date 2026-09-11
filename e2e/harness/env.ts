@@ -17,8 +17,11 @@ import {
 } from 'fs';
 import { execFileSync } from 'child_process';
 import { homedir } from 'os';
-import { dirname, join, resolve } from 'path';
+import { delimiter, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
+// The backend's own token module, so the harness reads/mints the credential
+// exactly as the server does — same file, same format, same validation rules.
+import { getAuthToken } from '../../backend/src/auth-token.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HERE, '..', '..');
@@ -163,6 +166,38 @@ export function prepareHarness(): void {
     const fakeClaude = join(BIN_DIR, 'claude');
     copyFileSync(fixture, fakeClaude);
     chmodSync(fakeClaude, 0o755);
+    if (process.platform === 'win32') {
+        // With APPDATA/USERPROFILE sandboxed (backendEnv), resolveClaudeSpawn()
+        // falls back to `cmd.exe /c claude.cmd`, which searches PATH — and the
+        // inherited PATH still names the real npm global dir. Shadow it with a
+        // shim that refuses, so a Windows run can never reach the real CLI.
+        writeFileSync(join(BIN_DIR, 'claude.cmd'),
+            '@echo [e2e] the fake claude CLI is a bash script; task specs need a POSIX host 1>&2\r\n@exit /b 1\r\n');
+    }
+
+    // Mint the sandbox's API token BEFORE the backend boots, the same way the
+    // backend would (auth-token.ts writes <dataDir>/auth-token). The backend
+    // mints lazily on its first authenticated request, so without this a spec
+    // that calls the API directly could race the server's own first mint and
+    // the two processes would end up holding different tokens.
+    getAuthToken(STATE_DIR);
+}
+
+/**
+ * The sandboxed backend's API token.
+ *
+ * Every /api route and WebSocket upgrade requires one (#261). Specs that call
+ * the backend directly — not through the browser — must present it; the
+ * browser gets its own through the app's real loopback bootstrap
+ * (`/api/auth/local`), which the suite deliberately does not bypass.
+ */
+export function authToken(): string {
+    return getAuthToken(STATE_DIR);
+}
+
+/** Headers for a direct API call to the sandboxed backend. */
+export function authHeaders(): Record<string, string> {
+    return { 'x-claudia-token': authToken() };
 }
 
 /**
@@ -192,6 +227,13 @@ export const DEFAULT_STATE_FILES = [
     join(REPO_ROOT, 'backend', 'learnings.json'),
     join(REPO_ROOT, 'backend', 'scheduled-tasks.json'),
     join(REPO_ROOT, 'backend', 'chat-history.json'),
+    // Credentials and the single-instance lock (#259/#261) also fall back to
+    // backend/ without a data dir. A leaked auth-token here would mean the
+    // sandbox minted a credential into the developer's checkout.
+    join(REPO_ROOT, 'backend', 'auth-token'),
+    join(REPO_ROOT, 'backend', 'mcp-token'),
+    join(REPO_ROOT, 'backend', 'instance.json'),
+    join(REPO_ROOT, 'backend', 'task-histories'),
     // Written only if the backend spawned a shared Playwright MCP server, which
     // backendEnv() disables (CLAUDIA_SHARED_MCP=0). Its presence would mean the
     // sandbox started a detached process that outlives the run.
@@ -211,8 +253,19 @@ export function backendEnv(): Record<string, string> {
         throw new Error(`[e2e] fake HOME ${FAKE_HOME} escapes the sandbox root ${RUN_ROOT}`);
     }
     return {
-        PATH: `${BIN_DIR}:${process.env.PATH ?? ''}`,
+        PATH: `${BIN_DIR}${delimiter}${process.env.PATH ?? ''}`,
         HOME: FAKE_HOME,
+        // On Windows HOME is not enough: os.homedir() reads USERPROFILE, and
+        // resolveClaudeSpawn() finds the CLI via APPDATA / USERPROFILE rather
+        // than PATH — so without these the sandboxed backend would write
+        // ~/.claude into the real profile and could spawn the developer's REAL
+        // claude.exe. Pointing both into the sandbox makes the real CLI
+        // unreachable. (The fake CLI is a bash script, so task specs still need
+        // a POSIX host; this only guarantees a Windows run cannot do harm.)
+        ...(process.platform === 'win32' ? {
+            USERPROFILE: FAKE_HOME,
+            APPDATA: join(FAKE_HOME, 'AppData', 'Roaming'),
+        } : {}),
         CLAUDIA_BACKEND_PORT: String(BACKEND_PORT),
         CLAUDIA_DATA_DIR: STATE_DIR,
         CLAUDIA_FAKE_DIR: FAKE_DIR,

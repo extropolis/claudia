@@ -74,7 +74,10 @@ export default defineConfig({
         {
             command: 'node backend/dist/index.js',
             cwd: REPO_ROOT,
-            url: `http://127.0.0.1:${BACKEND_PORT}/api/tasks`,
+            // /api/health, not /api/tasks: every other /api route requires the
+            // token now. Playwright happens to count a 401 as "up", but a probe
+            // that only passes by accident of that rule is not a readiness check.
+            url: `http://127.0.0.1:${BACKEND_PORT}/api/health`,
             reuseExistingServer: false,
             timeout: 60_000,
             stdout: 'pipe',

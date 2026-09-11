@@ -14,7 +14,7 @@
 import { existsSync, readFileSync } from 'fs';
 import { test, expect } from '../fixtures/test.js';
 import {
-    BACKEND_PORT, BACKEND_URL, DEFAULT_STATE_FILES, FRONTEND_PORT, STATE_DIR,
+    BACKEND_PORT, BACKEND_URL, DEFAULT_STATE_FILES, FRONTEND_PORT, STATE_DIR, authHeaders,
 } from '../harness/env.js';
 import { makeGitRepo } from '../harness/repo.js';
 import { addWorkspace, openApp, workspaceSection } from '../harness/ui.js';
@@ -79,6 +79,27 @@ test('the backend under test reads and writes only the sandboxed state dir', asy
 });
 
 test('the running backend is reachable on the sandboxed port only', async ({ request }) => {
-    const res = await request.get(`${BACKEND_URL}/api/tasks`);
+    const res = await request.get(`${BACKEND_URL}/api/tasks`, { headers: authHeaders() });
     expect(res.ok(), `sandboxed backend must answer on ${BACKEND_URL}`).toBe(true);
+});
+
+test('the sandboxed backend enforces auth: no token, or the wrong token, is refused', async ({ request }) => {
+    // Auth is unconditional on /api (#261). If this ever answers 200 the suite
+    // is either talking to a backend that predates it or to one whose gate is
+    // broken — and every "the browser authenticated" signal elsewhere in the
+    // suite would be vacuous.
+    const anonymous = await request.get(`${BACKEND_URL}/api/tasks`);
+    expect(anonymous.status(), 'unauthenticated /api request must be refused').toBe(401);
+
+    const wrong = await request.get(`${BACKEND_URL}/api/tasks`, {
+        headers: { 'x-claudia-token': '0'.repeat(64) },
+    });
+    expect(wrong.status(), 'a well-formed but wrong token must be refused').toBe(401);
+
+    // The token the harness presents is the one stored in the SANDBOX data dir,
+    // so a 200 here also proves the backend resolved its token from
+    // CLAUDIA_DATA_DIR rather than the legacy backend/ location.
+    const authed = await request.get(`${BACKEND_URL}/api/tasks`, { headers: authHeaders() });
+    expect(authed.status(), 'the sandbox token must be accepted').toBe(200);
+    expect(existsSync(`${STATE_DIR}/auth-token`), 'auth-token must live in the sandbox state dir').toBe(true);
 });
