@@ -23,12 +23,175 @@ export function stripAnsi(str: string): string {
 }
 
 /**
- * Check if terminal output indicates Claude is ready for initial input
+ * Check if terminal output indicates Claude is ready for initial input.
+ *
+ * These markers all belong to the input prompt / its footer hint bar. Beware
+ * that the mode footer ("⏵⏵ bypass permissions on (shift+tab to cycle)") stays
+ * on screen during an active turn as well, so a match means "the input box is
+ * rendered", not "the TUI is idle". That is why {@link classifyEnterOutcome}
+ * consults {@link hasActiveTurnIndicator} first and only then treats these
+ * markers as the "still parked at the input" signal.
  */
 export function isReadyForInitialInput(str: string): boolean {
     return str.includes('Try "') ||
         str.includes('? for shortcuts') ||
+        str.includes('bypass permissions') ||
+        str.includes('shift+tab') ||
         (str.includes('───') && str.includes('❯'));
+}
+
+/**
+ * Detect a genuine in-progress turn (Claude actively processing a submission).
+ *
+ * "esc to interrupt" is Claude Code's definitive active-turn marker: it is shown
+ * for the entire duration of a turn (thinking, tool calls, streaming) — today as
+ * part of the footer line "⏵⏵ bypass permissions on (shift+tab to cycle) · esc
+ * to interrupt · ← for agents" — and NEVER at the idle input prompt nor during
+ * startup/banner rendering. We deliberately
+ * do NOT reuse {@link hasProcessingIndicators} here — its spinner glyphs (✻, ✳)
+ * and "───Claude" header pattern also appear in the startup "✻ Welcome to Claude
+ * Code" banner, so they cannot distinguish "turn started" from "still starting
+ * up". Using them would reintroduce the false-positive that this function exists
+ * to avoid.
+ */
+export function hasActiveTurnIndicator(str: string): boolean {
+    // Whitespace-tolerant so a narrow-terminal line wrap (e.g. "esc to\ninterrupt")
+    // still matches; stripAnsi preserves newlines.
+    return /esc\s+to\s+interrupt/i.test(str);
+}
+
+/**
+ * Detect the structural chrome of a choice / permission dialog.
+ *
+ * WHY THIS EXISTS: a dialog on screen is *proof the submission landed* — the TUI
+ * only renders one as part of a running turn. But a parked turn does NOT paint
+ * the active-turn marker: across 40 real task histories under
+ * `backend/task-histories`, 27 of 27 dialog frames had no "esc to interrupt"
+ * anywhere in the trailing 4096 raw bytes (the marker-carrying footer repaints
+ * only a handful of times per task). Without this check the classifier reads an
+ * open dialog as "Enter was dropped" and re-sends Enter — which SELECTS the
+ * highlighted option: auto-answering an AskUserQuestion, or auto-approving a
+ * permission prompt (`skipPermissions` defaults to false in config-store).
+ *
+ * Only unambiguous TUI chrome is matched. In particular the older Allow/Deny
+ * word pair is deliberately NOT used: those words occur in ordinary prose, and
+ * a false match would silently switch this path back to the pre-fix heuristic.
+ * Whitespace-tolerant so a narrow-terminal wrap still matches.
+ */
+export function hasChoiceDialog(str: string): boolean {
+    // AskUserQuestion / numbered menu footer, e.g.
+    // "Enter to select · ↑/↓ to navigate · Esc to cancel"
+    // (also seen as "Enter to select · Tab/Arrow keys to navigate · Esc to cancel")
+    if (/Enter\s+to\s+select/i.test(str) && /(to\s+navigate|Esc\s+to\s+cancel)/i.test(str)) {
+        return true;
+    }
+    // Tool permission prompt: "Do you want to proceed?" + "❯ 1. Yes"
+    if (/\bDo you want to\b/i.test(str) && /\b1\.\s*Yes\b/i.test(str)) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Decide whether an Enter we just sent was actually accepted (the prompt was
+ * submitted and a turn began), or whether it was dropped and must be retried.
+ *
+ * ROOT-CAUSE NOTE: the previous heuristic treated ANY output growth (> ~10
+ * bytes) as "accepted". On a fresh task create the Claude Code TUI is still
+ * streaming startup output (MCP servers finishing, rotating tips, footer/token
+ * counter repaints, re-layouts) when the queued prompt is typed and Enter is
+ * sent. That unrelated churn crosses the growth threshold within the observation
+ * window, so a DROPPED Enter looked "accepted" and the retry loop stopped — the
+ * typed prompt then sat in the input box unsubmitted (the reported symptom). It
+ * was intermittent because it only triggered when startup output happened to
+ * still be streaming during the post-Enter window.
+ *
+ * The robust rule: a positive active-turn marker ("esc to interrupt") always
+ * wins. Otherwise growth only counts as acceptance when we are NOT still parked
+ * at the input prompt: if the recent output still shows the input footer
+ * ("? for shortcuts" / "bypass permissions" / "❯" box) with no active-turn
+ * marker, the Enter was NOT accepted regardless of byte growth — keep retrying.
+ * Since the mode footer also persists during a turn, on the guarded path this
+ * effectively means "accepted iff the active-turn marker is visible"; the
+ * caller (sendEnterWithRetry) carries a give-up fallback so a turn that starts
+ * and finishes without the marker being sampled cannot wedge the task.
+ */
+export function classifyEnterOutcome(opts: {
+    /** Bytes of output that arrived after Enter was written. */
+    outputDeltaBytes: number;
+    /** Stripped recent output tail observed after Enter. */
+    recentOutput: string;
+    /**
+     * Stripped output that arrived STRICTLY AFTER the Enter was written, used as
+     * the active-turn evidence window. Defaults to {@link recentOutput}.
+     *
+     * Two reasons this is not just the trailing window:
+     *  1. The TUI echoes the typed prompt into the input box BEFORE Enter. A
+     *     prompt that merely quotes "esc to interrupt" (this repo's own review
+     *     prompts do) would otherwise make a DROPPED Enter look accepted — the
+     *     very bug this classifier exists to prevent.
+     *  2. The marker-carrying footer paints rarely; a fixed trailing window
+     *     loses it as soon as a few KB of turn output stream past, so a live
+     *     turn gets misread as "dropped" and sprayed with more Enters.
+     *
+     * {@link hasChoiceDialog} is evaluated against this same window, for reason
+     * (1): a prompt that quotes dialog chrome must not count as acceptance.
+     */
+    outputSinceEnter?: string;
+    /**
+     * True when {@link outputSinceEnter} had to be capped, i.e. more output
+     * arrived after Enter than we are willing to hold in memory. That volume is
+     * categorically not idle/startup churn, and the marker may well have been
+     * painted in the part we can no longer see — so it counts as acceptance even
+     * on the guarded path, instead of silently degrading to "retry".
+     */
+    outputSinceEnterTruncated?: boolean;
+    /** Minimum growth (bytes) that counts as meaningful. Default 10. */
+    growthThreshold?: number;
+    /**
+     * Veto acceptance-by-growth while the output still shows the idle input
+     * prompt. Needed for the initial-prompt / reconnect delivery, where startup
+     * or resume churn produces growth that must NOT be mistaken for submission.
+     * For a plain follow-up (the task is already interactive, no startup churn)
+     * pass false: there, growth reliably means the message was accepted, and the
+     * veto would otherwise cause spurious retries on near-instant turns
+     * (e.g. `/clear`, a one-line answer) that redraw back to the idle prompt
+     * before we sample. Default true.
+     */
+    guardAgainstIdleChurn?: boolean;
+}): 'accepted' | 'retry' {
+    const threshold = opts.growthThreshold ?? 10;
+    const guardIdle = opts.guardAgainstIdleChurn ?? true;
+
+    // Strong positive: a real turn is underway. Evidence must come from output
+    // printed after our Enter, never from the pre-Enter prompt echo.
+    if (hasActiveTurnIndicator(opts.outputSinceEnter ?? opts.recentOutput)) return 'accepted';
+
+    // A choice/permission dialog can only be on screen because the submission
+    // landed and the turn is now parked on the user. Accept — and above all do
+    // NOT retry, because a retried Enter here picks the highlighted option.
+    //
+    // Same window as the marker, and for the same reason: the TUI echoes the
+    // typed prompt into the input box BEFORE Enter, so a prompt that merely
+    // quotes dialog chrome ("Do you want to proceed?" / "❯ 1. Yes", or an
+    // AskUserQuestion footer) would make a DROPPED Enter look accepted — the
+    // exact bug this classifier exists to prevent. A dialog is painted by the
+    // turn, so real dialog chrome is always in the post-Enter output.
+    if (hasChoiceDialog(opts.outputSinceEnter ?? opts.recentOutput)) return 'accepted';
+
+    // More post-Enter output than the evidence window can hold. Startup churn is
+    // kilobytes; this is tens of them. Treat as accepted rather than blind-retry.
+    if (opts.outputSinceEnterTruncated) return 'accepted';
+
+    // Still sitting at the idle input prompt → the Enter did not submit, even if
+    // the screen repainted. This is the case that kills the startup-churn false
+    // positive on fresh create / reconnect.
+    if (guardIdle && isReadyForInitialInput(opts.recentOutput)) return 'retry';
+
+    // Output advanced meaningfully → the submission took.
+    if (opts.outputDeltaBytes > threshold) return 'accepted';
+
+    return 'retry';
 }
 
 /**
