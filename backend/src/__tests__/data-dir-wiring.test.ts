@@ -7,6 +7,7 @@ import { SharedMcpManager } from '../shared-mcp-manager.js';
 import { LEGACY_DATA_DIR, DATA_DIR_ENV } from '../paths.js';
 import { createApp } from '../server.js';
 import { WSClient } from './helpers/ws-harness.js';
+import { getAuthToken } from '../auth-token.js';
 
 /**
  * Guards the stores that gained a data-directory parameter in #188.
@@ -189,7 +190,9 @@ describe('createApp data directory wiring', () => {
 
         const res = await fetch(`http://127.0.0.1:${port}/api/tasks/task-wiring/todos`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            // Every /api route requires the token (#261); mint it from the same
+            // data dir the server under test is using.
+            headers: { 'Content-Type': 'application/json', 'x-claudia-token': getAuthToken(dataDir) },
             body: JSON.stringify({ title: marker }),
         });
         expect(res.status).toBe(200);
@@ -211,7 +214,7 @@ describe('createApp data directory wiring', () => {
         const wsDir = join(homeDir, 'ws');
         mkdirSync(wsDir, { recursive: true });
 
-        const client = await WSClient.connect(port);
+        const client = await WSClient.connect(port, getAuthToken(dataDir));
         try {
             const frame = await client.request(
                 'checkpoint:create',
