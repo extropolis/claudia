@@ -984,6 +984,17 @@ describe('WorkspaceStore', () => {
             expect(loaded.collectStatusChanges().map(w => [w.id, w.status])).toEqual([[testWorkspace1, 'unavailable']]);
         });
 
+        it('collectStatusChanges reports a workspace added and removed from disk before the first poll', () => {
+            // Regression: the baseline used to be set only by the poll itself, so a
+            // workspace whose path vanished within one poll interval of being added
+            // was first seen as 'unavailable' and never announced.
+            const loaded = new WorkspaceStore(testBaseDir);
+            const fresh = join(testBaseDir, 'short-lived');
+            loaded.addWorkspace(fresh);
+            rmSync(fresh, { recursive: true, force: true });
+            expect(loaded.collectStatusChanges().map(w => [w.id, w.status])).toEqual([[fresh, 'unavailable']]);
+        });
+
         it('collectStatusChanges forgets workspaces that were deleted from the store', () => {
             seedWorkspaces([
                 { id: testWorkspace1, name: 'workspace1', createdAt: new Date().toISOString() },

@@ -232,6 +232,10 @@ export class WorkspaceStore {
         };
 
         this.config.workspaces.push(workspace);
+        // The path was just verified as a directory: record that as the
+        // availability baseline, so a path that vanishes before the next status
+        // poll is still reported as a flip rather than first-seen 'unavailable'.
+        this.lastKnownStatus.set(workspace.id, 'available');
 
         // Remove from recent workspaces if it was there (since it's now active again)
         this.config.recentWorkspaces = this.config.recentWorkspaces.filter(w => w.id !== resolvedPath);
@@ -296,6 +300,8 @@ export class WorkspaceStore {
             systemPrompt: parentWorkspace?.systemPrompt,
             references: parentWorkspace?.references ? [...parentWorkspace.references] : undefined,
         };
+        // Verified above: seed the availability baseline (see addWorkspace).
+        this.lastKnownStatus.set(workspace.id, 'available');
 
         // Insert worktree after its parent (or after the last sibling worktree)
         const parentIdx = this.config.workspaces.findIndex(w => w.id === parentId);
