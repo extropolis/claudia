@@ -102,6 +102,9 @@ if (process.env.CLAUDIA_SHARED_MCP !== '0') {
     const sharedPort = parseInt(process.env.CLAUDIA_SHARED_MCP_PORT || '', 10);
     const sharedMcp = new SharedMcpManager(
         Number.isFinite(sharedPort) ? sharedPort : DEFAULT_SHARED_PLAYWRIGHT_PORT,
+        // Same resolution createApp() uses, so the pid file lands next to the
+        // rest of the state instead of inside the source tree / image layer.
+        { dataDir: resolveDataDir() },
     );
     try {
         const ok = await sharedMcp.ensureStarted();
