@@ -22,6 +22,7 @@ import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import WebSocket from 'ws';
 import { createApp } from '../server.js';
+import { getAuthToken } from '../auth-token.js';
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
 
@@ -49,11 +50,11 @@ async function waitFor<T>(fn: () => T | Promise<T>, pred: (v: T) => boolean, ms 
 }
 
 const readIf = (p: string) => (existsSync(p) ? readFileSync(p, 'utf8') : '');
-const apiTasks = () => fetch(`http://127.0.0.1:${port}/api/tasks`).then(r => r.json());
+const apiTasks = () => fetch(`http://127.0.0.1:${port}/api/tasks`, { headers: { 'x-claudia-token': getAuthToken(base) } }).then(r => r.json());
 
 function wsSend(type: string, payload: Record<string, unknown>): Promise<void> {
     return new Promise((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+        const ws = new WebSocket(`ws://127.0.0.1:${port}?token=${getAuthToken(base)}`);
         ws.on('open', () => {
             ws.send(JSON.stringify({ type, payload }));
             setTimeout(() => { ws.close(); resolve(); }, 300);
@@ -167,7 +168,7 @@ describe.skipIf(SKIP_ON_WINDOWS)('reconnect end-to-end: --resume and --system-pr
         const parts2 = await createApp(base);
         await new Promise<void>(res => parts2.server.listen(0, '127.0.0.1', () => res()));
         const port2 = (parts2.server.address() as { port: number }).port;
-        const ws = new WebSocket(`ws://127.0.0.1:${port2}`);
+        const ws = new WebSocket(`ws://127.0.0.1:${port2}?token=${getAuthToken(base)}`);
         await new Promise<void>((res, rej) => { ws.on('open', () => res()); ws.on('error', rej); });
         ws.send(JSON.stringify({ type: 'task:reconnect', payload: { taskId: taskId2 } }));
 

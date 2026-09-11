@@ -23,6 +23,7 @@ import { execFileSync } from 'child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createApp } from '../server.js';
+import { getAuthToken } from '../auth-token.js';
 import { SUPPORTS_FAKE_CLI } from './helpers/server-harness.js';
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
@@ -49,7 +50,7 @@ async function waitForTask(taskId: string, pred: (t: any) => boolean, timeoutMs 
     const deadline = Date.now() + timeoutMs;
     let last: any = null;
     while (Date.now() < deadline) {
-        const tasks = await fetch(`http://127.0.0.1:${port}/api/tasks`).then(r => r.json());
+        const tasks = await fetch(`http://127.0.0.1:${port}/api/tasks`, { headers: { 'x-claudia-token': getAuthToken(base) } }).then(r => r.json());
         last = tasks.find((t: any) => t.id === taskId);
         if (last && pred(last)) return last;
         await new Promise(r => setTimeout(r, 200));

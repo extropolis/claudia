@@ -17,6 +17,7 @@ import { homedir } from 'os';
 import { execFileSync } from 'child_process';
 import WebSocket from 'ws';
 import { createApp } from '../server.js';
+import { getAuthToken } from '../auth-token.js';
 
 const git = (cwd: string, ...args: string[]) =>
     execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' } });
@@ -29,7 +30,7 @@ let shutdown: (() => Promise<void>) | undefined;
 
 function wsCall(type: string, payload: Record<string, unknown>, expectTypes: string[], timeoutMs = 8000): Promise<{ type: string; payload: any }> {
     return new Promise((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+        const ws = new WebSocket(`ws://127.0.0.1:${port}?token=${getAuthToken(base)}`);
         const timer = setTimeout(() => { ws.close(); reject(new Error(`timeout waiting for ${expectTypes.join('|')}`)); }, timeoutMs);
         ws.on('open', () => ws.send(JSON.stringify({ type, payload })));
         ws.on('message', (data: Buffer) => {
@@ -118,13 +119,13 @@ describe('workspace:reset (regression: family archiving + worktree removal)', ()
         expect(existsSync(worktree)).toBe(false);
 
         // Workspace record for the worktree is gone
-        const wsList = await fetch(`http://127.0.0.1:${port}/api/workspaces`).then(r => r.json());
+        const wsList = await fetch(`http://127.0.0.1:${port}/api/workspaces`, { headers: { 'x-claudia-token': getAuthToken(base) } }).then(r => r.json());
         const ids = (wsList.workspaces || []).map((w: { id: string }) => w.id);
         expect(ids).toContain(repo);
         expect(ids).not.toContain(worktree);
 
         // No live/disconnected tasks remain for the family
-        const tasks = await fetch(`http://127.0.0.1:${port}/api/tasks`).then(r => r.json());
+        const tasks = await fetch(`http://127.0.0.1:${port}/api/tasks`, { headers: { 'x-claudia-token': getAuthToken(base) } }).then(r => r.json());
         const remaining = tasks.filter((t: { workspaceId: string }) => t.workspaceId === repo || t.workspaceId === worktree);
         expect(remaining).toHaveLength(0);
     }, 20000);

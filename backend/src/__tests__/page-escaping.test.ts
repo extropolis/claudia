@@ -216,39 +216,35 @@ describe('mobile-page: inline <script> escaping', () => {
 });
 
 /**
- * End-to-end through the real route. This is what proves the vector is closed
- * in production and not just in the template function — including that `/voice`
- * accepts an unauthenticated `local-` token in the first place.
+ * End-to-end through the real route.
+ *
+ * The route used to accept any token starting with `local-` on any host the
+ * tunnel substring match did not recognize, which is how a hostile string
+ * reached the page template at all — the prefix is minted client-side and
+ * never registered, so it authenticated nobody. /voice now takes the same
+ * credential as every other route, so the vector is closed twice over: the
+ * hostile token is rejected outright, and the template still escapes the
+ * credential it does serve.
  */
 describe('GET /voice end-to-end', () => {
     let h: Harness | undefined;
 
     afterAll(async () => { await h?.stop(); });
 
-    it('serves a safe page for an unauthenticated local- token carrying a payload', async () => {
-        h = await startHarness({ prefix: '.claudia-xss-test-' });
+    it('rejects a self-minted local- token carrying a payload, and escapes the real one', async () => {
+        h = await startHarness({ prefix: '.claudia-xss-test-', authenticate: false });
 
-        const benign = await h.fetch(`/voice?token=${encodeURIComponent('local-' + BENIGN)}`);
-        expect(benign.status).toBe(200);
-        const benignHtml = await benign.text();
-        const baseCounts = BREAKOUT_PATTERNS.map(([, re]) => countAll(benignHtml, re));
-
-        for (const [name, value] of HOSTILE) {
-            const token = 'local-' + value;
-            const res = await h.fetch(`/voice?token=${encodeURIComponent(token)}`);
-            expect(res.status, `${name}: route should still serve the page`).toBe(200);
-            const html = await res.text();
-
-            BREAKOUT_PATTERNS.forEach(([label, re], i) => {
-                expect(
-                    countAll(html, re),
-                    `/voice ${name}: response introduced a new "${label}" sequence`,
-                ).toBe(baseCounts[i]);
-            });
-
-            const got = evalLiteral(html, 'TOKEN');
-            expect(got, `/voice ${name}: served literal is not valid JS`).toMatchObject({ ok: true });
-            expect((got as { value: unknown }).value, `/voice ${name}: token no longer round-trips`).toBe(token);
+        for (const [name, value] of [['benign', BENIGN] as const, ...HOSTILE]) {
+            const res = await h.fetch(`/voice?token=${encodeURIComponent('local-' + value)}`);
+            expect(res.status, `${name}: a local- prefix is not a credential`).toBe(401);
         }
+
+        // The real token still round-trips into the page as a safe JS literal.
+        const ok = await h.fetch(`/voice?token=${encodeURIComponent(h.token)}`);
+        expect(ok.status).toBe(200);
+        const html = await ok.text();
+        const got = evalLiteral(html, 'TOKEN');
+        expect(got).toMatchObject({ ok: true });
+        expect((got as { value: unknown }).value).toBe(h.token);
     });
 });

@@ -1629,7 +1629,7 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
             ttsAbortController = controller;
             var response = await fetch('/api/tts', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'x-claudia-token': TOKEN },
                 body: JSON.stringify({ text: text, voice: voice }),
                 signal: controller.signal
             });

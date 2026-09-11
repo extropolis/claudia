@@ -11,6 +11,7 @@ import { EventEmitter } from 'events';
 import { randomUUID } from 'crypto';
 import { spawn, execSync, ChildProcess } from 'child_process';
 import { createLogger } from './logger.js';
+import { safeEqual } from './auth-token.js';
 
 const logger = createLogger('[TunnelManager]');
 
@@ -652,7 +653,11 @@ export class TunnelManager extends EventEmitter {
     validateToken(token: string): boolean {
         if (!this.token) return false;
         if (!this.ngrokProcess && !this.adoptedMonitor) return false;
-        return token === this.token;
+        // Constant-time: `===` short-circuits at the first differing byte, which
+        // leaks the token prefix to anyone who can measure response latency
+        // across enough requests. The tunnel endpoint is on the public internet,
+        // so that is a realistic attack rather than a theoretical one.
+        return safeEqual(token, this.token);
     }
 
     /**

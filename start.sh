@@ -216,6 +216,32 @@ echo ""
 # Start from project root
 cd "$(dirname "$0")"
 
+# ---------------------------------------------------------------------------
+# API token
+#
+# Every /api route and every WebSocket upgrade now requires a credential (see
+# backend/src/auth-token.ts). A browser on this machine gets one automatically
+# from the loopback bootstrap (GET /api/auth/local), so the plain URL above is
+# enough; this prints the URL WITH the token as well, for the cases where the
+# bootstrap cannot help — a second browser profile, a curl session, or a device
+# on the LAN.
+#
+# The token file may not exist yet on a first ever run: the backend mints it on
+# first use. Nothing here creates it, so the block simply stays quiet.
+# ---------------------------------------------------------------------------
+CLAUDIA_TOKEN_FILE="${CLAUDIA_DATA_DIR:-backend}/auth-token"
+if [ -f "$CLAUDIA_TOKEN_FILE" ]; then
+    CLAUDIA_TOKEN=$(cat "$CLAUDIA_TOKEN_FILE" 2>/dev/null || echo "")
+    if [ -n "$CLAUDIA_TOKEN" ]; then
+        echo "   Authenticated URL (share only with devices you trust):"
+        echo "   http://localhost:$FRONTEND_PORT/?token=$CLAUDIA_TOKEN"
+        echo ""
+    fi
+else
+    echo "   (API token is minted on first use; re-run to see the authenticated URL)"
+    echo ""
+fi
+
 # Export CLAUDIA_BACKEND_PORT for the backend to use
 export CLAUDIA_BACKEND_PORT=$BACKEND_PORT
 
