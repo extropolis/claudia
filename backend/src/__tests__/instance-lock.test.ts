@@ -25,6 +25,7 @@ import {
     resolveBackendVersion,
     type InstanceInfo,
 } from '../instance-lock.js';
+import { writeHandoffMark, readHandoffMark, clearHandoffMark } from '../export-import/handoff.js';
 
 const dirs: string[] = [];
 const releases: Array<() => void> = [];
@@ -269,6 +270,59 @@ describe('release', () => {
 
         expect(existsSync(lockPath(dir))).toBe(true);
         expect(JSON.parse(readFileSync(lockPath(dir), 'utf8'))).toEqual(successor);
+    });
+});
+
+// instance.json also carries keys other modules own — today the handoff mark,
+// which must freeze a handed-off host across restarts until a human reclaims it.
+describe('keys that are not the lock\'s', () => {
+    it('release keeps non-lock keys instead of deleting the file', () => {
+        const dir = tempDataDir();
+        const { release } = acquire(dir, 4670);
+        const onDisk = JSON.parse(readFileSync(lockPath(dir), 'utf8'));
+        writeFileSync(lockPath(dir), JSON.stringify({ ...onDisk, handedOffAt: '2026-01-01T00:00:00.000Z' }));
+
+        release();
+
+        expect(JSON.parse(readFileSync(lockPath(dir), 'utf8'))).toEqual({ handedOffAt: '2026-01-01T00:00:00.000Z' });
+        expect(readInstanceLock(dir)).toBeNull();
+    });
+
+    it('carries non-lock keys forward when taking over a stale lock', () => {
+        const dir = tempDataDir();
+        const stale = seedLock(dir);
+        writeFileSync(lockPath(dir), JSON.stringify({ ...stale, handedOffAt: 'x', handoffExportId: 'e-1' }));
+
+        const { info } = acquire(dir, 4671);
+
+        const onDisk = JSON.parse(readFileSync(lockPath(dir), 'utf8'));
+        expect(onDisk).toEqual({ ...info, handedOffAt: 'x', handoffExportId: 'e-1' });
+    });
+
+    it('claims a file holding only non-lock keys, keeping them', () => {
+        const dir = tempDataDir();
+        writeFileSync(lockPath(dir), JSON.stringify({ handedOffAt: 'x' }));
+
+        const { info } = acquire(dir, 4672);
+
+        expect(readInstanceLock(dir)).toEqual(info);
+        expect(JSON.parse(readFileSync(lockPath(dir), 'utf8')).handedOffAt).toBe('x');
+    });
+
+    it('a handoff mark survives shutdown and the next boot, until it is cleared', () => {
+        const dir = tempDataDir();
+        const first = acquire(dir, 4673);
+        writeHandoffMark(dir, { handedOffAt: '2026-01-01T00:00:00.000Z', exportId: 'e-7' });
+        first.release();
+
+        const second = acquire(dir, 4674);
+        expect(readHandoffMark(dir)?.exportId).toBe('e-7');
+        expect(readInstanceLock(dir)).toEqual(second.info);
+
+        // After a reclaim there is nothing foreign left, so release deletes again.
+        clearHandoffMark(dir);
+        second.release();
+        expect(existsSync(lockPath(dir))).toBe(false);
     });
 });
 

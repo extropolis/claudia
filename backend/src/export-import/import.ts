@@ -10,11 +10,13 @@
  *
  *   1. **A workspace's id IS its absolute path.** `/Users/ana/work/api` on the
  *      laptop is `/home/ana/work/api` on the Sprite. On boot,
- *      `workspace-store.ts` filters its list with `existsSync(w.id)` and
- *      **drops** every workspace whose path is missing — so a naive copy does
- *      not degrade, it deletes. Every task pointing at that workspace is then
- *      orphaned. (PR #256 softens this to "mark unavailable"; this module
- *      assumes the older, destructive behaviour and does not depend on it.)
+ *      `workspace-store.ts` used to filter its list with `existsSync(w.id)`
+ *      and **drop** every workspace whose path was missing, orphaning its
+ *      tasks. Since PR #256 it keeps such a workspace with
+ *      `status: 'unavailable'` instead, so an import whose remapped path is
+ *      not cloned yet (reported here as `exists: false`) shows up greyed out
+ *      and comes back by itself once the folder appears. Remapping is still
+ *      what makes the ids point at real folders.
  *   2. **Agent transcripts are filed under a mangled absolute path.** Claude
  *      Code stores sessions at `~/.claude/projects/<path-with-non-alnum-
  *      replaced-by-dashes>/<sessionId>.jsonl`. The folder name for
