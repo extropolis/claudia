@@ -227,6 +227,9 @@ function makeWorkspace(over: Partial<Workspace> = {}): Workspace {
 function resetStore(over: Record<string, unknown> = {}) {
     useTaskStore.setState({
         tasks: new Map(),
+        // The normal state: the server's task list has arrived. The reload test
+        // overrides this to model the window before `init` lands.
+        hasTaskList: true,
         workspaces: [],
         selectedTaskId: null,
         showProjectPicker: false,
@@ -957,14 +960,35 @@ describe('App - split screen integration', () => {
         });
 
         // Every task goes away. An early-return on `tasks.size === 0` would leave
-        // the pane pointing at a dead id and keep reporting it as visible.
-        act(() => { useTaskStore.setState({ tasks: new Map() } as never); });
+        // the pane pointing at a dead id and keep reporting it as visible. The
+        // server's list HAS arrived (hasTaskList), so the empty map is real.
+        act(() => { useTaskStore.setState({ tasks: new Map(), hasTaskList: true } as never); });
 
         await waitFor(() => {
             expect(useSplitLayoutStore.getState().root).toMatchObject({ taskId: null });
         });
         const calls = H.actions.setVisibleTasksOnServer.mock.calls;
         expect(calls[calls.length - 1][0]).toEqual([]);
+    });
+
+    it('keeps a restored layout while the task list is still loading (page reload)', async () => {
+        // The previous session's persisted layout: one pane showing task-1.
+        const { focusedPaneId, setPaneTask } = useSplitLayoutStore.getState();
+        setPaneTask(focusedPaneId, 'task-1');
+        // A fresh page load: the socket is up, but `init` has not delivered the
+        // task list yet, so `tasks` is empty for a reason that is NOT deletion.
+        resetStore({ tasks: new Map(), workspaces: [makeWorkspace()], hasTaskList: false });
+        renderApp();
+        await act(async () => { await Promise.resolve(); });
+        expect(useSplitLayoutStore.getState().root).toMatchObject({ taskId: 'task-1' });
+
+        // `init` lands with the task: the pane is intact and still declared.
+        act(() => { useTaskStore.getState().setTasks([...twoTasks().values()]); });
+        await waitFor(() => {
+            const calls = H.actions.setVisibleTasksOnServer.mock.calls;
+            expect(calls[calls.length - 1][0]).toEqual(['task-1']);
+        });
+        expect(useSplitLayoutStore.getState().root).toMatchObject({ taskId: 'task-1' });
     });
 
     it('follows the focused pane when focus moves without a click', async () => {

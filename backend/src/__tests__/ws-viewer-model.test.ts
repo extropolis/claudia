@@ -247,3 +247,54 @@ describe.skipIf(!SUPPORTS_FAKE_CLI)('per-task terminal ownership', () => {
         expect(a.isClosed).toBe(false);
     });
 });
+
+describe.skipIf(!SUPPORTS_FAKE_CLI)('split screen: one client displaying several terminals', () => {
+    it('keeps every pane owned by the split client, so another client cannot resize them', async () => {
+        const desk = await env.connect();
+        const phone = await env.connect();
+
+        desk.send('task:create', { prompt: 'SPLIT_PANE_SECOND', workspaceId: env.workspaces[0] });
+        const created = await desk.waitForMessage(
+            'task:created',
+            f => f.payload?.task?.prompt?.includes('SPLIT_PANE_SECOND'),
+            30000,
+        );
+        const second = created.payload.task.id as string;
+        await waitFor(() => env.taskSpawner.getTaskDimensions(second), d => d !== undefined, 20000);
+
+        // Declare the layout, then mount both panes the way TerminalView does:
+        // focus, then one sizing resize, pane by pane.
+        desk.send('task:setVisible', { taskIds: [taskId, second] });
+        desk.send('task:focus', { taskId });
+        desk.send('task:resize', { taskId, cols: 100, rows: 30 });
+        desk.send('task:focus', { taskId: second });
+        desk.send('task:resize', { taskId: second, cols: 90, rows: 25 });
+        await desk.ping();
+        expect(dims()).toEqual({ cols: 100, rows: 30 });
+        expect(env.taskSpawner.getTaskDimensions(second)).toEqual({ cols: 90, rows: 25 });
+
+        // Under a one-focus-per-client model, mounting the second pane released
+        // the first, and this bare resize from another client claimed it —
+        // shrinking a terminal the desktop is actively showing.
+        phone.send('task:resize', { taskId, cols: 40, rows: 20 });
+        await phone.ping();
+        expect(dims()).toEqual({ cols: 100, rows: 30 });
+
+        // Dragging a divider resizes the first pane without refocusing it.
+        desk.send('task:resize', { taskId, cols: 104, rows: 30 });
+        await desk.ping();
+        expect(dims()).toEqual({ cols: 104, rows: 30 });
+
+        // Closing the first pane releases it, so the phone can now take it.
+        desk.send('task:setVisible', { taskIds: [second] });
+        await desk.ping();
+        phone.send('task:resize', { taskId, cols: 40, rows: 20 });
+        await phone.ping();
+        expect(dims()).toEqual({ cols: 40, rows: 20 });
+
+        desk.send('task:destroy', { taskId: second });
+        await desk.ping();
+        desk.close();
+        phone.close();
+    }, 60000);
+});

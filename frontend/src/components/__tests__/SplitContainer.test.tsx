@@ -71,8 +71,8 @@ function renderTree({
             root={root}
             focusedPaneId={focusedPaneId}
             renderLeaf={renderLeaf}
-            onFocusPane={onFocusPane}
-            onSizesChange={onSizesChange}
+            onFocusPane={onFocusPane as unknown as (paneId: string) => void}
+            onSizesChange={onSizesChange as unknown as (splitId: string, sizes: number[]) => void}
         />
     );
     return { ...utils, onFocusPane, onSizesChange, renderLeaf };

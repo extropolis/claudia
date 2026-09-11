@@ -360,10 +360,12 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
 
     setTaskActive(taskId: string, active: boolean): void {
         if (active) {
-            // Clear decoded history from all other tasks to free memory
+            // Additive, NOT exclusive: split screen shows several tasks at once,
+            // so activating one must not silence the others. TaskSpawner owns the
+            // visible set and calls setTaskActive(id, false) when a task leaves it.
+            // Only free decoded history for tasks that are not on screen.
             for (const task of this.tasks.values()) {
-                task.isActive = false;
-                if (task.id !== taskId && (task.previousHistory || task.lazyHistoryBase64)) {
+                if (task.id !== taskId && !task.isActive && (task.previousHistory || task.lazyHistoryBase64)) {
                     task.previousHistory = undefined;
                     task.lazyHistoryBase64 = undefined;
                     logger.debug('Freed memory for inactive task', { taskId: task.id });
