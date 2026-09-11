@@ -228,6 +228,73 @@ describe('archived-tasks.json schema envelope', () => {
     });
 });
 
+// The debounced background save (saveTasksAsync / saveArchivedTasksAsync) is the
+// path that runs most. It was added separately from the sync path, and without
+// these tests it kept writing bare JSON and reading the on-disk file raw, which
+// silently disabled the never-overwrite-with-empty guard against any file the
+// sync path had already wrapped in the envelope.
+describe('async (debounced) save path', () => {
+    it('writes the tasks.json envelope, same as the sync path', async () => {
+        const ctx = makeCtx();
+        writeFileSync(ctx.tasksFile, legacyTasksJson(ctx.base, ['t-1', 't-2']));
+        const s = start(ctx);
+
+        await (s as any).saveTasksAsync();
+
+        const onDisk = readJson(ctx.tasksFile);
+        expect(onDisk.schemaVersion).toBe(1);
+        expect(onDisk.data.tasks.map((t: any) => t.id).sort()).toEqual(['t-1', 't-2']);
+        expect(onDisk.tasks).toBeUndefined();
+    });
+
+    it('never replaces a populated VERSIONED tasks.json with empty state', async () => {
+        const ctx = makeCtx();
+        writeFileSync(ctx.tasksFile, legacyTasksJson(ctx.base, ['t-1', 't-2']));
+        const s = start(ctx);
+        s.saveNow(); // the sync path wraps the file in the envelope
+        expect(readJson(ctx.tasksFile).schemaVersion).toBe(1);
+        // The bug class the guard exists for: in-memory state lost.
+        (s as any).tasks.clear();
+        (s as any).disconnectedTasks.clear();
+        (s as any).archivedTasks.clear();
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        await (s as any).saveTasksAsync();
+
+        expect(errors.mock.calls.flat().join('\n')).toContain('REFUSING to save');
+        expect(readJson(ctx.tasksFile).data.tasks.map((t: any) => t.id).sort()).toEqual(['t-1', 't-2']);
+    });
+
+    it('writes the archived-tasks.json envelope, same as the sync path', async () => {
+        const ctx = makeCtx();
+        writeFileSync(ctx.tasksFile, legacyTasksJson(ctx.base, ['t-1']));
+        const s = start(ctx);
+
+        await (s as any).saveArchivedTasksAsync([archived('a-1', ctx.base)]);
+
+        const onDisk = readJson(ctx.archivedFile);
+        expect(onDisk.schemaVersion).toBe(1);
+        expect(onDisk.data.archivedTasks.map((t: any) => t.id)).toEqual(['a-1']);
+        expect(onDisk.archivedTasks).toBeUndefined();
+    });
+
+    it('never replaces a populated VERSIONED archive with an empty one', async () => {
+        const ctx = makeCtx();
+        writeFileSync(ctx.tasksFile, legacyTasksJson(ctx.base, ['t-1']));
+        writeFileSync(ctx.archivedFile, JSON.stringify({
+            schemaVersion: 1,
+            data: { archivedTasks: [archived('a-1', ctx.base)] },
+        }));
+        const s = start(ctx);
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        await (s as any).saveArchivedTasksAsync([]);
+
+        expect(errors.mock.calls.flat().join('\n')).toContain('REFUSING to save archived tasks');
+        expect(readJson(ctx.archivedFile).data.archivedTasks.map((t: any) => t.id)).toEqual(['a-1']);
+    });
+});
+
 describe('future schema versions', () => {
     it('does not silently swallow a tasks.json from a newer version as empty', () => {
         const ctx = makeCtx();

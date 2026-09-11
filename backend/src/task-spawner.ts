@@ -3152,7 +3152,7 @@ export class TaskSpawner extends EventEmitter {
             const path = this.getArchivedPersistencePath();
             if (archived.length === 0 && existsSync(path)) {
                 try {
-                    const existing = JSON.parse(readFileSync(path, 'utf-8')) as { archivedTasks?: unknown[] };
+                    const existing = unwrapTaskFile(JSON.parse(readFileSync(path, 'utf-8')));
                     if ((existing.archivedTasks?.length || 0) > 0) {
                         console.error(
                             `[TaskSpawner] REFUSING to save archived tasks: would overwrite ` +
@@ -3164,7 +3164,11 @@ export class TaskSpawner extends EventEmitter {
                     // Unparseable — fall through and overwrite.
                 }
             }
-            await atomicWriteFileAsync(path, JSON.stringify({ archivedTasks: archived }), { backup: true });
+            const envelope: VersionedFile<ArchivedTasksPersistence> = {
+                schemaVersion: TASKS_SCHEMA_VERSION,
+                data: { archivedTasks: archived },
+            };
+            await atomicWriteFileAsync(path, JSON.stringify(envelope), { backup: true });
             this.archivedDirty = false;
             console.log(`[TaskSpawner] Saved ${archived.length} archived tasks`);
         } catch (error) {
@@ -3303,7 +3307,7 @@ export class TaskSpawner extends EventEmitter {
             if (newTotal === 0 && existsSync(this.persistencePath)) {
                 try {
                     const existingRaw = readFileSync(this.persistencePath, 'utf-8');
-                    const existing = JSON.parse(existingRaw) as { tasks?: any[]; archivedTasks?: any[] };
+                    const existing = unwrapTaskFile(JSON.parse(existingRaw));
                     const existingTotal = (existing.tasks?.length || 0) + (existing.archivedTasks?.length || 0);
                     if (existingTotal > 0) {
                         console.error(
@@ -3319,9 +3323,15 @@ export class TaskSpawner extends EventEmitter {
                 }
             }
 
+            // Same envelope as the sync path. Writing bare JSON here made the
+            // file's shape depend on which path saved last.
+            const envelope: VersionedFile<TaskPersistence> = {
+                schemaVersion: TASKS_SCHEMA_VERSION,
+                data: persistence,
+            };
             await atomicWriteFileAsync(
                 this.persistencePath,
-                JSON.stringify(persistence),
+                JSON.stringify(envelope),
                 { backup: true }
             );
 
