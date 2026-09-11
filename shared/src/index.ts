@@ -559,7 +559,7 @@ export interface PlanUsage {
         /** Percentage in [0, 100]. */
         utilization: number | null;
     };
-    planLabel: string; // "Max" | "Pro" | "Team" | "Enterprise" | "Unknown"
+    planLabel: string; // "Max (5x)" | "Max (20x)" | "Max" | "Pro" | "Team" | "Enterprise" | "Unknown"
     fetchedAt: string; // ISO
     stale?: boolean; // served from cache after a failed refresh
     unavailable?: boolean; // could not fetch at all

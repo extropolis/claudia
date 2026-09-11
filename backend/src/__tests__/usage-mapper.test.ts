@@ -114,7 +114,7 @@ describe('mapUsageResponse', () => {
         ]);
     });
 
-    it('prefers a non-null seven_day_<model> key over a duplicate limits[] entry', () => {
+    it('treats limits[] as authoritative over a duplicate seven_day_<model> key', () => {
         const both = {
             five_hour: { utilization: 0, resets_at: 'x' },
             seven_day: { utilization: 0, resets_at: 'x' },
@@ -130,7 +130,44 @@ describe('mapUsageResponse', () => {
         };
         const u = mapUsageResponse(both, 'Max', 'now');
         const opus = u.sevenDayByModel.filter((m) => m.model === 'opus');
-        expect(opus).toEqual([{ model: 'opus', utilization: 20, resetsAt: 'a' }]);
+        expect(opus).toEqual([{ model: 'opus', utilization: 99, resetsAt: 'b' }]);
+    });
+
+    it('falls back to an allowlisted seven_day_<model> key only for models limits[] omits', () => {
+        const u = mapUsageResponse({
+            five_hour: { utilization: 1, resets_at: 'x' },
+            seven_day: { utilization: 1, resets_at: 'x' },
+            seven_day_sonnet: { utilization: 15, resets_at: 's' },
+            limits: [
+                { kind: 'weekly_scoped', percent: 40, resets_at: 'f', is_active: true,
+                  scope: { model: { id: null, display_name: 'Fable' } } },
+            ],
+        }, 'Max', 'now');
+        expect(u.sevenDayByModel).toEqual([
+            { model: 'fable', utilization: 40, resetsAt: 'f' },
+            { model: 'sonnet', utilization: 15, resetsAt: 's' },
+        ]);
+    });
+
+    it('never surfaces NON-NULL non-model seven_day_* buckets, even alongside limits[]', () => {
+        // oauth_apps / cowork / omelette are real live keys (null today). If
+        // upstream ever populates them they must still not become model rows.
+        const u = mapUsageResponse({
+            five_hour: { utilization: 10, resets_at: 'a' },
+            seven_day: { utilization: 20, resets_at: 'b' },
+            seven_day_oauth_apps: { utilization: 90, resets_at: 'c' },
+            seven_day_cowork: { utilization: 80, resets_at: 'c' },
+            seven_day_omelette: { utilization: 70, resets_at: 'c' },
+            limits: [
+                { kind: 'weekly_scoped', percent: 33, resets_at: 'f', is_active: true,
+                  scope: { model: { id: null, display_name: 'Fable' } } },
+            ],
+        }, 'Max', 'now');
+        expect(u.sevenDayByModel).toEqual([{ model: 'fable', utilization: 33, resetsAt: 'f' }]);
+        const blob = JSON.stringify(u);
+        for (const bucket of ['oauth_apps', 'cowork', 'omelette']) {
+            expect(blob).not.toContain(bucket);
+        }
     });
 });
 
@@ -167,14 +204,20 @@ describe('mapUsageResponse — real-payload edge cases', () => {
         expect(JSON.stringify(u)).not.toContain('totally-made-up-key');
     });
 
-    it('drops inactive weekly_scoped placeholder rows', () => {
-        // Real capture: an entry exists for every model the account *could*
-        // have a scoped limit for, flagged is_active:false with percent 0 and
-        // a null reset. Rendering those produced phantom "0%" model bars.
+    it('drops 0%-with-no-reset placeholder rows but keeps is_active:false rows with real usage', () => {
+        // Real captures: an entry exists for every model the account *could*
+        // have a scoped limit for — is_active:false, percent 0, null reset.
+        // Rendering those produced phantom "0%" model bars.
+        // But is_active:false ALSO appears on rows with genuine usage (a Sept
+        // 2026 capture: Fable at 2% with a reset time). It marks the binding
+        // limit, not a placeholder, so it must not be the filter.
         const u = mapUsageResponse({
             five_hour: { utilization: 5, resets_at: 'a' },
             limits: [
                 { kind: 'weekly_scoped', group: 'weekly', percent: 0, resets_at: null,
+                  is_active: false, scope: { model: { id: null, display_name: 'Claude Haiku' } } },
+                { kind: 'weekly_scoped', group: 'weekly', percent: 2, severity: 'normal',
+                  resets_at: '2026-09-09T14:59:59.521893+00:00',
                   is_active: false, scope: { model: { id: null, display_name: 'Fable' } } },
                 { kind: 'weekly_scoped', group: 'weekly', percent: 41, resets_at: '2026-07-08T15:00:00Z',
                   is_active: true, scope: { model: { id: null, display_name: 'Claude Opus 4' } } },
@@ -182,6 +225,7 @@ describe('mapUsageResponse — real-payload edge cases', () => {
         }, 'Max', 'now');
 
         expect(u.sevenDayByModel).toEqual([
+            { model: 'fable', utilization: 2, resetsAt: '2026-09-09T14:59:59.521893+00:00' },
             { model: 'claude opus 4', utilization: 41, resetsAt: '2026-07-08T15:00:00Z' },
         ]);
     });

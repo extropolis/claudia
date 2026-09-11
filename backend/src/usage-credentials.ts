@@ -13,13 +13,19 @@ const logger = createLogger('[UsageCredentials]');
 export interface OAuthCredentials {
     accessToken: string;
     subscriptionType?: string;
+    /**
+     * Claude Code's rate-limit tier, e.g. `default_claude_max_20x`. Not a
+     * secret — it is the only place the Max 5x / 20x multiplier is recorded
+     * (`subscriptionType` just says `max`).
+     */
+    rateLimitTier?: string;
 }
 
 /**
  * Parse the OAuth credentials JSON blob. Handles both the nested
  * `{ claudeAiOauth: {...} }` shape (as stored by Claude Code) and a bare
- * `{ accessToken, subscriptionType }` shape. Returns null on any parse failure
- * or when no access token is present. Pure — no I/O.
+ * `{ accessToken, subscriptionType, rateLimitTier }` shape. Returns null on any
+ * parse failure or when no access token is present. Pure — no I/O.
  */
 export function parseCredentialsBlob(json: string): OAuthCredentials | null {
     if (!json || !json.trim()) return null;
@@ -38,24 +44,37 @@ export function parseCredentialsBlob(json: string): OAuthCredentials | null {
     if (typeof inner.subscriptionType === 'string') {
         result.subscriptionType = inner.subscriptionType;
     }
+    if (typeof inner.rateLimitTier === 'string' && inner.rateLimitTier.length > 0) {
+        result.rateLimitTier = inner.rateLimitTier;
+    }
     return result;
 }
 
 /**
- * Human-facing plan label from a subscription type.
+ * The Max multiplier encoded in `rateLimitTier`: `default_claude_max_5x` →
+ * "5", `default_claude_max_20x` → "20". Deliberately strict — only the two
+ * multipliers Anthropic sells are recognized, so an unfamiliar tier string
+ * degrades to a plain "Max" instead of a made-up label.
+ */
+const MAX_TIER_RE = /(?:^|_)max_(5|20)x$/i;
+
+/**
+ * Human-facing plan label from a subscription type and rate-limit tier.
  *
  * `subscriptionType` is one of `max` | `pro` | `team` | `enterprise` | null —
  * derived by Claude Code from `organization.organization_type` and stored in
- * the credentials blob. It carries NO 5x/20x information: that lives in a
- * separate `rateLimitTier` field (`default_claude_max_5x` /
- * `default_claude_max_20x`). Labelling every `max` account "Max (20x)" was
- * therefore wrong for every Max 5x subscriber. Claude Code's own
- * `getSubscriptionName()` does not surface the tier either, so neither do we.
+ * the credentials blob. It carries NO 5x/20x information: that lives in the
+ * sibling `rateLimitTier` field (`default_claude_max_5x` /
+ * `default_claude_max_20x`, verified in `~/.claude/.credentials.json` on
+ * Windows). A `max` account is labelled "Max (5x)" / "Max (20x)" from that
+ * field, and plain "Max" when it is absent or unrecognized.
  */
-export function planLabelFromSubscription(sub?: string): string {
+export function planLabelFromSubscription(sub?: string, rateLimitTier?: string): string {
     switch ((sub ?? '').toLowerCase()) {
-        case 'max':
-            return 'Max';
+        case 'max': {
+            const tier = MAX_TIER_RE.exec(rateLimitTier ?? '');
+            return tier ? `Max (${tier[1]}x)` : 'Max';
+        }
         case 'pro':
             return 'Pro';
         case 'team':

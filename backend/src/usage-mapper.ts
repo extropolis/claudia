@@ -81,21 +81,15 @@ export function mapUsageResponse(
 ): PlanUsage {
     const src = (raw ?? {}) as Record<string, unknown>;
 
-    // Per-model weekly windows come from two sources:
-    //  1. `seven_day_<model>` top-level keys — allowlisted (see MODEL_KEYS);
-    //     null for scoped models since the Fable launch.
-    //  2. A `limits[]` array with `kind:"weekly_scoped"` and
-    //     `scope.model.display_name` — the source actually populated today.
-    //     Kept generic so a new model needs no code change.
+    // Per-model weekly windows come from two sources, in priority order:
+    //  1. AUTHORITATIVE: the `limits[]` array — `kind:"weekly_scoped"` rows
+    //     with `scope.model.display_name`. The source actually populated
+    //     today, kept generic so a new model needs no code change.
+    //  2. FALLBACK: allowlisted `seven_day_<model>` top-level keys (see
+    //     MODEL_KEYS), used only for a model limits[] did not report. Null for
+    //     scoped models since the Fable launch; non-model buckets that share
+    //     the prefix (oauth_apps, cowork, omelette, …) never become rows.
     const byModel = new Map<string, UsageModelWindow>();
-    for (const [key, value] of Object.entries(src)) {
-        const match = /^seven_day_(.+)$/.exec(key);
-        if (!match) continue;
-        if (!isPresent(value)) continue;
-        const model = match[1].toLowerCase();
-        if (!MODEL_KEYS.has(model)) continue;
-        byModel.set(model, { model, ...readWindow(value) });
-    }
 
     const limits = Array.isArray(src.limits) ? src.limits : [];
     for (const entry of limits) {
@@ -103,11 +97,16 @@ export function mapUsageResponse(
         const lim = entry as Record<string, unknown>;
         if (lim.kind !== 'weekly_scoped') continue;
 
-        // Placeholder rows: the API emits an inactive entry per model that the
-        // account has no scoped limit for. `is_active:false`, or 0% with no
-        // reset time, means "this window does not apply" — not "0% used".
+        // Placeholder rows: the API emits an entry per model the account
+        // *could* have a scoped limit for. With nothing to report they carry
+        // 0% and no reset time — "this window does not apply", not "0% used".
         // Rendering them produced phantom 0% bars for models never used.
-        if (lim.is_active === false) continue;
+        //
+        // `is_active` is deliberately NOT used as the placeholder signal: real
+        // captures carry `is_active:false` on rows with genuine usage (a Fable
+        // weekly_scoped row at 2% with a reset time, and the weekly_all row),
+        // so it marks which limit currently binds, not whether one exists.
+        // Filtering on it hid real per-model usage.
         const resetsAt = readUpstreamString(lim.resets_at, MAX_RESET_LEN);
         const percent = clampUtilization(lim.percent);
         if (percent === 0 && !resetsAt) continue;
@@ -130,8 +129,20 @@ export function mapUsageResponse(
         if (redactSecrets(displayName) !== displayName) continue;
 
         const model = displayName.toLowerCase();
-        if (byModel.has(model)) continue; // prefer the seven_day_<model> key
+        if (byModel.has(model)) continue; // first limits[] row for a model wins
         byModel.set(model, { model, utilization: percent, resetsAt });
+    }
+
+    // Fallback: allowlisted top-level `seven_day_<model>` keys, only for a
+    // model limits[] did not already report (limits[] is authoritative).
+    for (const [key, value] of Object.entries(src)) {
+        const match = /^seven_day_(.+)$/.exec(key);
+        if (!match) continue;
+        if (!isPresent(value)) continue;
+        const model = match[1].toLowerCase();
+        if (!MODEL_KEYS.has(model)) continue;
+        if (byModel.has(model)) continue;
+        byModel.set(model, { model, ...readWindow(value) });
     }
 
     const sevenDayByModel: UsageModelWindow[] = Array.from(byModel.values());

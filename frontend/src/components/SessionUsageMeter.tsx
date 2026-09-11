@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTaskStore } from '../stores/taskStore';
-import { clampPct, usageColorVar, usageSeverity, formatCountdown } from '../utils/usageFormat';
+import { clampPct, usageColorVar, usageSeverity, formatCountdown, usageTooltip } from '../utils/usageFormat';
 import { PlanUsageDashboard } from './PlanUsageDashboard';
 import './SessionUsageMeter.css';
 
@@ -57,7 +57,7 @@ export function SessionUsageMeter() {
                 type="button"
                 className={`session-usage-meter session-usage-meter--${severity}`}
                 onClick={() => setDashboardOpen(true)}
-                title="View plan usage"
+                title={usageTooltip(planUsage)}
             >
                 <div
                     className="session-usage-meter__track"

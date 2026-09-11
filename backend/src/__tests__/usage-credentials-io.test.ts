@@ -130,6 +130,30 @@ describe('readOAuthCredentials elsewhere (~/.claude/.credentials.json)', () => {
         expect(allLogged()).toMatch(/No credentials file/);
     });
 
+    it('carries rateLimitTier from a Windows-shaped credentials file, never logging the token', async () => {
+        // Same shape as ~/.claude/.credentials.json verified on Windows
+        // (subscriptionType "max" + rateLimitTier). Values are fixtures.
+        readFileMock.mockResolvedValue(JSON.stringify({
+            claudeAiOauth: {
+                accessToken: 'tok-secret-123',
+                refreshToken: 'ref-secret-456',
+                expiresAt: 1,
+                scopes: ['user:inference'],
+                subscriptionType: 'max',
+                rateLimitTier: 'default_claude_max_20x',
+            },
+        }));
+        const creds = await readOAuthCredentials();
+        expect(creds).toEqual({
+            accessToken: 'tok-secret-123',
+            subscriptionType: 'max',
+            rateLimitTier: 'default_claude_max_20x',
+        });
+        const logged = allLogged();
+        expect(logged).not.toContain('tok-secret-123');
+        expect(logged).not.toContain('ref-secret-456');
+    });
+
     it('returns null when the file is not valid JSON', async () => {
         readFileMock.mockResolvedValue('not json');
         expect(await readOAuthCredentials()).toBeNull();

@@ -7,7 +7,9 @@ import {
     formatResetLocal,
     capitalizeModel,
     formatCredits,
+    usageTooltip,
 } from '../usageFormat';
+import type { PlanUsage } from '@claudia/shared';
 
 describe('usageFormat', () => {
     describe('usageSeverity / usageColorVar', () => {
@@ -103,5 +105,29 @@ describe('formatCredits', () => {
         expect(formatCredits(null)).toBe('Unlimited');
         expect(formatCredits(undefined)).toBe('Unlimited');
         expect(formatCredits(NaN)).toBe('Unlimited');
+    });
+});
+
+describe('usageTooltip', () => {
+    const base: PlanUsage = {
+        fiveHour: { utilization: 31.4, resetsAt: '2026-07-02T15:00:00Z' },
+        sevenDay: { utilization: 28, resetsAt: '' },
+        sevenDayByModel: [{ model: 'fable', utilization: 41, resetsAt: '2026-07-08T15:00:00Z' }],
+        planLabel: 'Max (20x)',
+        fetchedAt: '2026-07-02T12:00:00Z',
+    };
+
+    it('lists every window with its percentage, plus a reset time when known', () => {
+        const lines = usageTooltip(base).split('\n');
+        expect(lines[0]).toMatch(/^Session \(5h\): 31% · resets [A-Za-z]{3}\s+\d{1,2}:\d{2}/);
+        // Unknown reset time: no dangling "· resets unknown".
+        expect(lines[1]).toBe('Weekly (all models): 28%');
+        expect(lines[2]).toMatch(/^Fable \(weekly\): 41% · resets /);
+        expect(lines[lines.length - 1]).toBe('Click for details');
+        expect(lines).not.toContain('Showing cached data');
+    });
+
+    it('notes cached data when the service reports stale', () => {
+        expect(usageTooltip({ ...base, stale: true }).split('\n')).toContain('Showing cached data');
     });
 });

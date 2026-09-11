@@ -144,6 +144,31 @@ describe('UsageService', () => {
         expect(u.reason).toBe('auth');
     });
 
+    it('reports auth (not network) on 403 — a token lacking the needed scope', async () => {
+        const { now } = makeClock();
+        const fetchImpl = scriptedFetch([{ status: 403 }]);
+        const svc = new UsageService({ fetchImpl, readCreds: creds, detectVersion: version, now });
+        const u = await svc.getUsage();
+        expect(u.unavailable).toBe(true);
+        expect(u.reason).toBe('auth');
+    });
+
+    it('labels the plan from subscriptionType + rateLimitTier', async () => {
+        const { now } = makeClock();
+        const fetchImpl = scriptedFetch([{ status: 200, body: OK_BODY }]);
+        const svc = new UsageService({
+            fetchImpl,
+            detectVersion: version,
+            now,
+            readCreds: async () => ({
+                accessToken: 'fake-token',
+                subscriptionType: 'max',
+                rateLimitTier: 'default_claude_max_5x',
+            }),
+        });
+        expect((await svc.getUsage()).planLabel).toBe('Max (5x)');
+    });
+
     it('forceRefresh bypasses the TTL cache', async () => {
         const { now } = makeClock();
         const fetchImpl = scriptedFetch([

@@ -190,6 +190,9 @@ export class UsageService {
                 url: USAGE_URL,
                 ua,
                 subscriptionType: creds.subscriptionType ?? null,
+                // Non-secret; logged so an unrecognized tier (plain "Max"
+                // label) is diagnosable without touching the credentials.
+                rateLimitTier: creds.rateLimitTier ?? null,
             });
             const res = await this.fetchImpl(USAGE_URL, {
                 headers: {
@@ -202,7 +205,7 @@ export class UsageService {
 
             if (res.status === 200) {
                 const raw = await res.json();
-                const planLabel = planLabelFromSubscription(creds.subscriptionType);
+                const planLabel = planLabelFromSubscription(creds.subscriptionType, creds.rateLimitTier);
                 const usage = mapUsageResponse(raw, planLabel, new Date(nowMs).toISOString());
                 this.lastGood = usage;
                 this.lastGoodAtMs = nowMs;
@@ -227,10 +230,14 @@ export class UsageService {
                 return this.staleCopy() ?? this.unavailable('rate_limited');
             }
 
-            if (res.status === 401) {
+            if (res.status === 401 || res.status === 403) {
                 // Auth problem: avoid hammering, but don't compound backoff.
+                // 403 = a token without the needed scope (e.g. one supplied via
+                // env rather than `claude` login) — an auth fix, not a network
+                // blip, so it must not surface as reason 'network'.
                 this.nextAllowedFetchAt = nowMs + MIN_POLL_MS;
-                logger.warn('Upstream rejected OAuth token (401); run `claude` to re-authenticate', {
+                logger.warn('Upstream rejected OAuth token; run `claude` to re-authenticate', {
+                    status: res.status,
                     hasCachedValue: this.lastGood !== null,
                     nextAllowedFetchAt: new Date(this.nextAllowedFetchAt).toISOString(),
                 });

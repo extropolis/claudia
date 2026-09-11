@@ -19,7 +19,27 @@ describe('parseCredentialsBlob', () => {
         expect(parseCredentialsBlob(blob)).toEqual({
             accessToken: 'tok-123',
             subscriptionType: 'max',
+            rateLimitTier: 'default',
         });
+    });
+
+    it('keeps rateLimitTier (the only source of the Max 5x/20x multiplier)', () => {
+        // Fixture shape mirrors ~/.claude/.credentials.json on Windows; values are fake.
+        const blob = JSON.stringify({
+            claudeAiOauth: {
+                accessToken: 'fake-token',
+                subscriptionType: 'max',
+                rateLimitTier: 'default_claude_max_20x',
+            },
+        });
+        expect(parseCredentialsBlob(blob)?.rateLimitTier).toBe('default_claude_max_20x');
+    });
+
+    it('omits rateLimitTier when absent, empty, or not a string', () => {
+        for (const rateLimitTier of [undefined, '', 20, null]) {
+            const blob = JSON.stringify({ claudeAiOauth: { accessToken: 't', subscriptionType: 'max', rateLimitTier } });
+            expect(parseCredentialsBlob(blob)).toEqual({ accessToken: 't', subscriptionType: 'max' });
+        }
     });
 
     it('parses a bare shape (no claudeAiOauth wrapper)', () => {
@@ -50,8 +70,25 @@ describe('parseCredentialsBlob', () => {
 });
 
 describe('planLabelFromSubscription', () => {
-    it('maps max to "Max"', () => {
+    it('maps max with no rateLimitTier to plain "Max"', () => {
         expect(planLabelFromSubscription('max')).toBe('Max');
+        expect(planLabelFromSubscription('max', undefined)).toBe('Max');
+    });
+
+    it('labels Max 5x and Max 20x from rateLimitTier', () => {
+        expect(planLabelFromSubscription('max', 'default_claude_max_5x')).toBe('Max (5x)');
+        expect(planLabelFromSubscription('max', 'default_claude_max_20x')).toBe('Max (20x)');
+        expect(planLabelFromSubscription('MAX', 'DEFAULT_CLAUDE_MAX_20X')).toBe('Max (20x)');
+    });
+
+    it('falls back to plain "Max" for an unrecognized rateLimitTier', () => {
+        for (const tier of ['', 'default', 'default_claude_max_7x', 'claude_max_200x', 'default_claude_max_20x_beta']) {
+            expect(planLabelFromSubscription('max', tier)).toBe('Max');
+        }
+    });
+
+    it('ignores rateLimitTier on non-max plans', () => {
+        expect(planLabelFromSubscription('pro', 'default_claude_max_20x')).toBe('Pro');
     });
 
     it('maps pro to "Pro"', () => {

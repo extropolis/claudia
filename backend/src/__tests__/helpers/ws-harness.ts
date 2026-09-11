@@ -72,11 +72,23 @@ export class WSClient {
      * @param token API token. Every WebSocket upgrade is authenticated (see
      *   auth-token.ts), so a connection without one is refused with a 401 —
      *   pass the token from `getAuthToken(base)`.
+     * @param opts.query   Extra query params for the upgrade URL, e.g.
+     *   `mobile=1` (the phone client's label). The token is added on top.
+     * @param opts.headers Extra upgrade headers, e.g. `X-Forwarded-For`, which
+     *   makes the server classify a socket from 127.0.0.1 as NON-loopback —
+     *   exactly how a connection arriving through the ngrok agent looks.
      */
-    static async connect(port: number, token?: string): Promise<WSClient> {
+    static async connect(
+        port: number,
+        token?: string,
+        opts: { query?: string; headers?: Record<string, string> } = {},
+    ): Promise<WSClient> {
         const c = new WSClient(port);
-        const query = token ? `?token=${encodeURIComponent(token)}` : '';
-        c.ws = new WebSocket(`ws://127.0.0.1:${port}${query}`);
+        const params = new URLSearchParams(opts.query ?? '');
+        if (token) params.set('token', token);
+        const qs = params.toString();
+        const url = `ws://127.0.0.1:${port}${qs ? `?${qs}` : ''}`;
+        c.ws = opts.headers ? new WebSocket(url, { headers: opts.headers }) : new WebSocket(url);
         c.ws.on('message', (data: Buffer) => {
             try {
                 c.frames.push(JSON.parse(data.toString()));

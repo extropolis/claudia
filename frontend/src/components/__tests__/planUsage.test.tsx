@@ -85,6 +85,16 @@ describe('SessionUsageMeter', () => {
         expect(screen.getByText('45% · resets in 2h 16m')).toBeInTheDocument();
     });
 
+    it('summarizes every window (session, weekly, per-model) in the meter tooltip', () => {
+        setUsage(healthy);
+        render(<SessionUsageMeter />);
+        const title = screen.getByRole('button', { name: /45%/ }).getAttribute('title') ?? '';
+        expect(title).toMatch(/^Session \(5h\): 45% · resets /);
+        expect(title).toContain('Weekly (all models): 31%');
+        expect(title).toContain('Fable (weekly): 41%');
+        expect(title).toContain('Opus (weekly): 12%');
+    });
+
     it('flags cached data when the service reports stale', () => {
         setUsage({ ...healthy, stale: true });
         render(<SessionUsageMeter />);

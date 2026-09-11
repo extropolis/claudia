@@ -1,5 +1,6 @@
 // Shared helpers for the plan-usage meter and dashboard. Kept DRY so the
 // utilization→color mapping and reset-time formatting are identical everywhere.
+import type { PlanUsage, UsageWindow } from '@claudia/shared';
 
 /**
  * Utilization "severity" bucket. Follows the app's status tokens rather than an
@@ -63,6 +64,31 @@ export function formatResetLocal(resetsAt: string | undefined): string {
     const weekday = target.toLocaleDateString(undefined, { weekday: 'short' });
     const time = target.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
     return `${weekday} ${time}`;
+}
+
+/**
+ * Hover text for the always-on meter: every window at a glance, so the weekly
+ * and per-model limits are visible without opening the dashboard. The bar
+ * itself only shows the 5-hour session window.
+ *
+ *   Session (5h): 31% · resets Wed 3:00 PM
+ *   Weekly (all models): 28% · resets Thu 8:00 AM
+ *   Fable (weekly): 41% · resets Thu 8:00 AM
+ *   Click for details
+ */
+export function usageTooltip(usage: PlanUsage): string {
+    const line = (label: string, w: UsageWindow): string => {
+        const reset = formatResetLocal(w.resetsAt);
+        return `${label}: ${clampPct(w.utilization)}%${reset === 'unknown' ? '' : ` · resets ${reset}`}`;
+    };
+    const lines = [
+        line('Session (5h)', usage.fiveHour),
+        line('Weekly (all models)', usage.sevenDay),
+        ...usage.sevenDayByModel.map((m) => line(`${capitalizeModel(m.model)} (weekly)`, m)),
+    ];
+    if (usage.stale) lines.push('Showing cached data');
+    lines.push('Click for details');
+    return lines.join('\n');
 }
 
 /** Capitalize a model name for display ("fable" → "Fable"). */
