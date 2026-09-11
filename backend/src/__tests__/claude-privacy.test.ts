@@ -8,7 +8,7 @@ import {
     buildClaudePrivacyArgs,
     ensurePrivacySettingsFile,
     privacySettingsJson,
-} from '../claude-privacy';
+} from '../claude-privacy.js';
 
 // Temp dirs must live under homedir(), not os.tmpdir(): on macOS /tmp resolves
 // under /var, which validateWorkspacePath blocklists as a system path.
