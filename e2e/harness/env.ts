@@ -13,7 +13,7 @@
  * to somebody else's server.
  */
 import {
-    chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync,
+    chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync,
 } from 'fs';
 import { execFileSync } from 'child_process';
 import { homedir } from 'os';
@@ -181,6 +181,33 @@ export function prepareHarness(): void {
     // that calls the API directly could race the server's own first mint and
     // the two processes would end up holding different tokens.
     getAuthToken(STATE_DIR);
+
+    // Record the legacy backend/ locations BEFORE the backend boots, so the
+    // isolation spec can assert what THIS RUN did to them rather than whether
+    // they exist at all. Existence is the wrong test: other tooling in the same
+    // checkout (the backend unit suite, for one, which does not set
+    // CLAUDIA_DATA_DIR) can legitimately leave files there, and a spec that
+    // fails on a stranger's leftovers reports nothing about the sandbox.
+    writeFileSync(LEGACY_BASELINE_FILE, JSON.stringify(legacyState()));
+}
+
+/** Snapshot of DEFAULT_STATE_FILES taken by prepareHarness(), before boot. */
+export const LEGACY_BASELINE_FILE = join(RUN_ROOT, 'legacy-baseline.json');
+
+/** mtime (ms) of each legacy location, or null when it does not exist. */
+export type LegacyState = Record<string, number | null>;
+
+export function legacyState(): LegacyState {
+    const state: LegacyState = {};
+    for (const file of DEFAULT_STATE_FILES) {
+        state[file] = existsSync(file) ? statSync(file).mtimeMs : null;
+    }
+    return state;
+}
+
+/** The pre-boot snapshot, as written by prepareHarness(). */
+export function legacyBaseline(): LegacyState {
+    return JSON.parse(readFileSync(LEGACY_BASELINE_FILE, 'utf8')) as LegacyState;
 }
 
 /**

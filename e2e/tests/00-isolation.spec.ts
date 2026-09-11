@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from 'fs';
 import { test, expect } from '../fixtures/test.js';
 import {
     BACKEND_PORT, BACKEND_URL, DEFAULT_STATE_FILES, FRONTEND_PORT, STATE_DIR, authHeaders,
+    legacyBaseline, legacyState,
 } from '../harness/env.js';
 import { makeGitRepo } from '../harness/repo.js';
 import { addWorkspace, openApp, workspaceSection } from '../harness/ui.js';
@@ -70,11 +71,18 @@ test('the backend under test reads and writes only the sandboxed state dir', asy
         })
         .not.toContain(repo.path);
 
-    // …and the default (non-isolated) locations were never created. A backend
-    // that ignored our env — or a store wired up without a data directory —
-    // would have written these instead, inside the developer's checkout.
+    // …and the default (non-isolated) locations were neither created nor
+    // modified by this run. A backend that ignored our env — or a store wired
+    // up without a data directory — would have written these instead, inside
+    // the developer's checkout. Compared against the pre-boot snapshot, not
+    // against "absent": on a fresh checkout (CI) the baseline is all-null, so
+    // this is exactly "never created"; on a checkout where something else left
+    // a file behind, it still catches the sandbox touching it.
+    const before = legacyBaseline();
+    const after = legacyState();
     for (const file of DEFAULT_STATE_FILES) {
-        expect(existsSync(file), `backend must not fall back to ${file}`).toBe(false);
+        const verb = before[file] === null ? 'create' : 'modify';
+        expect(after[file], `the sandboxed backend must not ${verb} ${file}`).toBe(before[file]);
     }
 });
 
