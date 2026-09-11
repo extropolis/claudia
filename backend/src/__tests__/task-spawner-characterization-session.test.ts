@@ -258,6 +258,8 @@ describe('CHARACTERIZATION: startSessionCapture', () => {
         expect(internals.sessionToTaskId.has(dead)).toBe(false);
     });
 
+    // Explicit timeout: this drives ~1,200 fake-timer ticks, each doing real fs
+    // calls, which can overrun vitest's 5s default on a loaded machine.
     it('polls for the FULL capture window (10 minutes, not 30s) before giving up', () => {
         liveTask();
         internals.startSessionCapture(TASK_ID, workspace);
@@ -272,7 +274,7 @@ describe('CHARACTERIZATION: startSessionCapture', () => {
         vi.advanceTimersByTime(500); // the first tick to cross the timeout
         expect(internals.pendingSessionCapture.has(TASK_ID)).toBe(false);
         expect(internals.sessionCaptureIntervals.has(TASK_ID)).toBe(false);
-    });
+    }, 30_000);
 
     it('keeps waiting when the projects dir does not exist yet', () => {
         const otherWs = join(base, 'ws-with-no-claude-dir');
