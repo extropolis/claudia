@@ -406,6 +406,25 @@ export class OpenCodeBackend extends EventEmitter implements CodeBackend {
     }
 
     /**
+     * Get the directory holding this runtime's session transcripts for a workspace
+     * @param _workspacePath - Absolute path of the workspace (unused)
+     * @returns Always null — OpenCode keeps sessions server-side, not in per-workspace files
+     */
+    sessionDir(_workspacePath: string): string | null {
+        return null;
+    }
+
+    /**
+     * Get the absolute paths of every file making up a session
+     * @param _workspacePath - Absolute path of the workspace (unused)
+     * @param _sessionId - The OpenCode session ID (unused)
+     * @returns Always empty — OpenCode sessions live on the server, not on disk here
+     */
+    sessionFiles(_workspacePath: string, _sessionId: string): string[] {
+        return [];
+    }
+
+    /**
      * Get the internal task (for TaskSpawner compatibility during migration)
      */
     getInternalTask(taskId: string): InternalTask | undefined {

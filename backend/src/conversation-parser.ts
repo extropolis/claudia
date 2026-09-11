@@ -2,6 +2,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import { BackendType } from '@claudia/shared';
+// Session-file locations live behind the CodeBackend seam; this standalone
+// module has no backend instance, so it uses the exported pure helper.
+import { claudeSessionDir, claudeSessionFiles } from './backends/claude-code-backend.js';
 
 export interface ConversationMessage {
     role: 'user' | 'assistant';
@@ -67,31 +70,12 @@ interface OpenCodePart {
 // ================== Claude Code Functions ==================
 
 /**
- * Convert a workspace path to the Claude projects folder name format
- * e.g., /Users/I850333/projects/experiments/codeui -> -Users-I850333-projects-experiments-codeui
- */
-function workspacePathToClaudeFolderName(workspacePath: string): string {
-    // Claude Code replaces every non-alphanumeric character (except dashes) with a dash
-    return workspacePath.replace(/[^a-zA-Z0-9-]/g, '-');
-}
-
-/**
- * Get the Claude projects directory for a workspace
- */
-function getClaudeProjectsDir(workspacePath: string): string {
-    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-    const folderName = workspacePathToClaudeFolderName(workspacePath);
-    return path.join(homeDir, '.claude', 'projects', folderName);
-}
-
-/**
  * Find the Claude Code JSONL file for a given session ID
  */
 async function findClaudeSessionFile(workspacePath: string, sessionId: string): Promise<string | null> {
-    const projectDir = getClaudeProjectsDir(workspacePath);
-    const sessionFile = path.join(projectDir, `${sessionId}.jsonl`);
+    const [sessionFile] = claudeSessionFiles(workspacePath, sessionId);
 
-    if (fs.existsSync(sessionFile)) {
+    if (sessionFile && fs.existsSync(sessionFile)) {
         return sessionFile;
     }
 
@@ -220,7 +204,7 @@ async function getClaudeConversationHistory(workspacePath: string, sessionId: st
  * Get Claude Code sessions for a workspace
  */
 async function getClaudeWorkspaceSessions(workspacePath: string): Promise<Array<{ sessionId: string; summary?: string; lastModified: Date }>> {
-    const projectDir = getClaudeProjectsDir(workspacePath);
+    const projectDir = claudeSessionDir(workspacePath);
 
     if (!fs.existsSync(projectDir)) {
         return [];
@@ -463,7 +447,7 @@ export async function findSessionFile(workspacePath: string, sessionId: string):
  * @deprecated Use getWorkspaceSessions with backendType instead
  */
 export async function findRecentSessionFiles(workspacePath: string, limit: number = 10): Promise<string[]> {
-    const projectDir = getClaudeProjectsDir(workspacePath);
+    const projectDir = claudeSessionDir(workspacePath);
 
     if (!fs.existsSync(projectDir)) {
         return [];

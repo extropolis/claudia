@@ -37,25 +37,46 @@ FRONTEND_PORT="${CLAUDIA_TEST_FRONTEND_PORT:-5173}"
 OPENCODE_PORT="${CLAUDIA_TEST_OPENCODE_PORT:-4097}"
 # ============================================
 
-# Lock file to prevent duplicate starts
-LOCK_FILE="${CLAUDIA_LOCK_FILE:-/tmp/claudia-server.lock}"
+# ============================================
+# SINGLE INSTANCE CHECK
+# ============================================
+# Authoritative mutual exclusion lives in the backend: instance-lock.ts claims
+# <dataDir>/instance.json at startup and refuses to boot a second backend
+# against the same data directory. This block is only the friendly front door
+# for that check — it tells the user WHERE the running Claudia is instead of
+# letting npm spend ten seconds booting a process that immediately exits 1.
+#
+# It replaces a /tmp/claudia-server.lock file, which guarded the wrong thing:
+# it covered only processes started through this script on this machine's /tmp,
+# so Electron, `npm run dev`, containers and CI all bypassed it, and it said
+# nothing at all about which data directory was in use. The data directory is
+# the resource that must not be shared; the launcher is not.
+INSTANCE_DIR="${CLAUDIA_DATA_DIR:-$(cd "$(dirname "$0")" && pwd)/backend}"
+INSTANCE_FILE="$INSTANCE_DIR/instance.json"
 
-if [ -f "$LOCK_FILE" ]; then
-    LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
-    if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
-        echo "❌ Claudia is already running (PID: $LOCK_PID)."
-        echo "   Stop it first or remove the lock file: rm $LOCK_FILE"
+# Pull one scalar field out of the lock file. instance.json is written
+# pretty-printed, one field per line, so this stays a one-liner without pulling
+# in a JSON parser before the dependency check has even run.
+instance_field() { # args: field-name
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",]*\).*/\1/p" "$INSTANCE_FILE" 2>/dev/null | head -1
+}
+
+if [ -f "$INSTANCE_FILE" ]; then
+    HOLDER_PID=$(instance_field pid)
+    HOLDER_PORT=$(instance_field port)
+    # Both signals must agree before we refuse, exactly as the backend does: a
+    # live pid alone is ambiguous (a tsx-watch process on its way out still has
+    # one, and pids get recycled), so the holder must also still be SERVING.
+    if [ -n "$HOLDER_PID" ] && kill -0 "$HOLDER_PID" 2>/dev/null && [ -n "$HOLDER_PORT" ] \
+        && curl -fsS --max-time 2 "http://127.0.0.1:$HOLDER_PORT/api/server-info" >/dev/null 2>&1; then
+        echo "❌ Claudia is already running (PID: $HOLDER_PID) at http://localhost:$HOLDER_PORT"
+        echo "   It holds the data directory: $INSTANCE_DIR"
+        echo "   Attach to it instead of starting a second instance, or stop it first:"
+        echo "     kill $HOLDER_PID"
         exit 1
     fi
-    # Remove stale lock file
-    rm -f "$LOCK_FILE"
+    echo "ℹ️  Ignoring stale instance lock from PID ${HOLDER_PID:-unknown} (not serving)."
 fi
-
-# Create lock file with our PID
-echo $$ > "$LOCK_FILE"
-
-# Clean up lock file on exit
-trap 'rm -f "$LOCK_FILE"' EXIT INT TERM
 
 # Ensure OpenCode CLI is in PATH
 export PATH=$HOME/.opencode/bin:$PATH
@@ -195,6 +216,32 @@ echo ""
 # Start from project root
 cd "$(dirname "$0")"
 
+# ---------------------------------------------------------------------------
+# API token
+#
+# Every /api route and every WebSocket upgrade now requires a credential (see
+# backend/src/auth-token.ts). A browser on this machine gets one automatically
+# from the loopback bootstrap (GET /api/auth/local), so the plain URL above is
+# enough; this prints the URL WITH the token as well, for the cases where the
+# bootstrap cannot help — a second browser profile, a curl session, or a device
+# on the LAN.
+#
+# The token file may not exist yet on a first ever run: the backend mints it on
+# first use. Nothing here creates it, so the block simply stays quiet.
+# ---------------------------------------------------------------------------
+CLAUDIA_TOKEN_FILE="${CLAUDIA_DATA_DIR:-backend}/auth-token"
+if [ -f "$CLAUDIA_TOKEN_FILE" ]; then
+    CLAUDIA_TOKEN=$(cat "$CLAUDIA_TOKEN_FILE" 2>/dev/null || echo "")
+    if [ -n "$CLAUDIA_TOKEN" ]; then
+        echo "   Authenticated URL (share only with devices you trust):"
+        echo "   http://localhost:$FRONTEND_PORT/?token=$CLAUDIA_TOKEN"
+        echo ""
+    fi
+else
+    echo "   (API token is minted on first use; re-run to see the authenticated URL)"
+    echo ""
+fi
+
 # Export CLAUDIA_BACKEND_PORT for the backend to use
 export CLAUDIA_BACKEND_PORT=$BACKEND_PORT
 
@@ -215,7 +262,7 @@ echo "Backend mode: $BACKEND_SCRIPT"
 # (kill_tree is defined near the top of the script.)
 npm run dev -w frontend &
 FRONTEND_PID=$!
-trap 'rm -f "$LOCK_FILE"; kill_tree "$FRONTEND_PID"' EXIT INT TERM
+trap 'kill_tree "$FRONTEND_PID"' EXIT INT TERM
 
 RESTART_EXIT_CODE=75
 while true; do

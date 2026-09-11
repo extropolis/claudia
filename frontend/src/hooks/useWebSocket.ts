@@ -5,7 +5,10 @@ import { getWebSocketUrl, getApiBaseUrl, isTunnelAccess } from '../config/api-co
 import { playTaskCompletionSound, sendTaskCompletionNotification, sendTaskWaitingInputNotification } from '../utils/browserCapabilities';
 import { clientIdentity } from '../config/client-identity';
 
-const WS_URL = getWebSocketUrl();
+// NOT module-level: every WebSocket upgrade now carries the API token, and on
+// localhost that token only exists after the loopback bootstrap resolves during
+// app startup. A URL captured at import time would be missing it forever, so
+// the socket would 401 on the first connect and on every reconnect after.
 const API_URL = getApiBaseUrl();
 
 /**
@@ -148,8 +151,11 @@ export function useWebSocket() {
             }
         }
 
-        console.log('[WebSocket] Creating WebSocket connection to:', WS_URL);
-        const ws = new WebSocket(WS_URL);
+        // Built here, per attempt, so a token acquired (or replaced) after boot
+        // is picked up by the next reconnect without a page reload.
+        const wsUrl = getWebSocketUrl();
+        console.log('[WebSocket] Creating WebSocket connection to:', wsUrl.replace(/token=[^&]*/, 'token=***'));
+        const ws = new WebSocket(wsUrl);
         console.log('[WebSocket] WebSocket object created, readyState:', ws.readyState);
 
         ws.onopen = () => {

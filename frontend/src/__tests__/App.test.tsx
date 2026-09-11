@@ -23,6 +23,7 @@ import userEvent from '@testing-library/user-event';
 import type { Task, Workspace } from '@claudia/shared';
 
 import { useTaskStore } from '../stores/taskStore';
+import { setAuthToken, clearAuthToken } from '../config/auth-client';
 
 // ---------------------------------------------------------------------------
 // Mock boundary. vi.mock factories are hoisted above the imports, so anything
@@ -268,6 +269,9 @@ function setViewportWidth(width: number) {
 
 beforeEach(() => {
     localStorage.clear();
+    // The API token is cached in a module variable and in sessionStorage, so
+    // one test's token would otherwise leak into the next.
+    clearAuthToken();
     resetStore();
     H.terminalMounts.length = 0;
     H.lastProps = {};
@@ -703,8 +707,9 @@ describe('App — header actions', () => {
         });
     });
 
-    it('opens the voice agent with the tunnel token', async () => {
-        stubFetch({ '/api/tunnel/status': { active: true, token: 'tok-123' } });
+    it('opens the voice agent with the session token', async () => {
+        setAuthToken('tok-123');
+        stubFetch();
         const user = userEvent.setup();
         renderApp();
 
@@ -715,16 +720,21 @@ describe('App — header actions', () => {
         });
     });
 
-    it('falls back to a generated local token when the tunnel has none', async () => {
-        stubFetch({ '/api/tunnel/status': { active: false } });
+    it('REFUSES to open the voice agent with a self-minted local- token', async () => {
+        // The old fallback was `'local-' + Math.random()`, which the backend
+        // accepted on any host its tunnel substring match did not recognize —
+        // and the page embeds the Deepgram API key. There is no fallback now.
+        clearAuthToken();
+        stubFetch();
         const user = userEvent.setup();
         renderApp();
 
         await user.click(screen.getByRole('button', { name: 'Voice Agent' }));
 
         await waitFor(() => {
-            expect(window.open).toHaveBeenCalledWith(expect.stringContaining('/voice?token=local-'), '_blank');
+            expect(window.alert).toHaveBeenCalled();
         });
+        expect(window.open).not.toHaveBeenCalled();
     });
 
     it('toggles the notification mute state', async () => {

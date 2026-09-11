@@ -164,6 +164,21 @@ export interface CodeBackend extends EventEmitter {
      * Used for state detection in PTY-based backends
      */
     hasProcessingIndicators?(taskId: string): boolean;
+
+    /**
+     * Get the directory holding this runtime's session transcripts for a workspace
+     * @param workspacePath - Absolute path of the workspace
+     * @returns Absolute directory path, or null if the runtime is not file-based
+     */
+    sessionDir(workspacePath: string): string | null;
+
+    /**
+     * Get the absolute paths of every file making up a session
+     * @param workspacePath - Absolute path of the workspace
+     * @param sessionId - The runtime's session ID
+     * @returns Absolute file paths (not checked for existence), or [] if none
+     */
+    sessionFiles(workspacePath: string, sessionId: string): string[];
 }
 
 /**

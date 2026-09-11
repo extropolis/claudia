@@ -1,127 +1,55 @@
 /**
- * Token acceptance contract for GET /voice.
+ * /voice page token acceptance.
  *
- * THE BUG (unauthenticated secret disclosure):
- *   The route accepted any token beginning with `local-`:
+ * WHAT THIS GUARDS. The page embeds the Deepgram API key, so serving it to an
+ * unauthenticated caller is a secret disclosure. It used to accept any token
+ * beginning with `local-` on any host the tunnel substring match did not
+ * recognize — and that prefix is minted client-side by the frontend as
+ * `'local-' + Math.random()...`, with nothing ever registering the suffix. So
+ * `GET http://<lan-ip>:4001/voice?token=local-x` returned 200 plus the key to
+ * anyone on the network, and only ngrok/localtunnel hostnames were protected.
  *
- *       const isLocalToken = token.startsWith('local-');
- *       if (!isLocalToken && !tunnelManager.validateToken(token)) { 401 }
+ * THE FIX. There is no hostname branch and no self-minted prefix. /voice takes
+ * the same credential as everything else, checked by the caller.
  *
- *   That prefix is not a credential. The frontend mints it client-side as
- *   `'local-' + Math.random().toString(36).substring(2, 15)` (App.tsx); nothing
- *   registers or checks the suffix, so the condition accepts any string an
- *   attacker types. The handler then embeds `deepgramApiKey` from config into
- *   the page it returns. With a tunnel active:
- *
- *       GET https://<tunnel-host>/voice?token=local-x  ->  200 + Deepgram key
- *
- *   Reachable in production specifically: for a tunnel host the middleware
- *   first proxies to the Vite dev server, and only falls through to this route
- *   on ECONNREFUSED — i.e. when Vite is not running, which is every deployed
- *   install. That is also why this is a unit test and not an HTTP test: through
- *   the stack the result depends on whether Vite happens to be up, which is
- *   true on a developer machine and false in CI.
- *
- * THE FIX:
- *   The `local-` prefix is honored only for non-tunnel requests.
+ * Why a unit test and not an HTTP test: through the real stack a tunnel-host
+ * request is first handed to the Vite proxy, which only falls through on
+ * ECONNREFUSED — so whether the route is reached depends on whether Vite is
+ * running, which is true on a developer machine and false in CI.
  */
 import { describe, it, expect } from 'vitest';
-import { isVoiceTokenAcceptable, isTunnelHostname } from '../voice-auth.js';
+import { isVoiceTokenAcceptable } from '../voice-auth.js';
 
-/** Hosts that must be treated as public tunnel traffic. */
-const TUNNEL_HOSTS = [
-    'abc-def.loca.lt',
-    'my-app.localtunnel.me',
-    'somewhere.ngrok-free.app',
-    'tenant.ngrok.io',
-    'foo.ngrok.example',
-];
+/** Stands in for a server with no valid credentials on offer. */
+const acceptsNothing = () => false;
 
-/** Ordinary local access. */
-const LOCAL_HOSTS = [
-    'localhost:4001',
-    '127.0.0.1:4001',
-    'localhost',
-    '[::1]:4001',
-    'my-desktop.lan:4001',
-];
-
-/** Stands in for a tunnel manager with no active tunnel. */
-const noTunnel = () => false;
-
-/** Stands in for an active tunnel that issued exactly `issued`. */
-const tunnelIssuing = (issued: string) => (t: string) => t === issued;
-
-describe('isTunnelHostname', () => {
-    it('recognizes tunnel hosts', () => {
-        for (const h of TUNNEL_HOSTS) {
-            expect(isTunnelHostname(h), `${h} should be a tunnel host`).toBe(true);
-        }
-    });
-
-    it('does not misclassify local hosts', () => {
-        for (const h of LOCAL_HOSTS) {
-            expect(isTunnelHostname(h), `${h} should not be a tunnel host`).toBe(false);
-        }
-    });
-});
+/** Stands in for a server that issued exactly `issued`. */
+const accepting = (issued: string) => (t: string) => t === issued;
 
 describe('isVoiceTokenAcceptable', () => {
-    it('accepts a local- token on a non-tunnel host (local use unchanged)', () => {
-        for (const h of LOCAL_HOSTS) {
-            expect(isVoiceTokenAcceptable('local-abc123', h, noTunnel), h).toBe(true);
-        }
+    it('accepts a token the server actually issued', () => {
+        expect(isVoiceTokenAcceptable('real-token', accepting('real-token'))).toBe(true);
     });
 
-    it('REJECTS a self-minted local- token over a tunnel host', () => {
-        for (const h of TUNNEL_HOSTS) {
-            expect(isVoiceTokenAcceptable('local-forged', h, noTunnel), h).toBe(false);
-        }
+    it('REJECTS a self-minted local- token — the prefix is not a credential', () => {
+        expect(isVoiceTokenAcceptable('local-abc123', acceptsNothing)).toBe(false);
+        expect(isVoiceTokenAcceptable('local-forged', accepting('real-token'))).toBe(false);
     });
 
-    it('rejects every attacker-chosen local- payload over a tunnel', () => {
-        const payloads = [
-            'local-',
-            'local-anything-at-all',
-            'local-' + 'x'.repeat(500),
-            'local-../../etc/passwd',
-            "local-';alert(1);//",
-        ];
-        for (const token of payloads) {
-            expect(
-                isVoiceTokenAcceptable(token, 'abc-def.loca.lt', noTunnel),
-                `token ${token} must be rejected over a tunnel`,
-            ).toBe(false);
-        }
+    it('rejects a token the server did not issue', () => {
+        expect(isVoiceTokenAcceptable('guessed', accepting('real-token'))).toBe(false);
     });
 
-    it('rejects an unissued non-local token everywhere', () => {
-        for (const h of [...LOCAL_HOSTS, ...TUNNEL_HOSTS]) {
-            expect(isVoiceTokenAcceptable('not-a-real-token', h, noTunnel), h).toBe(false);
-        }
+    it('rejects an empty token without consulting the validator', () => {
+        let consulted = false;
+        const spy = () => { consulted = true; return true; };
+        expect(isVoiceTokenAcceptable('', spy)).toBe(false);
+        expect(consulted).toBe(false);
     });
 
-    it('accepts the genuinely issued tunnel token over a tunnel', () => {
-        const validate = tunnelIssuing('real-tunnel-token');
-        for (const h of TUNNEL_HOSTS) {
-            expect(isVoiceTokenAcceptable('real-tunnel-token', h, validate), h).toBe(true);
-        }
-    });
-
-    it('still rejects a forged token when a tunnel is active', () => {
-        const validate = tunnelIssuing('real-tunnel-token');
-        expect(isVoiceTokenAcceptable('local-forged', 'abc-def.loca.lt', validate)).toBe(false);
-        expect(isVoiceTokenAcceptable('wrong-token', 'abc-def.loca.lt', validate)).toBe(false);
-    });
-
-    it('rejects an empty or missing token', () => {
-        expect(isVoiceTokenAcceptable('', 'localhost:4001', noTunnel)).toBe(false);
-        expect(isVoiceTokenAcceptable('', 'abc-def.loca.lt', noTunnel)).toBe(false);
-    });
-
-    it('claiming a tunnel host cannot grant access it would not otherwise have', () => {
-        // Host is used only to WITHDRAW trust. Lying about it moves the caller
-        // into the stricter branch, never a more permissive one.
-        expect(isVoiceTokenAcceptable('local-x', 'attacker-controlled.ngrok.io', noTunnel)).toBe(false);
+    it('does not vary with the host it was asked about', () => {
+        // The signature no longer takes a host at all; this test exists to fail
+        // loudly if a hostname parameter is ever reintroduced here.
+        expect(isVoiceTokenAcceptable.length).toBe(2);
     });
 });
