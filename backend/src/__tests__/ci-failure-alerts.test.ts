@@ -119,16 +119,40 @@ describe('CI failure alerts', () => {
         expect(write).toHaveBeenCalledTimes(1);
     });
 
-    it('re-arms once a new run starts, so the failure after a fix is new news', () => {
+    it('does NOT re-arm on a fresh run alone — a PR stuck failed/running/failed only alerts once', () => {
+        // A run starting is not a fix landing. Re-arming here used to mean a
+        // PR cycling failed -> running -> failed (retries, or fresh pushes
+        // that never actually fix it) fired a brand new alert every single
+        // cycle — real reported behavior: "constant messages... polluting
+        // and wasting tokens" for one chronically-red PR.
         vi.useFakeTimers();
         const s = makeSpawner([fakeTask('task-a', 'idle')]) as unknown as Internals;
         const write = vi.spyOn(s, 'writeToTask').mockImplementation(() => {});
 
-        s.notePrCiState('task-a', 'feature', pr());               // red
+        s.notePrCiState('task-a', 'feature', pr());                  // red — alert #1
         vi.advanceTimersByTime(400);
-        s.notePrCiState('task-a', 'feature', pr({ ci: 'running' })); // pushed a fix
+        s.notePrCiState('task-a', 'feature', pr({ ci: 'running' })); // a new run started
         vi.advanceTimersByTime(400);
-        s.notePrCiState('task-a', 'feature', pr());               // red again
+        s.notePrCiState('task-a', 'feature', pr());                  // red again — same problem
+        vi.advanceTimersByTime(400);
+        s.notePrCiState('task-a', 'feature', pr({ ci: 'running' }));
+        vi.advanceTimersByTime(400);
+        s.notePrCiState('task-a', 'feature', pr());                  // still hasn't been fixed
+        vi.advanceTimersByTime(400);
+
+        expect(write).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-arms once the PR actually goes green, so a later regression is new news', () => {
+        vi.useFakeTimers();
+        const s = makeSpawner([fakeTask('task-a', 'idle')]) as unknown as Internals;
+        const write = vi.spyOn(s, 'writeToTask').mockImplementation(() => {});
+
+        s.notePrCiState('task-a', 'feature', pr());                 // red — alert #1
+        vi.advanceTimersByTime(400);
+        s.notePrCiState('task-a', 'feature', pr({ ci: 'passed' })); // actually fixed
+        vi.advanceTimersByTime(400);
+        s.notePrCiState('task-a', 'feature', pr());                 // red again — a new regression
         vi.advanceTimersByTime(400);
 
         expect(write).toHaveBeenCalledTimes(2);
