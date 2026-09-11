@@ -4633,8 +4633,12 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
      * notices, which only delivers to a live, idle task and re-tries on its
      * next idle otherwise — so this never types into a running session.
      *
-     * One notice per failing run: the alert re-arms only after the PR reports
-     * green or a fresh run starts, which is exactly the push that follows a fix.
+     * One notice per failing run — and the alert only re-arms once the PR
+     * actually goes green. It deliberately does NOT re-arm on 'running': that
+     * used to also count as "resolved," so a PR stuck in failed -> running ->
+     * failed -> running (retries or fresh pushes that never actually fix it)
+     * fired a brand new alert on every single cycle. Nothing was ever fixed
+     * in that loop, so nothing about it should look new to the task.
      *
      * @returns false when the task is not live (disconnected tasks never reach
      * this map, so nothing could be delivered to it). Callers picking one owner
@@ -4655,8 +4659,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             return true;
         }
         if (prInfo.ci !== 'failed') {
-            // 'passed'/'running' both mean the red run is history — re-arm.
-            if (prInfo.ci === 'passed' || prInfo.ci === 'running') this.ciAlertsSent.delete(taskId);
+            // Only a real green run means the problem is actually resolved.
+            // 'running' is deliberately NOT treated as resolved here — a PR
+            // stuck cycling failed -> running -> failed without ever going
+            // green must not get a fresh alert every cycle (see doc comment).
+            if (prInfo.ci === 'passed') this.ciAlertsSent.delete(taskId);
             return true;
         }
 
