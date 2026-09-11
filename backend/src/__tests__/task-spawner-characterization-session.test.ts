@@ -196,8 +196,10 @@ describe('CHARACTERIZATION: startSessionCapture', () => {
 
         vi.advanceTimersByTime(500);
 
+        // tasks.json is written in the { schemaVersion, data } envelope (#252).
         const onDisk = JSON.parse(readFileSync(join(base, 'tasks.json'), 'utf8'));
-        expect(onDisk.tasks.find((t: { id: string }) => t.id === TASK_ID)?.sessionId).toBe(SID);
+        expect(onDisk.schemaVersion).toBe(1);
+        expect(onDisk.data.tasks.find((t: { id: string }) => t.id === TASK_ID)?.sessionId).toBe(SID);
     });
 
     it('stops polling as soon as it adopts a session', () => {
