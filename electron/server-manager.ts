@@ -7,9 +7,214 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 export interface ServerInfo {
-    child: UtilityProcess;
+    /**
+     * The utility process hosting the backend, or `null` when we attached to a
+     * backend that was already running (started by `./start.sh`, another
+     * Claudia window, ...). A null child means we do not own the process and
+     * must never kill it.
+     */
+    child: UtilityProcess | null;
     port: number;
     url: string;
+    /** Instance id from `/api/server-info`; absent when only `/api/health` answered. */
+    instanceId?: string;
+    /** Version reported by `/api/server-info`. */
+    version?: string;
+    /** Data directory the attached backend holds, per `/api/server-info`. */
+    dataDir?: string | null;
+}
+
+/** Identity a probe can learn about a backend that is already running. */
+interface BackendIdentity {
+    instanceId?: string;
+    version?: string;
+    dataDir?: string | null;
+}
+
+/**
+ * Ask `/api/server-info` who the backend is.
+ *
+ * This is the preferred probe: it answers with an identity we can log and, in
+ * time, reason about (see the instance-lock work). It is deliberately
+ * unauthenticated on the backend side, because the question is asked before any
+ * credential exists. Returns null when the route is absent (older backend) or
+ * the payload is not recognisably Claudia's, so the caller can fall back.
+ */
+async function probeServerInfo(base: string, signal: AbortSignal): Promise<BackendIdentity | null> {
+    try {
+        const res = await fetch(`${base}/api/server-info`, {
+            signal,
+            headers: { accept: 'application/json' }
+        });
+        if (!res.ok) {
+            console.log(`[Backend probe] /api/server-info -> HTTP ${res.status}, falling back to /api/health`);
+            return null;
+        }
+
+        const body = (await res.json()) as Record<string, unknown> | null;
+        // The identity guard: a bare 200 proves only that *something* listens on
+        // this port. A Claudia backend names itself.
+        if (!body || typeof body.instanceId !== 'string' || body.instanceId.length === 0) {
+            console.log('[Backend probe] /api/server-info answered without an instanceId, falling back to /api/health');
+            return null;
+        }
+
+        return {
+            instanceId: body.instanceId,
+            version: typeof body.version === 'string' ? body.version : undefined,
+            dataDir: typeof body.dataDir === 'string' ? body.dataDir : null
+        };
+    } catch {
+        // Route missing, payload not JSON, or the connection died. Either the
+        // health probe picks it up or the whole probe fails there.
+        return null;
+    }
+}
+
+/**
+ * Fall back to `/api/health` for backends predating `/api/server-info`.
+ *
+ * Learns no identity, so an attach via this path logs only that it attached.
+ */
+async function probeHealth(base: string, signal: AbortSignal): Promise<BackendIdentity | null> {
+    try {
+        const res = await fetch(`${base}/api/health`, {
+            signal,
+            headers: { accept: 'application/json' }
+        });
+        if (!res.ok) {
+            console.log(`[Backend probe] /api/health -> HTTP ${res.status}, not attaching`);
+            return null;
+        }
+
+        const body = (await res.json()) as Record<string, unknown> | null;
+        if (!body || body.status !== 'ok') {
+            console.log('[Backend probe] /api/health answered 200 but not with Claudia\'s payload, not attaching');
+            return null;
+        }
+        return {};
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Probe for a backend that is already listening at `url`.
+ *
+ * This is what keeps a packaged/dev Electron window from booting a *second*
+ * Claudia against a different data dir while the user's `./start.sh` backend
+ * is already serving all their workspaces on 4001.
+ *
+ * Tries `/api/server-info` first and falls back to `/api/health`, so it attaches
+ * to backends both with and without the instance-lock work. Both probes require
+ * the body to look like Claudia's, not merely a 200 — otherwise any unrelated
+ * service holding the port would be attached to. That guard is sized for a
+ * localhost default and needs real authentication before attach goes remote.
+ *
+ * @param url - Backend origin, e.g. `http://localhost:4001`
+ * @param timeoutMs - Abort the whole probe, both requests, after this long
+ * @returns ServerInfo with `child: null` when a Claudia backend answered, else null
+ */
+export async function findRunningBackend(
+    url: string,
+    timeoutMs = 1500
+): Promise<ServerInfo | null> {
+    const base = url.replace(/\/+$/, '');
+
+    let port: number;
+    try {
+        const parsed = new URL(base);
+        port = Number(parsed.port) || (parsed.protocol === 'https:' ? 443 : 80);
+    } catch {
+        console.log(`[Backend probe] ${base} is not a valid URL, not attaching`);
+        return null;
+    }
+
+    // One budget covers both requests, so a hung backend cannot double the
+    // startup delay by stalling each probe in turn.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        let identity = await probeServerInfo(base, controller.signal);
+        if (!identity && !controller.signal.aborted) {
+            identity = await probeHealth(base, controller.signal);
+        }
+
+        if (!identity) {
+            const why = controller.signal.aborted
+                ? `no response within ${timeoutMs}ms`
+                : 'no Claudia backend answered';
+            console.log(`[Backend probe] ${base}: ${why}, will spawn our own`);
+            return null;
+        }
+
+        return { child: null, port, url: base, ...identity };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * Decide where the backend comes from: attach to a running one if the probe
+ * finds it, otherwise spawn our own.
+ *
+ * Kept as a pure-ish function (both sides injected) precisely so it is
+ * testable — `main.ts` runs Electron app lifecycle at import time and cannot
+ * be exercised in a unit test.
+ */
+export async function resolveBackend(deps: {
+    probe: () => Promise<ServerInfo | null>;
+    spawn: () => Promise<ServerInfo>;
+}): Promise<{ info: ServerInfo; attached: boolean }> {
+    const found = await deps.probe();
+    if (found) return { info: found, attached: true };
+    return { info: await deps.spawn(), attached: false };
+}
+
+/**
+ * The API token for the backend at `backendUrl`, or null if none can be had.
+ *
+ * Every /api route and every WebSocket upgrade requires one (backend
+ * auth-token.ts). The probe above is the only unauthenticated call; everything
+ * after it — the SPA's fetches and its WS — carries the token this returns,
+ * which main.ts hands to the window as `?token=`.
+ *
+ * `CLAUDIA_AUTH_TOKEN` wins when set: it is the same override the MCP server and
+ * test-cli honor, and it is the only way to attach to a NON-local backend
+ * (`CLAUDIA_BACKEND_URL` pointing at another host), because the fallback —
+ * `GET /api/auth/local` — is served only to a loopback peer. That bootstrap is
+ * what a local attach or a spawned backend uses, and it needs no data-dir path
+ * arithmetic: the backend tells us its own token.
+ */
+export async function resolveBackendToken(
+    backendUrl: string,
+    opts: { env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch } = {}
+): Promise<string | null> {
+    const fromEnv = (opts.env ?? process.env).CLAUDIA_AUTH_TOKEN?.trim();
+    if (fromEnv) {
+        console.log('[Auth] Using CLAUDIA_AUTH_TOKEN from the environment');
+        return fromEnv;
+    }
+
+    const doFetch = opts.fetchImpl ?? fetch;
+    const base = backendUrl.replace(/\/+$/, '');
+    try {
+        const res = await doFetch(`${base}/api/auth/local`);
+        if (!res.ok) {
+            console.warn(
+                `[Auth] ${base} refused the local auth bootstrap (HTTP ${res.status}). ` +
+                'For a non-local backend, set CLAUDIA_AUTH_TOKEN; otherwise the app will prompt.'
+            );
+            return null;
+        }
+        const body = (await res.json()) as { token?: unknown } | null;
+        const token = typeof body?.token === 'string' ? body.token.trim() : '';
+        return token || null;
+    } catch (error) {
+        console.warn(`[Auth] Auth bootstrap at ${base} failed:`, error);
+        return null;
+    }
 }
 
 /**
@@ -67,7 +272,12 @@ export async function startServer(
 /**
  * Stop the backend server gracefully
  */
-export async function stopServer(child: UtilityProcess): Promise<void> {
+export async function stopServer(child: UtilityProcess | null): Promise<void> {
+    // We attached to a backend somebody else started — it is not ours to kill.
+    if (!child) {
+        console.log('↩️  Attached backend is externally owned, leaving it running');
+        return;
+    }
     console.log('🛑 Stopping backend server...');
     child.kill();
     // Wait for exit with timeout
