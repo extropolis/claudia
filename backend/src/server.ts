@@ -10,6 +10,7 @@ import { readFile, readdir } from 'fs/promises';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
+import { randomUUID } from 'crypto';
 import { TaskSpawner } from './task-spawner.js';
 import { ViewerRegistry } from './viewer-registry.js';
 import { WorkspaceStore } from './workspace-store.js';
@@ -23,7 +24,7 @@ import { CronScheduler, validateCronExpression, describeCronExpression } from '.
 import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
 import { validateConfigUpdate, validateWorkspacePath, isPathInside, isValidNgrokDomain } from './validation.js';
-import { isVoiceTokenAcceptable, isTunnelHostname } from './voice-auth.js';
+import { isVoiceTokenAcceptable } from './voice-auth.js';
 import { evaluateCorsOrigin, CORS_REJECTED } from './cors-policy.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch, getTaskWorkStatus } from './git-utils.js';
 import { selectWorkspacesToRefresh } from './pr-refresh.js';
@@ -43,6 +44,9 @@ import { isValidSharedMcpToken } from './mcp-auth.js';
 import { JiraClient, JiraError, parseIssueKey } from './jira-client.js';
 import { ensureDataDir, dataPath, describeDataDir } from './paths.js';
 import { exportState } from './export-import/export.js';
+import { resolveBackendVersion, type InstanceInfo } from './instance-lock.js';
+import { getAuthToken, validateAuthToken } from './auth-token.js';
+import { isLoopbackPeer, isSecureRequest } from './request-peer.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
 // - config-routes.ts: Config API routes template
@@ -50,6 +54,12 @@ import { exportState } from './export-import/export.js';
 // - ws-handlers.ts: WebSocket handlers template
 
 const logger = createLogger('[Server]');
+
+/**
+ * Wire format version of GET /api/server-info. Bump when the payload changes
+ * shape so an older launcher can recognise a backend it cannot talk to.
+ */
+export const SERVER_INFO_PROTOCOL_VERSION = 1;
 
 // ES module __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
@@ -378,11 +388,23 @@ function notifyTasksOfMcpChange(
     }
 }
 
-export async function createApp(basePath?: string) {
+export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) {
     // Resolve where mutable state lives before anything touches disk. `basePath`
     // is Electron's userData; CLAUDIA_DATA_DIR covers container and home-server
     // deployments; unset keeps the legacy in-source-tree location.
     const dataDir = ensureDataDir(basePath);
+
+    // Identity served by GET /api/server-info. index.ts passes the info from the
+    // instance lock it holds; embedders that boot the app without taking a lock
+    // (the Electron backend worker, the integration harness) still get a usable
+    // identity rather than an empty route.
+    const instance: InstanceInfo = instanceInfo ?? {
+        instanceId: randomUUID(),
+        pid: process.pid,
+        port: 0,
+        startedAt: new Date().toISOString(),
+        version: resolveBackendVersion(),
+    };
 
     const app = express();
     const server = createServer(app);
@@ -448,16 +470,179 @@ export async function createApp(basePath?: string) {
 
     app.use(express.json({ limit: '50mb' })); // Increased limit for large AI requests
 
+    // ===== API Authentication (unconditional) =====
+    //
+    // WHAT THIS REPLACES. `/api/*` used to require a token only when the Host
+    // header matched a tunnel substring (`.loca.lt`, `ngrok`, …). Every other
+    // reachable name — a LAN IP, a Tailscale MagicDNS name, a custom domain, a
+    // *.fly.dev host — fell through with NO authentication at all, and
+    // `server.listen(PORT)` binds every interface. Anything on the same network
+    // could POST /api/tasks and get arbitrary code execution as this user.
+    // Hostname was never a security boundary, so nothing branches on it here.
+    //
+    // ACCEPTED CREDENTIALS, in the order a client is likely to send them:
+    //   Authorization: Bearer <t> | x-claudia-token: <t> | ?token=<t> | cookie
+    // Two secrets are honored: the persistent API token (auth-token.ts) and the
+    // live tunnel token, which is a real per-session credential the tunnel
+    // manager issued and is what the existing mobile QR flow hands out.
+    //
+    // Presenting a valid token once mints an HttpOnly cookie so a browser's
+    // subsequent same-origin requests carry it without every fetch call site
+    // knowing about auth.
+    const AUTH_COOKIE = 'claudia_token';
+    // Kept readable so a phone that still holds the pre-rename cookie from a
+    // live tunnel session isn't logged out by this deploy.
+    const LEGACY_AUTH_COOKIE = 'claudia_tunnel_token';
+
+    /**
+     * Routes reachable without a credential.
+     *
+     * `/api/health` is a liveness probe — a container orchestrator has no token
+     * and must not need one. `/api/server-info` is the instance-identity probe
+     * (see its handler): a launcher asks it "is that you, and do I need a
+     * token?" before it holds a credential, which is how Electron decides to
+     * attach and how a remote client knows to prompt instead of silently
+     * failing. Neither reveals workspaces or tasks, and server-info returns its
+     * one filesystem field, `dataDir`, only to a loopback caller.
+     *
+     * `/api/auth/local` is handled separately: it is not open, it is gated on
+     * the socket peer being loopback.
+     */
+    const UNAUTHENTICATED_API_PATHS = new Set(['/api/health', '/api/server-info']);
+    const LOOPBACK_BOOTSTRAP_PATH = '/api/auth/local';
+
+    function readCookie(req: Request, name: string): string | undefined {
+        const header = req.headers.cookie || '';
+        const m = new RegExp(`(?:^|;\\s*)${name}=([^;]+)`).exec(header);
+        return m ? decodeURIComponent(m[1]) : undefined;
+    }
+
+    /** Pull the presented credential out of wherever the client put it. */
+    function presentedToken(req: Request): string | undefined {
+        const auth = req.headers.authorization;
+        if (typeof auth === 'string' && /^Bearer\s+/i.test(auth)) {
+            return auth.replace(/^Bearer\s+/i, '').trim();
+        }
+        const header = req.headers['x-claudia-token'];
+        if (typeof header === 'string' && header) return header;
+        const query = req.query.token;
+        if (typeof query === 'string' && query) return query;
+        return readCookie(req, AUTH_COOKIE) ?? readCookie(req, LEGACY_AUTH_COOKIE);
+    }
+
+    /** Is this string one of the two credentials this server accepts? */
+    function isAcceptedToken(candidate: string | undefined): boolean {
+        if (!candidate) return false;
+        return validateAuthToken(dataDir, candidate) || tunnelManager.validateToken(candidate);
+    }
+
+    /**
+     * Normalize the path the way Express's ROUTER will see it.
+     *
+     * Express matches routes case-insensitively unless `caseSensitive` is set,
+     * which it is not here. A gate written as `req.path.startsWith('/api/')`
+     * therefore has a hole you can drive a truck through: `GET /API/tasks`
+     * fails the gate's prefix test, falls through to `next()`, and is then
+     * matched and served by `app.get('/api/tasks')`. Collapsing repeated
+     * slashes closes the same trick spelled `//api/tasks`.
+     */
+    function routedPath(req: Request): string {
+        return req.path.replace(/\/{2,}/g, '/').toLowerCase();
+    }
+
+    app.use((req: Request, res: Response, next: NextFunction) => {
+        const path = routedPath(req);
+        if (!path.startsWith('/api/')) return next();
+        if (UNAUTHENTICATED_API_PATHS.has(path)) return next();
+        // The bootstrap endpoint runs its own, stricter check (loopback peer).
+        if (path === LOOPBACK_BOOTSTRAP_PATH) return next();
+
+        const candidate = presentedToken(req);
+        if (!isAcceptedToken(candidate)) {
+            logger.warn('API request rejected: missing or invalid token', {
+                path: req.path,
+                host: req.headers.host,
+                peer: req.socket?.remoteAddress,
+                presented: candidate ? 'invalid' : 'none',
+            });
+            return res.status(401).json({ error: 'Unauthorized: a valid Claudia token is required' });
+        }
+
+        // Mint the cookie so the SPA authenticates once and then behaves like a
+        // normal same-origin app. Secure follows the ACTUAL scheme: setting it
+        // unconditionally makes a browser silently discard the cookie over
+        // plain http on a LAN address, which is precisely the deployment this
+        // change exists to protect.
+        if (!readCookie(req, AUTH_COOKIE)) {
+            const secure = isSecureRequest(req) ? ' Secure;' : '';
+            res.setHeader('Set-Cookie',
+                `${AUTH_COOKIE}=${encodeURIComponent(candidate!)}; Path=/; HttpOnly;${secure} SameSite=Strict`);
+        }
+        return next();
+    });
+
+    /**
+     * Loopback bootstrap: hand the API token to a client already on this machine.
+     *
+     * This is what keeps `./start.sh` + a browser working without the user
+     * copying a secret around, and how Electron authenticates against a backend
+     * it did not spawn. It is the ONE exception to the middleware above, and it
+     * is gated on the socket peer address — not on a header, and not on the
+     * Host. `X-Forwarded-For: 127.0.0.1` therefore buys an attacker nothing;
+     * see request-peer.ts.
+     *
+     * Every process on this machine shares loopback, so this is not a strong
+     * boundary against a hostile local process — it is the same trust level as
+     * reading the token file, which any local process could also do.
+     */
+    app.get(LOOPBACK_BOOTSTRAP_PATH, (req: Request, res: Response) => {
+        // isTunnelHost as well as isLoopbackPeer, and the tunnel check is the
+        // load-bearing one: the ngrok agent runs on THIS machine, so a request
+        // that came in over the public tunnel reaches us from 127.0.0.1 and
+        // looks local at the socket. isLoopbackPeer already refuses anything
+        // carrying X-Forwarded-*, which is what ngrok sends; this is the second
+        // lock, in case a tunnel is ever configured to strip those headers.
+        // Getting this wrong hands the API token to the open internet.
+        if (!isLoopbackPeer(req) || isTunnelHost(req.headers.host || '')) {
+            logger.warn('Rejected non-loopback auth bootstrap', {
+                peer: req.socket?.remoteAddress,
+                host: req.headers.host,
+                forwarded: req.headers['x-forwarded-for'] ? 'present' : 'absent',
+            });
+            res.status(403).json({ error: 'The local auth bootstrap is only available from this machine.' });
+            return;
+        }
+        const token = getAuthToken(dataDir);
+        const secure = isSecureRequest(req) ? ' Secure;' : '';
+        res.setHeader('Set-Cookie',
+            `${AUTH_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly;${secure} SameSite=Strict`);
+        logger.info('Served auth token to loopback client', { peer: req.socket?.remoteAddress });
+        res.json({ token });
+    });
+
     // ===== Tunnel → React Frontend Proxy =====
     // When accessed through the tunnel, proxy non-API requests to the Vite
     // dev server (development) or fall through to the static server (production).
     // Instead of relying on env vars, we try Vite first and fall back to static
     // if Vite isn't running (connection refused = production mode).
 
-    // Delegates to the shared predicate so the middleware below and the /voice
-    // token check can never drift apart on what counts as tunnel traffic.
+    // Is this request being served through the tunnel's reverse proxy?
+    //
+    // This is a ROUTING question, not a security one: the tunnel serves the SPA
+    // on the backend's own origin, so those requests must be proxied to Vite
+    // (or the static bundle) instead of 404ing. Authentication is decided by
+    // the middleware above and never consults the Host header. Answering it
+    // from the active tunnel's own URL rather than a substring match on
+    // "ngrok" also means a custom tunnel domain routes correctly.
     function isTunnelHost(host: string): boolean {
-        return isTunnelHostname(host);
+        if (!host) return false;
+        const status = tunnelManager.getStatus();
+        if (!status.active || !status.url) return false;
+        try {
+            return new URL(status.url).host.toLowerCase() === host.toLowerCase();
+        } catch {
+            return false;
+        }
     }
 
     app.use((req, res, next) => {
@@ -473,7 +658,7 @@ export async function createApp(basePath?: string) {
             const status = tunnelManager.getStatus();
             if (status.active && status.token) {
                 const requestToken = req.query.token as string | undefined;
-                if (!requestToken || !tunnelManager.validateToken(requestToken)) {
+                if (!requestToken || !isAcceptedToken(requestToken)) {
                     logger.info('Tunnel visitor at root with missing/stale token, redirecting', { host });
                     return res.redirect(`/?token=${status.token}`);
                 }
@@ -481,23 +666,13 @@ export async function createApp(basePath?: string) {
                 // fetches are authenticated without frontend changes. Secure +
                 // SameSite=Strict — tunnel origins are always https.
                 res.setHeader('Set-Cookie',
-                    `claudia_tunnel_token=${encodeURIComponent(requestToken)}; Path=/; HttpOnly; Secure; SameSite=Strict`);
+                    `${AUTH_COOKIE}=${encodeURIComponent(requestToken)}; Path=/; HttpOnly; Secure; SameSite=Strict`);
             }
         }
 
-        // #77: API routes over the tunnel REQUIRE a valid token (query param,
-        // header, or the cookie minted at '/'). Previously /api/* passed through
-        // unauthenticated — a network-exposed task-spawn/file-access surface.
-        if (req.path.startsWith('/api/')) {
-            const cookieHeader = req.headers.cookie || '';
-            const cookieMatch = /(?:^|;\s*)claudia_tunnel_token=([^;]+)/.exec(cookieHeader);
-            const candidate = (req.query.token as string | undefined)
-                || (req.headers['x-claudia-token'] as string | undefined)
-                || (cookieMatch ? decodeURIComponent(cookieMatch[1]) : undefined);
-            if (!candidate || !tunnelManager.validateToken(candidate)) {
-                logger.warn('Tunnel API request rejected: missing/invalid token', { host, path: req.path });
-                return res.status(401).json({ error: 'Unauthorized: valid tunnel token required' });
-            }
+        // /api/* already passed the unconditional auth middleware above — there
+        // is no separate, weaker tunnel rule any more. Hand it to the routes.
+        if (routedPath(req).startsWith('/api/')) {
             return next();
         }
 
@@ -1701,38 +1876,53 @@ export async function createApp(basePath?: string) {
     });
 
     // ===== WebSocket Upgrade Routing =====
-    // Using noServer mode so we can selectively handle upgrades.
-    // Through the tunnel, Vite's HMR client also tries to connect a WebSocket
-    // (because the frontend is served from the same origin). We reject those
-    // non-app connections so they don't create noise or compete with the real WS.
+    //
+    // The WS carries the same authority as the REST API — task:input writes to
+    // a live PTY — so it is gated by the same credential, on EVERY upgrade.
+    //
+    // It previously checked a token only when the Host looked like a tunnel AND
+    // `mobile=1` was absent, which meant two separate holes: a non-tunnel host
+    // (a LAN IP, Tailscale) was never checked at all, and a tunnel connection
+    // that simply said `mobile=1` skipped straight past the token check into
+    // the client set. There is no `mobile=1` special case any more; the query
+    // parameter now only labels the connection for logging.
     server.on('upgrade', (req, socket, head) => {
         const host = req.headers.host || '';
-        const isTunnel = host.includes('.loca.lt') || host.includes('localtunnel') ||
-                         host.includes('.ngrok-free.app') || host.includes('.ngrok.io') || host.includes('ngrok');
         const url = new URL(req.url || '/', `http://${host || 'localhost'}`);
+        const token = url.searchParams.get('token') || undefined;
 
         logger.info('WebSocket upgrade request', {
             url: req.url,
             host,
-            isTunnel,
-            hasToken: url.searchParams.has('token'),
-            mobile: url.searchParams.get('mobile'),
+            peer: req.socket?.remoteAddress,
+            hasToken: !!token,
         });
 
-        if (isTunnel) {
-            const hasToken = url.searchParams.has('token');
-            const isMobile = url.searchParams.get('mobile') === '1';
+        // Vite's HMR socket connects to the same origin when the SPA is served
+        // through the tunnel proxy, and it has no way to carry our token. It is
+        // only ever present in a dev run, so the exemption is gated on dev mode
+        // rather than on "the token happens to be missing" — which is what made
+        // the old rule an auth bypass in the first place.
+        // Vite identifies its HMR socket with the `vite-hmr` subprotocol.
+        const subprotocols = String(req.headers['sec-websocket-protocol'] || '');
+        const isViteHmr = process.env.NODE_ENV !== 'production'
+            && subprotocols.split(',').some(p => p.trim() === 'vite-hmr');
+        if (isViteHmr) {
+            logger.info('Rejecting Vite HMR WebSocket (not an app connection)', { path: req.url });
+            socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+            socket.destroy();
+            return;
+        }
 
-            if (!hasToken && !isMobile) {
-                // Vite HMR or other non-app WebSocket — silently reject.
-                // HMR isn't needed through the tunnel (mobile users don't need it).
-                logger.info('Tunnel WebSocket: rejecting non-app upgrade (likely Vite HMR)', { path: req.url });
-                socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
-                socket.destroy();
-                return;
-            }
-
-            logger.info('Tunnel WebSocket: routing to app WSS');
+        if (!isAcceptedToken(token)) {
+            logger.warn('WebSocket upgrade rejected: missing or invalid token', {
+                host,
+                peer: req.socket?.remoteAddress,
+                presented: token ? 'invalid' : 'none',
+            });
+            socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+            socket.destroy();
+            return;
         }
 
         wss.handleUpgrade(req, socket, head, (ws) => {
@@ -1743,33 +1933,31 @@ export async function createApp(basePath?: string) {
     // WebSocket connection handling
     let wsClientSeq = 0;
     wss.on('connection', async (ws: WebSocket, req) => {
-        // Check for mobile token auth on query string
+        // Authentication already happened in the upgrade handler — every socket
+        // that reaches here presented a valid token. `mobile=1` is now only a
+        // label for logs and client attribution, never an auth decision.
         const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-        const mobileToken = url.searchParams.get('token');
         const isMobile = url.searchParams.get('mobile') === '1';
         // Stable per-connection id so writes can be attributed to a specific client
         // (used to attribute task:input — e.g. to catch a runaway client looping /clear).
         const clientId = `${isMobile ? 'mobile' : 'web'}:${req.socket.remoteAddress || 'local'}#${++wsClientSeq}`;
 
-        if (isMobile) {
-            if (!mobileToken || !tunnelManager.validateToken(mobileToken)) {
-                logger.error('Mobile WebSocket rejected: invalid token');
-                ws.close(4001, 'Invalid token');
-                return;
-            }
-            logger.info('Mobile client connected via tunnel');
-        }
-
         console.log('[Server] Client connected' + (isMobile ? ' (mobile)' : ''));
         clients.add(ws);
         clientAliveMap.set(ws, true); // Mark as alive on connection
 
-        // Tag loopback (localhost) connections. A mobile/tunnel client is never
-        // loopback. Used to scope sensitive broadcasts (Jira) to local clients only.
-        const remoteAddr = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
-        const isLoopbackConn = !isMobile && !isTunnelHost(req.headers.host || '') &&
-            (remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr.startsWith('127.'));
-        if (isLoopbackConn) loopbackClients.add(ws);
+        // Tag loopback (localhost) connections, used to scope sensitive
+        // broadcasts (Jira) to local clients only.
+        //
+        // The socket peer alone is not sufficient here, and this is the one
+        // place where the tunnel's identity legitimately matters: the ngrok
+        // agent runs on this machine, so a phone's connection arrives from
+        // 127.0.0.1 like any local browser. This is a privacy-scoping decision
+        // about a feature, not an authentication decision — the connection is
+        // already authenticated — and it now asks the tunnel manager for its
+        // real URL instead of substring-matching the Host header.
+        const viaTunnel = isMobile || isTunnelHost(req.headers.host || '');
+        if (!viaTunnel && isLoopbackPeer(req)) loopbackClients.add(ws);
 
         // Handle pong responses to keep connection alive
         ws.on('pong', () => {
@@ -3554,6 +3742,38 @@ export async function createApp(basePath?: string) {
         res.json({ status: 'ok' });
     });
 
+    /**
+     * Who is holding this data directory, and what does it speak?
+     *
+     * Deliberately unauthenticated and deliberately dull: a launcher (start.sh,
+     * the Electron app, a second `npm run dev`) must be able to ask a running
+     * backend "is that you?" before deciding whether to start another one, and
+     * that question has to be answerable before any credential exists.
+     *
+     * The payload is therefore restricted to identity — never tokens, tunnel
+     * URLs, workspace contents or task data. `protocolVersion` lets a future
+     * launcher tell an old backend from a new one, and `authRequired` tells a
+     * client without a credential that it must obtain one (every other /api
+     * route and every WebSocket upgrade requires it).
+     *
+     * `dataDir` is a filesystem path, so it is returned ONLY to a loopback
+     * caller — the local launcher deciding whether this backend holds the same
+     * data directory. `isLoopbackPeer` decides from the socket and refuses any
+     * forwarded request, so a caller over the ngrok tunnel or a reverse proxy
+     * (which connect from 127.0.0.1 but add X-Forwarded-*) gets everything else
+     * without it.
+     */
+    app.get('/api/server-info', (req: Request, res: Response) => {
+        res.json({
+            instanceId: instance.instanceId,
+            version: instance.version,
+            protocolVersion: SERVER_INFO_PROTOCOL_VERSION,
+            startedAt: instance.startedAt,
+            authRequired: true,
+            ...(isLoopbackPeer(req) ? { dataDir: dataDir ?? null } : {}),
+        });
+    });
+
     // Short-ref resolution for REST: every route with a :taskId param accepts
     // the short number ("#48"/"48") as well as the full id. Mirrors the WS-side
     // normalization; unresolvable refs pass through so each route's own
@@ -4142,15 +4362,12 @@ export async function createApp(basePath?: string) {
             }
         }
 
-        // See voice-auth.ts: a `local-` prefix is not a credential, so it is
-        // only honored for requests that did not arrive over a public tunnel.
-        // This page embeds the Deepgram API key.
+        // This page embeds the Deepgram API key, so it takes a real credential
+        // on every host — see voice-auth.ts for the self-minted `local-` token
+        // this replaces.
         const requestHost = req.headers.host || '';
-        if (!isVoiceTokenAcceptable(token, requestHost, t => tunnelManager.validateToken(t))) {
-            logger.warn('[Voice Agent] Rejected token', {
-                host: requestHost,
-                tunnelHost: isTunnelHostname(requestHost),
-            });
+        if (!isVoiceTokenAcceptable(token, isAcceptedToken)) {
+            logger.warn('[Voice Agent] Rejected token', { host: requestHost });
             res.status(401).send('Access denied: Invalid or expired token');
             return;
         }
@@ -6418,16 +6635,15 @@ export async function createApp(basePath?: string) {
 
     /**
      * True when the request originates from loopback (localhost).
-     * Deliberately uses the raw socket address, NOT req.ip — req.ip honors the
-     * X-Forwarded-For header when Express "trust proxy" is enabled, which a tunnel
-     * client could spoof to "127.0.0.1". The socket peer address cannot be forged.
+     *
+     * Delegates to the shared classifier in request-peer.ts so the Jira guard
+     * and the `/api/auth/local` bootstrap cannot drift apart on what "local"
+     * means. It uses the raw socket address, NOT req.ip — req.ip honors the
+     * X-Forwarded-For header when Express "trust proxy" is enabled, which any
+     * client can set. The socket peer address cannot be forged.
      */
     function isLoopbackRequest(req: express.Request): boolean {
-        const ip = req.socket?.remoteAddress || '';
-        // Normalize IPv4-mapped IPv6 (::ffff:127.0.0.1) and bare forms.
-        const norm = ip.replace(/^::ffff:/, '');
-        if (norm === '127.0.0.1' || norm === '::1' || norm === 'localhost') return true;
-        return norm.startsWith('127.');
+        return isLoopbackPeer(req);
     }
 
     /**

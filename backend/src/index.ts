@@ -4,12 +4,17 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { createApp } from './server.js';
-import { resolveDataDir, dataPath } from './paths.js';
+import { resolveDataDir, dataPath, ensureDataDir, describeDataDir } from './paths.js';
+import { acquireInstanceLock, InstanceLockError, resolveBackendVersion } from './instance-lock.js';
 import { checkClaudeCodeInstalled } from './task-spawner.js';
 import { SharedMcpManager, DEFAULT_SHARED_PLAYWRIGHT_PORT } from './shared-mcp-manager.js';
 import { PORTS } from '@claudia/shared';
 
 const PORT = process.env.CLAUDIA_BACKEND_PORT || PORTS.BACKEND;
+// The instance lock records a real port so another launcher can build a URL
+// from it; a malformed CLAUDIA_BACKEND_PORT must not put NaN in the lock file.
+const PARSED_PORT = typeof PORT === 'number' ? PORT : parseInt(String(PORT), 10);
+const PORT_NUMBER = Number.isInteger(PARSED_PORT) && PARSED_PORT > 0 ? PARSED_PORT : PORTS.BACKEND;
 
 // Check if Claude Code CLI is installed — warn but don't block startup.
 // The CLI may be unreachable when off VPN or during network issues;
@@ -64,7 +69,29 @@ function installLearnCommand() {
 installLearnCommand();
 
 
-const { server, taskSpawner, gracefulShutdown } = await createApp();
+// Claim the data directory BEFORE anything touches it — createApp() constructs
+// the task spawner and every other store, so a second backend must be turned
+// away here rather than after it has already loaded (and started re-saving)
+// tasks.json. Port collisions are a weaker signal than this: two backends on
+// different ports against one data dir bind fine and then overwrite each other.
+const dataDir = ensureDataDir();
+let instanceLock: ReturnType<typeof acquireInstanceLock>;
+try {
+    instanceLock = acquireInstanceLock(dataDir, PORT_NUMBER, resolveBackendVersion());
+} catch (err) {
+    if (err instanceof InstanceLockError) {
+        const { pid, port } = err.existing;
+        console.error(
+            `Claudia is already running (pid ${pid}) at http://localhost:${port} ` +
+            `— attach to it instead of starting a second instance.`
+        );
+        process.exit(1);
+    }
+    throw err;
+}
+console.log(`[Index] Instance ${instanceLock.info.instanceId} holds ${describeDataDir(dataDir)}`);
+
+const { server, taskSpawner, gracefulShutdown } = await createApp(undefined, instanceLock.info);
 
 // Bring up the shared Playwright MCP server before serving traffic, so tasks
 // spawned immediately after boot get the HTTP URL rather than each starting
@@ -154,8 +181,19 @@ try {
 }
 
 // Graceful shutdown - use the server's gracefulShutdown which handles all cleanup
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+// Release the data-directory lock on the way out, so the next start does not
+// have to fall back to the health probe to decide the lock is stale.
+function shutdown(signal: string): void {
+    try {
+        instanceLock.release();
+    } catch (err) {
+        console.warn('[Index] Failed to release instance lock:', err);
+    }
+    gracefulShutdown(signal);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // NOTE: We intentionally do NOT save on the 'exit' event because it causes race conditions
 // when tsx watch restarts the server. The debounced save mechanism (500ms) is sufficient,

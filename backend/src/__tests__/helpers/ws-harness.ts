@@ -25,6 +25,7 @@ import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import WebSocket from 'ws';
 import { createApp } from '../../server.js';
+import { getAuthToken } from '../../auth-token.js';
 
 type TestServerParts = Awaited<ReturnType<typeof createApp>>;
 
@@ -67,9 +68,15 @@ export class WSClient {
 
     private constructor(private readonly port: number) {}
 
-    static async connect(port: number): Promise<WSClient> {
+    /**
+     * @param token API token. Every WebSocket upgrade is authenticated (see
+     *   auth-token.ts), so a connection without one is refused with a 401 —
+     *   pass the token from `getAuthToken(base)`.
+     */
+    static async connect(port: number, token?: string): Promise<WSClient> {
         const c = new WSClient(port);
-        c.ws = new WebSocket(`ws://127.0.0.1:${port}`);
+        const query = token ? `?token=${encodeURIComponent(token)}` : '';
+        c.ws = new WebSocket(`ws://127.0.0.1:${port}${query}`);
         c.ws.on('message', (data: Buffer) => {
             try {
                 c.frames.push(JSON.parse(data.toString()));
@@ -191,6 +198,8 @@ export interface TestEnvOptions {
 
 export interface TestEnv {
     base: string;
+    /** The API token this server accepts, minted under `base`. */
+    token: string;
     port: number;
     workspaces: string[];
     fakeDir: string;
@@ -288,9 +297,13 @@ export async function createTestEnv(opts: TestEnvOptions = {}): Promise<TestEnv>
 
     const extraShutdowns: Array<() => Promise<void>> = [];
     const clients: WSClient[] = [];
+    // Auth is unconditional on /api/* and on every WS upgrade; the harness
+    // presents the token so suites keep testing their own handlers.
+    const token = getAuthToken(base);
 
     return {
         base,
+        token,
         port,
         workspaces,
         fakeDir,
@@ -299,9 +312,11 @@ export async function createTestEnv(opts: TestEnvOptions = {}): Promise<TestEnv>
             const p = join(fakeDir, name);
             return existsSync(p) ? readFileSync(p, 'utf8') : '';
         },
-        api: (path: string) => fetch(`http://127.0.0.1:${port}${path}`).then(r => r.json()),
+        api: (path: string) => fetch(`http://127.0.0.1:${port}${path}`, {
+            headers: { 'x-claudia-token': token },
+        }).then(r => r.json()),
         connect: async () => {
-            const c = await WSClient.connect(port);
+            const c = await WSClient.connect(port, token);
             clients.push(c);
             return c;
         },

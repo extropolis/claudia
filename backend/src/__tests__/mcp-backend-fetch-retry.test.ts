@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { backendFetchAt } from '../claudia-mcp-server.js';
@@ -15,7 +15,21 @@ import { backendFetchAt } from '../claudia-mcp-server.js';
 
 const servers: http.Server[] = [];
 
+// backendFetchAt authenticates every request. Supplying the token through the
+// supported CLAUDIA_AUTH_TOKEN override (what a remote backend uses) keeps the
+// loopback bootstrap — itself a request — out of these servers' attempt counts,
+// so each count below measures exactly the retry behaviour under test.
+const TOKEN = 'retry-test-token';
+let savedToken: string | undefined;
+
+beforeEach(() => {
+    savedToken = process.env.CLAUDIA_AUTH_TOKEN;
+    process.env.CLAUDIA_AUTH_TOKEN = TOKEN;
+});
+
 afterEach(async () => {
+    if (savedToken === undefined) delete process.env.CLAUDIA_AUTH_TOKEN;
+    else process.env.CLAUDIA_AUTH_TOKEN = savedToken;
     await Promise.all(servers.splice(0).map(s => new Promise<void>(r => s.close(() => r()))));
 });
 
@@ -38,9 +52,11 @@ function resetSocket(res: http.ServerResponse) {
 describe('backendFetchAt transient-failure retry', () => {
     it('retries a GET whose socket is reset and returns the eventual success', async () => {
         let served = 0;
-        const url = await startServer((n, _req, res) => {
+        let retryToken: string | string[] | undefined;
+        const url = await startServer((n, req, res) => {
             if (n === 1) return resetSocket(res);
             served = n;
+            retryToken = req.headers['x-claudia-token'];
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify([{ id: 'task-1' }]));
         });
@@ -50,6 +66,8 @@ describe('backendFetchAt transient-failure retry', () => {
         expect(response.status).toBe(200);
         expect(await response.json()).toEqual([{ id: 'task-1' }]);
         expect(served).toBe(2); // the retry, not the first attempt, produced it
+        // The retried request still carries the credential.
+        expect(retryToken).toBe(TOKEN);
     });
 
     it('gives up after the retry budget and reports the underlying code', async () => {

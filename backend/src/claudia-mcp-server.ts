@@ -114,6 +114,52 @@ function resolveWorktreeRoot(wsById: Map<string, any>, startId: string): string 
 }
 
 /**
+ * The API token for each backend this MCP server talks to.
+ *
+ * Every `/api` route and every WebSocket upgrade now requires a credential, so
+ * the claudia_* tools need one too. It is fetched from the backend's loopback
+ * bootstrap rather than plumbed through config: this process runs on the same
+ * machine as the backend it addresses (in-process for the shared endpoint, a
+ * child process for stdio servers), which is exactly the condition
+ * `/api/auth/local` is gated on. Cached per baseUrl because the token is stable
+ * across restarts.
+ *
+ * `CLAUDIA_AUTH_TOKEN` overrides it, which is what a future remote backend
+ * (Tailscale, a Sprite) will use — there the bootstrap correctly refuses.
+ */
+const tokenCache = new Map<string, string>();
+
+async function authTokenFor(baseUrl: string): Promise<string | undefined> {
+    const fromEnv = process.env.CLAUDIA_AUTH_TOKEN?.trim();
+    if (fromEnv) return fromEnv;
+
+    const cached = tokenCache.get(baseUrl);
+    if (cached) return cached;
+
+    try {
+        const res = await fetch(`${baseUrl}/api/auth/local`);
+        if (!res.ok) {
+            log.error(`Auth bootstrap refused by ${baseUrl} (HTTP ${res.status})`);
+            return undefined;
+        }
+        const body = await res.json() as { token?: string };
+        if (!body.token) return undefined;
+        tokenCache.set(baseUrl, body.token);
+        return body.token;
+    } catch (error) {
+        log.error(`Auth bootstrap unreachable at ${baseUrl}`, error);
+        return undefined;
+    }
+}
+
+/** Append the token to a URL so a WebSocket upgrade carries it. */
+async function withToken(url: string, baseUrl: string): Promise<string> {
+    const token = await authTokenFor(baseUrl);
+    if (!token) return url;
+    return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
+}
+
+/**
  * Socket-level failures that say nothing about the request's validity — the
  * connection died, so the same request on a fresh socket is likely to work.
  *
@@ -170,6 +216,10 @@ export async function backendFetchAt(baseUrl: string, path: string, options: Req
     const idempotent = IDEMPOTENT_METHODS.has(method);
     log.debug(`Fetching: ${method} ${url}`);
 
+    // Every /api route requires a credential now; resolved once, outside the
+    // retry loop, so a transport retry never re-runs the loopback bootstrap.
+    const token = await authTokenFor(baseUrl);
+
     let lastError: unknown;
     let lastCode: string | undefined;
 
@@ -179,6 +229,7 @@ export async function backendFetchAt(baseUrl: string, path: string, options: Req
                 ...options,
                 headers: {
                     'Content-Type': 'application/json',
+                    ...(token ? { 'x-claudia-token': token } : {}),
                     ...options.headers,
                 },
             });
@@ -210,8 +261,14 @@ export async function backendFetchAt(baseUrl: string, path: string, options: Req
 async function sendWSMessageAt(baseUrl: string, type: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     const WebSocket = (await import('ws')).default;
 
+    // Resolved before the Promise so the upgrade carries the credential — an
+    // unauthenticated upgrade is now refused with a 401 at the socket level.
+    const wsUrl = await withToken(
+        baseUrl.replace('http://', 'ws://').replace('https://', 'wss://'),
+        baseUrl,
+    );
+
     return new Promise((resolve, reject) => {
-        const wsUrl = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://');
         const ws = new WebSocket(wsUrl);
         const timeout = setTimeout(() => {
             ws.close();
@@ -340,8 +397,14 @@ async function sendWSMessageWithMultiResponseAt<T>(
 ): Promise<T> {
     const WebSocket = (await import('ws')).default;
 
+    // Resolved before the Promise so the upgrade carries the credential — an
+    // unauthenticated upgrade is now refused with a 401 at the socket level.
+    const wsUrl = await withToken(
+        baseUrl.replace('http://', 'ws://').replace('https://', 'wss://'),
+        baseUrl,
+    );
+
     return new Promise((resolve, reject) => {
-        const wsUrl = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://');
         const ws = new WebSocket(wsUrl);
         const timeout = setTimeout(() => {
             ws.close();

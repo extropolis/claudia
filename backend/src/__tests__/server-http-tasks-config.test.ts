@@ -883,9 +883,11 @@ describe.skipIf(!SUPPORTS_FAKE_CLI)('live task /debug and /output', () => {
     let liveWs: string;
     let taskId: string;
 
+    // `live.token`, not `h.token`: this is a SECOND harness on its own state
+    // dir, so it mints its own credential. Every WS upgrade is authenticated.
     const wsSend = (port: number, type: string, payload: Record<string, unknown>) =>
         new Promise<void>((resolve, reject) => {
-            const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+            const sock = new WebSocket(`ws://127.0.0.1:${port}?token=${live.token}`);
             sock.on('open', () => {
                 sock.send(JSON.stringify({ type, payload }));
                 setTimeout(() => { sock.close(); resolve(); }, 300);

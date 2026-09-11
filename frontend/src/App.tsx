@@ -21,6 +21,7 @@ import { useTaskStore } from './stores/taskStore';
 import { Terminal, Settings, MessageCircle, X, RefreshCw, RotateCcw, WifiOff, Activity, AlertTriangle, Smartphone, ArrowLeft, Minimize2, Mic, Bell, BellOff, BarChart3, ChevronRight } from 'lucide-react';
 import { UsageDashboard } from './components/UsageDashboard';
 import { getApiBaseUrl } from './config/api-config';
+import { getAuthToken } from './config/auth-client';
 import { isSoundEnabled, setSoundEnabled } from './utils/browserCapabilities';
 import { useNotification } from './components/NotificationContainer';
 
@@ -391,19 +392,24 @@ function App() {
         }
     };
 
-    // Open voice agent in new tab
+    // Open voice agent in new tab.
+    //
+    // The /voice page embeds the Deepgram API key, so it takes a real
+    // credential. It used to fall back to `'local-' + Math.random()`, which the
+    // backend accepted on any host its tunnel substring match did not
+    // recognize — i.e. an unauthenticated secret disclosure on any LAN or
+    // Tailscale address. There is no fallback now: without a token there is
+    // nothing to open.
     const handleOpenVoiceAgent = useCallback(async () => {
         try {
-            const res = await fetch(`${getApiBaseUrl()}/api/tunnel/status`);
-            const data = await res.json();
-            let token = data.token;
-
-            // If no tunnel token, generate a temporary local token
+            const token = getAuthToken();
             if (!token) {
-                token = 'local-' + Math.random().toString(36).substring(2, 15);
+                alert('No Claudia token in this session, so the voice agent cannot be opened. ' +
+                      'Reload from the URL that carries the token.');
+                return;
             }
 
-            const voiceUrl = `${getApiBaseUrl()}/voice?token=${token}`;
+            const voiceUrl = `${getApiBaseUrl()}/voice?token=${encodeURIComponent(token)}`;
             window.open(voiceUrl, '_blank');
         } catch (error) {
             console.error('Failed to open voice agent:', error);

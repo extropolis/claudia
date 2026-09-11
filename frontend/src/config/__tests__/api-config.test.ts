@@ -6,6 +6,7 @@ import {
     getWebSocketUrl,
     isElectron,
 } from '../api-config';
+import { clearAuthToken } from '../auth-client';
 import { PORTS } from '@claudia/shared';
 
 /**
@@ -35,6 +36,9 @@ describe('api-config', () => {
     beforeEach(() => {
         clearElectron();
         setLocation({});
+        // The token is cached in a module variable and in sessionStorage, so a
+        // token picked up from one test's ?token= would leak into the next.
+        clearAuthToken();
     });
 
     afterEach(() => {
@@ -121,17 +125,26 @@ describe('api-config', () => {
                 protocol: 'https:',
                 search: '?token=tok99',
             });
-            expect(getWebSocketUrl()).toBe('wss://app.loca.lt?token=tok99&mobile=1');
+            expect(getWebSocketUrl()).toBe('wss://app.loca.lt?mobile=1&token=tok99');
         });
 
-        it('uses ws for http tunnel without token', () => {
+        it('carries the token on a plain LAN host, not just a tunnel host', () => {
+            // The regression this guards: the WS URL used to append a token
+            // ONLY on a tunnel hostname, and the server only *checked* one
+            // there. A LAN or Tailscale client connected with no credential at
+            // all, and the server accepted it.
+            setLocation({ hostname: '192.168.1.20', search: '?token=tok99' });
+            expect(getWebSocketUrl()).toBe(`ws://192.168.1.20:${PORTS.BACKEND}?token=tok99`);
+        });
+
+        it('omits the token when the page has none (the server will refuse)', () => {
             setLocation({
                 hostname: 'app.loca.lt',
                 host: 'app.loca.lt',
                 protocol: 'http:',
                 search: '',
             });
-            expect(getWebSocketUrl()).toBe('ws://app.loca.lt');
+            expect(getWebSocketUrl()).toBe('ws://app.loca.lt?mobile=1');
         });
 
         it('uses hostname + backend port for web', () => {

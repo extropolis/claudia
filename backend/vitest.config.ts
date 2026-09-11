@@ -39,6 +39,12 @@ export default defineConfig({
             // Raise these as coverage improves; never lower them.
             thresholds: {
                 'src/validation.ts': { lines: 95 },
+                // The credential and the peer classifier — both 100%. Gated at
+                // 100 deliberately: an untested branch in either is an
+                // untested authentication decision.
+                'src/auth-token.ts': { lines: 100 },
+                'src/request-peer.ts': { lines: 100 },
+                'src/voice-auth.ts': { lines: 100 },
                 'src/conversation-parser.ts': { lines: 95 },
                 'src/git-utils.ts': { lines: 80 },
                 'src/workspace-store.ts': { lines: 90 },

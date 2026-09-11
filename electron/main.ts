@@ -107,6 +107,34 @@ const menuTemplate: Electron.MenuItemConstructorOptions[] = [
 ];
 Menu.setApplicationMenu(Menu.buildFromTemplate(menuTemplate));
 
+/**
+ * Ask the backend for the API token.
+ *
+ * Every /api route and every WebSocket upgrade requires one now (see
+ * backend/src/auth-token.ts). Electron asks the backend over loopback rather
+ * than reading the token file directly: `GET /api/auth/local` is gated on the
+ * socket peer, which Electron always satisfies, and it is the same code path
+ * whether Electron spawned this backend or is attaching to one that was already
+ * running (#204) — no data-directory path arithmetic in two places.
+ *
+ * Returns null on failure, in which case the window loads without a token and
+ * the SPA shows its token gate rather than a blank app.
+ */
+async function fetchBackendToken(backendUrl: string): Promise<string | null> {
+    try {
+        const res = await fetch(`${backendUrl}/api/auth/local`);
+        if (!res.ok) {
+            console.warn(`[Main] Auth bootstrap refused (HTTP ${res.status})`);
+            return null;
+        }
+        const body = await res.json() as { token?: string };
+        return body?.token?.trim() || null;
+    } catch (error) {
+        console.warn('[Main] Auth bootstrap failed:', error);
+        return null;
+    }
+}
+
 async function createWindow(backendUrl: string): Promise<void> {
     // Create the browser window
     mainWindow = new BrowserWindow({
@@ -128,8 +156,12 @@ async function createWindow(backendUrl: string): Promise<void> {
     mainWindow.show();
     mainWindow.focus();
 
-    // Pass backend URL as query parameter so it's available immediately on page load
-    const urlParam = `backendUrl=${encodeURIComponent(backendUrl)}`;
+    // Pass backend URL as query parameter so it's available immediately on page load,
+    // plus the API token — the SPA reads ?token= before it makes its first request.
+    const token = await fetchBackendToken(backendUrl);
+    console.log(`[Main] API token ${token ? 'acquired' : 'NOT acquired — the app will prompt'}`);
+    const urlParam = `backendUrl=${encodeURIComponent(backendUrl)}`
+        + (token ? `&token=${encodeURIComponent(token)}` : '');
 
     // Load the app
     if (isDev) {

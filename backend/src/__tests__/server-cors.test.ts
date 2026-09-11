@@ -21,10 +21,22 @@ afterAll(async () => {
     await h?.stop();
 });
 
+/**
+ * Every /api route requires a credential, so the token rides along on each
+ * request — otherwise these assertions would all be about the auth middleware
+ * rather than about CORS. The one exception is the tunnel-host case below,
+ * which deliberately checks the CORS decision happens BEFORE auth.
+ */
 function raw(path: string, headers: Record<string, string>): Promise<{ status: number; body: string; acao?: string }> {
     return new Promise((resolve, reject) => {
         const req = httpRequest(
-            { hostname: '127.0.0.1', port: h.port, path, method: 'GET', headers },
+            {
+                hostname: '127.0.0.1',
+                port: h.port,
+                path,
+                method: 'GET',
+                headers: { 'x-claudia-token': h.token, ...headers },
+            },
             (res) => {
                 let body = '';
                 res.on('data', (c) => { body += c; });

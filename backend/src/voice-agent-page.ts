@@ -534,7 +534,12 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
                     \`;
                 }
 
-                const response = await fetch('/api/elevenlabs/voices');
+                // Every /api route needs a credential. This page is served
+                // outside /api, so no auth cookie was minted for it — send the
+                // token it was rendered with.
+                const response = await fetch('/api/elevenlabs/voices', {
+                    headers: { 'x-claudia-token': TOKEN },
+                });
                 if (!response.ok) {
                     throw new Error(\`Failed to fetch voices: \${response.statusText}\`);
                 }
@@ -595,7 +600,9 @@ export function getVoiceAgentPageHtml(wsUrl: string, token: string, deepgramApiK
 
         async function previewVoice(voiceId, voiceName) {
             try {
-                const response = await fetch(\`/api/elevenlabs/voices/\${voiceId}/preview\`);
+                const response = await fetch(\`/api/elevenlabs/voices/\${voiceId}/preview\`, {
+                    headers: { 'x-claudia-token': TOKEN },
+                });
                 if (!response.ok) {
                     throw new Error(\`Failed to fetch preview: \${response.statusText}\`);
                 }

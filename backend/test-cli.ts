@@ -23,6 +23,66 @@ function httpBaseFromArgv(argv: string[]): string {
     return httpBaseFromWsUrl(wsUrl);
 }
 
+/**
+ * API token for the backend under test.
+ *
+ * Every /api route and every WebSocket upgrade requires a credential now (see
+ * src/auth-token.ts). The CLI runs on the same machine as the backend it
+ * drives, so it asks the loopback bootstrap for the token rather than being
+ * given one — the same path the Electron client and the MCP server take.
+ *
+ * Stays undefined when the endpoint is absent (an older backend still running)
+ * or refuses (a remote --url), and requests then go out unauthenticated exactly
+ * as they used to. That keeps the CLI usable against a server that predates
+ * this change instead of failing confusingly.
+ */
+let cliAuthToken: string | undefined;
+
+async function bootstrapCliAuth(baseHttpUrl: string): Promise<void> {
+    const fromEnv = process.env.CLAUDIA_AUTH_TOKEN?.trim();
+    if (fromEnv) {
+        cliAuthToken = fromEnv;
+        console.log('🔑 Using CLAUDIA_AUTH_TOKEN from the environment');
+        return;
+    }
+    try {
+        const res = await realFetch(`${baseHttpUrl}/api/auth/local`);
+        if (!res.ok) {
+            console.warn(`⚠️  Auth bootstrap refused (HTTP ${res.status}) — requests will be unauthenticated`);
+            return;
+        }
+        const body = await res.json() as { token?: string };
+        cliAuthToken = body?.token?.trim() || undefined;
+        if (cliAuthToken) console.log('🔑 Got an API token from the loopback bootstrap');
+    } catch (err) {
+        console.warn(`⚠️  Auth bootstrap unreachable (${err instanceof Error ? err.message : String(err)})`);
+    }
+}
+
+/**
+ * The real fetch, captured before the wrapper is installed.
+ *
+ * The wrapper below replaces the global rather than touching ~25 call sites,
+ * so the bootstrap itself must not recurse through it.
+ */
+const realFetch = globalThis.fetch.bind(globalThis);
+
+/** Attach the token to every backend request the CLI makes. */
+function installCliAuthFetch(): void {
+    globalThis.fetch = ((input: any, init?: RequestInit) => {
+        if (!cliAuthToken) return realFetch(input, init);
+        const headers = new Headers(init?.headers);
+        if (!headers.has('x-claudia-token')) headers.set('x-claudia-token', cliAuthToken);
+        return realFetch(input, { ...init, headers });
+    }) as typeof fetch;
+}
+
+/** Append the token to a WebSocket URL — a handshake cannot carry headers. */
+function wsUrlWithToken(url: string): string {
+    if (!cliAuthToken) return url;
+    return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(cliAuthToken)}`;
+}
+
 interface TestConfig {
     backendUrl: string;
     testMessage: string;
@@ -125,7 +185,7 @@ class TestCLI {
                 reject(new Error('Test timeout'));
             }, this.config.timeoutMs);
 
-            this.ws = new WebSocket(this.config.backendUrl);
+            this.ws = new WebSocket(wsUrlWithToken(this.config.backendUrl));
 
             this.ws.on('open', async () => {
                 console.log('✅ Connected to backend');
@@ -2859,6 +2919,15 @@ async function handleTunnelCommand(argv: string[]): Promise<boolean> {
 }
 
 async function main() {
+    // Auth first: every /api route and every WS upgrade needs a token, and the
+    // Jira/tunnel commands below are pure HTTP that would 401 without one.
+    installCliAuthFetch();
+    await bootstrapCliAuth(
+        (process.env.CLAUDIA_BACKEND_URL || 'http://localhost:4001')
+            .replace('ws://', 'http://')
+            .replace('wss://', 'https://'),
+    );
+
     // Jira commands short-circuit before the WS machinery.
     if (await handleJiraCommand(process.argv.slice(2))) {
         process.exit(0);
