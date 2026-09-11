@@ -18,7 +18,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { join, basename } from 'path';
 import { homedir } from 'os';
 
 import { fakePtySpawn, ptys, resetFakePtys, makeFakePty, type FakePty } from './helpers/fake-pty.js';
@@ -28,6 +28,7 @@ vi.mock('node-pty', () => ({
 }));
 
 import { TaskSpawner, SESSION_CAPTURE_TIMEOUT_MS } from '../task-spawner.js';
+import { claudeSessionDir } from '../backends/claude-code-backend.js';
 
 const TASK_ID = 'task-500-sess';
 const SID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeffff0001';
@@ -48,8 +49,7 @@ interface Internals {
     sessionCaptureIntervals: Map<string, unknown>;
     startSessionCapture(taskId: string, workspaceId: string): void;
     findSessionForTask(taskId: string, claudeDir: string): string | null;
-    workspaceToClaudeFolder(p: string): string;
-    getClaudeProjectsDir(p: string): string;
+    getSessionDir(p: string): string;
 }
 
 let base: string;
@@ -139,26 +139,31 @@ afterEach(() => {
 // workspace path -> Claude projects folder
 // ===========================================================================
 
-describe('CHARACTERIZATION: workspaceToClaudeFolder', () => {
+// The folder encoding moved out of TaskSpawner into claudeSessionDir() (#255),
+// so the encoding is pinned on that helper; the spawner's getSessionDir()
+// routes through the CodeBackend seam, and the last test pins that wiring.
+const folderOf = (p: string): string => basename(claudeSessionDir(p));
+
+describe('CHARACTERIZATION: workspace path -> Claude projects folder', () => {
     beforeEach(boot);
 
     it('replaces every non-alphanumeric character with its OWN dash (no collapsing)', () => {
-        expect(internals.workspaceToClaudeFolder('/Users/kb/my_proj.v2')).toBe('-Users-kb-my-proj-v2');
+        expect(folderOf('/Users/kb/my_proj.v2')).toBe('-Users-kb-my-proj-v2');
     });
 
     it('keeps dashes and digits, and dashes a Windows drive colon and backslashes', () => {
-        expect(internals.workspaceToClaudeFolder('C:\\Work\\a-b\\c1')).toBe('C--Work-a-b-c1');
+        expect(folderOf('C:\\Work\\a-b\\c1')).toBe('C--Work-a-b-c1');
     });
 
     it('is NOT injective — different paths can share a folder', () => {
         // Pinned as-is: '_' and '.' and '/' all map to '-', so two distinct
         // workspaces can land in one Claude projects dir and see each other's
         // transcripts during recovery.
-        expect(internals.workspaceToClaudeFolder('/a/b_c')).toBe(internals.workspaceToClaudeFolder('/a/b.c'));
+        expect(folderOf('/a/b_c')).toBe(folderOf('/a/b.c'));
     });
 
     it('roots the projects dir at HOME/.claude/projects', () => {
-        expect(internals.getClaudeProjectsDir(workspace)).toBe(join(base, '.claude', 'projects', encode(workspace)));
+        expect(internals.getSessionDir(workspace)).toBe(join(base, '.claude', 'projects', encode(workspace)));
     });
 });
 
