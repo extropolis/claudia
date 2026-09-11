@@ -78,6 +78,16 @@ export function loadVersioned<T>(filePath: string, options: LoadVersionedOptions
         data = legacyLoader ? legacyLoader(raw) : (raw as T);
     }
 
+    if (fileVersion > currentVersion) {
+        // A newer build wrote this file. We pass its data through untouched
+        // rather than returning the default (which would look like an empty
+        // store and get saved over the real one), but say so loudly.
+        console.warn(
+            `[SchemaVersion] ${filePath} is schemaVersion ${fileVersion} but this build ` +
+            `understands v${currentVersion}. Loading as-is; a downgrade may lose newer fields.`
+        );
+    }
+
     if (fileVersion < currentVersion) {
         for (let v = fileVersion; v < currentVersion; v++) {
             const migration = migrations[v];

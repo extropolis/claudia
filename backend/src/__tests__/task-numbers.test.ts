@@ -105,7 +105,7 @@ describe('task number migration', () => {
         const s = start(ctx);
         // Force a save and confirm the counter did not regress to 4.
         (s as unknown as { saveTasks(): void }).saveTasks();
-        const onDisk = JSON.parse(readFileSync(ctx.tasksFile, 'utf-8')) as { nextTaskNumber?: number };
+        const onDisk = JSON.parse(readFileSync(ctx.tasksFile, 'utf-8')).data as { nextTaskNumber?: number };
         expect(onDisk.nextTaskNumber).toBe(50);
     });
 
@@ -117,7 +117,7 @@ describe('task number migration', () => {
         const s = start(ctx);
         (s as unknown as { saveTasks(): void }).saveTasks();
 
-        const onDisk = JSON.parse(readFileSync(ctx.tasksFile, 'utf-8')) as {
+        const onDisk = JSON.parse(readFileSync(ctx.tasksFile, 'utf-8')).data as {
             tasks: { id: string; taskNumber?: number }[];
             nextTaskNumber?: number;
         };
@@ -144,7 +144,7 @@ describe('task number migration', () => {
         s.destroyTask('task-b'); // frees #2 — which must stay retired
         (s as unknown as { saveTasks(): void }).saveTasks();
 
-        const onDisk = JSON.parse(readFileSync(ctx.tasksFile, 'utf-8')) as { nextTaskNumber?: number };
+        const onDisk = JSON.parse(readFileSync(ctx.tasksFile, 'utf-8')).data as { nextTaskNumber?: number };
         expect(onDisk.nextTaskNumber).toBe(3);
     });
 });
