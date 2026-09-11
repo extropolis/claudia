@@ -381,3 +381,41 @@
 .workspace-manager-content::-webkit-scrollbar-thumb:hover {
     background: var(--text-tertiary);
 }
+
+/* Worktree-count badge on a workspace row. Worktrees themselves are not listed
+   here (they are tasks, not workspaces) — this is the only trace of them. */
+.workspace-item-worktree-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--text-secondary, #9aa0a6);
+    background: var(--bg-tertiary, rgba(255, 255, 255, 0.06));
+}
+
+/* A worktree whose parent workspace is gone: nothing else renders it, so it is
+   listed here purely so it can be deleted. */
+.workspace-item-orphan-badge {
+    flex-shrink: 0;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-size: 10px;
+    line-height: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #e0a458;
+    background: rgba(224, 164, 88, 0.12);
+}
+
+.workspace-manager-hidden-note {
+    opacity: 0.65;
+}
+
+.workspace-item-drag-handle.disabled {
+    opacity: 0.25;
+    cursor: default;
+}

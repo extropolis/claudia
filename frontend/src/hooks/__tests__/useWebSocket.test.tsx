@@ -733,6 +733,35 @@ describe('useWebSocket — inbound dispatch', () => {
         expect(useTaskStore.getState().pendingDeleteRequests).toEqual([request]);
     });
 
+    it('task:deleteRequest carrying a batch parks every request from ONE message', () => {
+        const { ws } = mountConnected();
+        const requests = [
+            { taskId: 't1', requestId: 'req1', taskName: 'Cleanup' },
+            { taskId: 't2', requestId: 'req2', taskName: 'Stale audit' },
+            { taskId: 't3', requestId: 'req3', taskName: 'Old spike' },
+        ];
+
+        act(() => {
+            // The wire shape the agent sends: the batch, plus the first request
+            // spread at the top level for clients that predate batching.
+            ws.simulateMessage('task:deleteRequest', { requests, ...requests[0] });
+        });
+
+        // All three land, so the confirmation dialog renders once listing them
+        // all — the reason the batch tool exists.
+        expect(useTaskStore.getState().pendingDeleteRequests).toEqual(requests);
+    });
+
+    it('task:deleteRequest ignores a malformed payload instead of parking a ghost row', () => {
+        const { ws } = mountConnected();
+
+        act(() => {
+            ws.simulateMessage('task:deleteRequest', { taskName: 'no ids here' });
+        });
+
+        expect(useTaskStore.getState().pendingDeleteRequests).toEqual([]);
+    });
+
     it('workspace:created / workspace:deleted add and remove a workspace', () => {
         const { ws } = mountConnected();
 

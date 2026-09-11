@@ -82,6 +82,20 @@
     transform: scale(0.98);
 }
 
+/*
+ * Shown only when another client owns this terminal. Deliberately quiet: it
+ * explains why the terminal is not filling the window, and is not a warning.
+ */
+.terminal-viewing-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(127, 127, 127, 0.18);
+    color: #9aa0a6;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
 .terminal-state {
     font-size: 12px;
     padding: 2px 8px;
@@ -201,6 +215,16 @@
     padding: 8px;
     min-height: 0; /* Allow shrinking in flex context */
     overflow: hidden;
+}
+
+/*
+ * Follower mode: another client owns this task's terminal, so xterm is sized to
+ * THEIR dimensions rather than fitted to this container. Scroll rather than
+ * clip — reflowing to the local width would garble a TUI whose cursor
+ * positioning assumes the owner's width.
+ */
+.terminal-container--follower {
+    overflow: auto;
 }
 
 /* Loading spinner overlay while reconnecting / restoring history */

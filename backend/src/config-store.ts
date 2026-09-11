@@ -142,6 +142,19 @@ export interface AppConfig {
      * Pinning a domain on another zone is the way out of that.
      */
     ngrokDomain?: string;
+
+    /**
+     * Opt in to Anthropic's cloud surfaces for Claudia-spawned sessions.
+     *
+     * Default false: Claudia pins Claude Code's `autoUploadSessions`,
+     * `remoteControlAtStartup`, `disableRemoteControl` and the two mobile push
+     * channels OFF for every session it spawns, so task transcripts stay on
+     * this machine and never mirror to claude.ai. See claude-privacy.ts.
+     *
+     * Set true only to deliberately re-enable claude.ai mirroring, Remote
+     * Control, and phone notifications for Claudia tasks.
+     */
+    claudeCloudSyncEnabled?: boolean;
 }
 
 /**
@@ -237,7 +250,8 @@ const DEFAULT_CONFIG: AppConfig = {
     worktreeRetentionDays: 30,  // Per the archived-worktree retention spec
     jiraEnabled: false,  // Jira integration off by default
     jira: undefined,
-    ngrokDomain: undefined  // free tier: let ngrok assign the URL
+    ngrokDomain: undefined,  // free tier: let ngrok assign the URL
+    claudeCloudSyncEnabled: false  // never mirror Claudia sessions to claude.ai
 };
 
 export class ConfigStore {
@@ -294,7 +308,9 @@ export class ConfigStore {
             jira: loaded.jira,
             worktreeRetentionDays: loaded.worktreeRetentionDays ?? 30,
             todoEnabled: loaded.todoEnabled ?? false,
-            ngrokDomain: loaded.ngrokDomain
+            ngrokDomain: loaded.ngrokDomain,
+            // Absent means "not opted in" — sessions stay off claude.ai.
+            claudeCloudSyncEnabled: loaded.claudeCloudSyncEnabled ?? false
         };
     }
 
@@ -462,6 +478,17 @@ export class ConfigStore {
 
     getSkipPermissions(): boolean {
         return this.config.skipPermissions;
+    }
+
+    /**
+     * Whether Claudia-spawned sessions may use Anthropic's cloud surfaces
+     * (claude.ai session mirroring, Remote Control, mobile push).
+     *
+     * False unless the user explicitly opted in. See claude-privacy.ts for what
+     * gets pinned off and why.
+     */
+    isClaudeCloudSyncEnabled(): boolean {
+        return this.config.claudeCloudSyncEnabled === true;
     }
 
     /** Days before archived tasks' worktrees are swept; 0 disables the sweep. */

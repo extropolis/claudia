@@ -5,16 +5,19 @@ import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, Ta
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
-import { tmpdir, homedir } from 'os';
-import { execSync } from 'child_process';
-import { atomicWriteFileSync } from './utils/atomic-write.js';
+import { writeFile as writeFileAsync, rename as renameAsync, unlink as unlinkAsync, appendFile as appendFileAsync, stat as statAsync, open as openAsync } from 'fs/promises';
+import { tmpdir, homedir, cpus, CpuInfo } from 'os';
+import { execFileSync, execSync } from 'child_process';
+import { atomicWriteFileSync, atomicWriteFileAsync } from './utils/atomic-write.js';
 import { buildSettingsLocalContent } from './settings-local.js';
+import { buildClaudePrivacyArgs, ensurePrivacySettingsFile } from './claude-privacy.js';
 import { ConfigStore, ClaudeCodeSwitches } from './config-store.js';
 import { captureGitStateBefore, captureGitStateAfter, revertTaskChanges } from './git-utils.js';
 import { sanitizePrompt, decodeHtmlEntities } from './validation.js';
 import { createLogger } from './logger.js';
 import { getSharedMcpToken } from './mcp-auth.js';
 import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
+import { resolveAgentCapabilities } from './agents/index.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
@@ -26,9 +29,11 @@ import {
     measureRssByPid,
     budgetBytesFromPct,
     formatMB,
+    computeCpuBusyPct,
     DEFAULT_BUDGET_PCT,
     DEFAULT_MIN_LIVE,
     GuardCandidate,
+    SHEDDABLE_STATES,
 } from './memory-guard.js';
 
 /**
@@ -58,7 +63,7 @@ if (USE_WINPTY) {
  * How long the fallback session-file watcher keeps polling before giving up.
  * Only a fallback path now that tasks pre-assign their session id via --session-id.
  */
-const SESSION_CAPTURE_TIMEOUT_MS = 10 * 60 * 1000;
+export const SESSION_CAPTURE_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
  * Map legacy permission mode values to actual Claude Code CLI values.
@@ -233,6 +238,24 @@ const DEFAULT_HISTORY_RETENTION_DAYS = 0;
 /** Grace period after startup before the idle reaper acts. */
 const REAP_STARTUP_GRACE_MS = 10 * 60 * 1000;
 
+/**
+ * States the idle reaper may disconnect. Everything here holds a live PTY —
+ * a Claude CLI plus its MCP children — so leaving them parked indefinitely is
+ * what let agents accumulate for days.
+ *
+ * `waiting_input` is included deliberately: it means the task is blocked on a
+ * human who, past the threshold, has not returned. Reaping only disconnects —
+ * metadata and sessionId survive and the task resumes on demand — so the cost
+ * of reaping a task the user did want is one reconnect.
+ *
+ * `busy` is excluded (real work in flight) and `exited` is excluded (no process
+ * left to reclaim; those are freed in the exit handler instead).
+ *
+ * Same set the resource guard uses (memory-guard.ts's SHEDDABLE_STATES) — one
+ * definition of "safe to disconnect" shared by both triggers.
+ */
+const REAPABLE_STATES: TaskState[] = SHEDDABLE_STATES as TaskState[];
+
 const DEFAULT_PERSISTENCE_PATH = join(__dirname, '..', 'tasks.json');
 
 // Persisted task data (no process, just metadata)
@@ -242,6 +265,12 @@ interface PersistedTask {
     workspaceId: string;
     createdAt: string;
     lastActivity: string;
+    /**
+     * Last user action. Optional so older tasks.json files still load — absent
+     * means "fall back to lastActivity". Persisted so a server restart cannot
+     * reset the reap clock and hand every stale task another full threshold.
+     */
+    lastUserActivity?: string;
     lastState: TaskState;
     sessionId: string | null;
     outputHistory?: string;
@@ -391,6 +420,15 @@ interface TaskPersistence {
 
 interface InternalTask extends Task {
     process: IPty;
+    /**
+     * Last time the USER acted on this task (created it, or sent it input).
+     *
+     * Distinct from `lastActivity`, which the PTY handler refreshes on every
+     * byte the child emits — including spinner frames and terminal repaints.
+     * A live Claude TUI therefore never looks idle by `lastActivity`, which
+     * made the reap threshold unreachable. Reaping keys off this instead.
+     */
+    lastUserActivity: Date;
     outputHistory: Buffer[];
     previousHistory?: Buffer; // Historical output from before reconnection (kept separate)
     resumeSeparator?: string; // "─── Resuming session ───" shown live but NOT saved to history file
@@ -507,6 +545,11 @@ export class TaskSpawner extends EventEmitter {
     private archivedTasks: Map<string, ArchivedTaskMetadata> = new Map();
     private persistencePath: string;
     private saveDebounceTimer: NodeJS.Timeout | null = null;
+    /** True while a debounced async save (`saveTasksAsync`) is in flight. */
+    private saveInFlight: boolean = false;
+    /** Set when `scheduleSave` fires again while `saveInFlight` — coalesces into
+     *  one more run after the current save finishes, instead of overlapping. */
+    private saveAgainRequested: boolean = false;
     private fileModTimeOnLoad: number | null = null; // Track file mtime when we loaded it
     /** Periodic heartbeat save — always fires every HEARTBEAT_SAVE_MS regardless of activity.
      * Safety net against lost tasks when the process dies without a clean shutdown
@@ -530,6 +573,16 @@ export class TaskSpawner extends EventEmitter {
     private sessionToTaskId: Map<string, string> = new Map(); // Map session IDs to task IDs
     /** Stores terminal size for disconnected tasks so it can be applied after reconnection */
     private pendingResizes: Map<string, { cols: number; rows: number }> = new Map();
+    /**
+     * The size each live PTY is actually running at.
+     *
+     * Under the multi-client viewer model only the task's OWNER may resize it,
+     * and every other viewer renders at the owner's dimensions rather than its
+     * own. That means the true PTY size is no longer a private detail of the
+     * process — the server broadcasts it in `task:viewers` so non-owners know
+     * what to render at. Written on spawn and on every applied resize.
+     */
+    private taskDimensions: Map<string, { cols: number; rows: number }> = new Map();
 
     // State polling (replaces hooks and output-based streaming detection)
     private statePollingInterval: NodeJS.Timeout | null = null;
@@ -554,6 +607,14 @@ export class TaskSpawner extends EventEmitter {
     private readonly memoryMinLiveTasks: number;
     private readonly memoryGuardIntervalMs: number;
     private memoryGuardInterval: NodeJS.Timeout | null = null;
+    /** CPU busy% (system-wide) that, combined with too many live sessions, triggers shedding. 0 disables. */
+    private readonly cpuBusyThresholdPct: number;
+    /** Live-session cap = logical cores * this multiplier. Only enforced once CPU is also busy. */
+    private readonly cpuSessionMultiplier: number;
+    /** Previous os.cpus() sample, diffed against the current one each guard tick. */
+    private lastCpuSample: CpuInfo[] = cpus();
+    /** Consecutive overloaded ticks; the cap only applies once this crosses the hysteresis threshold. */
+    private cpuOverloadTicks = 0;
     /**
      * Archived tasks are immutable once written, but they made up 71% of
      * tasks.json (6.8MB of 9.5MB) and were re-serialized on EVERY debounced
@@ -656,6 +717,29 @@ export class TaskSpawner extends EventEmitter {
             ? envGuardInterval
             : 60_000;
 
+        // CPU/session-count guard config. RAM alone missed the case where 35
+        // idle-ish sessions saturate CPU well under the memory budget — this
+        // sheds the coldest sessions once BOTH the machine is genuinely busy
+        // AND there are more live sessions than cores can reasonably serve.
+        // 0 disables.
+        //
+        // Defaults measured against a real incident, not guessed: on a 32-core
+        // box, ~28 concurrent Claude CLI + MCP process trees made the backend's
+        // own single-threaded event loop stall for 5+ seconds at a time (a
+        // plain GET timing out), while SYSTEM-WIDE average CPU sat at just
+        // ~50%. Contention concentrated on the handful of cores the backend
+        // and its neighbors actually schedule onto gets diluted into
+        // invisibility once averaged across all 32 — an 85%-wide threshold
+        // and a 1:1 core cap would never have fired during that incident.
+        const envCpuThreshold = parseFloat(process.env.CLAUDIA_CPU_BUSY_THRESHOLD_PCT || '');
+        this.cpuBusyThresholdPct = !isNaN(envCpuThreshold) && envCpuThreshold >= 0
+            ? envCpuThreshold
+            : 60;
+        const envCpuMultiplier = parseFloat(process.env.CLAUDIA_CPU_SESSION_MULTIPLIER || '');
+        this.cpuSessionMultiplier = !isNaN(envCpuMultiplier) && envCpuMultiplier > 0
+            ? envCpuMultiplier
+            : 0.4;
+
         const envRetention = parseFloat(process.env.HISTORY_RETENTION_DAYS || '');
         this.historyRetentionDays = !isNaN(envRetention) && envRetention >= 0
             ? envRetention
@@ -702,12 +786,17 @@ export class TaskSpawner extends EventEmitter {
         this.sweepOrphanHistoryFiles();
         this.sweepAgedArchivedHistories();
 
-        // Start state polling (only for claude-code backend which uses PTY)
-        // OpenCode backend handles its own state management via HTTP API
-        if (this.backendType === 'claude-code') {
+        // Which subsystems run is a per-agent CAPABILITY, not a string check.
+        // These used to be `=== 'claude-code'`, which silently switched three
+        // subsystems off for every other agent (issue #62).
+        const caps = resolveAgentCapabilities(this.backendType);
+        if (caps.ptyStatePolling) {
             this.startStatePolling();
-            // Start idle-task reaper (claude-code only — OpenCode has its own lifecycle)
+        }
+        if (caps.idleReaper) {
             this.startIdleTaskReaper();
+        }
+        if (caps.memoryGuard) {
             this.startMemoryGuard();
         }
 
@@ -1145,17 +1234,17 @@ export class TaskSpawner extends EventEmitter {
 
         logger.info('Switching backend', { from: this.backendType, to: newBackendType });
 
-        // Stop state polling for claude-code
-        if (this.backendType === 'claude-code' && this.statePollingInterval) {
+        // Tear down whatever the OUTGOING agent had running.
+        const outgoing = resolveAgentCapabilities(this.backendType);
+        if (outgoing.ptyStatePolling && this.statePollingInterval) {
             clearInterval(this.statePollingInterval);
             this.statePollingInterval = null;
         }
-        // Stop idle-task reaper for claude-code (OpenCode has its own lifecycle)
-        if (this.backendType === 'claude-code' && this.idleReaperInterval) {
+        if (outgoing.idleReaper && this.idleReaperInterval) {
             clearInterval(this.idleReaperInterval);
             this.idleReaperInterval = null;
         }
-        if (this.backendType === 'claude-code' && this.memoryGuardInterval) {
+        if (outgoing.memoryGuard && this.memoryGuardInterval) {
             clearInterval(this.memoryGuardInterval);
             this.memoryGuardInterval = null;
         }
@@ -1168,10 +1257,15 @@ export class TaskSpawner extends EventEmitter {
         // Reinitialize the backend
         this.initializeBackend();
 
-        // Start state polling if switching to claude-code
-        if (this.backendType === 'claude-code') {
+        // Start whatever the INCOMING agent supports.
+        const incoming = resolveAgentCapabilities(this.backendType);
+        if (incoming.ptyStatePolling) {
             this.startStatePolling();
+        }
+        if (incoming.idleReaper) {
             this.startIdleTaskReaper();
+        }
+        if (incoming.memoryGuard) {
             this.startMemoryGuard();
         }
     }
@@ -1259,6 +1353,72 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Async twin of the tail-read half of {@link readTaskHistoryRange}, used
+     * when a user clicks a disconnected task in setTaskActive(). A click used
+     * to trigger a fully synchronous, UNBOUNDED readFileSync of the entire
+     * history file (archived/disconnected histories run up to the 10MB
+     * on-disk cap) plus a full base64 decode of that — both blocking the
+     * single event loop, and with it every other task's WebSocket traffic
+     * (including keystrokes to a completely unrelated, already-open task),
+     * for however long that took.
+     *
+     * Two fixes, not one: bound the read to the same 2MB tail every other
+     * history-display path already uses (getCombinedHistory, reconnect), AND
+     * do the read itself off the blocking path via fs/promises, so even that
+     * bounded read can't stall other tasks while it's in flight. The frontend
+     * already re-fetches earlier content on scroll-up via
+     * `/api/task/:id/history` (readTaskHistoryRange) regardless of how the
+     * initial tail arrived, so nothing here is permanently out of reach —
+     * only the very first render is capped, to make "the recent page" (the
+     * common case) fast without walling off full history.
+     */
+    private async loadDisconnectedTaskHistoryAsync(taskId: string): Promise<void> {
+        const MAX_CLICK_HISTORY = 2 * 1024 * 1024; // 2MB — matches getCombinedHistory's send cap
+        const historyPath = this.getTaskHistoryPath(taskId);
+        try {
+            if (existsSync(historyPath)) {
+                const stat = await statAsync(historyPath);
+                const handle = await openAsync(historyPath, 'r');
+                try {
+                    const sampleLen = Math.min(100, stat.size);
+                    const sampleBuf = Buffer.alloc(sampleLen);
+                    await handle.read(sampleBuf, 0, sampleLen, 0);
+                    const sample = sampleBuf.toString('utf8');
+                    const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
+
+                    const readLen = Math.min(stat.size, MAX_CLICK_HISTORY);
+                    const offset = stat.size - readLen;
+                    const buf = Buffer.alloc(readLen);
+                    await handle.read(buf, 0, readLen, offset);
+                    const history = isRawText ? buf.toString('utf8') : Buffer.from(buf.toString('utf-8'), 'base64').toString('utf8');
+                    if (readLen < stat.size) {
+                        console.log(`[TaskSpawner] Large history file (${stat.size} bytes), loaded tail ${MAX_CLICK_HISTORY} bytes for ${taskId} on select (async)`);
+                    }
+                    this.emit('taskRestore', taskId, history);
+                } finally {
+                    await handle.close();
+                }
+                return;
+            }
+
+            // Fallback: check in-memory outputHistory (older tasks or migration edge cases)
+            const persisted = this.disconnectedTasks.get(taskId);
+            if (persisted?.outputHistory) {
+                const history = Buffer.from(persisted.outputHistory, 'base64').toString('utf8');
+                this.emit('taskRestore', taskId, history);
+                return;
+            }
+
+            // Always emit taskRestore so the frontend clears loading state (prevents blank screen)
+            console.warn(`[TaskSpawner] No history found for disconnected task ${taskId}, sending empty restore`);
+            this.emit('taskRestore', taskId, '');
+        } catch (e) {
+            console.error(`[TaskSpawner] Failed to read history file for ${taskId}:`, e);
+            this.emit('taskRestore', taskId, '');
+        }
+    }
+
+    /**
      * Per-task carry-over of an incomplete trailing escape sequence between
      * incremental history appends. Without this, a query split across two save
      * batches (batch 1 ends "\x1b[", batch 2 starts "?6n") matches neither
@@ -1287,10 +1447,44 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Async twin of {@link atomicWriteHistorySync}, used only by the debounced
+     * background save path (`saveTasksAsync`) so a slow history write can't block
+     * the event loop. The synchronous version stays as-is for `saveNow`/shutdown.
+     */
+    private async atomicWriteHistoryAsync(historyPath: string, data: string): Promise<void> {
+        const tmpPath = `${historyPath}.${process.pid}.tmp`;
+        await writeFileAsync(tmpPath, stripTerminalQueries(data));
+        try {
+            await renameAsync(tmpPath, historyPath);
+        } catch (e) {
+            try { if (existsSync(tmpPath)) await unlinkAsync(tmpPath); } catch (_e) { /* ignore */ }
+            throw e;
+        }
+    }
+
+    /**
      * Get the directory for task histories
      */
     private getHistoryDir(): string {
         return join(dirname(this.persistencePath), 'task-histories');
+    }
+
+    /**
+     * `--settings` args pinning Claude Code's cloud features off for a spawned
+     * session, so Claudia task transcripts never mirror to claude.ai and no
+     * mobile push fires for a background task. See claude-privacy.ts.
+     *
+     * Returns [] when the user opted into cloud sync, when a --settings arg is
+     * already present, or when the file could not be written — each logged by
+     * buildClaudePrivacyArgs. Spawning must never fail because of this.
+     */
+    private buildPrivacyArgs(existingArgs: string[]): string[] {
+        const settingsFilePath = ensurePrivacySettingsFile(dirname(this.persistencePath));
+        return buildClaudePrivacyArgs({
+            cloudSyncEnabled: this.configStore?.isClaudeCloudSyncEnabled() ?? false,
+            existingArgs,
+            settingsFilePath,
+        });
     }
 
     /**
@@ -1436,6 +1630,52 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
+     * Async twin of {@link rotateHistoryFileIfNeeded}, used only by the debounced
+     * background save path. Same trim-to-tail logic, via `fs/promises`.
+     */
+    private async rotateHistoryFileIfNeededAsync(historyPath: string): Promise<void> {
+        if (this.historyFileMaxBytes <= 0) return;
+        if (!existsSync(historyPath)) return;
+
+        let stat;
+        try {
+            stat = await statAsync(historyPath);
+        } catch (_e) {
+            return;
+        }
+        if (stat.size <= this.historyFileMaxBytes) return;
+
+        const keep = this.historyFileKeepBytes;
+        try {
+            let payload: Buffer;
+            const handle = await openAsync(historyPath, 'r');
+            try {
+                const start = Math.max(0, stat.size - keep);
+                const buf = Buffer.alloc(stat.size - start);
+                await handle.read(buf, 0, buf.length, start);
+
+                let offset = 0;
+                const nl = buf.indexOf(0x0a, 0);
+                if (nl >= 0 && nl < Math.min(1024, buf.length)) offset = nl + 1;
+
+                const marker = Buffer.from(`\x1b[90m── history trimmed (${Math.round((stat.size - start) / 1024)} KB shown of ${Math.round(stat.size / 1024)} KB) ──\x1b[0m\r\n`);
+                payload = Buffer.concat([marker, buf.subarray(offset)]);
+            } finally {
+                await handle.close();  // Close before rename — critical on Windows
+            }
+
+            await this.atomicWriteHistoryAsync(historyPath, payload.toString('utf8'));
+            logger.info('Rotated history file', {
+                file: historyPath,
+                originalBytes: stat.size,
+                newBytes: payload.length,
+            });
+        } catch (e) {
+            logger.warn('Failed to rotate history file', { file: historyPath, error: (e as Error).message });
+        }
+    }
+
+    /**
      * Start the idle-task reaper. Runs `reapIdleTasks` on an interval.
      */
     private startIdleTaskReaper(): void {
@@ -1458,41 +1698,54 @@ export class TaskSpawner extends EventEmitter {
     }
 
     /**
-     * Start the memory guard. Runs `enforceMemoryBudget` on an interval.
+     * Start the resource guard. Runs `enforceResourceBudget` on an interval.
      *
      * This complements the idle reaper rather than duplicating it: the reaper
      * sheds on AGE (idle >24h) regardless of pressure, while the guard sheds on
      * PRESSURE regardless of age. Twenty agents idle for an hour never trip the
-     * reaper but will happily exhaust RAM.
+     * reaper but will happily exhaust RAM or CPU.
      */
     private startMemoryGuard(): void {
         if (this.memoryGuardInterval) return;
-        if (this.memoryBudgetPct <= 0) {
-            logger.info('Memory guard disabled (CLAUDIA_MEMORY_BUDGET_PCT=0)');
+        if (this.memoryBudgetPct <= 0 && this.cpuBusyThresholdPct <= 0) {
+            logger.info('Resource guard disabled (CLAUDIA_MEMORY_BUDGET_PCT=0 and CLAUDIA_CPU_BUSY_THRESHOLD_PCT=0)');
             return;
         }
         this.memoryGuardInterval = setInterval(() => {
             try {
-                this.enforceMemoryBudget();
+                this.enforceResourceBudget();
             } catch (e) {
-                logger.error('Memory guard threw', { error: (e as Error).message });
+                logger.error('Resource guard threw', { error: (e as Error).message });
             }
         }, this.memoryGuardIntervalMs);
         this.memoryGuardInterval.unref?.();
-        logger.info('Memory guard started', {
+        logger.info('Resource guard started', {
             budgetPct: this.memoryBudgetPct,
-            budgetMB: formatMB(budgetBytesFromPct(this.memoryBudgetPct)),
+            budgetMB: this.memoryBudgetPct > 0 ? formatMB(budgetBytesFromPct(this.memoryBudgetPct)) : undefined,
+            cpuBusyThresholdPct: this.cpuBusyThresholdPct,
+            sessionCap: this.cpuBusyThresholdPct > 0 ? this.computeSessionCap() : undefined,
             minLiveTasks: this.memoryMinLiveTasks,
             intervalMs: this.memoryGuardIntervalMs,
         });
     }
 
+    /** Live-session cap for the CPU trigger: logical cores * multiplier, floored at 1. */
+    private computeSessionCap(): number {
+        return Math.max(1, Math.round(cpus().length * this.cpuSessionMultiplier));
+    }
+
     /**
-     * Disconnect the coldest idle agents when live tasks exceed the memory
-     * budget. Disconnected tasks keep their sessionId and resume on click, so
-     * this sheds memory without losing work.
+     * Disconnect the coldest idle-or-forgotten agents when EITHER live tasks
+     * exceed the memory budget OR the machine is under sustained CPU pressure
+     * with more live sessions than cores can reasonably serve. Disconnected
+     * tasks keep their sessionId and resume on click, so this sheds resources
+     * without losing work.
+     *
+     * "Coldest" is measured by `lastUserActivity`, not `lastActivity` — a task
+     * whose Claude CLI is repainting a spinner looks busy by output alone even
+     * when the human walked away hours ago.
      */
-    private enforceMemoryBudget(): void {
+    private enforceResourceBudget(): void {
         const candidates: GuardCandidate[] = [];
         for (const task of this.tasks.values()) {
             const pid = task.process?.pid;
@@ -1500,28 +1753,55 @@ export class TaskSpawner extends EventEmitter {
             candidates.push({
                 id: task.id,
                 state: task.state,
-                lastActivity: task.lastActivity,
+                lastActivity: task.lastUserActivity ?? task.lastActivity,
                 pid,
             });
         }
+
+        // Sample every tick, independent of candidate count, so the delta
+        // against next tick's sample stays accurate.
+        const currentCpuSample = cpus();
+        const cpuBusyPct = computeCpuBusyPct(this.lastCpuSample, currentCpuSample);
+        this.lastCpuSample = currentCpuSample;
+
+        let maxLive: number | undefined;
+        let sessionCap: number | undefined;
+        if (this.cpuBusyThresholdPct > 0) {
+            sessionCap = this.computeSessionCap();
+            const overloaded = cpuBusyPct >= this.cpuBusyThresholdPct && candidates.length > sessionCap;
+            // Require two consecutive overloaded ticks (~2 guard intervals)
+            // before capping, so a transient spike (a build compiling) doesn't
+            // cost anyone a live session.
+            this.cpuOverloadTicks = overloaded ? this.cpuOverloadTicks + 1 : 0;
+            if (this.cpuOverloadTicks >= 2) maxLive = sessionCap;
+        }
+
         if (candidates.length === 0) return;
 
         const rssByPid = measureRssByPid(candidates.map(c => c.pid!));
-        const budgetBytes = budgetBytesFromPct(this.memoryBudgetPct);
+        const budgetBytes = this.memoryBudgetPct > 0 ? budgetBytesFromPct(this.memoryBudgetPct) : Infinity;
         const { toDisconnect, usedBytes, projectedBytes } = selectTasksToDisconnect({
             tasks: candidates,
             rssByPid,
             budgetBytes,
             minLive: this.memoryMinLiveTasks,
+            maxLive,
         });
 
         if (toDisconnect.length === 0) return;
 
-        logger.info('Memory budget exceeded; disconnecting coldest idle agents', {
+        const reasons: string[] = [];
+        if (this.memoryBudgetPct > 0 && usedBytes > budgetBytes) reasons.push('memory');
+        if (maxLive !== undefined && candidates.length > maxLive) reasons.push('cpu+session-count');
+
+        logger.info('Resource budget exceeded; disconnecting coldest idle agents', {
+            reasons,
             liveTasks: candidates.length,
             usedMB: formatMB(usedBytes),
-            budgetMB: formatMB(budgetBytes),
+            budgetMB: this.memoryBudgetPct > 0 ? formatMB(budgetBytes) : undefined,
             projectedMB: formatMB(projectedBytes),
+            cpuBusyPct: Math.round(cpuBusyPct),
+            sessionCap,
             disconnecting: toDisconnect.length,
         });
 
@@ -1552,9 +1832,52 @@ export class TaskSpawner extends EventEmitter {
      * the task metadata is preserved with its sessionId — the user can still
      * resume it, and the backend will --resume cleanly.
      *
-     * Skips tasks that are starting/busy/waiting_input (they aren't actually
-     * idle, just quiet). State 'exited' tasks have no process to reclaim.
+     * Reaps the states in REAPABLE_STATES — including `waiting_input`, which is
+     * a task blocked on a human who never came back. Skips `busy` (real work in
+     * flight) and `exited` (no process left to reclaim).
+     *
+     * Age is measured from `lastUserActivity`, not `lastActivity`.
      */
+    /**
+     * Force-kill whole process trees on Windows.
+     *
+     * node-pty tears down the ConPTY and signals the direct child, but that does
+     * not reach grandchildren — an agent's MCP servers, or a shell command it
+     * spawned, survive as orphans and accumulate. `taskkill /T` walks the tree.
+     *
+     * PIDs are batched into one invocation: process creation is expensive on
+     * endpoint-protected machines, so shutdown pays one spawn, not one per task.
+     * Best-effort — a non-zero exit usually just means the tree was already gone.
+     */
+    private taskkillTrees(pids: number[]): void {
+        if (process.platform !== 'win32' || pids.length === 0) return;
+        const args: string[] = [];
+        for (const pid of pids) args.push('/PID', String(pid));
+        args.push('/T', '/F');
+        try {
+            execFileSync('taskkill', args, { stdio: 'ignore', timeout: 15000 });
+        } catch (_e) {
+            // Already reaped, or partially reaped — nothing actionable.
+        }
+    }
+
+    /**
+     * Kill a single task's PTY and any descendants it left behind.
+     *
+     * `process` is optional in practice — placeholder tasks and already-reaped
+     * ones carry no PTY — so every access is guarded. The code this replaced
+     * hid that behind a try/catch.
+     */
+    private killTaskTree(task: InternalTask): void {
+        const pid = task.process?.pid;
+        try {
+            task.process?.kill();
+        } catch (_e) {
+            // Process might already be dead
+        }
+        if (pid) this.taskkillTrees([pid]);
+    }
+
     private reapIdleTasks(): void {
         const now = Date.now();
 
@@ -1570,8 +1893,10 @@ export class TaskSpawner extends EventEmitter {
         if (now - this.startedAt.getTime() < REAP_STARTUP_GRACE_MS) return;
         const toReap: string[] = [];
         for (const task of this.tasks.values()) {
-            if (task.state !== 'idle') continue;
-            const age = now - task.lastActivity.getTime();
+            if (!REAPABLE_STATES.includes(task.state)) continue;
+            // lastUserActivity, not lastActivity: the latter is refreshed by any
+            // PTY byte (spinner frames, repaints), so it never crosses the threshold.
+            const age = now - (task.lastUserActivity ?? task.lastActivity).getTime();
             if (age >= this.idleReapMs) toReap.push(task.id);
         }
         if (toReap.length === 0) return;
@@ -2401,7 +2726,41 @@ export class TaskSpawner extends EventEmitter {
         if (this.saveDebounceTimer) {
             clearTimeout(this.saveDebounceTimer);
         }
-        this.saveDebounceTimer = setTimeout(() => this.saveTasks(), 500);
+        this.saveDebounceTimer = setTimeout(() => {
+            this.saveDebounceTimer = null;
+            void this.runDebouncedSave();
+        }, 500);
+    }
+
+    /**
+     * Entry point for the debounce timer. Runs the async, parallelized
+     * `saveTasksAsync` instead of the synchronous `saveTasks` — this is the save
+     * that fires often (nearly every task state change), so it must not block
+     * every other task's PTY I/O while it writes. `saveNow`/shutdown are
+     * unaffected: they still call synchronous `saveTasks` directly.
+     *
+     * Coalesces overlapping triggers: if `scheduleSave`'s timer fires again while
+     * a save from a previous tick is still running (I/O took >500ms), this does
+     * not start a second concurrent save — it flags one more run to happen right
+     * after the current one finishes, so at most one save is ever in flight.
+     */
+    private async runDebouncedSave(): Promise<void> {
+        if (this.saveInFlight) {
+            this.saveAgainRequested = true;
+            return;
+        }
+        this.saveInFlight = true;
+        try {
+            await this.saveTasksAsync();
+        } catch (e) {
+            console.error('[TaskSpawner] Debounced async save threw:', e);
+        } finally {
+            this.saveInFlight = false;
+            if (this.saveAgainRequested) {
+                this.saveAgainRequested = false;
+                this.scheduleSave();
+            }
+        }
     }
 
     /**
@@ -2568,6 +2927,7 @@ export class TaskSpawner extends EventEmitter {
                     workspaceId: task.workspaceId,
                     createdAt: task.createdAt.toISOString(),
                     lastActivity: task.lastActivity.toISOString(),
+                    lastUserActivity: (task.lastUserActivity ?? task.lastActivity).toISOString(),
                     lastState: task.state,
                     sessionId: task.sessionId,
                     // outputHistory removed from JSON
@@ -2653,6 +3013,210 @@ export class TaskSpawner extends EventEmitter {
             console.log(`[TaskSpawner] Saved ${tasksToSave.length} tasks, ${archivedTasksToSave.length} archived (metadata only)`);
         } catch (error) {
             console.error('[TaskSpawner] Failed to save tasks:', error);
+        }
+    }
+
+    /**
+     * Async twin of {@link saveArchivedTasks}, used only by the debounced
+     * background save path.
+     */
+    private async saveArchivedTasksAsync(archived: ArchivedTaskMetadata[]): Promise<void> {
+        try {
+            const path = this.getArchivedPersistencePath();
+            if (archived.length === 0 && existsSync(path)) {
+                try {
+                    const existing = JSON.parse(readFileSync(path, 'utf-8')) as { archivedTasks?: unknown[] };
+                    if ((existing.archivedTasks?.length || 0) > 0) {
+                        console.error(
+                            `[TaskSpawner] REFUSING to save archived tasks: would overwrite ` +
+                            `${existing.archivedTasks!.length} archived with empty state.`
+                        );
+                        return;
+                    }
+                } catch (_e) {
+                    // Unparseable — fall through and overwrite.
+                }
+            }
+            await atomicWriteFileAsync(path, JSON.stringify({ archivedTasks: archived }), { backup: true });
+            this.archivedDirty = false;
+            console.log(`[TaskSpawner] Saved ${archived.length} archived tasks`);
+        } catch (error) {
+            // Leave archivedDirty set so the next save retries.
+            console.error('[TaskSpawner] Failed to save archived tasks:', error);
+        }
+    }
+
+    /**
+     * Async, parallelized twin of {@link saveTasks}. Used ONLY by the debounced
+     * background save (`runDebouncedSave`, invoked from `scheduleSave`'s timer) —
+     * `saveNow`/shutdown keep calling the synchronous `saveTasks` unchanged, since
+     * that path must complete before an abrupt process kill can interrupt it.
+     *
+     * Same logic and same safety nets (mod-time conflict guard, refuse-to-overwrite
+     * -non-empty-with-empty guard, `.bak` rollover) as `saveTasks`. The only
+     * structural difference: each live task's history-file handling is an
+     * independent async job, run concurrently via `Promise.allSettled` instead of
+     * a sequential blocking loop — this is what actually parallelizes the I/O.
+     *
+     * Known accepted trade-off: if a synchronous `saveNow()` (e.g. shutdown) lands
+     * while a task's history job here is mid-flight, both could append the same
+     * slice of new terminal output once each — a rare, cosmetic duplicate-lines
+     * possibility in that task's history file. This can never corrupt or lose data
+     * in tasks.json itself: that file is always a full atomic overwrite derived
+     * fresh from current in-memory state into a private tmp file before an atomic
+     * rename, so whichever of two concurrent writers renames last simply wins, and
+     * both would contain valid, current state.
+     */
+    private async saveTasksAsync(): Promise<void> {
+        try {
+            if (this.fileModTimeOnLoad !== null && existsSync(this.persistencePath)) {
+                const currentStats = statSync(this.persistencePath);
+                if (currentStats.mtimeMs > this.fileModTimeOnLoad) {
+                    console.error(`[TaskSpawner] ⚠️  WARNING: tasks.json was modified by another process!`);
+                    console.error(`[TaskSpawner]     Loaded at:  ${new Date(this.fileModTimeOnLoad).toISOString()}`);
+                    console.error(`[TaskSpawner]     Modified at: ${new Date(currentStats.mtimeMs).toISOString()}`);
+                    console.error(`[TaskSpawner]     REFUSING TO SAVE to prevent data loss!`);
+                    console.error(`[TaskSpawner]     This indicates multiple server instances are running.`);
+                    return;
+                }
+            }
+
+            const tasksToSave: PersistedTask[] = [];
+            const historyJobs: Promise<void>[] = [];
+
+            const historyDir = this.getHistoryDir();
+            if (!existsSync(historyDir)) {
+                mkdirSync(historyDir, { recursive: true });
+            }
+
+            for (const task of this.tasks.values()) {
+                const historyPath = this.getTaskHistoryPath(task.id);
+                historyJobs.push((async () => {
+                    try {
+                        if (task.previousHistory && !existsSync(historyPath)) {
+                            const buffers: Buffer[] = [task.previousHistory];
+                            if (task.outputHistory.length > 0) {
+                                buffers.push(...task.outputHistory);
+                            }
+                            const fullHistory = Buffer.concat(buffers);
+                            await this.atomicWriteHistoryAsync(historyPath, fullHistory.toString('utf8'));
+                            task.savedBufferCount = task.outputHistory.length;
+                        } else if (!existsSync(historyPath)) {
+                            if (task.outputHistory.length > 0) {
+                                const fullHistory = Buffer.concat(task.outputHistory);
+                                await this.atomicWriteHistoryAsync(historyPath, fullHistory.toString('utf8'));
+                                task.savedBufferCount = task.outputHistory.length;
+                            }
+                        } else if (task.savedBufferCount < task.outputHistory.length) {
+                            const newBuffers = task.outputHistory.slice(task.savedBufferCount);
+                            if (newBuffers.length > 0) {
+                                let raw = (this.historyAppendCarry.get(task.id) || '') + Buffer.concat(newBuffers).toString('utf8');
+                                const cut = incompleteEscapeSuffixStart(raw);
+                                if (cut >= 0 && raw.length - cut <= 16) {
+                                    this.historyAppendCarry.set(task.id, raw.slice(cut));
+                                    raw = raw.slice(0, cut);
+                                } else {
+                                    this.historyAppendCarry.delete(task.id);
+                                }
+                                const newData = stripTerminalQueries(raw);
+                                await appendFileAsync(historyPath, newData);
+                                task.savedBufferCount = task.outputHistory.length;
+                                await this.rotateHistoryFileIfNeededAsync(historyPath);
+                            }
+                        }
+                    } catch (e) {
+                        console.error(`[TaskSpawner] Failed to save history for task ${task.id}:`, e);
+                    }
+                })());
+
+                const wasInterrupted = true;
+                const wasMidTurn = task.state === 'busy' || task.state === 'starting';
+                const shouldContinue = wasMidTurn && task.sessionId != null;
+                const taskBackendType = this.taskBackends.get(task.id);
+
+                tasksToSave.push({
+                    id: task.id,
+                    prompt: task.prompt,
+                    workspaceId: task.workspaceId,
+                    createdAt: task.createdAt.toISOString(),
+                    lastActivity: task.lastActivity.toISOString(),
+                    lastState: task.state,
+                    sessionId: task.sessionId,
+                    wasInterrupted,
+                    shouldContinue,
+                    systemPrompt: task.systemPrompt,
+                    backendType: taskBackendType,
+                    displayName: task.displayName,
+                    displayNameEditedByUser: task.displayNameEditedByUser,
+                    processStartedAt: task.processStartedAt?.toISOString(),
+                    order: task.order,
+                    tokenUsage: task.tokenUsage,
+                    parentTaskId: task.parentTaskId,
+                    taskNumber: task.taskNumber,
+                });
+            }
+
+            // Parallelize: every task's history file is independent, so there is no
+            // reason to write them one at a time. allSettled — one task's history
+            // failure (already logged above) must not abort the others or the main
+            // tasks.json write below.
+            await Promise.allSettled(historyJobs);
+
+            for (const task of this.disconnectedTasks.values()) {
+                tasksToSave.push(task);
+            }
+
+            const archivedTasksToSave: ArchivedTaskMetadata[] = Array.from(this.archivedTasks.values());
+
+            const persistence: TaskPersistence = {
+                tasks: tasksToSave,
+                archivedTasks: [],
+                nextTaskNumber: this.nextTaskNumber,
+                ...(this.pendingParentNotifications.size > 0
+                    ? { pendingParentNotifications: Object.fromEntries(this.pendingParentNotifications) }
+                    : {}),
+            };
+            const dir = dirname(this.persistencePath);
+            if (!existsSync(dir)) {
+                mkdirSync(dir, { recursive: true });
+            }
+
+            const newTotal = tasksToSave.length + archivedTasksToSave.length;
+            if (newTotal === 0 && existsSync(this.persistencePath)) {
+                try {
+                    const existingRaw = readFileSync(this.persistencePath, 'utf-8');
+                    const existing = JSON.parse(existingRaw) as { tasks?: any[]; archivedTasks?: any[] };
+                    const existingTotal = (existing.tasks?.length || 0) + (existing.archivedTasks?.length || 0);
+                    if (existingTotal > 0) {
+                        console.error(
+                            `[TaskSpawner] REFUSING to save: would overwrite ${existingTotal} tasks ` +
+                            `with empty state. This is almost certainly a bug. ` +
+                            `In-memory: ${this.tasks.size} live, ${this.disconnectedTasks.size} disconnected, ` +
+                            `${this.archivedTasks.size} archived.`
+                        );
+                        return;
+                    }
+                } catch (_e) {
+                    // Existing file unparseable — fall through and overwrite
+                }
+            }
+
+            await atomicWriteFileAsync(
+                this.persistencePath,
+                JSON.stringify(persistence),
+                { backup: true }
+            );
+
+            if (this.archivedDirty) {
+                await this.saveArchivedTasksAsync(archivedTasksToSave);
+            }
+
+            const newStats = statSync(this.persistencePath);
+            this.fileModTimeOnLoad = newStats.mtimeMs;
+
+            console.log(`[TaskSpawner] Saved ${tasksToSave.length} tasks, ${archivedTasksToSave.length} archived (metadata only) [async]`);
+        } catch (error) {
+            console.error('[TaskSpawner] Failed to save tasks (async):', error);
         }
     }
 
@@ -3703,6 +4267,8 @@ export class TaskSpawner extends EventEmitter {
             process: 'opencode'
         } as unknown as IPty;
 
+        this.taskDimensions.set(backendTask.id, { cols: 120, rows: 40 });
+
         const now = new Date();
         const task: InternalTask = {
             id: backendTask.id,
@@ -3712,6 +4278,7 @@ export class TaskSpawner extends EventEmitter {
             state: backendTask.state,
             outputHistory: [],
             lastActivity: now,
+            lastUserActivity: now,
             createdAt: now,
             isActive: false,
             initialPromptSent: true,  // OpenCode handles prompt submission
@@ -3847,7 +4414,7 @@ You are running as an agent inside Claudia, a multi-agent orchestrator. You have
 - Only spawn tasks when parallelization provides real value; do simple work yourself
 - Each spawned task prompt should be fully self-contained — include file paths, context, and constraints so it can work independently
 - While waiting for spawned tasks, do NOT start implementing features that overlap with what they're doing
-- **Deleting tasks**: You can request task deletion via \`claudia_delete_task\`, but it requires **explicit user approval** — a confirmation popup appears in the UI and the user must click "Delete" before the task is removed. NEVER call this automatically after tasks complete. Only call it when the user explicitly asks to delete/remove/clean up tasks.
+- **Deleting tasks**: You can request task deletion via \`claudia_delete_tasks\`, but it requires **explicit user approval** — a confirmation popup appears in the UI and the user must click "Delete" before the tasks are removed. Pass EVERY task you want deleted in a single call (\`taskIds: [...]\`): the user then gets one prompt listing them all with a checkbox each, instead of a burst of competing prompts. NEVER call this automatically after tasks complete. Only call it when the user explicitly asks to delete/remove/clean up tasks.
 
 ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the toolbar):**
 - The Claudia toolbar shows a live TODO work-plan for this task. Treat it as YOUR working plan and keep it current so the user can watch progress at a glance.
@@ -3925,6 +4492,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             }
         }
 
+        // Keep this session off claude.ai (no transcript mirroring, no Remote
+        // Control, no mobile push). Must land before the `--` terminator below,
+        // or the CLI stops parsing flags and treats it as a positional.
+        claudeArgs.push(...this.buildPrivacyArgs(claudeArgs));
+
         // Add -- to terminate argument parsing (workaround for Claude CLI bug with --mcp-config)
         // See: https://github.com/anthropics/claude-code/issues/22404
         claudeArgs.push('--');
@@ -3951,6 +4523,10 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             ...(USE_WINPTY ? { useConpty: false } : {}),
         });
 
+        // Seed the live-dimension map so `task:viewers` can report the real PTY
+        // size before anyone has resized it.
+        this.taskDimensions.set(id, { cols: initialCols || 120, rows: initialRows || 40 });
+
         const now = new Date();
         const task: InternalTask = {
             id,
@@ -3961,6 +4537,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             processStartedAt: now,
             outputHistory: [],
             lastActivity: now,
+            lastUserActivity: now,
             createdAt: now,
             isActive: false,
             initialPromptSent: false,
@@ -4633,37 +5210,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             // Don't auto-reconnect on click - just show the stored history.
             // The task will be reconnected when the user actually sends input (via writeToTask).
             console.log(`[TaskSpawner] Showing history for disconnected task ${taskId} (no auto-reconnect)`);
-
-            // Try loading history from disk file first (primary storage), then fall back to in-memory
-            let historyRestored = false;
-            const historyPath = this.getTaskHistoryPath(taskId);
-            if (existsSync(historyPath)) {
-                try {
-                    const fileContent = readFileSync(historyPath, 'utf-8');
-                    // Detect format: raw text (contains ANSI escapes, spaces, brackets) vs base64
-                    const sample = fileContent.substring(0, 100);
-                    const isRawText = sample.includes('\x1b') || sample.includes(' ') || sample.includes('[') || sample.includes(']');
-                    const history = isRawText ? fileContent : Buffer.from(fileContent, 'base64').toString('utf8');
-                    this.emit('taskRestore', taskId, history);
-                    historyRestored = true;
-                } catch (e) {
-                    console.error(`[TaskSpawner] Failed to read history file for ${taskId}:`, e);
-                }
-            } else {
-                // Fallback: check in-memory outputHistory (older tasks or migration edge cases)
-                const persisted = this.disconnectedTasks.get(taskId)!;
-                if (persisted.outputHistory) {
-                    const history = Buffer.from(persisted.outputHistory, 'base64').toString('utf8');
-                    this.emit('taskRestore', taskId, history);
-                    historyRestored = true;
-                }
-            }
-
-            // Always emit taskRestore so the frontend clears loading state (prevents blank screen)
-            if (!historyRestored) {
-                console.warn(`[TaskSpawner] No history found for disconnected task ${taskId}, sending empty restore`);
-                this.emit('taskRestore', taskId, '');
-            }
+            void this.loadDisconnectedTaskHistoryAsync(taskId);
             return;
         }
 
@@ -4950,6 +5497,12 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // to idle) bypass the guard entirely: the external entry point that first
         // received the command already counted it, so counting it again here would
         // spuriously trip the guard and drop a legitimate command.
+        // Real user intent — the only signal the idle reaper trusts.
+        const writeTarget = this.tasks.get(taskId);
+        if (writeTarget && !isInternalRedelivery) {
+            writeTarget.lastUserActivity = new Date();
+        }
+
         if (!isInternalRedelivery && isContextDestroyingInput(data)) {
             const destructiveCmd = data.replace(/[\r\n]+$/, '').trim();
             const now = Date.now();
@@ -5091,6 +5644,17 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         }
     }
 
+    /**
+     * The size a task's terminal is running at — the dimensions it was spawned
+     * with, updated by every applied resize. Undefined for a task this process
+     * has never spawned. A disconnected task keeps its last size, because that
+     * is what it will respawn at. Used by the server to tell non-owner viewers
+     * what dimensions to render at (see viewer-registry.ts).
+     */
+    getTaskDimensions(taskId: string): { cols: number; rows: number } | undefined {
+        return this.taskDimensions.get(taskId);
+    }
+
     resizeTask(taskId: string, cols: number, rows: number): void {
         const task = this.tasks.get(taskId);
         if (!task) {
@@ -5099,6 +5663,8 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             this.pendingResizes.set(taskId, { cols, rows });
             return;
         }
+
+        this.taskDimensions.set(taskId, { cols, rows });
 
         // Check if this task uses the OpenCode backend
         const taskBackend = this.taskBackends.get(taskId);
@@ -5258,11 +5824,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                 // Delete from map FIRST to prevent onExit handler from emitting state changes
                 this.tasks.delete(taskId);
                 this.taskBackends.delete(taskId);
-                try {
-                    task.process.kill();
-                } catch (_e) {
-                    // Process might already be dead
-                }
+                this.killTaskTree(task);
                 destroyed = true;
                 source = 'live';
             }
@@ -5277,6 +5839,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
         // Clean up any pending resize for this task
         this.pendingResizes.delete(taskId);
+        this.taskDimensions.delete(taskId);
 
         // Only emit once, regardless of which map(s) the task was in
         if (destroyed) {
@@ -5372,11 +5935,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
             // Delete from map FIRST to prevent onExit handler from emitting state changes
             this.tasks.delete(taskId);
-            try {
-                task.process.kill();
-            } catch (_e) {
-                // Process might already be dead
-            }
+            this.killTaskTree(task);
             archived = true;
             wasLive = true;
         }
@@ -5724,6 +6283,10 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             }
 
             const pendingSizeOC = this.pendingResizes.get(taskId);
+            this.taskDimensions.set(taskId, {
+                cols: pendingSizeOC?.cols || 120,
+                rows: pendingSizeOC?.rows || 40,
+            });
             ptyProcess = spawn(exe('opencode'), opencodeArgs, {
                 name: 'xterm-256color',
                 cols: pendingSizeOC?.cols || 120,
@@ -5762,6 +6325,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                 }
             }
 
+            // Same privacy pinning as the create path — a reconnect spawns a
+            // fresh CLI process, so it re-opts into the cloud features unless
+            // told otherwise.
+            claudeArgs.push(...this.buildPrivacyArgs(claudeArgs));
+
             // Add MCP server configurations for reconnection
             const mcpResult = this.buildMcpConfig(persisted.workspaceId, taskId);
             if (mcpResult) {
@@ -5794,6 +6362,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             const pendingSize = this.pendingResizes.get(taskId);
             const spawnCols = pendingSize?.cols || 120;
             const spawnRows = pendingSize?.rows || 40;
+            this.taskDimensions.set(taskId, { cols: spawnCols, rows: spawnRows });
             const { command: claudeCmd2, prefixArgs: claudePrefix2 } = resolveClaudeSpawn();
             ptyProcess = spawn(claudeCmd2, [...claudePrefix2, ...claudeArgs], {
                 name: 'xterm-256color',
@@ -5892,6 +6461,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             previousHistory, // Historical output from before reconnect (loaded from file or in-memory)
             resumeSeparator: resumeMessage, // Shown live when task becomes active, not saved to disk
             lastActivity: now,
+            // Carry the persisted timestamp, NOT `now`: a startup auto-reconnect is
+            // not the user touching the task, and resetting here would make every
+            // reconnected task immortal across restarts. Falls back to lastActivity
+            // for tasks.json files written before this field existed.
+            lastUserActivity: new Date(persisted.lastUserActivity ?? persisted.lastActivity),
             createdAt: new Date(persisted.createdAt),
             isActive: false,
             initialPromptSent: !needsDelivery,  // False if we have a prompt/message to deliver on ready
@@ -5945,7 +6519,9 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
         // Arm the ready-signal fallback timer whenever we have something to deliver
         // (a continuation or the user's first message) — same race window as new tasks.
-        if (needsDelivery && taskBackendType === 'claude-code') {
+        // The ready-fallback timer watches for the interactive TUI's ready
+        // banner, which only exists for a PTY agent that polls its own state.
+        if (needsDelivery && resolveAgentCapabilities(taskBackendType).ptyStatePolling) {
             this.startReadyFallbackTimer(task);
         }
 
@@ -5962,7 +6538,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // Start session capture so we detect the new/resumed session file
         // This is critical for fresh starts (no sessionId) and also covers cases where
         // Claude Code creates a new session file even when resuming
-        if (taskBackendType === 'claude-code') {
+        if (resolveAgentCapabilities(taskBackendType).sessionFileCapture) {
             this.startSessionCapture(taskId, persisted.workspaceId);
         }
 
@@ -6009,15 +6585,19 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             this.clearSessionCapture(taskId);
         }
 
+        const destroyPids: number[] = [];
         for (const task of this.tasks.values()) {
             // Clean up MCP temp files
             this.cleanupMcpTempFiles(task.id);
+            const destroyPid = task.process?.pid;
+            if (destroyPid) destroyPids.push(destroyPid);
             try {
-                task.process.kill();
+                task.process?.kill();
             } catch (_e) {
                 // Process might already be dead
             }
         }
+        this.taskkillTrees(destroyPids);
         this.tasks.clear();
     }
 
@@ -6065,12 +6645,8 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             }
         }
 
-        // Kill the process
-        try {
-            task.process.kill();
-        } catch (e) {
-            console.error(`[TaskSpawner] Failed to kill process for ${taskId}:`, e);
-        }
+        // Kill the process (and anything it spawned)
+        this.killTaskTree(task);
 
         // Create persisted task entry - preserve all metadata from the active task
         const persisted: PersistedTask = {
@@ -6079,6 +6655,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             workspaceId: task.workspaceId,
             createdAt: task.createdAt.toISOString(),
             lastActivity: task.lastActivity.toISOString(),
+            lastUserActivity: (task.lastUserActivity ?? task.lastActivity).toISOString(),
             lastState: task.state,
             sessionId: task.sessionId,
             // We don't save full history to memory here, it's already on disk/in memory
@@ -6116,12 +6693,16 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
     clearAllTasks(): void {
         console.log('[TaskSpawner] Clearing ALL tasks');
 
-        // 1. Kill all active tasks
+        // 1. Kill all active tasks (and anything they spawned)
+        const clearPids: number[] = [];
         for (const task of this.tasks.values()) {
+            const clearPid = task.process?.pid;
+            if (clearPid) clearPids.push(clearPid);
             try {
-                task.process.kill();
+                task.process?.kill();
             } catch (e) { }
         }
+        this.taskkillTrees(clearPids);
         this.tasks.clear();
 
         // 2. Clear persisted maps

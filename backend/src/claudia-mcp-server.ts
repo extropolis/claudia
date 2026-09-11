@@ -20,7 +20,7 @@
  *   - claudia_stop_task: Gracefully stop a running task
  *   - claudia_stop_all_tasks: Stop all running tasks in the workspace
  *   - claudia_rename_task: Set a display name for a task
- *   - claudia_delete_task: Archive/remove a task from the sidebar
+ *   - claudia_delete_tasks: Archive/remove one or more tasks from the sidebar
  *   - claudia_cron_create / claudia_cron_list / claudia_cron_delete / claudia_cron_pause:
  *     Manage scheduled (cron) prompts attached to tasks
  *
@@ -114,26 +114,94 @@ function resolveWorktreeRoot(wsById: Map<string, any>, startId: string): string 
 }
 
 /**
- * Make an HTTP request to the Claudia backend
+ * Socket-level failures that say nothing about the request's validity — the
+ * connection died, so the same request on a fresh socket is likely to work.
+ *
+ * The one seen in practice is ECONNRESET on a pooled keep-alive socket: undici
+ * reuses an idle connection at the same instant the server reaps it, and the
+ * caller gets an opaque `TypeError: fetch failed`. A backend restart produces
+ * the same shape. Neither is a reason to fail a tool call that is otherwise
+ * fine.
  */
-async function backendFetchAt(baseUrl: string, path: string, options: RequestInit = {}): Promise<Response> {
+const TRANSIENT_NET_CODES = new Set([
+    'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ECONNREFUSED', 'ECONNABORTED',
+    'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EAI_AGAIN', 'ENOTFOUND',
+    'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT',
+]);
+
+/**
+ * Errors where the connection was never established, so the server provably
+ * never saw the request. Only these are safe to retry for non-idempotent
+ * methods — retrying a POST that may already have been processed would create
+ * a second cron job, a second todo, a duplicate write.
+ */
+const NEVER_DELIVERED_CODES = new Set([
+    'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH',
+    'ENETUNREACH', 'ENETDOWN', 'UND_ERR_CONNECT_TIMEOUT',
+]);
+
+const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/** Pull the OS/undici error code out of a `fetch failed` TypeError's cause chain. */
+function networkErrorCode(error: unknown): string | undefined {
+    let cur: any = error;
+    for (let depth = 0; cur && depth < 5; depth++) {
+        if (typeof cur.code === 'string') return cur.code;
+        cur = cur.cause;
+    }
+    // Node surfaces a reset mid-request as a bare 'socket hang up' Error.
+    const msg = error instanceof Error ? error.message : '';
+    if (/socket hang up|other side closed|terminated/i.test(msg)) return 'ECONNRESET';
+    return undefined;
+}
+
+const RETRY_ATTEMPTS = 3;
+const RETRY_BASE_MS = 150;
+
+/**
+ * Make an HTTP request to the Claudia backend, retrying transport-level
+ * failures. HTTP error statuses are NOT retried — they are returned to the
+ * caller, which is what every call site already expects.
+ */
+export async function backendFetchAt(baseUrl: string, path: string, options: RequestInit = {}): Promise<Response> {
     const BACKEND_URL = baseUrl;
     const url = `${BACKEND_URL}${path}`;
-    log.debug(`Fetching: ${options.method || 'GET'} ${url}`);
+    const method = (options.method || 'GET').toUpperCase();
+    const idempotent = IDEMPOTENT_METHODS.has(method);
+    log.debug(`Fetching: ${method} ${url}`);
 
-    try {
-        const response = await fetch(url, {
-            ...options,
-            headers: {
-                'Content-Type': 'application/json',
-                ...options.headers,
-            },
-        });
-        return response;
-    } catch (error) {
-        log.error(`Backend request failed: ${path}`, error);
-        throw new Error(`Failed to connect to Claudia backend at ${BACKEND_URL}. Is the server running?`);
+    let lastError: unknown;
+    let lastCode: string | undefined;
+
+    for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+        try {
+            return await fetch(url, {
+                ...options,
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...options.headers,
+                },
+            });
+        } catch (error) {
+            lastError = error;
+            lastCode = networkErrorCode(error);
+
+            const retryable = lastCode !== undefined && TRANSIENT_NET_CODES.has(lastCode)
+                && (idempotent || NEVER_DELIVERED_CODES.has(lastCode));
+
+            if (!retryable || attempt === RETRY_ATTEMPTS) break;
+
+            const delay = RETRY_BASE_MS * 2 ** (attempt - 1) + Math.floor(Math.random() * 100);
+            log.debug(`Backend ${method} ${path} failed with ${lastCode}; retry ${attempt}/${RETRY_ATTEMPTS - 1} in ${delay}ms`);
+            await new Promise(r => setTimeout(r, delay));
+        }
     }
+
+    log.error(`Backend request failed: ${path}`, lastError);
+    throw new Error(
+        `Failed to connect to Claudia backend at ${BACKEND_URL}${lastCode ? ` (${lastCode})` : ''}. Is the server running?`,
+        { cause: lastError }
+    );
 }
 
 /**
@@ -942,6 +1010,9 @@ server.tool(
         // turn. Treating it as settled returned a partial output tail as final.
         const RUNNING_STATES = new Set(['busy', 'starting', 'interrupted']);
         const POLL_MS = 2500;
+        // Give up only after the backend has been unreachable for ~5 polls in a
+        // row; a single dropped socket must not end the wait.
+        const MAX_POLL_ERRORS = 5;
         const capMs = Math.min(Math.max(timeoutSeconds ?? 60, 5), 240) * 1000;
         const deadline = Date.now() + capMs;
 
@@ -972,9 +1043,24 @@ server.tool(
             // before the TUI accepts it) and report the PREVIOUS turn's output
             // as the result of work that has not started yet.
             let settledStreak = 0;
+            // A wait runs for minutes across dozens of polls, so it is the tool
+            // most likely to meet a transient backend hiccup (a dropped
+            // keep-alive socket, a backend restart). Letting one throw escape to
+            // the outer catch turned a survivable blip into "Error: Failed to
+            // connect", losing the whole wait. Poll failures are absorbed and
+            // the loop keeps going until the deadline decides.
+            let consecutivePollErrors = 0;
             for (;;) {
-                const response = await backendFetch('/api/tasks');
-                if (response.ok) {
+                let response: Response | undefined;
+                try {
+                    response = await backendFetch('/api/tasks');
+                    consecutivePollErrors = 0;
+                } catch (pollError) {
+                    consecutivePollErrors++;
+                    log.debug(`wait_for_task poll failed (${consecutivePollErrors}/${MAX_POLL_ERRORS})`, pollError);
+                    if (consecutivePollErrors >= MAX_POLL_ERRORS) throw pollError;
+                }
+                if (response?.ok) {
                     const task = (await response.json()).find((t: { id: string }) => t.id === canonicalId) as { state?: string; waitingInputType?: string } | undefined;
                     if (!task) {
                         return { content: [{ type: 'text', text: JSON.stringify({ taskId: canonicalId, state: 'deleted', message: 'Task no longer exists.' }, null, 2) }] };
@@ -1359,100 +1445,122 @@ server.tool(
 );
 
 // ============================================================================
-// Tool: claudia_delete_task
+// Tool: claudia_delete_tasks
 // ============================================================================
 server.tool(
-    'claudia_delete_task',
-    'Request deletion (archival) of a task. This sends a confirmation popup to the user — the task is only deleted if the user approves. IMPORTANT: Only call this when the user explicitly asks to delete/remove a task. Never delete tasks automatically after completion — users want to review outputs.',
+    'claudia_delete_tasks',
+    'Request deletion (archival) of one or more tasks. Pass every task you want gone in a SINGLE call: the user gets one confirmation prompt listing them all, with a checkbox per task, and can approve or reject each one individually. Calling this once per task instead produces a race of competing prompts. IMPORTANT: Only call this when the user explicitly asks to delete/remove tasks. Never delete tasks automatically after completion — users want to review outputs.',
     {
-        taskId: z.string().describe('The task ID to delete. ' + TASK_REF_HINT),
+        taskIds: z.array(z.string()).min(1).describe('The task IDs to delete. ' + TASK_REF_HINT),
     },
-    async ({ taskId }) => {
+    async ({ taskIds }) => {
+        const notFound: string[] = [];
+        const skipped: string[] = [];
+        const items: { taskId: string; requestId: string; taskName: string }[] = [];
+
         // Resolve short refs FIRST: the self-guard must catch "#77" for the
         // caller's own task, and the task:destroyed approval matcher below
         // compares against the broadcast's CANONICAL id — with a raw short ref
         // it never matched, and an approved deletion reported as a timeout.
-        const canonicalId = await resolveRefToCanonicalId(taskId);
-        if (!canonicalId) {
-            return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
+        let tasks: any[] = [];
+        let haveTaskList = false;
+        try {
+            const tasksResponse = await backendFetch('/api/tasks');
+            if (tasksResponse.ok) { tasks = await tasksResponse.json(); haveTaskList = true; }
+        } catch { /* names fall back to ids, and unknown ids can't be detected */ }
+
+        const seen = new Set<string>();
+        for (const ref of taskIds) {
+            const canonicalId = await resolveRefToCanonicalId(ref);
+            if (!canonicalId) { notFound.push(ref); continue; }
+            if (SELF_TASK_ID && canonicalId === SELF_TASK_ID) { skipped.push(ref); continue; }
+            if (seen.has(canonicalId)) continue;
+            seen.add(canonicalId);
+            const task = matchTaskRef(tasks, canonicalId) as any;
+            // resolveRefToCanonicalId passes through ids it cannot resolve, so the
+            // task list is what actually proves a task exists. Skip the check when
+            // the list could not be fetched rather than reporting everything gone.
+            if (haveTaskList && !task) { notFound.push(ref); seen.delete(canonicalId); continue; }
+            items.push({
+                taskId: canonicalId,
+                requestId: `del-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                taskName: task?.displayName || task?.prompt?.substring(0, 60) || canonicalId,
+            });
         }
-        taskId = canonicalId;
-        if (SELF_TASK_ID && taskId === SELF_TASK_ID) {
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify({
-                        success: false,
-                        message: `Cannot delete task '${taskId}' because it is the currently running session.`,
-                    }, null, 2)
-                }]
-            };
+
+        const respond = (body: Record<string, unknown>) => ({
+            content: [{ type: 'text' as const, text: JSON.stringify(body, null, 2) }],
+        });
+
+        if (items.length === 0) {
+            const reasons: string[] = [];
+            if (skipped.length) reasons.push(`${skipped.join(', ')} is the currently running session`);
+            if (notFound.length) reasons.push(`not found: ${notFound.join(', ')}`);
+            return respond({
+                success: false,
+                message: `Nothing to delete — ${reasons.join('; ') || 'no task ids given'}.`,
+                deleted: [], rejected: [], notFound, skipped,
+            });
         }
+
+        // Declared outside the try so a timeout can still report whatever the
+        // user did approve before walking away, instead of losing it.
+        const pending = new Map(items.map(i => [i.taskId, i.requestId]));
+        const deleted: string[] = [];
+        const rejected: string[] = [];
 
         try {
-            // Look up task name for the confirmation dialog
-            let taskName = taskId;
-            try {
-                const tasksResponse = await backendFetch('/api/tasks');
-                if (tasksResponse.ok) {
-                    const tasks = await tasksResponse.json();
-                    const task = matchTaskRef(tasks, taskId) as any;
-                    if (!task) {
-                        return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: `Task '${taskId}' not found.` }, null, 2) }] };
-                    }
-                    taskName = task.displayName || task.prompt?.substring(0, 60) || taskId;
-                }
-            } catch { /* use taskId as fallback name */ }
+            log.info(`Requesting user confirmation to delete ${items.length} task(s)`, {
+                taskIds: items.map(i => i.taskId),
+            });
 
-            const requestId = `del-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-            log.info(`Requesting user confirmation to delete task: ${taskId}`, { requestId });
+            // One broadcast, one prompt. Each task keeps its own requestId so the
+            // user can approve a subset; we settle once every task has an outcome.
 
-            // Send deleteRequest — backend broadcasts to frontend which shows
-            // a confirmation modal. We wait for either task:destroyed (approved)
-            // or task:deleteRejected (denied).
             const result = await sendWSMessageWithMultiResponse(
                 'task:deleteRequest',
-                { taskId, requestId, taskName },
+                { requests: items },
                 (msg) => {
-                    if (msg.type === 'task:destroyed' && msg.payload?.taskId === taskId) {
-                        return { outcome: 'approved' };
+                    const id = msg.payload?.taskId;
+                    if (msg.type === 'task:destroyed' && id && pending.has(id)) {
+                        pending.delete(id);
+                        deleted.push(id);
+                    } else if (msg.type === 'task:deleteRejected' && id && pending.has(id)
+                               && pending.get(id) === msg.payload?.requestId) {
+                        pending.delete(id);
+                        rejected.push(id);
                     }
-                    if (msg.type === 'task:deleteRejected' && msg.payload?.requestId === requestId) {
-                        return { outcome: 'rejected' };
-                    }
-                    return null;
+                    return pending.size === 0 ? { deleted, rejected } : null;
                 },
                 60000
             );
 
-            if (result.outcome === 'approved') {
-                return {
-                    content: [{
-                        type: 'text',
-                        text: JSON.stringify({
-                            success: true,
-                            message: `Task '${taskName}' deleted (archived) by user.`,
-                        }, null, 2)
-                    }]
-                };
-            } else {
-                return {
-                    content: [{
-                        type: 'text',
-                        text: JSON.stringify({
-                            success: false,
-                            message: `User rejected deletion of task '${taskName}'.`,
-                        }, null, 2)
-                    }]
-                };
-            }
+            const nameOf = (id: string) => items.find(i => i.taskId === id)?.taskName ?? id;
+            const parts: string[] = [];
+            if (result.deleted.length) parts.push(`${result.deleted.length} deleted (archived) by user: ${result.deleted.map(nameOf).join(', ')}`);
+            if (result.rejected.length) parts.push(`${result.rejected.length} rejected by user`);
+            if (notFound.length) parts.push(`${notFound.length} not found: ${notFound.join(', ')}`);
+            if (skipped.length) parts.push(`${skipped.length} skipped (the currently running session)`);
+
+            return respond({
+                success: result.deleted.length > 0,
+                message: parts.join('; ') + '.',
+                deleted: result.deleted, rejected: result.rejected, notFound, skipped,
+            });
         } catch (error) {
-            log.error('Failed to delete task:', error);
+            log.error('Failed to delete tasks:', error);
             const msg = error instanceof Error ? error.message : String(error);
             if (msg.includes('timed out')) {
-                return { content: [{ type: 'text', text: JSON.stringify({ success: false, message: 'User did not respond to the deletion confirmation within 60 seconds.' }, null, 2) }] };
+                return respond({
+                    success: deleted.length > 0,
+                    message: deleted.length > 0
+                        ? `${deleted.length} deleted before the confirmation timed out; ${pending.size} task(s) got no answer within 60 seconds.`
+                        : 'User did not respond to the deletion confirmation within 60 seconds.',
+                    deleted, rejected, notFound, skipped,
+                    timedOut: [...pending.keys()],
+                });
             }
-            return { content: [{ type: 'text', text: `Error deleting task: ${msg}` }] };
+            return { content: [{ type: 'text' as const, text: `Error deleting tasks: ${msg}` }] };
         }
     }
 );

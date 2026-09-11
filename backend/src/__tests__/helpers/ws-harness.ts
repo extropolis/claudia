@@ -26,6 +26,8 @@ import { execFileSync } from 'child_process';
 import WebSocket from 'ws';
 import { createApp } from '../../server.js';
 
+type TestServerParts = Awaited<ReturnType<typeof createApp>>;
+
 export const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures');
 
 export interface WSFrame {
@@ -192,6 +194,12 @@ export interface TestEnv {
     port: number;
     workspaces: string[];
     fakeDir: string;
+    /**
+     * The live TaskSpawner behind this server. Exposed so a test can assert on
+     * real process state (e.g. the PTY size a resize did or did not apply)
+     * rather than inferring it from a broadcast the same code path emits.
+     */
+    taskSpawner: TestServerParts['taskSpawner'];
     /** Read a file written by the fake claude CLI ('' if absent). */
     readFake(name: string): string;
     api(path: string): Promise<any>;
@@ -282,6 +290,7 @@ export async function createTestEnv(opts: TestEnvOptions = {}): Promise<TestEnv>
         port,
         workspaces,
         fakeDir,
+        taskSpawner: parts.taskSpawner,
         readFake: (name: string) => {
             const p = join(fakeDir, name);
             return existsSync(p) ? readFileSync(p, 'utf8') : '';

@@ -8,6 +8,20 @@ import WebSocket from 'ws';
 import { WSMessage, ChatMessage, Task } from './src/types.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { httpBaseFromWsUrl } from './src/utils/backend-url.js';
+
+const DEFAULT_BACKEND_URL = 'ws://localhost:4001';
+
+/**
+ * Read `--url` straight from argv for subcommands that run before parseArgs()
+ * (Jira, tunnel). Returns the HTTP base so those handlers hit the same host
+ * and port as the WebSocket client would.
+ */
+function httpBaseFromArgv(argv: string[]): string {
+    const i = argv.indexOf('--url');
+    const wsUrl = i >= 0 && argv[i + 1] ? argv[i + 1] : DEFAULT_BACKEND_URL;
+    return httpBaseFromWsUrl(wsUrl);
+}
 
 interface TestConfig {
     backendUrl: string;
@@ -24,6 +38,7 @@ interface TestConfig {
     taskId: string | null;    // Task ID for operations
     stopTask: boolean;        // Stop a running task
     deleteTask: boolean;      // Delete a specific task
+    deleteRequest: boolean;   // Send a batched task:deleteRequest (confirmation prompt) and watch the broadcast
     clearTasks: boolean;      // Clear all tasks
     approvePlan: boolean;     // Approve current plan
     rejectPlan: boolean;      // Reject current plan
@@ -52,7 +67,7 @@ interface TestConfig {
     archiveTask: boolean;         // Archive a task
     gitPush: boolean;             // Push to GitHub
     backendStatus: boolean;       // Get backend status (no WebSocket needed)
-    setBackend: string | null;    // Set backend ('claude-code' or 'opencode')
+    setBackend: string | null;    // Set the default agent (any id from --backend-status)
     watchOutput: boolean;         // Stream task output to console
     waitForIdle: boolean;         // Wait for task to become idle before exiting
     listMcpServers: boolean;      // List available MCP servers (no WebSocket needed)
@@ -137,6 +152,9 @@ class TestCLI {
                 } else if (this.config.deleteTask && this.config.taskId) {
                     this.sendDeleteTask(this.config.taskId);
                     setTimeout(() => this.cleanup(), 2000);
+                } else if (this.config.deleteRequest && this.config.taskId) {
+                    this.sendDeleteRequest(this.config.taskId);
+                    setTimeout(() => this.cleanup(), 4000);
                 } else if (this.config.clearTasks) {
                     this.sendClearTasks();
                     setTimeout(() => this.cleanup(), 2000);
@@ -266,7 +284,10 @@ class TestCLI {
             });
 
             this.ws.on('error', (error: Error) => {
-                console.error('❌ WebSocket error:', error.message);
+                // ws reports ECONNREFUSED with an empty message; name the URL so
+                // a wrong --url host/port is obvious from the output.
+                const code = (error as NodeJS.ErrnoException).code;
+                console.error(`❌ WebSocket error connecting to ${this.config.backendUrl}: ${error.message || code || String(error)}`);
                 clearTimeout(timeout);
                 reject(error);
             });
@@ -414,6 +435,28 @@ class TestCLI {
 
         console.log(`⏹️  Stopping task ${taskId}...`);
         this.ws.send(JSON.stringify(message));
+    }
+
+    /**
+     * Exercise the batched delete-confirmation protocol the `claudia_delete_tasks`
+     * MCP tool speaks: send ONE task:deleteRequest carrying N tasks and print the
+     * broadcast that comes back, so you can see that N tasks produce one prompt.
+     * Nothing is deleted — the broadcast only asks the UI to confirm.
+     */
+    private sendDeleteRequest(taskIds: string): void {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('Cannot send delete request: WebSocket not connected');
+            return;
+        }
+        const requests = taskIds.split(',').map(id => id.trim()).filter(Boolean).map(taskId => ({
+            taskId,
+            requestId: `cli-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            taskName: taskId,
+        }));
+        console.log(`\nSending ONE task:deleteRequest for ${requests.length} task(s):`);
+        requests.forEach(r => console.log(`   - ${r.taskId}  (requestId ${r.requestId})`));
+        console.log('Watching for the broadcast the frontend would render...\n');
+        this.ws.send(JSON.stringify({ type: 'task:deleteRequest', payload: { requests, ...requests[0] } }));
     }
 
     private sendDeleteTask(taskId: string): void {
@@ -857,7 +900,7 @@ class TestCLI {
     }
 
     private async viewTaskFiles(taskId: string): Promise<void> {
-        const httpUrl = this.config.backendUrl.replace('ws://', 'http://').replace('ws', '3000');
+        const httpUrl = httpBaseFromWsUrl(this.config.backendUrl);
         const url = `${httpUrl}/api/tasks/${taskId}/files`;
 
         console.log(`📄 Fetching files for task ${taskId}...`);
@@ -900,7 +943,7 @@ class TestCLI {
     }
 
     private async getConfig(): Promise<void> {
-        const httpUrl = this.config.backendUrl.replace('ws://', 'http://').replace('ws', '3000');
+        const httpUrl = httpBaseFromWsUrl(this.config.backendUrl);
         const url = `${httpUrl}/api/config`;
 
         console.log('⚙️  Fetching orchestrator configuration...');
@@ -933,6 +976,15 @@ class TestCLI {
         }
 
         switch (message.type) {
+            case 'task:deleteRequest': {
+                // What the frontend receives for --delete-request: ONE message
+                // carrying every task, which is what makes it ONE dialog.
+                const reqs = (message.payload?.requests ?? [message.payload]) as any[];
+                console.log(`[${elapsed}s] DELETE-REQ │ one broadcast carrying ${reqs.length} request(s)`);
+                reqs.forEach((r: any) => console.log(`             │   ${r.taskId}  requestId=${r.requestId}  name=${r.taskName}`));
+                console.log(`             │ legacy top-level taskId=${message.payload?.taskId} (for pre-batch clients)`);
+                break;
+            }
             case 'init':
                 this.handleInit(message.payload);
                 break;
@@ -1336,7 +1388,7 @@ class TestCLI {
 function parseArgs(): TestConfig {
     const args = process.argv.slice(2);
 
-    let backendUrl = 'ws://localhost:4001';
+    let backendUrl = DEFAULT_BACKEND_URL;
     let testMessage = 'echo hello world';
     let timeoutMs = 120000; // 120 seconds
     let testClear = false;
@@ -1349,6 +1401,7 @@ function parseArgs(): TestConfig {
     let taskId: string | null = null;
     let stopTask = false;
     let deleteTask = false;
+    let deleteRequest = false;
     let clearTasks = false;
     let approvePlan = false;
     let rejectPlan = false;
@@ -1457,6 +1510,9 @@ function parseArgs(): TestConfig {
                 break;
             case '--stop-task':
                 stopTask = true;
+                break;
+            case '--delete-request':
+                deleteRequest = true;
                 break;
             case '--delete-task':
                 deleteTask = true;
@@ -1685,6 +1741,8 @@ TASK OPERATIONS:
   --task-input             Send input to a task (requires --task-id and --message)
   --stop-task              Stop a running task (requires --task-id)
   --delete-task            Delete a specific task (requires --task-id)
+  --delete-request         Send ONE batched delete-confirmation request for a comma-separated
+                           --task-id list and print the broadcast (deletes nothing)
   --clear-tasks            Clear all tasks
   --list-tasks             List all tasks with their status
   --tunnel-status          Show tunnel state (url, token, domain, reachability)
@@ -1692,6 +1750,13 @@ TASK OPERATIONS:
   --tunnel-stop            Stop the tunnel
   --tunnel-domain <host>   Pin a reserved ngrok domain ("" clears it)
   --tunnel-diagnose        Probe which ngrok domains this network allows
+
+STATE EXPORT (P0 task 10, spec §11.1):
+  --export <dir>           Write a portable state export to <dir> (server-side path)
+                           Respects --url to target a backend other than :4001
+  --with-secrets           Also write secrets.json (mode 0600) — API keys, MCP env/headers
+  --with-histories         Also copy task-histories/ + archived-histories/ (gigabytes)
+  --with-agent-sessions    Also copy session JSONL transcripts for non-archived tasks
   --view-files             View code files for a task (requires --task-id)
   --archive-task           Archive a task (requires --task-id)
   --disconnect             Disconnect a task (requires --task-id)
@@ -1737,8 +1802,10 @@ CONFIGURATION:
   --get-config             Get orchestrator configuration
 
 BACKEND OPERATIONS:
-  --backend-status         Get current backend status (claude-code or opencode)
-  --set-backend <name>     Set the AI backend ('claude-code' or 'opencode')
+  --backend-status         Show every registered coding agent: install state,
+                           version, server health and task-row badge label
+  --set-backend <name>     Set the default AI agent. Valid ids come from the
+                           agent registry — run --backend-status to list them
 
 MCP SERVER OPERATIONS:
   --list-mcp-servers       List all available MCP servers (global and project-specific)
@@ -1786,6 +1853,7 @@ Examples:
 
   # Delete a task
   npx tsx test-cli.ts --delete-task --task-id abc123
+  npx tsx test-cli.ts --delete-request --task-id abc123,def456
 
   # List all tasks
   npx tsx test-cli.ts --list-tasks
@@ -1899,6 +1967,7 @@ Examples:
         taskId,
         stopTask,
         deleteTask,
+        deleteRequest,
         clearTasks,
         approvePlan,
         rejectPlan,
@@ -2141,14 +2210,31 @@ async function getBackendStatus(baseHttpUrl: string): Promise<void> {
         }
 
         console.log('');
-        console.log('Available Backends:');
-        for (const backend of status.availableBackends || []) {
-            const isCurrent = backend === status.backend;
-            console.log(`  ${isCurrent ? '►' : ' '} ${backend}`);
+        console.log('Registered Agents:');
+        // availableBackends is AgentDisplayInfo[] from the agent registry.
+        // Older backends returned a plain string[] — handle both so the CLI
+        // still works against a server that has not been restarted.
+        const agents: Array<Record<string, unknown> | string> = status.availableBackends || [];
+        for (const entry of agents) {
+            const display = typeof entry === 'string' ? { id: entry } : entry;
+            const id = String(display.id ?? entry);
+            const isCurrent = id === status.backend;
+            const perAgent = status.statuses?.[id];
+            const bits: string[] = [];
+            if (display.name) bits.push(String(display.name));
+            if (display.shortLabel) bits.push(`badge="${display.shortLabel}"`);
+            if (perAgent) {
+                bits.push(perAgent.installed ? `installed ${perAgent.version ?? ''}`.trim() : 'NOT installed');
+                if (perAgent.serverRunning !== undefined) {
+                    bits.push(perAgent.serverRunning ? 'server up' : 'server down');
+                }
+                if (perAgent.error) bits.push(perAgent.error);
+            }
+            console.log(`  ${isCurrent ? '►' : ' '} ${id.padEnd(14)} ${bits.join(' | ')}`);
         }
         console.log('');
     } catch (error) {
-        console.error('Failed to get backend status:', error);
+        console.error(`Failed to get backend status from ${baseHttpUrl}:`, error);
     }
 }
 
@@ -2379,10 +2465,10 @@ async function checkApiConfig(baseHttpUrl: string): Promise<void> {
         console.log('🌍 ENVIRONMENT VARIABLES FOR TASKS');
         console.log('-'.repeat(80));
         if (config.apiMode === 'sap-ai-core') {
-            console.log(`  ANTHROPIC_BASE_URL: http://localhost:4001/anthropic`);
+            console.log(`  ANTHROPIC_BASE_URL: ${baseHttpUrl}/anthropic`);
             console.log(`  ANTHROPIC_API_KEY:  sap-ai-core-proxy (placeholder)`);
         } else if (config.apiMode === 'hyperspace-proxy') {
-            console.log(`  ANTHROPIC_BASE_URL: http://localhost:4001/anthropic`);
+            console.log(`  ANTHROPIC_BASE_URL: ${baseHttpUrl}/anthropic`);
             console.log(`  ANTHROPIC_API_KEY:  hyperspace-proxy (placeholder)`);
         } else if (config.apiMode === 'custom-anthropic') {
             console.log(`  ANTHROPIC_API_KEY:  [CUSTOM KEY]`);
@@ -2500,7 +2586,7 @@ async function toggleAutoWorktreeCmd(baseHttpUrl: string, workspaceId: string, e
 //   --jira-security-check                      run the S1/token-leak checks
 // ============================================================================
 async function handleJiraCommand(argv: string[]): Promise<boolean> {
-    const base = 'http://localhost:4001';
+    const base = httpBaseFromArgv(argv);
     const idx = (flag: string) => argv.indexOf(flag);
     const val = (flag: string) => { const i = idx(flag); return i >= 0 ? argv[i + 1] : undefined; };
 
@@ -2581,8 +2667,114 @@ async function handleJiraCommand(argv: string[]): Promise<boolean> {
 //   --tunnel-domain <host|"">       pin a reserved ngrok domain ("" clears it)
 //   --tunnel-diagnose               probe which ngrok zones this network allows
 // ============================================================================
+// ============================================================================
+// Portable state export (P0 task 10, spec §11.1). Pure HTTP, no WebSocket.
+//   --export <dir> [--with-secrets] [--with-histories] [--with-agent-sessions]
+//
+// The backend writes the export; <dir> is a path on the machine running the
+// backend, not on this CLI's machine. When the two are the same box (the dev
+// case) the byte total below is measured by walking the tree locally.
+// ============================================================================
+async function handleExportCommand(argv: string[]): Promise<boolean> {
+    const i = argv.indexOf('--export');
+    if (i < 0) return false;
+
+    // Honour --url so this can be pointed at a backend other than the dev
+    // server on 4001 — which is how the happy path gets exercised without
+    // going anywhere near the running instance.
+    const urlIdx = argv.indexOf('--url');
+    const base = (urlIdx >= 0 && argv[urlIdx + 1] ? argv[urlIdx + 1] : 'http://localhost:4001')
+        .replace(/^ws:/, 'http:')
+        .replace(/^wss:/, 'https:')
+        .replace(/\/$/, '');
+
+    const out = argv[i + 1];
+    if (!out || out.startsWith('--')) {
+        console.error('❌ --export requires an output directory');
+        process.exitCode = 1;
+        return true;
+    }
+
+    const body = {
+        out,
+        withSecrets: argv.includes('--with-secrets'),
+        withHistories: argv.includes('--with-histories'),
+        withAgentSessions: argv.includes('--with-agent-sessions'),
+    };
+
+    console.log(`📦 Exporting state → ${out}`);
+    console.log(`   tiers: ${Object.entries(body)
+        .filter(([k, v]) => k !== 'out' && v)
+        .map(([k]) => k)
+        .join(', ') || 'state only (no secrets, histories or agent sessions)'}`);
+
+    const res = await fetch(`${base}/api/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const payload = await res.json().catch(() => ({})) as any;
+
+    if (!res.ok) {
+        console.error(`❌ Export failed (HTTP ${res.status}): ${payload.error ?? JSON.stringify(payload)}`);
+        process.exitCode = 1;
+        return true;
+    }
+
+    const m = payload.manifest;
+    if (!m) {
+        // A backend predating this route answers 404/HTML rather than a manifest.
+        console.error(`❌ No manifest in the response (HTTP ${res.status}). Is the backend running this build?`);
+        process.exitCode = 1;
+        return true;
+    }
+    console.log('\n✅ Export complete\n');
+    console.log(`   format version : ${m.formatVersion}`);
+    console.log(`   claudia version: ${m.claudiaVersion}`);
+    console.log(`   exported at    : ${m.exportedAt}`);
+    console.log(`   source         : ${m.source.hostname} (${m.source.platform})`);
+    console.log(`   data dir       : ${m.source.dataDir}`);
+    console.log(`   instance id    : ${m.source.instanceId ?? '(none)'}`);
+    console.log(`   tiers          : secrets=${m.tiers.secrets} histories=${m.tiers.histories} agentSessions=${m.tiers.agentSessions}`);
+
+    console.log(`\n   state files (${Object.keys(m.schemaVersions).length}):`);
+    for (const [file, version] of Object.entries(m.schemaVersions)) {
+        console.log(`     - ${file.padEnd(24)} schemaVersion=${version ?? 'legacy (unversioned)'}`);
+    }
+
+    console.log(`\n   workspaces (${m.workspaces.length}):`);
+    for (const ws of m.workspaces.slice(0, 25)) {
+        const parent = ws.worktreeParentId ? `  ↳ worktree of ${ws.worktreeParentId}` : '';
+        console.log(`     - ${ws.name}  ${ws.id}${parent}`);
+    }
+    if (m.workspaces.length > 25) console.log(`     … and ${m.workspaces.length - 25} more`);
+
+    // Byte total, measured by walking the produced tree. Only possible when the
+    // backend shares a filesystem with this CLI.
+    try {
+        const fs = await import('fs');
+        const pathMod = await import('path');
+        let files = 0;
+        let bytes = 0;
+        const walk = (dir: string) => {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const full = pathMod.join(dir, entry.name);
+                if (entry.isDirectory()) walk(full);
+                else { files++; bytes += fs.statSync(full).size; }
+            }
+        };
+        walk(out);
+        const mb = bytes / 1e6;
+        console.log(`\n   total: ${files} file(s), ${bytes.toLocaleString()} bytes (${mb.toFixed(2)} MB)`);
+    } catch {
+        console.log('\n   total: not measurable from here (backend is on another host)');
+    }
+
+    return true;
+}
+
 async function handleTunnelCommand(argv: string[]): Promise<boolean> {
-    const base = 'http://localhost:4001';
+    const base = httpBaseFromArgv(argv);
     const idx = (flag: string) => argv.indexOf(flag);
     const val = (flag: string) => { const i = idx(flag); return i >= 0 ? argv[i + 1] : undefined; };
 
@@ -2633,8 +2825,7 @@ async function handleTunnelCommand(argv: string[]): Promise<boolean> {
         show(status);
         if (status.active && status.url) {
             // The server probes asynchronously; give it a beat, then re-read.
-            console.log('
-Probing reachability...');
+            console.log('\nProbing reachability...');
             await new Promise(r => setTimeout(r, 16000));
             show(await (await fetch(`${base}/api/tunnel/status`)).json());
         }
@@ -2646,8 +2837,7 @@ Probing reachability...');
         // drops one zone by SNI makes a perfectly healthy tunnel unreachable,
         // and nothing else in the stack can tell you that.
         const zones = ['ngrok.com', 'probe.ngrok.app', 'probe.ngrok.io', 'probe.ngrok-free.app', 'probe.ngrok-free.dev'];
-        console.log('Probing ngrok domains from this machine (404 = reachable, ngrok just has no such endpoint):
-');
+        console.log('Probing ngrok domains from this machine (404 = reachable, ngrok just has no such endpoint):\n');
         for (const host of zones) {
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), 12000);
@@ -2660,8 +2850,7 @@ Probing reachability...');
                 clearTimeout(timer);
             }
         }
-        console.log('
-If one zone is BLOCKED while others are OK, this network filters that domain.');
+        console.log('\nIf one zone is BLOCKED while others are OK, this network filters that domain.');
         console.log('Pin a reserved domain on a working zone:  --tunnel-domain <your>.ngrok.app');
         return true;
     }
@@ -2680,13 +2869,15 @@ async function main() {
         process.exit(0);
     }
 
+    // State export — pure HTTP too.
+    if (await handleExportCommand(process.argv.slice(2))) {
+        process.exit(process.exitCode ?? 0);
+    }
+
     const config = parseArgs() as any;
 
     // Derive HTTP URL from WebSocket URL for API calls
-    const baseHttpUrl = config.backendUrl
-        .replace('ws://', 'http://')
-        .replace('wss://', 'https://')
-        .replace(/:\d+$/, ':4001');  // Ensure correct port
+    const baseHttpUrl = httpBaseFromWsUrl(config.backendUrl);
 
     // Handle backend commands that don't need WebSocket
     if (config.backendStatus) {

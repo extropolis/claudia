@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { Task, Workspace, WorkspacePrInfo, TaskWorkStatus } from '@claudia/shared';
 import {
@@ -8,6 +8,7 @@ import {
 import { getApiBaseUrl } from '../config/api-config';
 import { isSoundEnabled } from '../utils/browserCapabilities';
 import { lastKnownTerminalSize } from '../config/terminal-size';
+import { compareTasksForDisplay, createTopLevelResolver, newestSortable } from '../utils/taskSort';
 import { PrBadge } from './PrBadge';
 import { SystemPromptModal } from './SystemPromptModal';
 import { ConfirmModal } from './ConfirmModal';
@@ -986,25 +987,43 @@ function WorkspaceSection({
     const taskListRef = useRef<HTMLDivElement>(null);
 
     // Task drag state (separate from workspace drag)
-    const [taskDragIndex, setTaskDragIndex] = useState<number | null>(null);
+    // Track the dragged task by ID, not by index. In "Recent" sort mode the
+    // list re-sorts live while a drag is in flight (lastActivity is bumped on
+    // every PTY output chunk of any busy task), so an index captured at
+    // dragstart can point at a different row by the time the user drops.
+    // The index is re-derived from the id against the CURRENT top-level order
+    // at drop time, which is the same order the store's reorderTasks rebuilds.
+    const [taskDragId, setTaskDragId] = useState<string | null>(null);
     const [taskDragOverIndex, setTaskDragOverIndex] = useState<number | null>(null);
 
+    const topLevelTaskIds = useMemo(() => {
+        const isTopLevel = createTopLevelResolver(tasks);
+        return tasks.filter(isTopLevel).map(t => t.id);
+    }, [tasks]);
+    const taskDragIndex = (() => {
+        if (taskDragId === null) return null;
+        const i = topLevelTaskIds.indexOf(taskDragId);
+        return i === -1 ? null : i;
+    })();
+
     const handleTaskDragStart = useCallback((idx: number) => {
-        setTaskDragIndex(idx);
+        const id = topLevelTaskIds[idx];
+        if (id === undefined) return;
+        setTaskDragId(id);
         setTaskDragOverIndex(idx);
-    }, []);
+    }, [topLevelTaskIds]);
 
     const handleTaskDragEnter = useCallback((idx: number) => {
-        if (taskDragIndex !== null) {
+        if (taskDragId !== null) {
             setTaskDragOverIndex(idx);
         }
-    }, [taskDragIndex]);
+    }, [taskDragId]);
 
     const handleTaskDragEnd = useCallback(() => {
         if (taskDragIndex !== null && taskDragOverIndex !== null && taskDragIndex !== taskDragOverIndex) {
             onReorderTasks(taskDragIndex, taskDragOverIndex);
         }
-        setTaskDragIndex(null);
+        setTaskDragId(null);
         setTaskDragOverIndex(null);
     }, [taskDragIndex, taskDragOverIndex, onReorderTasks]);
 
@@ -1980,18 +1999,11 @@ function WorkspaceSection({
                                     // subtaskMap entries are only read for top-level rows, so filing
                                     // a grandchild under a subtask made it vanish from the sidebar
                                     // entirely: unselectable, unstoppable, invisible.
+                                    // Shared with the store's reorderTasks: BOTH must agree on
+                                    // which tasks are top-level, because drag idx is assigned
+                                    // over top-level rows only.
                                     const byId = new Map(tasks.map(t => [t.id, t]));
-                                    const topCache = new Map<string, boolean>();
-                                    const isTopLevel = (t: Task, seen: Set<string> = new Set()): boolean => {
-                                        const cached = topCache.get(t.id);
-                                        if (cached !== undefined) return cached;
-                                        if (seen.has(t.id)) { topCache.set(t.id, true); return true; } // cyclic parent links: render flat
-                                        seen.add(t.id);
-                                        const parent = t.parentTaskId ? byId.get(t.parentTaskId) : undefined;
-                                        const result = !(parent && isTopLevel(parent, seen));
-                                        topCache.set(t.id, result);
-                                        return result;
-                                    };
+                                    const isTopLevel = createTopLevelResolver(tasks);
                                     const subtaskMap = new Map<string, SubtaskEntry[]>();
                                     const topLevelTasks: Task[] = [];
                                     tasks.forEach(task => {
@@ -2058,23 +2070,22 @@ function WorkspaceSection({
                                         }
                                     }
 
-                                    // Sort: items with explicit order first, then by creation time (newest first).
-                                    // For worktree groups, use the newest task's creation time.
-                                    items.sort((a, b) => {
-                                        const orderA = a.type === 'task' ? a.task.order : undefined;
-                                        const orderB = b.type === 'task' ? b.task.order : undefined;
-                                        if (orderA !== undefined && orderB !== undefined) return orderA - orderB;
-                                        if (orderA !== undefined) return -1;
-                                        if (orderB !== undefined) return 1;
-
-                                        const timeA = a.type === 'task'
-                                            ? new Date(a.task.createdAt).getTime()
-                                            : Math.max(...a.group.tasks.map(t => new Date(t.createdAt).getTime()));
-                                        const timeB = b.type === 'task'
-                                            ? new Date(b.task.createdAt).getTime()
-                                            : Math.max(...b.group.tasks.map(t => new Date(t.createdAt).getTime()));
-                                        return timeB - timeA;
-                                    });
+                                    // Sort tasks + worktree groups together using the SAME
+                                    // canonical comparator as sortTasks/reorderTasks. This must
+                                    // match, otherwise a task's rendered position diverges from
+                                    // the `idx` handed to the drag handlers and manual reorder
+                                    // moves the wrong task (notably in "Recent" sort mode).
+                                    // Worktree groups are represented by their newest task.
+                                    // A group's own tasks may all have been lifted (leaving
+                                    // only nested sub-worktrees), so collect recursively.
+                                    const collectGroupTasks = (g: WorktreeGroup, out: Task[] = []): Task[] => {
+                                        out.push(...g.tasks);
+                                        for (const sg of g.subGroups ?? []) collectGroupTasks(sg, out);
+                                        return out;
+                                    };
+                                    const itemSortable = (it: RenderItem) =>
+                                        it.type === 'task' ? it.task : newestSortable(collectGroupTasks(it.group));
+                                    items.sort((a, b) => compareTasksForDisplay(itemSortable(a), itemSortable(b), taskSortBy));
 
                                     const sharedProps = {
                                         selectedTaskId, lastSelectedTaskId, waitingInputTaskIds, unreadTaskIds,
@@ -2482,16 +2493,28 @@ export function WorkspacePanel({
     // Workspace manager modal state
     const [showWorkspaceManager, setShowWorkspaceManager] = useState(false);
 
-    // Batch delete: track which pending requests are checked (approved) by the user
+    // Batch delete: track which pending requests are checked (approved) by the user.
     const [checkedDeleteIds, setCheckedDeleteIds] = useState<Set<string>>(new Set());
-    // When new requests arrive, auto-check them
-    const prevDeleteCountRef = useRef(0);
-    if (pendingDeleteRequests.length > prevDeleteCountRef.current) {
-        const newChecked = new Set(checkedDeleteIds);
-        pendingDeleteRequests.forEach(r => newChecked.add(r.requestId));
-        setCheckedDeleteIds(newChecked);
-    }
-    prevDeleteCountRef.current = pendingDeleteRequests.length;
+    // Auto-check each request once, on arrival. Keyed on requestId rather than on
+    // the list length: keying on length re-checked *every* pending request whenever
+    // a new one arrived, silently re-arming a task the user had deliberately
+    // unchecked to keep.
+    const autoCheckedRef = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        const pendingIds = new Set(pendingDeleteRequests.map(r => r.requestId));
+        // Forget resolved requests so a recycled id would be treated as new again.
+        for (const id of autoCheckedRef.current) {
+            if (!pendingIds.has(id)) autoCheckedRef.current.delete(id);
+        }
+        const unseen = pendingDeleteRequests.filter(r => !autoCheckedRef.current.has(r.requestId));
+        if (unseen.length === 0) return;
+        unseen.forEach(r => autoCheckedRef.current.add(r.requestId));
+        setCheckedDeleteIds(prev => {
+            const next = new Set(prev);
+            unseen.forEach(r => next.add(r.requestId));
+            return next;
+        });
+    }, [pendingDeleteRequests]);
 
     // Close menu when clicking outside (capture phase so stopPropagation on child elements doesn't block it)
     // or when the panel scrolls (menu is position:fixed and would detach from its trigger).
@@ -2622,23 +2645,9 @@ export function WorkspacePanel({
     // Get task IDs that have active questions
     const waitingInputTaskIds = new Set(waitingInputNotifications.keys());
 
-    // Sort tasks by user preference
+    // Sort tasks by user preference (shared canonical comparator).
     const sortTasks = (taskList: Task[]): Task[] => {
-        return taskList.sort((a, b) => {
-            if (a.order !== undefined && b.order !== undefined) return a.order - b.order;
-            if (a.order !== undefined) return -1;
-            if (b.order !== undefined) return 1;
-            switch (taskSortBy) {
-                case 'last-modified': {
-                    const timeA = new Date(a.lastActivity || a.createdAt).getTime();
-                    const timeB = new Date(b.lastActivity || b.createdAt).getTime();
-                    return timeB - timeA;
-                }
-                case 'date-created':
-                default:
-                    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-            }
-        });
+        return taskList.sort((a, b) => compareTasksForDisplay(a, b, taskSortBy));
     };
 
     // Direct tasks for a workspace (excludes tasks in child worktrees)
@@ -2947,7 +2956,7 @@ export function WorkspacePanel({
                     onClose={() => setShowWorkspaceManager(false)}
                     onCreateWorkspace={onCreateWorkspace}
                     onDeleteWorkspace={onDeleteWorkspace}
-                    onReorderWorkspaces={onReorderWorkspaces}
+                    onSetWorkspaceOrder={onSetWorkspaceOrder}
                 />
             )}
 

@@ -99,6 +99,41 @@ let calls: RecordedCall[] = [];
 type ConfigShape = Record<string, unknown>;
 
 /**
+ * `GET /api/backend/status` now serves the agent REGISTRY's display info, and
+ * the Settings agent list renders from it — the component holds no hardcoded
+ * agent names. Tests override this to prove that.
+ */
+const AGENT_CLAUDE = {
+    id: 'claude-code',
+    name: 'Claude Code',
+    shortLabel: 'claude',
+    description: "Anthropic's official CLI tool for Claude",
+    installUrl: 'https://claude.ai/code',
+    colour: '#d97757',
+};
+const AGENT_OPENCODE = {
+    id: 'opencode',
+    name: 'OpenCode',
+    shortLabel: 'opencode',
+    description: 'Open-source AI coding agent by SST',
+    installUrl: 'https://opencode.ai',
+    colour: '#5b8def',
+};
+
+const DEFAULT_BACKEND_STATUS = {
+    backend: 'claude-code',
+    installed: true,
+    version: '1.0.0',
+    availableBackends: [AGENT_CLAUDE, AGENT_OPENCODE],
+    statuses: {
+        'claude-code': { installed: true, version: '1.0.0' },
+        'opencode': { installed: false, error: 'OpenCode is not installed.' },
+    },
+};
+
+let backendStatusBody: unknown = DEFAULT_BACKEND_STATUS;
+
+/**
  * Route every request the component makes by pathname. Anything unrecognised
  * resolves to `{}` so a stray call can never hang or hit the network.
  */
@@ -125,7 +160,7 @@ function installFetch(config: ConfigShape = {}, overrides: Record<string, unknow
         if (path === '/api/config') return ok({ success: true });
         if (path === '/api/plugins') return ok({ success: true, plugins: [] });
         if (path === '/api/backend/status') {
-            return ok({ backend: 'claude-code', installed: true, version: '1.0.0', availableBackends: ['claude-code'] });
+            return ok(backendStatusBody);
         }
         return ok({});
     });
@@ -188,6 +223,7 @@ const flush = () => act(async () => { await Promise.resolve(); await Promise.res
 
 beforeEach(() => {
     calls = [];
+    backendStatusBody = DEFAULT_BACKEND_STATUS;
     localStorage.clear();
     vi.clearAllMocks();
     capabilities.hasBrowserNotifications.mockReturnValue(true);
@@ -294,6 +330,119 @@ describe('SettingsMenu — panel expansion', () => {
         await flush();
 
         expect(calls.filter(c => c.path === '/api/backend/status').length).toBeGreaterThan(before);
+    });
+});
+
+// ---------------------------------------------------------------------------
+/**
+ * The AI Backend list is rendered from the agent REGISTRY (served as
+ * `availableBackends`), not from markup. That is the whole point of the
+ * adapter seam: registering an adapter must be enough to make an agent
+ * selectable, with no frontend edit.
+ */
+describe('SettingsMenu — AI Backend list renders from the registry', () => {
+    const backendRadios = () =>
+        Array.from(document.querySelectorAll<HTMLInputElement>('input[name="backend"]'));
+
+    it('renders one radio per registered agent, using the server-supplied names', async () => {
+        installFetch();
+        await renderSettings();
+        await expandPanel('AI Backend');
+        await flush();
+
+        expect(backendRadios().map(r => r.value)).toEqual(['claude-code', 'opencode']);
+        expect(screen.getByText('Claude Code')).toBeInTheDocument();
+        expect(screen.getByText('OpenCode')).toBeInTheDocument();
+        expect(screen.getByText("Anthropic's official CLI tool for Claude")).toBeInTheDocument();
+    });
+
+    it('checks the configured agent and no other', async () => {
+        installFetch({ backend: 'opencode' });
+        await renderSettings();
+        await expandPanel('AI Backend');
+        await flush();
+
+        const checked = backendRadios().filter(r => r.checked).map(r => r.value);
+        expect(checked).toEqual(['opencode']);
+    });
+
+    it('surfaces per-agent install state from `statuses`', async () => {
+        installFetch();
+        await renderSettings();
+        await expandPanel('AI Backend');
+        await flush();
+
+        // Only the MISSING agent is annotated — the installed case is already
+        // covered by the status line for the selected agent.
+        expect(screen.getAllByText('Not installed')).toHaveLength(1);
+    });
+
+    it('selecting an agent persists it via PUT /api/config', async () => {
+        installFetch();
+        await renderSettings();
+        await expandPanel('AI Backend');
+        await flush();
+
+        fireEvent.click(backendRadios().find(r => r.value === 'opencode')!);
+        await flush();
+
+        expect(putBodies()).toContainEqual({ backend: 'opencode' });
+    });
+
+    /**
+     * THE EXTENSIBILITY PROOF. A third agent appears in `availableBackends`
+     * and the UI grows a third radio with zero frontend changes — which is
+     * exactly how the future Codex adapter will show up here.
+     */
+    it('renders a third agent the frontend has never heard of', async () => {
+        backendStatusBody = {
+            backend: 'claude-code',
+            installed: true,
+            version: '1.0.0',
+            availableBackends: [
+                AGENT_CLAUDE,
+                AGENT_OPENCODE,
+                {
+                    id: 'codex',
+                    name: 'GPT Codex',
+                    shortLabel: 'gpt',
+                    description: 'OpenAI coding agent',
+                    installUrl: 'https://example.invalid',
+                    colour: '#10a37f',
+                },
+            ],
+            statuses: {
+                'claude-code': { installed: true, version: '1.0.0' },
+                'opencode': { installed: true, version: '0.4.2' },
+                'codex': { installed: true, version: '0.153.4' },
+            },
+        };
+        installFetch();
+        await renderSettings();
+        await expandPanel('AI Backend');
+        await flush();
+
+        expect(backendRadios().map(r => r.value)).toEqual(['claude-code', 'opencode', 'codex']);
+        expect(screen.getByText('GPT Codex')).toBeInTheDocument();
+        expect(screen.getByText('OpenAI coding agent')).toBeInTheDocument();
+
+        fireEvent.click(backendRadios().find(r => r.value === 'codex')!);
+        await flush();
+        expect(putBodies()).toContainEqual({ backend: 'codex' });
+    });
+
+    it('shows a loading placeholder instead of a stale hardcoded list', async () => {
+        // An older server that still returns `string[]` supplies no display
+        // info, so there is nothing to render — better an honest placeholder
+        // than a list the frontend invented.
+        backendStatusBody = { backend: 'claude-code', installed: true, availableBackends: undefined };
+        installFetch();
+        await renderSettings();
+        await expandPanel('AI Backend');
+        await flush();
+
+        expect(backendRadios()).toHaveLength(0);
+        expect(screen.getByText('Loading available agents...')).toBeInTheDocument();
     });
 });
 

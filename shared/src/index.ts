@@ -25,8 +25,120 @@ export interface FileDiff {
     diff: string;  // unified diff format
 }
 
-// Which backend created/manages a task
-export type BackendType = 'claude-code' | 'opencode';
+// ---------------------------------------------------------------------------
+// Coding agents
+//
+// The SINGLE source of truth for "which coding agents exist". Everything that
+// used to hand-write `'claude-code' | 'opencode'` (six places, none deriving
+// from each other) derives from AGENT_IDS instead. Adding an agent is one
+// entry here plus one adapter file under backend/src/agents/adapters/.
+// ---------------------------------------------------------------------------
+
+/** Every coding agent Claudia knows how to run, in display order. */
+export const AGENT_IDS = ['claude-code', 'opencode'] as const;
+
+/**
+ * Which agent created/manages a task.
+ * Historical name — kept so the ~200 existing references keep compiling.
+ */
+export type BackendType = typeof AGENT_IDS[number];
+
+/** Preferred name going forward. Identical to BackendType. */
+export type AgentId = BackendType;
+
+/** True if an arbitrary string names a registered agent (narrowing guard). */
+export function isAgentId(value: unknown): value is AgentId {
+    return typeof value === 'string' && (AGENT_IDS as readonly string[]).includes(value);
+}
+
+/**
+ * How an agent presents itself in the UI. Served by `/api/backend/status` so
+ * the frontend renders the agent list from data instead of hardcoded markup.
+ */
+export interface AgentDisplayInfo {
+    id: AgentId;
+    /** Settings display name, e.g. "Claude Code". */
+    name: string;
+    /**
+     * Task-row badge text. Short and lowercase — `claude`, `opencode`, `gpt`.
+     * A glance-level identifier in a dense sidebar, never a product name.
+     */
+    shortLabel: string;
+    description: string;
+    installUrl: string;
+    /** Badge/accent colour, CSS hex. */
+    colour: string;
+}
+
+/**
+ * Per-agent feature switches. These replace the `=== 'claude-code'` string
+ * checks that used to silently switch subsystems off for any other agent.
+ *
+ * EVERY FIELD IS REQUIRED ON PURPOSE: an adapter that forgets one is a
+ * compile error, not a subsystem that quietly does nothing at runtime.
+ */
+export interface AgentCapabilities {
+    /** Engine polls PTY output length/tail to infer busy/idle. */
+    ptyStatePolling: boolean;
+    /** Agent writes a session transcript file the engine can watch/parse. */
+    sessionFileCapture: boolean;
+    /** Idle tasks are reaped after the inactivity window. */
+    idleReaper: boolean;
+    /** Runaway-memory guard watches this agent's processes. */
+    memoryGuard: boolean;
+    /** Agent can prompt a human mid-turn (permission dialogs). */
+    interactiveApprovals: boolean;
+    /** Resume refuses unless the session transcript still exists on disk. */
+    resumeRequiresSessionFile: boolean;
+    /** CLI accepts a system-prompt flag (Codex does not). */
+    supportsSystemPromptFlag: boolean;
+    /** How the engine talks to the process. */
+    transport: 'pty' | 'json-stream';
+    /** Typical resident footprint, MB — tunes the memory guard per agent. */
+    expectedMemoryMb: number;
+}
+
+/**
+ * Normalised event produced by an agent's transport.
+ *
+ * DESIGN NOTE: this is intended to become the `conversation:event` WebSocket
+ * payload (#136), so the structured-transcript view and a future JSON-stream
+ * transport share one schema rather than growing two incompatible ones.
+ * Deliberately minimal for now — nothing consumes it yet.
+ */
+export type AgentEvent =
+    | { type: 'output'; data: string }
+    | { type: 'state'; state: TaskState }
+    | { type: 'session'; sessionId: string }
+    | {
+          type: 'tokens';
+          usage: {
+              inputTokens?: number;
+              outputTokens?: number;
+              cacheCreationTokens?: number;
+              cacheReadTokens?: number;
+          };
+      }
+    | { type: 'exit'; code: number };
+
+/** Installation/liveness probe result for one agent. */
+export interface AgentDetectResult {
+    installed: boolean;
+    version?: string;
+    error?: string;
+    /** OpenCode-style agents that also run a background server. */
+    serverRunning?: boolean;
+}
+
+/** Response body of `GET /api/backend/status`. */
+export interface BackendStatusResponse extends AgentDetectResult {
+    /** The currently configured agent. */
+    backend: AgentId;
+    /** Every registered agent's display info, in registry order. */
+    availableBackends: AgentDisplayInfo[];
+    /** Detection result for every registered agent, keyed by id. */
+    statuses: Record<AgentId, AgentDetectResult>;
+}
 
 export interface Task {
     id: string;
@@ -244,6 +356,9 @@ export type WSMessageType =
     | 'task:deleteRejected'
     | 'tasks:updated'
     | 'task:renamed'
+    // Multi-client viewer model (P0 §5.6 "Multi-client viewer model")
+    | 'task:focus'
+    | 'task:viewers'
     // Archived tasks
     | 'task:archived'
     | 'task:archived:list'
@@ -324,6 +439,36 @@ export interface WSMessage {
 }
 
 /**
+ * Inbound: the sending client declares that `taskId` is the task it is
+ * currently displaying. The most recent client to focus a task becomes its
+ * OWNER, and only the owner's `task:resize` frames are applied to the PTY.
+ */
+export interface TaskFocusPayload {
+    taskId: string;
+}
+
+/**
+ * Outbound: broadcast whenever a task's viewer set or owner changes (focus,
+ * an owner resize that changed the size, or a client disconnecting).
+ *
+ * `count` is the number of CONNECTED CLIENTS CURRENTLY FOCUSED ON THIS TASK —
+ * not the number of sockets connected to the server. The UI renders exactly one
+ * terminal at a time, so "focused" and "viewing" are the same thing, which makes
+ * this both the useful definition and one we can compute exactly.
+ *
+ * `cols`/`rows` are the OWNER's terminal dimensions, i.e. the size the PTY is
+ * actually running at. Non-owner clients render at these dimensions inside
+ * their own viewport instead of reflowing to their local width.
+ */
+export interface TaskViewersPayload {
+    taskId: string;
+    count: number;
+    ownerClientId: string | null;
+    cols?: number;
+    rows?: number;
+}
+
+/**
  * Error payload structure for WebSocket error messages
  */
 export interface WSErrorPayload {
@@ -377,4 +522,9 @@ export interface UsageDashboardData {
     taskCount: number;
     lastUpdated: string;
 }
-export * from './terminal';
+// NOTE: the .js extension is REQUIRED. This package is ESM ("type": "module")
+// and Node's ESM resolver does not add extensions, so an extensionless
+// specifier crashes `node backend/dist/index.js` with ERR_MODULE_NOT_FOUND —
+// i.e. the published `claudia` CLI and the packaged Electron app. `tsx watch`
+// resolves it fine, which is why the dev loop never caught it.
+export * from './terminal.js';

@@ -7,6 +7,8 @@
 import { describe, it, expect } from 'vitest';
 import { createBackend, ClaudeCodeBackend, OpenCodeBackend, BACKEND_INFO } from '../backends/index.js';
 import type { BackendType, CodeBackend } from '../backends/index.js';
+import { AGENT_IDS } from '@claudia/shared';
+import { listAgentIds } from '../agents/index.js';
 
 const REQUIRED_METHODS = [
     'checkInstalled', 'initialize', 'shutdown',
@@ -36,6 +38,21 @@ describe('createBackend()', () => {
     it('forwards the history directory to the instance', () => {
         const b = createBackend('opencode', undefined, '/tmp/does-not-need-to-exist');
         expect((b as unknown as { historyDir: string }).historyDir).toBe('/tmp/does-not-need-to-exist');
+    });
+
+    it('BACKEND_INFO is derived from the agent registry, not hand-written', () => {
+        // One of the six copies of the agent list that used to drift
+        // independently. It now IS the registry's display info.
+        expect(Object.keys(BACKEND_INFO)).toEqual(listAgentIds());
+        expect(Object.keys(BACKEND_INFO)).toEqual([...AGENT_IDS]);
+        for (const [id, info] of Object.entries(BACKEND_INFO)) {
+            expect(info.id).toBe(id);
+            expect(info.name.length).toBeGreaterThan(0);
+            expect(info.description.length).toBeGreaterThan(0);
+            expect(info.installUrl).toMatch(/^https:\/\//);
+            // The task-row badge label rides along with the Settings name.
+            expect(info.shortLabel).toBe(info.shortLabel.toLowerCase());
+        }
     });
 
     it('every registered BackendType builds something that satisfies the contract', () => {

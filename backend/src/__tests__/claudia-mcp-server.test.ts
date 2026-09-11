@@ -50,6 +50,23 @@ async function callTool(name: string, args: Record<string, unknown> = {}) {
     return { text, json, isError: res.isError === true };
 }
 
+
+/** Stand in for the frontend: answer every delete request with `reply`. */
+async function openFrontend(reply: (req: { taskId: string; requestId: string }) => any) {
+    const frontend = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((res, rej) => {
+        frontend.on('open', () => res());
+        frontend.on('error', rej);
+    });
+    frontend.on('message', (data: Buffer) => {
+        let msg: any;
+        try { msg = JSON.parse(data.toString()); } catch { return; }
+        if (msg.type !== 'task:deleteRequest') return;
+        for (const r of msg.payload.requests ?? [msg.payload]) frontend.send(JSON.stringify(reply(r)));
+    });
+    return frontend;
+}
+
 beforeAll(async () => {
     // NOT os.tmpdir(): macOS tmp lives under /var, which validateWorkspacePath
     // blocklists as a system path — workspace ops on temp repos would be
@@ -173,7 +190,7 @@ describe('tool schema integrity', () => {
         'claudia_create_task', 'claudia_create_tasks', 'claudia_wait_for_task',
         'claudia_send_input', 'claudia_continue_task',
         'claudia_stop_task', 'claudia_stop_all_tasks', 'claudia_rename_task',
-        'claudia_delete_task', 'claudia_cron_create', 'claudia_cron_list',
+        'claudia_delete_tasks', 'claudia_cron_create', 'claudia_cron_list',
         'claudia_cron_delete', 'claudia_cron_pause',
         // The Jira surface is registered unconditionally by the same server; the
         // backend's /api/jira/* routes are what enforce the enabled/configured
@@ -215,7 +232,7 @@ describe('tool schema integrity', () => {
             claudia_stop_task: ['taskId'],
             claudia_stop_all_tasks: [],
             claudia_rename_task: ['taskId', 'displayName'],
-            claudia_delete_task: ['taskId'],
+            claudia_delete_tasks: ['taskIds'],
             claudia_cron_create: ['taskId', 'prompt', 'cronExpression'],
             claudia_cron_list: [],
             claudia_cron_delete: ['cronId'],
@@ -462,38 +479,38 @@ describe('claudia_rename_task guardrail', () => {
     }, 20000);
 });
 
-describe('claudia_delete_task guardrail', () => {
+describe('claudia_delete_tasks', () => {
     it('refuses to delete the session that is making the call', async () => {
-        const { json } = await callTool('claudia_delete_task', { taskId: SELF_TASK });
+        const { json } = await callTool('claudia_delete_tasks', { taskIds: [SELF_TASK] });
         expect(json.success).toBe(false);
         expect(json.message).toMatch(/currently running session/i);
+        expect(json.skipped).toEqual([SELF_TASK]);
     });
 
+    it('skips the calling session but still processes the other ids', async () => {
+        const frontend = await openFrontend(msg => ({
+            type: 'task:deleteRejected',
+            payload: { taskId: msg.taskId, requestId: msg.requestId },
+        }));
+        const { json } = await callTool('claudia_delete_tasks', { taskIds: [SELF_TASK, 'task-wt-1'] });
+        frontend.close();
+        expect(json.skipped).toEqual([SELF_TASK]);
+        expect(json.rejected).toEqual(['task-wt-1']);
+    }, 30000);
+
     it('reports a clean failure for an unknown task', async () => {
-        const { json } = await callTool('claudia_delete_task', { taskId: 'ghost-task' });
+        const { json } = await callTool('claudia_delete_tasks', { taskIds: ['ghost-task'] });
         expect(json.success).toBe(false);
+        expect(json.notFound).toEqual(['ghost-task']);
         expect(json.message).toMatch(/not found/i);
     });
 
     it('does NOT delete without user approval — a rejection leaves the task alive', async () => {
-        // Stand in for the frontend: wait for the confirmation broadcast, then deny it.
-        const frontend = new WebSocket(`ws://127.0.0.1:${port}`);
-        await new Promise<void>((res, rej) => {
-            frontend.on('open', () => res());
-            frontend.on('error', rej);
-        });
-        frontend.on('message', (data: Buffer) => {
-            let msg: any;
-            try { msg = JSON.parse(data.toString()); } catch { return; }
-            if (msg.type === 'task:deleteRequest') {
-                frontend.send(JSON.stringify({
-                    type: 'task:deleteRejected',
-                    payload: { taskId: msg.payload.taskId, requestId: msg.payload.requestId },
-                }));
-            }
-        });
-
-        const { json } = await callTool('claudia_delete_task', { taskId: 'task-wt-1' });
+        const frontend = await openFrontend(msg => ({
+            type: 'task:deleteRejected',
+            payload: { taskId: msg.taskId, requestId: msg.requestId },
+        }));
+        const { json } = await callTool('claudia_delete_tasks', { taskIds: ['task-wt-1'] });
         frontend.close();
 
         expect(json.success).toBe(false);
@@ -503,11 +520,77 @@ describe('claudia_delete_task guardrail', () => {
         const list = await callTool('claudia_list_tasks');
         expect(list.json.map((t: any) => t.id)).toContain('task-wt-1');
     }, 30000);
+
+    it('asks ONCE for many tasks — a single broadcast carrying every request', async () => {
+        // This is the whole point of the batch tool: N ids must not produce N
+        // separate confirmation prompts racing each other into the UI.
+        const broadcasts: any[] = [];
+        const frontend = new WebSocket(`ws://127.0.0.1:${port}`);
+        await new Promise<void>((res, rej) => {
+            frontend.on('open', () => res());
+            frontend.on('error', rej);
+        });
+        frontend.on('message', (data: Buffer) => {
+            let msg: any;
+            try { msg = JSON.parse(data.toString()); } catch { return; }
+            if (msg.type !== 'task:deleteRequest') return;
+            broadcasts.push(msg.payload);
+            for (const r of msg.payload.requests) {
+                frontend.send(JSON.stringify({
+                    type: 'task:deleteRejected',
+                    payload: { taskId: r.taskId, requestId: r.requestId },
+                }));
+            }
+        });
+
+        await callTool('claudia_delete_tasks', { taskIds: ['task-wt-1', 'task-root-1'] });
+        frontend.close();
+
+        expect(broadcasts).toHaveLength(1);
+        expect(broadcasts[0].requests).toHaveLength(2);
+        expect(broadcasts[0].requests.map((r: any) => r.taskId).sort())
+            .toEqual(['task-root-1', 'task-wt-1']);
+        // Every request carries its own id so the user can approve them individually.
+        expect(new Set(broadcasts[0].requests.map((r: any) => r.requestId)).size).toBe(2);
+        // Legacy single-task fields remain on the payload for older clients.
+        expect(broadcasts[0].taskId).toBe(broadcasts[0].requests[0].taskId);
+    }, 30000);
+
+    it('honours a partial approval — approved dies, unapproved survives', async () => {
+        const frontend = new WebSocket(`ws://127.0.0.1:${port}`);
+        await new Promise<void>((res, rej) => {
+            frontend.on('open', () => res());
+            frontend.on('error', rej);
+        });
+        frontend.on('message', (data: Buffer) => {
+            let msg: any;
+            try { msg = JSON.parse(data.toString()); } catch { return; }
+            if (msg.type !== 'task:deleteRequest') return;
+            for (const r of msg.payload.requests) {
+                if (r.taskId === 'task-wt-1') {
+                    frontend.send(JSON.stringify({ type: 'task:archive', payload: { taskId: r.taskId } }));
+                } else {
+                    frontend.send(JSON.stringify({
+                        type: 'task:deleteRejected',
+                        payload: { taskId: r.taskId, requestId: r.requestId },
+                    }));
+                }
+            }
+        });
+
+        const { json } = await callTool('claudia_delete_tasks', { taskIds: ['task-wt-1', 'task-root-1'] });
+        frontend.close();
+
+        expect(json.deleted).toEqual(['task-wt-1']);
+        expect(json.rejected).toEqual(['task-root-1']);
+
+        const list = await callTool('claudia_list_tasks');
+        const ids = list.json.map((t: any) => t.id);
+        expect(ids).not.toContain('task-wt-1');
+        expect(ids).toContain('task-root-1');
+    }, 30000);
 });
 
-// ============================================================================
-// Cron tools
-// ============================================================================
 describe('cron tools', () => {
     it('rejects a malformed cron expression instead of scheduling it', async () => {
         const { text, json } = await callTool('claudia_cron_create', {

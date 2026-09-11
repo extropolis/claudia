@@ -1,29 +1,35 @@
 {
     "generatedBy": "scripts/coverage.mjs",
     "total": {
-        "lines": 29.51,
-        "statements": 29.01,
-        "branches": 28.03,
-        "functions": 22.13
+        "lines": 76.31,
+        "statements": 75.77,
+        "branches": 73.34,
+        "functions": 75.67
     },
     "packages": {
         "backend": {
-            "lines": 36.68,
-            "statements": 36.68,
-            "branches": 73.39,
-            "functions": 61.44
+            "lines": 77.33,
+            "statements": 77.33,
+            "branches": 81.33,
+            "functions": 92.46
         },
         "frontend": {
-            "lines": 7.56,
-            "statements": 7.35,
-            "branches": 5.19,
-            "functions": 7.17
+            "lines": 72.48,
+            "statements": 70.6,
+            "branches": 63.21,
+            "functions": 67.7
         },
         "shared": {
             "lines": 73.08,
             "statements": 73.08,
             "branches": 100,
             "functions": 100
+        },
+        "electron": {
+            "lines": 91.56,
+            "statements": 91.56,
+            "branches": 91.25,
+            "functions": 95
         }
     }
 }
