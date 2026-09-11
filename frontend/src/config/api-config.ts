@@ -9,6 +9,20 @@ import { PORTS } from '@claudia/shared';
 import { getAuthToken } from './auth-client';
 
 /**
+ * Backend port used for web (non-Electron, non-tunnel) access.
+ *
+ * Defaults to the shared PORTS.BACKEND (4001). Can be overridden at build/dev
+ * time with `VITE_CLAUDIA_BACKEND_PORT` so a sandboxed instance (E2E harness,
+ * a second checkout, a demo build) talks to its own backend instead of the
+ * developer's live one.
+ */
+export function getBackendPort(): number {
+    const override = import.meta.env.VITE_CLAUDIA_BACKEND_PORT;
+    const parsed = override ? parseInt(String(override), 10) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : PORTS.BACKEND;
+}
+
+/**
  * True when the page was loaded through a tunnel proxy (ngrok, localtunnel, etc.)
  *
  * ROUTING ONLY. This decides whether the API lives on the page's own origin
@@ -53,7 +67,7 @@ export function getApiBaseUrl(): string {
     }
 
     // Web environment - use hostname with configured port
-    return `http://${window.location.hostname}:${PORTS.BACKEND}`;
+    return `http://${window.location.hostname}:${getBackendPort()}`;
 }
 
 /**
@@ -79,7 +93,7 @@ export function getWebSocketUrl(): string {
     }
 
     // Web environment - use hostname with configured port
-    return withWsToken(`ws://${window.location.hostname}:${PORTS.BACKEND}`);
+    return withWsToken(`ws://${window.location.hostname}:${getBackendPort()}`);
 }
 
 /**

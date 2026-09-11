@@ -154,12 +154,12 @@ export function FileContentModal({ workspacePath, filePath, isDiff = false, stag
     // floats above everything including the WorkspacePanel.
     return createPortal(
         <div className="file-content-modal-backdrop" onClick={handleBackdropClick}>
-            <div className="file-content-modal">
+            <div className="file-content-modal" data-testid="file-content-modal">
                 {/* Header */}
                 <div className="file-content-modal-header">
                     <div className="file-content-modal-title">
                         {isDiff ? <GitBranch size={16} /> : <File size={16} />}
-                        <span className="file-content-modal-path">{filePath}</span>
+                        <span className="file-content-modal-path" data-testid="file-content-path">{filePath}</span>
                         {isDiff && staged && <span className="file-content-badge staged">Staged</span>}
                         {isDiff && !staged && <span className="file-content-badge">Changes</span>}
                         {isEditing && <span className="file-content-badge editing">Editing</span>}

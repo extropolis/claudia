@@ -1,0 +1,22 @@
+{
+    // Typecheck for the Playwright browser E2E suite (playwright.config.ts +
+    // e2e/). It has no home in the backend/frontend/shared projects: it is Node
+    // code that imports @playwright/test and the workspace's shared package.
+    //
+    //   npx tsc --noEmit -p tsconfig.e2e.json
+    "compilerOptions": {
+        "target": "ES2022",
+        "lib": ["ES2022", "DOM"],
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "types": ["node"],
+        "strict": true,
+        "noEmit": true,
+        "skipLibCheck": true,
+        "esModuleInterop": true,
+        "resolveJsonModule": true,
+        "forceConsistentCasingInFileNames": true,
+        "isolatedModules": true
+    },
+    "include": ["playwright.config.ts", "e2e/**/*.ts"]
+}

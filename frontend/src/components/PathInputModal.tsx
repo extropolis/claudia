@@ -103,6 +103,7 @@ export function PathInputModal({ onSubmit, onCancel, recentWorkspaces = [], onRe
                             <div className="path-input-row">
                                 <input
                                     id="path-input"
+                                    data-testid="path-input"
                                     type="text"
                                     value={path}
                                     onChange={(e) => setPath(e.target.value)}
@@ -127,7 +128,7 @@ export function PathInputModal({ onSubmit, onCancel, recentWorkspaces = [], onRe
                             <button type="button" onClick={onCancel} className="btn-secondary">
                                 Cancel
                             </button>
-                            <button type="submit" disabled={!path.trim()} className="btn-primary">
+                            <button type="submit" data-testid="path-submit" disabled={!path.trim()} className="btn-primary">
                                 Add Workspace
                             </button>
                         </div>

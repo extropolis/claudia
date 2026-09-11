@@ -1,0 +1,310 @@
+/**
+ * E2E harness environment.
+ *
+ * Single source of truth for the sandboxed ports and directories the browser
+ * suite runs against. Everything here is computed at Playwright *config load*
+ * time (see playwright.config.ts) so the isolated state exists before any
+ * server or test starts, whatever order Playwright chooses internally.
+ *
+ * ── Port safety ────────────────────────────────────────────────────────────
+ * The developer's live Claudia runs on 4001 (backend) / 5173 (frontend). The
+ * E2E stack must NEVER touch those. `assertSafePort` hard-fails if anything
+ * ever tries, and `assertPortFree` fails loudly rather than silently attaching
+ * to somebody else's server.
+ */
+import {
+    chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync,
+} from 'fs';
+import { execFileSync } from 'child_process';
+import { homedir } from 'os';
+import { delimiter, dirname, join, resolve } from 'path';
+import { fileURLToPath } from 'url';
+// The backend's own token module, so the harness reads/mints the credential
+// exactly as the server does — same file, same format, same validation rules.
+import { getAuthToken } from '../../backend/src/auth-token.js';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+export const REPO_ROOT = resolve(HERE, '..', '..');
+
+/** Ports the developer's real dev servers own. Touching these is a hard error. */
+const FORBIDDEN_PORTS = [4001, 5173];
+
+function readPort(envVar: string, fallback: number): number {
+    const raw = process.env[envVar];
+    const n = raw ? parseInt(raw, 10) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+export const BACKEND_PORT = readPort('CLAUDIA_E2E_BACKEND_PORT', 4801);
+export const FRONTEND_PORT = readPort('CLAUDIA_E2E_FRONTEND_PORT', 5801);
+
+/**
+ * Frontend build output the suite serves, relative to `frontend/`.
+ *
+ * NOT `dist`. That path is a real production artifact — server.ts serves it on
+ * the tunnel/mobile route and electron/main.ts loads it in a packaged app — and
+ * the E2E bundle has the sandbox backend port compiled into it. Writing over
+ * `frontend/dist` would leave the developer's tunnel pointing at a dead port,
+ * silently, because dist/ is gitignored and nothing would show the damage.
+ */
+export const FRONTEND_DIST = 'dist-e2e';
+
+export const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
+export const FRONTEND_URL = `http://127.0.0.1:${FRONTEND_PORT}`;
+
+/**
+ * Root of all E2E scratch state.
+ *
+ * Deliberately under $HOME and NOT os.tmpdir(): on macOS tmpdir resolves under
+ * /var, which `validateWorkspacePath` blocklists — workspace creation would be
+ * rejected by the backend and every workspace test would fail.
+ *
+ * Keyed by the backend port so the CLAUDIA_E2E_* overrides actually buy
+ * isolation. prepareHarness() wipes this tree at config load; with one fixed
+ * path, a second run started on different ports — the documented way to run two
+ * suites at once, and routine in a repo whose own orchestrator drives many
+ * worktrees in parallel — would delete the first run's state dir out from under
+ * its live backend. On the default port this is `~/.claudia-e2e-4801`.
+ */
+export const RUN_ROOT = join(homedir(), `.claudia-e2e-${BACKEND_PORT}`);
+
+export const STATE_DIR = join(RUN_ROOT, 'state');   // config.json / tasks.json / workspace-config.json
+export const FAKE_HOME = join(RUN_ROOT, 'home');    // backend's $HOME → ~/.claude session files land here
+export const BIN_DIR = join(RUN_ROOT, 'bin');       // fake `claude` goes on PATH from here
+export const FAKE_DIR = join(RUN_ROOT, 'fake');     // fake CLI writes args.log / input.log / alive
+export const WORKSPACES_DIR = join(RUN_ROOT, 'workspaces'); // temp git repos created by tests
+
+/**
+ * Desktop viewport every spec starts from. Claudia renders a mobile layout at
+ * <= 768px with no main panel, terminal or file explorer; the resize spec also
+ * assumes exactly this size as its baseline.
+ */
+export const VIEWPORT = { width: 1440, height: 900 };
+
+/** Session id the fake CLI reports, so session-capture assertions are deterministic. */
+export const FAKE_SESSION_ID = 'e2e0b0b0-1111-2222-3333-444455556666';
+
+export function assertSafePort(port: number, label: string): void {
+    if (FORBIDDEN_PORTS.includes(port)) {
+        throw new Error(
+            `[e2e] REFUSING TO START: ${label} port ${port} belongs to the developer's live dev server. ` +
+            `Set CLAUDIA_E2E_BACKEND_PORT / CLAUDIA_E2E_FRONTEND_PORT to something else.`,
+        );
+    }
+}
+
+/**
+ * Fail loudly if `port` already has a listener. Better a clear error than
+ * silently running the suite against a stranger's server (or, worse, the
+ * developer's).
+ */
+export function assertPortFree(port: number, label: string): void {
+    if (process.platform === 'win32') return; // lsof unavailable; webServer's own check covers us
+    let out = '';
+    try {
+        out = execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], {
+            encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim();
+    } catch {
+        return; // non-zero exit from lsof means "nothing listening"
+    }
+    if (out) {
+        throw new Error(
+            `[e2e] Port ${port} (${label}) is already in use by pid(s) ${out.split('\n').join(', ')}. ` +
+            `Free it or pick another port; the suite will not attach to an existing server.`,
+        );
+    }
+}
+
+/**
+ * Wipe and recreate the isolated state tree, and install the fake Claude CLI.
+ *
+ * Called once at config load. The wipe is what makes "run the suite twice in a
+ * row" deterministic — no workspace, task, or config leaks between runs.
+ */
+export function prepareHarness(): void {
+    assertSafePort(BACKEND_PORT, 'backend');
+    assertSafePort(FRONTEND_PORT, 'frontend');
+
+    rmSync(RUN_ROOT, { recursive: true, force: true });
+    for (const d of [STATE_DIR, FAKE_HOME, BIN_DIR, FAKE_DIR, WORKSPACES_DIR]) {
+        mkdirSync(d, { recursive: true });
+    }
+
+    // Seed empty state so the backend starts from a known-clean slate rather
+    // than whatever shape a previous schema left behind.
+    writeFileSync(join(STATE_DIR, 'tasks.json'), JSON.stringify({ tasks: [], archivedTasks: [] }));
+    writeFileSync(join(STATE_DIR, 'workspace-config.json'), JSON.stringify({
+        schemaVersion: 1,
+        data: { workspaces: [], activeWorkspaceId: null, recentWorkspaces: [] },
+    }));
+    // On a genuinely fresh install the app auto-opens Settings on the AI Core
+    // panel (App.tsx: aiCoreConfigured === false). That modal covers the whole
+    // UI and would block every flow. Seeding dummy credentials marks AI Core as
+    // "configured" so the suite lands on the normal, post-onboarding app. The
+    // values are never used — the Anthropic backend is never contacted, because
+    // the only CLI on PATH is the fake one.
+    writeFileSync(join(STATE_DIR, 'config.json'), JSON.stringify({
+        schemaVersion: 1,
+        data: {
+            aiCoreCredentials: {
+                clientId: 'e2e-not-a-real-client',
+                clientSecret: 'e2e-not-a-real-secret',
+                authUrl: 'https://e2e.invalid/oauth/token',
+                baseUrl: 'https://e2e.invalid/v2',
+            },
+        },
+    }));
+
+    // Fake Claude CLI on PATH — no real Claude session is ever spawned.
+    // Reuses the backend integration fixture so both layers test the same
+    // contract (ready banner, stdin echo, session JSONL, SIGTERM exit).
+    const fixture = join(REPO_ROOT, 'backend', 'src', '__tests__', 'fixtures', 'fake-claude.sh');
+    if (!existsSync(fixture)) {
+        throw new Error(`[e2e] fake claude fixture missing at ${fixture}`);
+    }
+    const fakeClaude = join(BIN_DIR, 'claude');
+    copyFileSync(fixture, fakeClaude);
+    chmodSync(fakeClaude, 0o755);
+    if (process.platform === 'win32') {
+        // With APPDATA/USERPROFILE sandboxed (backendEnv), resolveClaudeSpawn()
+        // falls back to `cmd.exe /c claude.cmd`, which searches PATH — and the
+        // inherited PATH still names the real npm global dir. Shadow it with a
+        // shim that refuses, so a Windows run can never reach the real CLI.
+        writeFileSync(join(BIN_DIR, 'claude.cmd'),
+            '@echo [e2e] the fake claude CLI is a bash script; task specs need a POSIX host 1>&2\r\n@exit /b 1\r\n');
+    }
+
+    // Mint the sandbox's API token BEFORE the backend boots, the same way the
+    // backend would (auth-token.ts writes <dataDir>/auth-token). The backend
+    // mints lazily on its first authenticated request, so without this a spec
+    // that calls the API directly could race the server's own first mint and
+    // the two processes would end up holding different tokens.
+    getAuthToken(STATE_DIR);
+
+    // Record the legacy backend/ locations BEFORE the backend boots, so the
+    // isolation spec can assert what THIS RUN did to them rather than whether
+    // they exist at all. Existence is the wrong test: other tooling in the same
+    // checkout (the backend unit suite, for one, which does not set
+    // CLAUDIA_DATA_DIR) can legitimately leave files there, and a spec that
+    // fails on a stranger's leftovers reports nothing about the sandbox.
+    writeFileSync(LEGACY_BASELINE_FILE, JSON.stringify(legacyState()));
+}
+
+/** Snapshot of DEFAULT_STATE_FILES taken by prepareHarness(), before boot. */
+export const LEGACY_BASELINE_FILE = join(RUN_ROOT, 'legacy-baseline.json');
+
+/** mtime (ms) of each legacy location, or null when it does not exist. */
+export type LegacyState = Record<string, number | null>;
+
+export function legacyState(): LegacyState {
+    const state: LegacyState = {};
+    for (const file of DEFAULT_STATE_FILES) {
+        state[file] = existsSync(file) ? statSync(file).mtimeMs : null;
+    }
+    return state;
+}
+
+/** The pre-boot snapshot, as written by prepareHarness(). */
+export function legacyBaseline(): LegacyState {
+    return JSON.parse(readFileSync(LEGACY_BASELINE_FILE, 'utf8')) as LegacyState;
+}
+
+/**
+ * The sandboxed backend's API token.
+ *
+ * Every /api route and WebSocket upgrade requires one (#261). Specs that call
+ * the backend directly — not through the browser — must present it; the
+ * browser gets its own through the app's real loopback bootstrap
+ * (`/api/auth/local`), which the suite deliberately does not bypass.
+ */
+export function authToken(): string {
+    return getAuthToken(STATE_DIR);
+}
+
+/** Headers for a direct API call to the sandboxed backend. */
+export function authHeaders(): Record<string, string> {
+    return { 'x-claudia-token': authToken() };
+}
+
+/**
+ * Where the backend writes its state when CLAUDIA_DATA_DIR is *absent*.
+ *
+ * Every store with a `basePath?` seam falls back to `backend/<file>` (i.e.
+ * `__dirname/..` from backend/dist) when it is not given one. If the sandboxed
+ * server ever ignores our env — or a new store is wired up without a data
+ * directory — its writes land here instead, INSIDE the developer's checkout, on
+ * top of their live instance's state. So the isolation spec asserts these stay
+ * untouched.
+ *
+ * This list must name every such file, not a sample: a fallback file that is
+ * missing from it is a leak the isolation spec passes straight over. That is
+ * not hypothetical — `checkpoints.json` and `todos.json` were both being
+ * written into the repo on every run while this spec reported green.
+ *
+ * Cross-check when adding a store:
+ *   grep -rn "join(__dirname, '\.\.'" backend/src/*.ts
+ */
+export const DEFAULT_STATE_FILES = [
+    join(REPO_ROOT, 'backend', 'workspace-config.json'),
+    join(REPO_ROOT, 'backend', 'config.json'),
+    join(REPO_ROOT, 'backend', 'tasks.json'),
+    join(REPO_ROOT, 'backend', 'checkpoints.json'),
+    join(REPO_ROOT, 'backend', 'todos.json'),
+    join(REPO_ROOT, 'backend', 'learnings.json'),
+    join(REPO_ROOT, 'backend', 'scheduled-tasks.json'),
+    join(REPO_ROOT, 'backend', 'chat-history.json'),
+    // Credentials and the single-instance lock (#259/#261) also fall back to
+    // backend/ without a data dir. A leaked auth-token here would mean the
+    // sandbox minted a credential into the developer's checkout.
+    join(REPO_ROOT, 'backend', 'auth-token'),
+    join(REPO_ROOT, 'backend', 'mcp-token'),
+    join(REPO_ROOT, 'backend', 'instance.json'),
+    join(REPO_ROOT, 'backend', 'task-histories'),
+    // Written only if the backend spawned a shared Playwright MCP server, which
+    // backendEnv() disables (CLAUDIA_SHARED_MCP=0). Its presence would mean the
+    // sandbox started a detached process that outlives the run.
+    join(REPO_ROOT, 'backend', '.shared-playwright-mcp-4022.pid'),
+];
+
+/** Env handed to the sandboxed backend process. */
+export function backendEnv(): Record<string, string> {
+    // Defence in depth: the values below are what keeps the server off the
+    // developer's port and out of the developer's state files. Verify them here
+    // rather than trusting that nobody edited the constants above.
+    assertSafePort(BACKEND_PORT, 'backend');
+    if (!STATE_DIR.startsWith(RUN_ROOT)) {
+        throw new Error(`[e2e] state dir ${STATE_DIR} escapes the sandbox root ${RUN_ROOT}`);
+    }
+    if (!FAKE_HOME.startsWith(RUN_ROOT)) {
+        throw new Error(`[e2e] fake HOME ${FAKE_HOME} escapes the sandbox root ${RUN_ROOT}`);
+    }
+    return {
+        PATH: `${BIN_DIR}${delimiter}${process.env.PATH ?? ''}`,
+        HOME: FAKE_HOME,
+        // On Windows HOME is not enough: os.homedir() reads USERPROFILE, and
+        // resolveClaudeSpawn() finds the CLI via APPDATA / USERPROFILE rather
+        // than PATH — so without these the sandboxed backend would write
+        // ~/.claude into the real profile and could spawn the developer's REAL
+        // claude.exe. Pointing both into the sandbox makes the real CLI
+        // unreachable. (The fake CLI is a bash script, so task specs still need
+        // a POSIX host; this only guarantees a Windows run cannot do harm.)
+        ...(process.platform === 'win32' ? {
+            USERPROFILE: FAKE_HOME,
+            APPDATA: join(FAKE_HOME, 'AppData', 'Roaming'),
+        } : {}),
+        CLAUDIA_BACKEND_PORT: String(BACKEND_PORT),
+        CLAUDIA_DATA_DIR: STATE_DIR,
+        CLAUDIA_FAKE_DIR: FAKE_DIR,
+        CLAUDIA_FAKE_SID: FAKE_SESSION_ID,
+        // Never adopt (or spawn) the shared Playwright MCP server. Its default
+        // port 4022 is owned by the developer's live instance, and the backend
+        // probes-and-adopts whatever answers there — a quiet way for the
+        // sandbox to reach into a process it does not own. The fake CLI never
+        // speaks MCP, so per-task stdio config is all the suite needs.
+        CLAUDIA_SHARED_MCP: '0',
+        // Faster state transitions so busy/idle assertions don't crawl.
+        STATE_POLLING_MS: '400',
+        NODE_ENV: 'production',
+    };
+}
