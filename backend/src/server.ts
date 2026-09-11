@@ -10,6 +10,7 @@ import { readFile, readdir } from 'fs/promises';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
+import { randomUUID } from 'crypto';
 import { TaskSpawner } from './task-spawner.js';
 import { ViewerRegistry } from './viewer-registry.js';
 import { WorkspaceStore } from './workspace-store.js';
@@ -43,6 +44,7 @@ import { isValidSharedMcpToken } from './mcp-auth.js';
 import { JiraClient, JiraError, parseIssueKey } from './jira-client.js';
 import { ensureDataDir, dataPath, describeDataDir } from './paths.js';
 import { exportState } from './export-import/export.js';
+import { resolveBackendVersion, type InstanceInfo } from './instance-lock.js';
 
 // Note: Route modules available in ./routes/ for reference and future refactoring
 // - config-routes.ts: Config API routes template
@@ -50,6 +52,12 @@ import { exportState } from './export-import/export.js';
 // - ws-handlers.ts: WebSocket handlers template
 
 const logger = createLogger('[Server]');
+
+/**
+ * Wire format version of GET /api/server-info. Bump when the payload changes
+ * shape so an older launcher can recognise a backend it cannot talk to.
+ */
+export const SERVER_INFO_PROTOCOL_VERSION = 1;
 
 // ES module __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
@@ -378,11 +386,23 @@ function notifyTasksOfMcpChange(
     }
 }
 
-export async function createApp(basePath?: string) {
+export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) {
     // Resolve where mutable state lives before anything touches disk. `basePath`
     // is Electron's userData; CLAUDIA_DATA_DIR covers container and home-server
     // deployments; unset keeps the legacy in-source-tree location.
     const dataDir = ensureDataDir(basePath);
+
+    // Identity served by GET /api/server-info. index.ts passes the info from the
+    // instance lock it holds; embedders that boot the app without taking a lock
+    // (the Electron backend worker, the integration harness) still get a usable
+    // identity rather than an empty route.
+    const instance: InstanceInfo = instanceInfo ?? {
+        instanceId: randomUUID(),
+        pid: process.pid,
+        port: 0,
+        startedAt: new Date().toISOString(),
+        version: resolveBackendVersion(),
+    };
 
     const app = express();
     const server = createServer(app);
@@ -3552,6 +3572,28 @@ export async function createApp(basePath?: string) {
     // REST API routes
     app.get('/api/health', (_req, res) => {
         res.json({ status: 'ok' });
+    });
+
+    /**
+     * Who is holding this data directory, and what does it speak?
+     *
+     * Deliberately unauthenticated and deliberately dull: a launcher (start.sh,
+     * the Electron app, a second `npm run dev`) must be able to ask a running
+     * backend "is that you?" before deciding whether to start another one, and
+     * that question has to be answerable before any credential exists.
+     *
+     * The payload is therefore restricted to identity and location — never
+     * tokens, tunnel URLs, workspace contents or task data. `protocolVersion`
+     * lets a future launcher tell an old backend from a new one.
+     */
+    app.get('/api/server-info', (_req, res) => {
+        res.json({
+            instanceId: instance.instanceId,
+            version: instance.version,
+            protocolVersion: SERVER_INFO_PROTOCOL_VERSION,
+            dataDir: dataDir ?? null,
+            startedAt: instance.startedAt,
+        });
     });
 
     // Short-ref resolution for REST: every route with a :taskId param accepts

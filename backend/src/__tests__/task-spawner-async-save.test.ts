@@ -11,7 +11,7 @@
  * These tests protect against regressing INTO the thing the user explicitly
  * asked us not to risk: corrupting tasks.json or a task's history file while
  * making the save non-blocking. They mirror the existing sync-path tests
- * (task-spawner-save-guard.test.ts, task-numbers.test.ts) so the async path is
+ * (task-spawner-save.test.ts, task-numbers.test.ts) so the async path is
  * held to the same guarantees, plus one test for the new overlap-coalescing
  * logic in `runDebouncedSave`.
  *
@@ -19,7 +19,7 @@
  * by validateWorkspacePath.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, utimesSync, statSync, existsSync } from 'fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, utimesSync, existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { TaskSpawner } from '../task-spawner.js';
@@ -97,43 +97,32 @@ describe('saveTasksAsync — parity with the synchronous save path', () => {
         expect(onDisk.tasks.map(t => t.id).sort()).toEqual(['task-a', 'task-b']);
     });
 
-    it('REFUSES to overwrite a file another process modified after we loaded it', async () => {
+    it('no longer wedges when tasks.json is touched behind its back', async () => {
+        // Parity with saveTasks() (see task-spawner-save.test.ts): the old
+        // mtime "another process wrote this" guard is gone — instance-lock.ts
+        // guarantees a single owner of the data directory at boot, so a moved
+        // mtime is an external edit and the running backend's state wins.
         const ctx = seed(['task-original-1']);
         const s = startSpawner(ctx);
 
-        const foreign = JSON.stringify({
-            tasks: [{ id: 'task-from-other-process', prompt: 'do not lose me' }],
+        foreignWrite(ctx.tasksFile, JSON.stringify({
+            tasks: [{ id: 'task-edited-by-hand', prompt: 'external edit' }],
             archivedTasks: [],
-        });
-        foreignWrite(ctx.tasksFile, foreign);
+        }));
 
         await internals(s).saveTasksAsync();
-
-        // Same guard as saveTasks(): must PREVENT the write, not merely log.
-        expect(readFileSync(ctx.tasksFile, 'utf8')).toBe(foreign);
-        expect(readFileSync(ctx.tasksFile, 'utf8')).toContain('task-from-other-process');
-        expect(readFileSync(ctx.tasksFile, 'utf8')).not.toContain('task-original-1');
-    });
-
-    it('does not leave a partial or backup write behind when it refuses', async () => {
-        const ctx = seed(['task-original-1']);
-        const s = startSpawner(ctx);
-
-        const foreign = JSON.stringify({ tasks: [], archivedTasks: [] });
-        foreignWrite(ctx.tasksFile, foreign);
-        const sizeBefore = statSync(ctx.tasksFile).size;
-
         await internals(s).saveTasksAsync();
 
-        expect(statSync(ctx.tasksFile).size).toBe(sizeBefore);
-        expect(readFileSync(ctx.tasksFile, 'utf8')).toBe(foreign);
+        const onDisk = readFileSync(ctx.tasksFile, 'utf8');
+        expect(onDisk).toContain('task-original-1');
+        expect(onDisk).not.toContain('task-edited-by-hand');
     });
 
     it('refuses to overwrite a non-empty file with an empty save', async () => {
         const ctx = seed(['task-original-1']);
         const s = startSpawner(ctx);
-        // Prime fileModTimeOnLoad against the real on-disk file, then clear the
-        // in-memory disconnected tasks to simulate the bug this guard exists for.
+        // Save once for real, then clear the in-memory disconnected tasks to
+        // simulate the bug this guard exists for.
         await internals(s).saveTasksAsync();
         (s as unknown as { disconnectedTasks: Map<string, unknown> }).disconnectedTasks.clear();
 
