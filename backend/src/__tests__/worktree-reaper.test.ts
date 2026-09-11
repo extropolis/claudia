@@ -6,6 +6,7 @@ import { homedir } from 'os';
 import {
     classifyWorktree,
     removeWorktreeWithUnlockRetry,
+    reapWorktree,
     type TaskRef,
     type WorktreeRecord,
 } from '../worktree-reaper.js';
@@ -142,6 +143,31 @@ describe('removeWorktreeWithUnlockRetry (real git)', () => {
         expect(() => git(['worktree', 'remove', '--force', wt], repo)).toThrow();
 
         await removeWorktreeWithUnlockRetry(repo, wt);
+        expect(existsSync(wt)).toBe(false);
+    });
+
+    it('reapWorktree prunes git bookkeeping instead of failing when the worktree dir is already gone', async () => {
+        const repo = makeRepo();
+        const wt = addWorktree(repo, 'claudia/task-externally-deleted');
+        // Simulate the dir vanishing behind git's back (rm -rf, or a stale
+        // record from before the sweep ran) — the sweep must not error every
+        // interval on such a record.
+        rmSync(wt, { recursive: true, force: true });
+        expect(existsSync(wt)).toBe(false);
+
+        await expect(reapWorktree(repo, wt)).resolves.toBeUndefined();
+
+        const slash = (p: string) => p.replace(/\\/g, '/');
+        expect(slash(git(['worktree', 'list', '--porcelain'], repo)))
+            .not.toContain(slash(resolve(wt)));
+    });
+
+    it('reapWorktree removes a worktree that still exists on disk', async () => {
+        const repo = makeRepo();
+        const wt = addWorktree(repo, 'claudia/task-still-there');
+
+        await reapWorktree(repo, wt);
+
         expect(existsSync(wt)).toBe(false);
     });
 

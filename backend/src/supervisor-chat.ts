@@ -212,7 +212,7 @@ interface AnalysisQueueItem {
 
 export class SupervisorChat extends EventEmitter {
     private taskSpawner: TaskSpawner;
-    private workspaceStore: { getWorkspaces: () => { id: string; name: string }[] };
+    private workspaceStore: { getWorkspaces: () => { id: string; name: string; status?: 'available' | 'unavailable' }[] };
     private configStore: ConfigStore;
     private chatHistory: ChatMessage[] = [];
     private isProcessing: boolean = false;
@@ -231,7 +231,7 @@ export class SupervisorChat extends EventEmitter {
      */
     constructor(
         taskSpawner: TaskSpawner,
-        workspaceStore: { getWorkspaces: () => { id: string; name: string }[] },
+        workspaceStore: { getWorkspaces: () => { id: string; name: string; status?: 'available' | 'unavailable' }[] },
         configStore: ConfigStore,
         dataDir?: string,
         options?: { historyFile?: string; runClaude?: ClaudeRunner }
@@ -706,13 +706,16 @@ Be witty — dry humor, light sarcasm, maybe a pun. Think "funny coworker" not "
             return 'Error: prompt is required';
         }
 
-        // Get default workspace if not provided
+        // Get default workspace if not provided (skip ones whose path is gone)
+        const workspaces = this.workspaceStore.getWorkspaces();
         if (!workspaceId) {
-            const workspaces = this.workspaceStore.getWorkspaces();
-            if (workspaces.length === 0) {
+            const usable = workspaces.filter(w => w.status !== 'unavailable');
+            if (usable.length === 0) {
                 return 'Error: No workspaces available. Please create a workspace first.';
             }
-            workspaceId = workspaces[0].id;
+            workspaceId = usable[0].id;
+        } else if (workspaces.find(w => w.id === workspaceId)?.status === 'unavailable') {
+            return `Error: Workspace path not found: ${workspaceId}`;
         }
 
         try {

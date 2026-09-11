@@ -166,6 +166,34 @@
     z-index: 9999;
 }
 
+/* Workspace whose folder is missing on disk (unmounted drive, imported config).
+   Kept in the list so its tasks don't orphan, but visibly inert. */
+.workspace-section.unavailable {
+    opacity: 0.55;
+    border-style: dashed;
+}
+
+.workspace-section.unavailable .workspace-header {
+    filter: grayscale(1);
+}
+
+.workspace-section.unavailable .task-input-form {
+    pointer-events: none;
+}
+
+.workspace-unavailable-badge {
+    flex-shrink: 0;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-secondary);
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+}
+
 .workspace-header {
     display: flex;
     align-items: center;

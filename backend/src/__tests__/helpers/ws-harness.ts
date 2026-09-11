@@ -232,7 +232,11 @@ export async function createTestEnv(opts: TestEnvOptions = {}): Promise<TestEnv>
         CLAUDIA_FAKE_DIR: process.env.CLAUDIA_FAKE_DIR,
         CLAUDIA_FAKE_SID: process.env.CLAUDIA_FAKE_SID,
         STATE_POLLING_MS: process.env.STATE_POLLING_MS,
+        WORKSPACE_STATUS_POLL_MS: process.env.WORKSPACE_STATUS_POLL_MS,
     };
+    // Poll workspace availability fast so tests can observe the
+    // available/unavailable broadcast without waiting on the 15s default.
+    process.env.WORKSPACE_STATUS_POLL_MS = '200';
 
     if (opts.withFakeClaude) {
         const bin = join(base, 'bin');

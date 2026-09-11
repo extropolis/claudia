@@ -48,6 +48,9 @@ export class WorkspaceStore {
     // prInfo silently dropped every task-less workspace from the refresh loop
     // and froze its badge at the pre-restart state.
     private prInfoCache = new Map<string, Workspace['prInfo']>();
+    // Last availability seen per workspace id, so the periodic status poll can
+    // broadcast only real flips (drive unmounted / remounted) — not every tick.
+    private lastKnownStatus = new Map<string, NonNullable<Workspace['status']>>();
 
     constructor(basePath?: string) {
         // Use basePath if provided (Electron userData), otherwise use default location
@@ -67,6 +70,33 @@ export class WorkspaceStore {
             this.needsResaveAfterLoad = false;
             this.saveConfig();
         }
+
+        // Prime the availability baseline so the first poll reports only
+        // flips that happen after startup.
+        this.collectStatusChanges();
+    }
+
+    /**
+     * Re-evaluate every workspace's on-disk availability and return those
+     * whose status differs from the previous call. Each flip is reported
+     * exactly once. Workspaces removed from the store are forgotten.
+     */
+    collectStatusChanges(): Workspace[] {
+        const changed: Workspace[] = [];
+        const seen = new Set<string>();
+        for (const w of this.getWorkspaces()) {
+            const status = w.status ?? 'available';
+            seen.add(w.id);
+            const prev = this.lastKnownStatus.get(w.id);
+            this.lastKnownStatus.set(w.id, status);
+            if (prev !== undefined && prev !== status) {
+                changed.push(w);
+            }
+        }
+        for (const id of Array.from(this.lastKnownStatus.keys())) {
+            if (!seen.has(id)) this.lastKnownStatus.delete(id);
+        }
+        return changed;
     }
 
     private loadConfig(): WorkspaceConfig {
@@ -78,8 +108,17 @@ export class WorkspaceStore {
                 legacyLoader: (raw) => (raw as WorkspaceConfig) ?? { ...DEFAULT_CONFIG },
             });
 
-            // Filter out workspaces that no longer exist.
-            loaded.workspaces = (loaded.workspaces || []).filter(w => existsSync(w.id));
+            // Never drop a workspace because its path is missing (unmounted
+            // drive, config imported from another machine): its tasks would
+            // orphan. Availability is computed on read — see withStatus().
+            // Copy: loadVersioned's defaultData is a shallow clone of
+            // DEFAULT_CONFIG, so without this every fresh store would share
+            // (and mutate) the same workspaces array.
+            loaded.workspaces = [...(loaded.workspaces || [])];
+            const missing = loaded.workspaces.filter(w => !existsSync(w.id));
+            if (missing.length > 0) {
+                console.warn(`[WorkspaceStore] ${missing.length} workspace path(s) not found; keeping them as unavailable:`, missing.map(w => w.id));
+            }
 
             // Initialize recentWorkspaces if not present.
             if (!loaded.recentWorkspaces) {
@@ -116,7 +155,16 @@ export class WorkspaceStore {
     }
 
     getWorkspaces(): Workspace[] {
-        return this.config.workspaces.map(w => this.withPrInfo(w));
+        return this.config.workspaces.map(w => this.withStatus(this.withPrInfo(w)));
+    }
+
+    /**
+     * Stamp the live availability of a workspace path. Evaluated on every read
+     * (not persisted) so a remounted drive flips back to 'available' without a
+     * restart.
+     */
+    private withStatus(w: Workspace): Workspace {
+        return { ...w, status: existsSync(w.id) ? 'available' : 'unavailable' };
     }
 
     /** Merge the in-memory PR info cache onto a workspace for serialization. */
@@ -149,7 +197,7 @@ export class WorkspaceStore {
 
     getWorkspace(id: string): Workspace | undefined {
         const w = this.config.workspaces.find(w => w.id === id);
-        return w ? this.withPrInfo(w) : w;
+        return w ? this.withStatus(this.withPrInfo(w)) : w;
     }
 
     // Add workspace by path - the id IS the path, name comes from folder
@@ -184,6 +232,10 @@ export class WorkspaceStore {
         };
 
         this.config.workspaces.push(workspace);
+        // The path was just verified as a directory: record that as the
+        // availability baseline, so a path that vanishes before the next status
+        // poll is still reported as a flip rather than first-seen 'unavailable'.
+        this.lastKnownStatus.set(workspace.id, 'available');
 
         // Remove from recent workspaces if it was there (since it's now active again)
         this.config.recentWorkspaces = this.config.recentWorkspaces.filter(w => w.id !== resolvedPath);
@@ -248,6 +300,8 @@ export class WorkspaceStore {
             systemPrompt: parentWorkspace?.systemPrompt,
             references: parentWorkspace?.references ? [...parentWorkspace.references] : undefined,
         };
+        // Verified above: seed the availability baseline (see addWorkspace).
+        this.lastKnownStatus.set(workspace.id, 'available');
 
         // Insert worktree after its parent (or after the last sibling worktree)
         const parentIdx = this.config.workspaces.findIndex(w => w.id === parentId);

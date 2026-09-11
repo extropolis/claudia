@@ -457,6 +457,31 @@ describe('WorkspacePanel', () => {
         expect(screen.getByText('No tasks yet')).toBeInTheDocument();
     });
 
+    it('greys out an unavailable workspace and disables its new-task input', () => {
+        const { props } = renderWorkspacePanel({
+            workspaces: [makeWorkspace('/repos/alpha', { status: 'unavailable' })],
+        });
+
+        const section = screen.getByText('alpha').closest('.workspace-section');
+        expect(section).toHaveClass('unavailable');
+        // The expected path is surfaced so the user knows what to remount.
+        expect(screen.getByText('alpha')).toHaveAttribute('title', 'Workspace path not found: /repos/alpha');
+        expect(screen.getByText('Unavailable')).toBeInTheDocument();
+
+        const input = screen.getByPlaceholderText(/workspace path not found/i);
+        expect(input).toBeDisabled();
+        fireEvent.submit(input.closest('form')!);
+        expect(props.onCreateTask).not.toHaveBeenCalled();
+    });
+
+    it('does not grey out a workspace whose status is available', () => {
+        renderWorkspacePanel({
+            workspaces: [makeWorkspace('/repos/alpha', { status: 'available' })],
+        });
+        expect(screen.getByText('alpha').closest('.workspace-section')).not.toHaveClass('unavailable');
+        expect(screen.getByPlaceholderText(/type or speak a task/i)).not.toBeDisabled();
+    });
+
     // ── drag and drop ───────────────────────────────────────────────────────
 
     it('reorders workspaces by index when the sort mode is manual', () => {
