@@ -32,8 +32,31 @@ import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
 import { spawnSync } from 'child_process';
 import { dataPath } from './paths.js';
+import { atomicWriteFileSync } from './utils/atomic-write.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/** The fields that make up the lock itself; anything else belongs to another module. */
+const LOCK_KEYS = new Set<string>(['instanceId', 'pid', 'port', 'startedAt', 'version']);
+
+/**
+ * Keys in `instance.json` that are not part of the lock — today the handoff
+ * mark from `export-import/handoff.ts`. Empty for a missing or corrupt file.
+ */
+function readForeignKeys(file: string): Record<string, unknown> {
+    try {
+        if (!existsSync(file)) return {};
+        const parsed = JSON.parse(readFileSync(file, 'utf8'));
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+        const foreign: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+            if (!LOCK_KEYS.has(key)) foreign[key] = value;
+        }
+        return foreign;
+    } catch {
+        return {};
+    }
+}
 
 /** Lock file name, inside the data directory. */
 export const INSTANCE_LOCK_FILE = 'instance.json';
@@ -199,6 +222,15 @@ export function readInstanceLock(dataDir: string | undefined): InstanceInfo | nu
  * are asymmetric on purpose: refusing to start when the holder is actually gone
  * is a wedged install a user cannot fix, while taking over from a process that
  * no longer answers is the case the old guards were trying to reach anyway.
+ *
+ * ## Keys that are not the lock's
+ *
+ * `instance.json` also carries machine-local state owned by other modules —
+ * today the handoff mark (`export-import/handoff.ts`), which freezes a host
+ * that handed its work to another machine until a human reclaims it. Taking
+ * over a stale lock carries those keys forward, and {@link release} leaves
+ * them behind instead of deleting the file; otherwise a single restart would
+ * silently un-freeze a handed-off host.
  */
 export function acquireInstanceLock(
     dataDir: string | undefined,
@@ -228,6 +260,8 @@ export function acquireInstanceLock(
     // would let both see an empty directory and both believe they own it.
     if (!tryCreateExclusive(file, info)) {
         const existing = readInstanceLock(dataDir);
+        // Read before the file is replaced: see "Keys that are not the lock's".
+        const carried = readForeignKeys(file);
 
         if (existing && existing.pid !== ourPid && alive(existing.pid)) {
             // Ambiguous — see the doc comment above. Only a holder that BOTH
@@ -241,6 +275,10 @@ export function acquireInstanceLock(
             );
         } else if (existing) {
             console.warn(`[InstanceLock] Replacing stale lock from pid ${existing.pid} (not running).`);
+        } else if (Object.keys(carried).length > 0) {
+            // No lock fields, only other modules' keys: a previous instance
+            // released cleanly and left, e.g., a handoff mark behind.
+            console.log(`[InstanceLock] No lock held; keeping ${Object.keys(carried).join(', ')} from instance.json.`);
         } else {
             // Present but unreadable — a truncated write from a process that
             // died mid-save. Nothing to defer to.
@@ -251,7 +289,7 @@ export function acquireInstanceLock(
         // directory in the gap, they are by definition newer than the holder we
         // just judged dead, so defer to them rather than stomping.
         try { unlinkSync(file); } catch { /* already gone */ }
-        if (!tryCreateExclusive(file, info)) {
+        if (!tryCreateExclusive(file, { ...carried, ...info })) {
             const winner = readInstanceLock(dataDir);
             throw new InstanceLockError(winner ?? { ...info, instanceId: 'unknown', pid: -1 });
         }
@@ -266,7 +304,16 @@ export function acquireInstanceLock(
             // and a successor already took the directory, its lock outlives us.
             const current = readInstanceLock(dataDir);
             if (current && current.instanceId !== info.instanceId) return;
-            if (existsSync(file)) unlinkSync(file);
+            if (!existsSync(file)) return;
+            // Drop only our claim: keys other modules stored here (the handoff
+            // mark) must outlive this process. See "Keys that are not the lock's".
+            const foreign = readForeignKeys(file);
+            if (Object.keys(foreign).length > 0) {
+                atomicWriteFileSync(file, JSON.stringify(foreign, null, 2));
+                console.log(`[InstanceLock] Released lock; kept ${Object.keys(foreign).join(', ')} in instance.json.`);
+            } else {
+                unlinkSync(file);
+            }
         } catch (err) {
             console.warn('[InstanceLock] Failed to release lock:', err);
         }

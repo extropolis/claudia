@@ -55,12 +55,21 @@ import {
     chmodSync,
 } from 'fs';
 import { copyFile as copyFileAsync, stat as statAsync } from 'fs/promises';
-import { join, dirname, resolve, basename } from 'path';
+import { join, dirname, resolve, basename, sep } from 'path';
 import { homedir, hostname } from 'os';
 import { fileURLToPath } from 'url';
 
+import { randomUUID } from 'crypto';
+
 import { dataPath, LEGACY_DATA_DIR } from '../paths.js';
 import { isPathInside } from '../validation.js';
+import {
+    captureWorkingTree,
+    pushHandoffBranch,
+    bundleHandoff,
+    writeHandoffMark,
+    type HandoffRepo,
+} from './handoff.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -78,10 +87,28 @@ export interface ExportOptions {
     withHistories?: boolean;
     /** Include agent session JSONL transcripts for non-archived tasks. */
     withAgentSessions?: boolean;
+    /**
+     * Take a handoff (§11.3): capture every workspace's dirty working tree onto
+     * a throwaway git branch, push it, stop tasks so their transcripts flush,
+     * force the agent-sessions tier on, and freeze this host afterwards.
+     */
+    handoff?: boolean;
+    /**
+     * Permit a handoff of a repo with no git remote, carrying a `git bundle`
+     * for it instead. Off by default: without a remote there is nothing the
+     * target can fetch from, and a handoff that silently drops a repo's work
+     * is worse than one that refuses.
+     */
+    allowNoRemote?: boolean;
 }
 
 export interface ExportManifest {
     formatVersion: 1;
+    /**
+     * Unique id for this export. Written into the source's handoff mark so an
+     * operator staring at two exports can tell which one froze the host.
+     */
+    exportId: string;
     exportedAt: string;
     claudiaVersion: string;
     source: {
@@ -100,11 +127,28 @@ export interface ExportManifest {
      */
     schemaVersions: Record<string, number | null>;
     workspaces: Array<{ id: string; name: string; worktreeParentId?: string }>;
+    /**
+     * Present only for a handoff export (§11.3): the captured working trees,
+     * one per git workspace. Additive — a plain export omits the key entirely
+     * and an importer that does not know about it is unaffected.
+     */
+    handoff?: {
+        takenAt: string;
+        repos: HandoffRepo[];
+    };
 }
 
 /** Injectable environment. Exists so tests never read the real `~/.claude`. */
 export interface ExportDeps {
     homeDir?: string;
+    /**
+     * Stop running tasks so each runtime exits and flushes its session JSONL.
+     *
+     * Injected rather than imported because this module has no business
+     * holding a TaskSpawner: the server owns the spawner and passes a closure,
+     * which also keeps the export testable without a live process tree.
+     */
+    stopTasks?: () => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +384,24 @@ function workspaceSegment(workspaceId: string): string {
     return encodeURIComponent(workspaceId);
 }
 
+/**
+ * Workspace ids (== absolute paths) straight off `workspace-config.json`.
+ *
+ * Read directly rather than through `WorkspaceStore`, because constructing the
+ * store has side effects — it prunes and re-saves the config on load — and an
+ * export must observe the data directory without altering it.
+ */
+function readWorkspaceIds(dataDir: string | undefined): string[] {
+    const parsed = parseStateFile(dataPath(dataDir, 'workspace-config.json'));
+    const data = parsed?.data;
+    if (!isPlainObject(data) || !Array.isArray(data['workspaces'])) return [];
+    const ids: string[] = [];
+    for (const ws of data['workspaces'] as Json[]) {
+        if (isPlainObject(ws) && typeof ws['id'] === 'string' && ws['id']) ids.push(ws['id']);
+    }
+    return ids;
+}
+
 // ---------------------------------------------------------------------------
 // Version
 // ---------------------------------------------------------------------------
@@ -446,10 +508,15 @@ export async function exportState(
     }
 
     const homeDirectory = deps.homeDir ?? homedir();
+    const handoffMode = opts.handoff === true;
     const tiers = {
         secrets: opts.withSecrets === true,
         histories: opts.withHistories === true,
-        agentSessions: opts.withAgentSessions === true,
+        // A handoff without transcripts is not a handoff: the target would
+        // re-create the tasks but every one of them would start the
+        // conversation from scratch. The tier is forced on rather than merely
+        // recommended, because getting it wrong is silent.
+        agentSessions: opts.withAgentSessions === true || handoffMode,
     };
 
     console.log(
@@ -458,6 +525,68 @@ export async function exportState(
     );
 
     mkdirSync(outAbs, { recursive: true });
+
+    // --- handoff pre-phase (§11.3) ----------------------------------------
+    //
+    // Runs BEFORE the state tier is copied, and in this order deliberately:
+    //
+    //   1. Capture and push the working trees. If this fails — no remote, no
+    //      network — nothing has been frozen yet and the operator can retry or
+    //      pass `allowNoRemote`. Doing it after the freeze would leave the
+    //      source refusing to run tasks with nowhere for the work to have gone.
+    //   2. Stop the tasks. Each runtime exits, flushing its session JSONL, and
+    //      the spawner persists them as `wasInterrupted` — which is what makes
+    //      the target's existing auto-reconnect resume them. No new resume
+    //      mechanism is introduced here; that is the whole design.
+    //   3. Only then copy state, so `tasks.json` is captured with those flags
+    //      already set rather than as it looked while the tasks were live.
+    let handoffRepos: HandoffRepo[] = [];
+    if (handoffMode) {
+        const workspaceIds = readWorkspaceIds(dataDir);
+        console.log(`[Export] handoff: capturing working trees for ${workspaceIds.length} workspace(s)`);
+
+        const captured: HandoffRepo[] = [];
+        const noRemote: string[] = [];
+        for (const workspaceId of workspaceIds) {
+            const repo = await captureWorkingTree(workspaceId);
+            if (!repo) {
+                console.log(`[Export] handoff: ${workspaceId} is not a git work tree, skipping`);
+                continue;
+            }
+            captured.push(repo);
+            if (!repo.remote) noRemote.push(workspaceId);
+        }
+
+        if (noRemote.length > 0 && opts.allowNoRemote !== true) {
+            throw new Error(
+                `export: ${noRemote.length} workspace(s) have no git remote, so a handoff has ` +
+                    `nowhere to push their work:\n  ${noRemote.join('\n  ')}\n` +
+                    `Add a remote, or pass allowNoRemote to carry a git bundle for each instead ` +
+                    `(the bundle travels inside the export, which is bigger and easier to lose).`
+            );
+        }
+
+        for (const repo of captured) {
+            if (repo.remote) {
+                await pushHandoffBranch(repo.workspaceId, repo);
+            } else {
+                const rel = join('handoff-bundles', `${basename(repo.workspaceId)}-${repo.commit.slice(0, 8)}.bundle`);
+                await bundleHandoff(repo.workspaceId, repo, join(outAbs, rel));
+                repo.bundle = rel.split(sep).join('/');
+            }
+        }
+        handoffRepos = captured;
+
+        if (deps.stopTasks) {
+            console.log('[Export] handoff: stopping tasks so each runtime flushes its session file');
+            await deps.stopTasks();
+        } else {
+            console.warn(
+                '[Export] handoff: no stopTasks hook was provided — running tasks were NOT stopped, ' +
+                    'so their transcripts may be missing the most recent turns'
+            );
+        }
+    }
 
     // --- state tier --------------------------------------------------------
     const stateDir = join(outAbs, 'state');
@@ -575,8 +704,10 @@ export async function exportState(
         }
     }
 
+    const exportId = randomUUID();
     const manifest: ExportManifest = {
         formatVersion: 1,
+        exportId,
         exportedAt: new Date().toISOString(),
         claudiaVersion: readClaudiaVersion(),
         source: {
@@ -590,8 +721,27 @@ export async function exportState(
         schemaVersions,
         workspaces,
     };
+    if (handoffMode) {
+        manifest.handoff = { takenAt: new Date().toISOString(), repos: handoffRepos };
+    }
 
     writeFileSync(join(outAbs, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8');
+    // Freeze the source LAST, once the export is complete on disk. Marking
+    // earlier would stop tasks that an aborted export then had no replacement
+    // for; marking here means the host only stops being a writer once there is
+    // a finished export for another host to become one from.
+    if (handoffMode) {
+        writeHandoffMark(sourceDir, {
+            handedOffAt: new Date().toISOString(),
+            exportId,
+            exportDir: outAbs,
+        });
+        console.log(
+            `[Export] handoff: ${sourceDir} will now REFUSE to start or resume tasks. ` +
+                `Run --reclaim (or POST /api/handoff/reclaim) to undo this.`
+        );
+    }
+
     console.log(
         `[Export] complete: ${workspaces.length} workspace(s), ` +
             `${Object.keys(schemaVersions).length} state file(s) → ${outAbs}`
