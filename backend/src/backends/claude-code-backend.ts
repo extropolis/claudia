@@ -28,6 +28,38 @@ const claudeExe = process.platform === 'win32' ? 'claude.exe' : 'claude';
 const logger = createLogger('[ClaudeCodeBackend]');
 
 /**
+ * Root of Claude Code's on-disk project/session store (~/.claude/projects).
+ */
+export function claudeProjectsRoot(): string {
+    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+    return join(homeDir, '.claude', 'projects');
+}
+
+/**
+ * Directory holding Claude Code's session transcripts for a workspace.
+ *
+ * Claude Code derives the folder name from the workspace path by replacing
+ * every non-alphanumeric character (except dashes) with a dash, e.g.
+ * /Users/me/Work/my repo -> -Users-me-Work-my-repo
+ *
+ * Exported as a standalone helper so modules with no backend instance in hand
+ * (token-parser, conversation-parser) can share the same derivation.
+ */
+export function claudeSessionDir(workspacePath: string): string {
+    const folderName = workspacePath.replace(/[^a-zA-Z0-9-]/g, '-');
+    return join(claudeProjectsRoot(), folderName);
+}
+
+/**
+ * Absolute paths of every file making up a Claude Code session.
+ * Claude Code stores one session per <sessionId>.jsonl transcript.
+ */
+export function claudeSessionFiles(workspacePath: string, sessionId: string): string[] {
+    if (!sessionId) return [];
+    return [join(claudeSessionDir(workspacePath), `${sessionId}.jsonl`)];
+}
+
+/**
  * Map legacy permission mode values to actual Claude Code CLI values.
  * Claude CLI --permission-mode accepts: acceptEdits, bypassPermissions, default, dontAsk, plan
  * Old Claudia UI used: plan, safe, dangerous, auto
@@ -281,7 +313,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
         // Check if session file exists before trying to resume
         let sessionIdToUse = config.sessionId;
         if (sessionIdToUse) {
-            const claudeDir = this.getClaudeProjectsDir(config.workspaceId);
+            const claudeDir = this.sessionDir(config.workspaceId);
             const sessionFilePath = join(claudeDir, `${sessionIdToUse}.jsonl`);
             if (!existsSync(sessionFilePath)) {
                 logger.warn('Session file not found, starting fresh', {
@@ -764,7 +796,7 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
     private startSessionCapture(taskId: string, workspaceId: string): void {
         this.clearSessionCapture(taskId);
 
-        const claudeDir = this.getClaudeProjectsDir(workspaceId);
+        const claudeDir = this.sessionDir(workspaceId);
 
         let existingFiles = new Set<string>();
         try {
@@ -828,11 +860,23 @@ export class ClaudeCodeBackend extends EventEmitter implements CodeBackend {
         this.pendingSessionCapture.delete(taskId);
     }
 
-    private getClaudeProjectsDir(workspacePath: string): string {
-        const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-        // Claude Code replaces every non-alphanumeric character (except dashes) with a dash
-        const folderName = workspacePath.replace(/[^a-zA-Z0-9-]/g, '-');
-        return join(homeDir, '.claude', 'projects', folderName);
+    /**
+     * Get the directory holding Claude Code's session transcripts for a workspace
+     * @param workspacePath - Absolute path of the workspace
+     * @returns Absolute directory path (Claude Code is always file-based)
+     */
+    sessionDir(workspacePath: string): string {
+        return claudeSessionDir(workspacePath);
+    }
+
+    /**
+     * Get the absolute paths of every file making up a Claude Code session
+     * @param workspacePath - Absolute path of the workspace
+     * @param sessionId - The Claude Code session ID
+     * @returns The session's <sessionId>.jsonl transcript, or [] if no session id
+     */
+    sessionFiles(workspacePath: string, sessionId: string): string[] {
+        return claudeSessionFiles(workspacePath, sessionId);
     }
 
     private extractSessionId(str: string): string | null {

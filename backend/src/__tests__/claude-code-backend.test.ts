@@ -31,7 +31,7 @@ interface ClaudePrivates {
     isReadyForInitialInput(s: string): boolean;
     stripAnsi(s: string): string;
     filterAuthConflictWarning(s: string): string;
-    getClaudeProjectsDir(p: string): string;
+    sessionDir(p: string): string;
     extractSessionId(s: string): string | null;
 }
 const priv = (b: ClaudeCodeBackend): ClaudePrivates => b as unknown as ClaudePrivates;
@@ -667,7 +667,7 @@ describe('ClaudeCodeBackend: TUI heuristics', () => {
     });
 
     it('encodes the workspace path the same way Claude Code names its projects dir', () => {
-        const dir = p.getClaudeProjectsDir('/Users/me/Work/my_repo.git');
+        const dir = p.sessionDir('/Users/me/Work/my_repo.git');
         expect(dir.endsWith(join('.claude', 'projects', '-Users-me-Work-my-repo-git'))).toBe(true);
     });
 
