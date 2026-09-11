@@ -7,7 +7,7 @@
  * did not, which is exactly how those bugs shipped.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { createTestEnv, initRepo, git, waitFor, type TestEnv, type WSClient, SUPPORTS_FAKE_CLI } from './helpers/ws-harness.js';
 
@@ -383,4 +383,61 @@ describe.skipIf(!SUPPORTS_FAKE_CLI)('git:push (local bare remote — no network)
         const refs = git(bare, 'branch', '--list');
         expect(refs).toContain('main');
     }, 20000);
+});
+
+describe.skipIf(!SUPPORTS_FAKE_CLI)('unavailable workspaces (path missing on disk)', () => {
+    let gonePath: string;
+
+    beforeAll(async () => {
+        gonePath = join(env.base, 'unmounted-drive');
+        mkdirSync(gonePath, { recursive: true });
+        client.send('workspace:create', { path: gonePath });
+        await observer.waitForMessage('workspace:created', m => m.payload?.workspace?.id === gonePath);
+        // The drive "unmounts" behind the server's back.
+        rmSync(gonePath, { recursive: true, force: true });
+    }, 15000);
+
+    it('is still listed, flagged unavailable, rather than silently dropped', async () => {
+        const list = await env.api('/api/workspaces');
+        const ws = list.workspaces.find((w: any) => w.id === gonePath);
+        expect(ws).toBeDefined();
+        expect(ws.status).toBe('unavailable');
+        // A healthy workspace in the same list is explicitly available.
+        expect(list.workspaces.find((w: any) => w.id === repo)?.status).toBe('available');
+    }, 15000);
+
+    it('task:create is refused with WORKSPACE_UNAVAILABLE naming the path', async () => {
+        const err = await client.request('task:create', { prompt: 'should not spawn', workspaceId: gonePath }, 'error');
+        expect(err.payload.code).toBe('WORKSPACE_UNAVAILABLE');
+        expect(err.payload.error ?? err.payload.message).toContain(`Workspace path not found: ${gonePath}`);
+        const tasks = await env.api('/api/tasks');
+        expect(tasks.some((t: any) => t.workspaceId === gonePath)).toBe(false);
+    }, 15000);
+
+    it('git:push is refused with WORKSPACE_UNAVAILABLE', async () => {
+        const err = await client.request('git:push', { workspaceId: gonePath }, 'error');
+        expect(err.payload.code).toBe('WORKSPACE_UNAVAILABLE');
+    }, 15000);
+
+    it('the periodic status check broadcasts workspace:updated when the path disappears', async () => {
+        const f = await observer.waitForMessage(
+            'workspace:updated',
+            m => m.payload?.workspace?.id === gonePath && m.payload.workspace.status === 'unavailable',
+            10000,
+        );
+        expect(f.payload.workspace.status).toBe('unavailable');
+    }, 15000);
+
+    it('flips back to available once the path reappears, without a restart', async () => {
+        mkdirSync(gonePath, { recursive: true });
+        const list = await env.api('/api/workspaces');
+        expect(list.workspaces.find((w: any) => w.id === gonePath)?.status).toBe('available');
+        // ...and every client is told, so the UI un-greys without a refresh.
+        const f = await observer.waitForMessage(
+            'workspace:updated',
+            m => m.payload?.workspace?.id === gonePath && m.payload.workspace.status === 'available',
+            10000,
+        );
+        expect(f.payload.workspace.status).toBe('available');
+    }, 15000);
 });

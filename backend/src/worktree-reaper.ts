@@ -12,6 +12,7 @@
  * still runs — an orphan has no owner to wait for).
  */
 import { execFile } from 'child_process';
+import { existsSync } from 'fs';
 import { promisify } from 'util';
 import { createLogger } from './logger.js';
 
@@ -86,4 +87,20 @@ export async function removeWorktreeWithUnlockRetry(
             throw firstErr;
         }
     }
+}
+
+/**
+ * Remove a worktree the sweep has decided to reap. If the directory is
+ * already gone (deleted externally, or a record that outlived its folder —
+ * such records are no longer dropped at load, they are kept as 'unavailable'
+ * workspaces), `git worktree remove` would fail on every sweep; prune git's
+ * stale registration instead so the record can be retired cleanly.
+ */
+export async function reapWorktree(repoPath: string, worktreePath: string): Promise<void> {
+    if (existsSync(worktreePath)) {
+        await removeWorktreeWithUnlockRetry(repoPath, worktreePath);
+        return;
+    }
+    logger.info('reapWorktree: directory already gone, pruning git bookkeeping', { repoPath, worktreePath });
+    await execFileAsync('git', ['-C', repoPath, 'worktree', 'prune']);
 }

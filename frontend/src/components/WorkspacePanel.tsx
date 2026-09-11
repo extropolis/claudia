@@ -1078,6 +1078,12 @@ function WorkspaceSection({
     const inputId = `new-task-${workspace.id}`;
     const isFocused = focusedInputId === inputId;
 
+    // The backend keeps a workspace whose folder is missing (unmounted drive,
+    // config from another machine) but flags it unavailable. Render it greyed
+    // out with the expected path and block new tasks until the path is back.
+    const isUnavailable = workspace.status === 'unavailable';
+    const unavailableHint = `Workspace path not found: ${workspace.id}`;
+
     // Upload image to server
     const uploadImage = async (file: File): Promise<UploadedImage | null> => {
         const formData = new FormData();
@@ -1239,6 +1245,7 @@ function WorkspaceSection({
 
     const handleSubmit = useCallback((e?: React.FormEvent) => {
         e?.preventDefault();
+        if (isUnavailable) return;  // path missing — server would refuse anyway
         if (globalVoiceEnabled) {
             clearVoiceTranscript();
         }
@@ -1261,7 +1268,7 @@ function WorkspaceSection({
             images.forEach(img => URL.revokeObjectURL(img.previewUrl));
             setImages([]);
         }
-    }, [inputValue, images, isolate, workspace.autoWorktree, globalVoiceEnabled, clearVoiceTranscript, onCreateTask]);
+    }, [isUnavailable, inputValue, images, isolate, workspace.autoWorktree, globalVoiceEnabled, clearVoiceTranscript, onCreateTask]);
 
     // Listen for auto-send event
     useEffect(() => {
@@ -1356,7 +1363,7 @@ function WorkspaceSection({
 
     return (
         <div
-            className={`workspace-section ${isExpanded ? 'expanded' : ''} ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''} ${isMenuOpen ? 'menu-open' : ''}`}
+            className={`workspace-section ${isExpanded ? 'expanded' : ''} ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''} ${isMenuOpen ? 'menu-open' : ''} ${isUnavailable ? 'unavailable' : ''}`}
             onDragOver={(e) => e.preventDefault()}
             onDragEnter={() => onDragEnter(index)}
         >
@@ -1402,10 +1409,15 @@ function WorkspaceSection({
                         <>
                             <span
                                 className="workspace-name"
-                                title={workspace.id}
+                                title={isUnavailable ? unavailableHint : workspace.id}
                             >
                                 {workspaceDisplayName}
                             </span>
+                            {isUnavailable && (
+                                <span className="workspace-unavailable-badge" title={unavailableHint}>
+                                    Unavailable
+                                </span>
+                            )}
                             {onRenameWorkspace && (
                                 <button
                                     className="workspace-rename-button"
@@ -1922,7 +1934,8 @@ function WorkspaceSection({
                             <div className={`task-input-wrapper ${isFocused && globalVoiceEnabled ? 'voice-active' : ''}`}>
                                 <textarea
                                     className="task-input"
-                                    placeholder="Type or speak a task... (Ctrl+V to paste screenshots)"
+                                    placeholder={isUnavailable ? unavailableHint : 'Type or speak a task... (Ctrl+V to paste screenshots)'}
+                                    disabled={isUnavailable}
                                     value={inputValue}
                                     onChange={(e) => setInputValue(e.target.value)}
                                     onKeyDown={handleKeyDown}
@@ -1942,6 +1955,7 @@ function WorkspaceSection({
                                 onClick={() => fileInputRef.current?.click()}
                                 className="task-image-button"
                                 title="Attach image"
+                                disabled={isUnavailable}
                             >
                                 <ImagePlus size={16} />
                             </button>
@@ -1959,6 +1973,7 @@ function WorkspaceSection({
                                     className={`task-isolate-button${isolate ? ' active' : ''}`}
                                     title={isolate ? 'Isolate in worktree: ON — click to disable' : 'Isolate in worktree: OFF — click to enable'}
                                     onClick={() => setIsolate(v => !v)}
+                                    disabled={isUnavailable}
                                 >
                                     <GitBranch size={14} />
                                 </button>
@@ -1966,7 +1981,7 @@ function WorkspaceSection({
                             <button
                                 type="submit"
                                 className="task-submit-button"
-                                disabled={!inputValue.trim() && images.length === 0}
+                                disabled={isUnavailable || (!inputValue.trim() && images.length === 0)}
                             >
                                 <Send size={16} />
                             </button>
