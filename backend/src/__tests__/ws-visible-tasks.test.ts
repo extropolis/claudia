@@ -17,15 +17,20 @@ import { join } from 'path';
 import { homedir } from 'os';
 import WebSocket from 'ws';
 import { createApp } from '../server.js';
+import { getAuthToken } from '../auth-token.js';
 
 let base: string;
 let port: number;
+let token: string;
 let shutdown: (() => Promise<void>) | undefined;
 
-/** Send one message and resolve with the first reply of an expected type. */
+/**
+ * Send one message and resolve with the first reply of an expected type.
+ * Every WS upgrade is authenticated, so the socket presents the API token.
+ */
 function wsCall(type: string, payload: Record<string, unknown>, expectTypes: string[], timeoutMs = 8000): Promise<{ type: string; payload: any }> {
     return new Promise((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+        const ws = new WebSocket(`ws://127.0.0.1:${port}?token=${encodeURIComponent(token)}`);
         const timer = setTimeout(() => { ws.close(); reject(new Error(`timeout waiting for ${expectTypes.join('|')}`)); }, timeoutMs);
         ws.on('open', () => ws.send(JSON.stringify({ type, payload })));
         ws.on('message', (data: Buffer) => {
@@ -55,6 +60,7 @@ beforeAll(async () => {
 
     const appParts = await createApp(base);
     shutdown = appParts.shutdownForTests;
+    token = getAuthToken(base);
     await new Promise<void>((resolve) => appParts.server.listen(0, '127.0.0.1', () => resolve()));
     port = (appParts.server.address() as { port: number }).port;
 }, 30000);
@@ -78,6 +84,18 @@ describe('task:setVisible', () => {
     it('rejects a non-array payload instead of throwing', async () => {
         const reply = await wsCall('task:setVisible', { taskIds: 'task-p1' }, ['error', 'task:visibleSet']);
         expect(reply.type).toBe('error');
+    });
+
+    it('never reaches the handler on a socket without the API token', async () => {
+        // Split-screen traffic rides the same authenticated socket as everything
+        // else: an untokened client cannot even open it to declare a layout.
+        const outcome = await new Promise<string>((resolve) => {
+            const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+            ws.on('open', () => { ws.close(); resolve('opened'); });
+            ws.on('unexpected-response', (_req, res) => resolve(`refused ${res.statusCode}`));
+            ws.on('error', () => resolve('error'));
+        });
+        expect(outcome).toBe('refused 401');
     });
 
     it('survives junk ids without killing the connection', async () => {
