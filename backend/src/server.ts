@@ -28,7 +28,7 @@ import { evaluateCorsOrigin, CORS_REJECTED } from './cors-policy.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch, getTaskWorkStatus } from './git-utils.js';
 import { selectWorkspacesToRefresh } from './pr-refresh.js';
 import { WorktreeManager } from './worktree-manager.js';
-import { classifyWorktree, removeWorktreeWithUnlockRetry } from './worktree-reaper.js';
+import { classifyWorktree, reapWorktree } from './worktree-reaper.js';
 import { LearningsStore } from './learnings-store.js';
 import { TunnelManager } from './tunnel-manager.js';
 import { getMobilePageHtml } from './mobile-page.js';
@@ -1320,8 +1320,16 @@ export async function createApp(basePath?: string) {
                     logger.info('Worktree sweep: skip', { worktree: rec.id, reason: decision.reason });
                     continue;
                 }
+                if (!existsSync(rec.worktreeParentId)) {
+                    // Parent repo is missing too (unmounted drive, imported
+                    // config): this is an unavailable workspace, not a stale
+                    // worktree. Leave the record and its archived tasks alone.
+                    skipped++;
+                    logger.info('Worktree sweep: skip', { worktree: rec.id, reason: 'parent repo path not found (workspace unavailable)' });
+                    continue;
+                }
                 try {
-                    await removeWorktreeWithUnlockRetry(rec.worktreeParentId, rec.id);
+                    await reapWorktree(rec.worktreeParentId, rec.id);
                     workspaceStore.deleteWorkspace(rec.id);
                     broadcast({ type: 'workspace:deleted' as WSMessageType, payload: { workspaceId: rec.id } });
                     for (const taskId of decision.archivedTaskIds) {
@@ -1346,6 +1354,25 @@ export async function createApp(basePath?: string) {
     }
     const WORKTREE_SWEEP_INTERVAL_MS = 60 * 60 * 1000; // hourly; reads config each run
     const worktreeSweepInterval = setInterval(() => { void sweepArchivedWorktrees(); }, WORKTREE_SWEEP_INTERVAL_MS);
+
+    // Workspace availability poll: a workspace whose folder is missing is kept
+    // (status 'unavailable') rather than deleted. Re-check on a timer and tell
+    // every client when a path disappears or comes back (drive remounted), so
+    // the sidebar un-greys without a refresh. Cheap: one existsSync per workspace.
+    const WORKSPACE_STATUS_POLL_MS = (() => {
+        const fromEnv = parseInt(process.env.WORKSPACE_STATUS_POLL_MS || '', 10);
+        return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 15_000;
+    })();
+    const workspaceStatusInterval = setInterval(() => {
+        try {
+            for (const workspace of workspaceStore.collectStatusChanges()) {
+                logger.info('Workspace availability changed', { workspaceId: workspace.id, status: workspace.status });
+                broadcast({ type: 'workspace:updated' as WSMessageType, payload: { workspace } });
+            }
+        } catch (e) {
+            logger.error('Workspace status poll failed', { error: e instanceof Error ? e.message : String(e) });
+        }
+    }, WORKSPACE_STATUS_POLL_MS);
     const worktreeSweepKickoff = setTimeout(() => { void sweepArchivedWorktrees(); }, 30_000); // initial pass after startup settles
 
     // Debounced discovery trigger — multiple tasks going idle in quick succession
@@ -1842,6 +1869,18 @@ export async function createApp(basePath?: string) {
                             sendWSError(ws, `Invalid complexity '${complexity}'. Expected one of: low, medium, high.`, message.type, 'INVALID_COMPLEXITY');
                             return;
                         }
+                        // Refuse to spawn into a registered workspace whose path is
+                        // gone (unmounted drive, config from another machine). Checked
+                        // before path validation — which would otherwise reject the
+                        // same case with a generic "Path does not exist" — so the user
+                        // sees which path is expected. Exact-match on a registered id
+                        // only; the raw string is never used as a path here.
+                        if (workspaceStore.getWorkspace(workspaceId)?.status === 'unavailable') {
+                            logger.error('task:create rejected: workspace path not found', { workspaceId });
+                            sendWSError(ws, `Workspace path not found: ${workspaceId}`, message.type, 'WORKSPACE_UNAVAILABLE');
+                            return;
+                        }
+
                         // Validate workspace path
                         const workspaceValidation = validateWorkspacePath(workspaceId);
                         if (!workspaceValidation.valid) {
@@ -2364,6 +2403,15 @@ export async function createApp(basePath?: string) {
                         // Reconnect to a disconnected task
                         const { taskId } = payload as { taskId?: string };
                         if (!taskId) break;
+                        // A task whose workspace path is missing cannot be resumed:
+                        // fail loudly instead of letting the PTY spawn ENOENT.
+                        const reconnectWorkspaceId = taskSpawner.getTask(taskId)?.workspaceId
+                            ?? taskSpawner.getDisconnectedTask(taskId)?.workspaceId;
+                        if (reconnectWorkspaceId && workspaceStore.getWorkspace(reconnectWorkspaceId)?.status === 'unavailable') {
+                            logger.error('task:reconnect rejected: workspace path not found', { taskId, workspaceId: reconnectWorkspaceId });
+                            sendWSError(ws, `Workspace path not found: ${reconnectWorkspaceId}`, message.type, 'WORKSPACE_UNAVAILABLE');
+                            return;
+                        }
                         try {
                             const task = taskSpawner.reconnectTask(taskId);
                             if (task) {
@@ -2926,6 +2974,11 @@ export async function createApp(basePath?: string) {
                         if (!workspaceId) {
                             logger.error('git:push requires workspaceId');
                             sendWSError(ws, 'git:push requires workspaceId', message.type, 'MISSING_PARAMS');
+                            return;
+                        }
+                        if (workspaceStore.getWorkspace(workspaceId)?.status === 'unavailable') {
+                            logger.error('git push task rejected: workspace path not found', { workspaceId });
+                            sendWSError(ws, `Workspace path not found: ${workspaceId}`, message.type, 'WORKSPACE_UNAVAILABLE');
                             return;
                         }
                         // Validate workspace path
@@ -7643,6 +7696,7 @@ Guidelines:
         clearInterval(prInfoInterval);
         clearInterval(worktreeScanInterval);
         clearInterval(worktreeSweepInterval);
+        clearInterval(workspaceStatusInterval);
 
         // Notify all connected clients that the server is reloading
         broadcast({ type: 'server:reloading' as WSMessageType, payload: {} });
@@ -7684,6 +7738,7 @@ Guidelines:
         // vitest hangs on a non-idle event loop.
         clearInterval(uploadCleanupInterval);
         clearInterval(worktreeSweepInterval);
+        clearInterval(workspaceStatusInterval);
         clearTimeout(worktreeScanKickoff);
         clearTimeout(worktreeSweepKickoff);
 
