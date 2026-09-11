@@ -135,6 +135,13 @@ interface TaskStore {
     setErrorNotification: (message: string, code?: string) => void;
     clearErrorNotification: () => void;
     selectTask: (id: string | null) => void;
+    /**
+     * True once the server has delivered an authoritative task list (setTasks,
+     * i.e. `init`). Until then `tasks` is empty because nothing has loaded, not
+     * because every task was deleted — split-screen panes must not be pruned on
+     * that basis, or a reload would wipe the persisted layout.
+     */
+    hasTaskList: boolean;
     setTasks: (tasks: Task[]) => void;
     addTask: (task: Task) => void;
     updateTask: (task: Task) => void;
@@ -284,6 +291,7 @@ export const useTaskStore = create<TaskStore>()(
         (set, get) => ({
             // Initial state
             tasks: new Map(),
+            hasTaskList: false,
             archivedTasks: [],
             showArchivedTasks: false,
             selectedTaskId: null,
@@ -453,7 +461,7 @@ export const useTaskStore = create<TaskStore>()(
 
                 // Clear selectedTaskId if it's no longer in the task list
                 const newSelectedId = selectedTaskId && !taskMap.has(selectedTaskId) ? null : selectedTaskId;
-                set({ tasks: taskMap, selectedTaskId: newSelectedId });
+                set({ tasks: taskMap, selectedTaskId: newSelectedId, hasTaskList: true });
             },
 
             addTask: (task) => {

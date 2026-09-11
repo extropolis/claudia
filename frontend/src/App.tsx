@@ -369,17 +369,22 @@ function App() {
     // A task shown in a pane can be archived or destroyed from the sidebar (or
     // by another agent). Clear those panes instead of leaving them pointing at
     // a task that no longer exists.
+    const hasTaskList = useTaskStore(st => st.hasTaskList);
     useEffect(() => {
-        // NOT `|| tasks.size === 0`: deleting the LAST task is exactly when panes
-        // are most stale. They would render the empty state but still report their
-        // dead ids to the server in the visible set. The loop is idempotent.
-        if (isMobile) return;
+        // Gated on hasTaskList, NOT on `tasks.size === 0`. Before the server's
+        // first task list arrives `tasks` is empty only because nothing has
+        // loaded — pruning then would wipe every pane of the persisted layout on
+        // each page reload. Once the list HAS arrived, an empty map is real:
+        // deleting the LAST task is exactly when panes are most stale, and they
+        // would otherwise keep reporting dead ids in the visible set.
+        if (isMobile || !hasTaskList) return;
         for (const leaf of collectLeaves(splitRoot)) {
             if (leaf.taskId && !tasks.has(leaf.taskId)) {
+                console.log(`[SplitLayout] pane ${leaf.id} pointed at missing task ${leaf.taskId} - clearing it`);
                 setPaneTask(leaf.id, null);
             }
         }
-    }, [isMobile, tasks, splitRoot, setPaneTask]);
+    }, [isMobile, hasTaskList, tasks, splitRoot, setPaneTask]);
 
     // Focusing a pane makes its task "the" selected task, so the File Explorer,
     // AI Supervisor and sidebar highlight all follow the pane you are looking at.

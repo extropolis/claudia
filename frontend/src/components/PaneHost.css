@@ -19,6 +19,61 @@
     min-height: 0;
 }
 
+/*
+ * Narrow panes. The terminal header is a single non-wrapping row with
+ * overflow: hidden, sized for a full-width terminal: in a ~300px pane the title
+ * collapsed to nothing and the pane controls (split / close) were clipped off
+ * the right edge — unreachable. The app's mobile breakpoint cannot help, since
+ * a pane is narrow on a wide screen, so each pane is a size container and the
+ * header compacts on the PANE's width instead of the viewport's.
+ */
+.pane-host {
+    container-type: inline-size;
+    container-name: pane;
+}
+
+/* Every selector below is prefixed with .pane-host: at equal specificity the
+   bundle's CSS order decides, and TerminalView.css's own .copy-button rule was
+   winning — the copy button stayed visible and its width came out of the title. */
+@container pane (max-width: 560px) {
+    .pane-host .terminal-header {
+        padding: 6px 10px;
+        gap: 4px;
+    }
+    .pane-host .terminal-title {
+        /* Shrinks first, but never to nothing. */
+        min-width: 6ch;
+        -webkit-line-clamp: 1;
+        max-height: calc(1 * 1.4em);
+        font-size: 13px;
+    }
+    /* Icon-only Learn button, as on mobile. */
+    .pane-host .learn-button {
+        padding: 4px 6px;
+        font-size: 0;
+        gap: 0;
+    }
+    .pane-host .terminal-viewing-badge {
+        max-width: 12ch;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .pane-host .pane-controls {
+        margin-left: auto;
+    }
+}
+
+@container pane (max-width: 380px) {
+    .pane-host .copy-button,
+    .pane-host .terminal-viewing-badge {
+        display: none;
+    }
+    .pane-host .terminal-state {
+        font-size: 10px;
+        padding: 2px 5px;
+    }
+}
+
 /* ---- Pane chrome (injected into the terminal header) ---- */
 
 .pane-controls {
