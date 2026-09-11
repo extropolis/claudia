@@ -205,6 +205,11 @@ export interface Workspace {
     id: string;              // Full path
     name: string;            // Folder name
     createdAt: string;
+    // Whether the workspace path currently exists on disk. Computed server-side
+    // on every read (never persisted) so an unmounted drive or a config imported
+    // from another machine shows as 'unavailable' instead of being dropped, and
+    // flips back to 'available' as soon as the path reappears.
+    status?: 'available' | 'unavailable';
     systemPrompt?: string;   // Custom system prompt for this workspace
     displayName?: string;    // User-editable display name (shown instead of folder name when set)
     references?: WorkspaceReference[];  // Referenced workspaces/folders for cross-workspace context
