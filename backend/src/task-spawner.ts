@@ -550,7 +550,6 @@ export class TaskSpawner extends EventEmitter {
     /** Set when `scheduleSave` fires again while `saveInFlight` — coalesces into
      *  one more run after the current save finishes, instead of overlapping. */
     private saveAgainRequested: boolean = false;
-    private fileModTimeOnLoad: number | null = null; // Track file mtime when we loaded it
     /** Periodic heartbeat save — always fires every HEARTBEAT_SAVE_MS regardless of activity.
      * Safety net against lost tasks when the process dies without a clean shutdown
      * (SIGKILL, OOM, tsx watch abrupt restart, etc.). */
@@ -2480,10 +2479,6 @@ export class TaskSpawner extends EventEmitter {
             }
 
             if (existsSync(this.persistencePath)) {
-                // Track file modification time to detect concurrent writes
-                const stats = statSync(this.persistencePath);
-                this.fileModTimeOnLoad = stats.mtimeMs;
-
                 const data = readFileSync(this.persistencePath, 'utf-8');
                 // Use 'any' for raw persistence to handle migration from old format
                 const persistence = JSON.parse(data) as { tasks: PersistedTask[]; archivedTasks?: any[]; nextTaskNumber?: number; pendingParentNotifications?: Record<string, { childId: string; text: string }[]> };
@@ -2835,18 +2830,15 @@ export class TaskSpawner extends EventEmitter {
 
     private saveTasks(): void {
         try {
-            // Check if file has been modified by another process since we loaded it
-            if (this.fileModTimeOnLoad !== null && existsSync(this.persistencePath)) {
-                const currentStats = statSync(this.persistencePath);
-                if (currentStats.mtimeMs > this.fileModTimeOnLoad) {
-                    console.error(`[TaskSpawner] ⚠️  WARNING: tasks.json was modified by another process!`);
-                    console.error(`[TaskSpawner]     Loaded at:  ${new Date(this.fileModTimeOnLoad).toISOString()}`);
-                    console.error(`[TaskSpawner]     Modified at: ${new Date(currentStats.mtimeMs).toISOString()}`);
-                    console.error(`[TaskSpawner]     REFUSING TO SAVE to prevent data loss!`);
-                    console.error(`[TaskSpawner]     This indicates multiple server instances are running.`);
-                    return;
-                }
-            }
+            // NOTE: this used to compare tasks.json's mtime against the value
+            // recorded at load and refuse to save when it had moved, as a proxy
+            // for "another instance is running". That guard is gone: mutual
+            // exclusion now happens at startup in instance-lock.ts, which
+            // refuses to BOOT a second backend against the same data directory
+            // instead of letting both run and silently stop persisting. The
+            // mtime check also fired on legitimate external edits and, once
+            // tripped, quietly dropped every subsequent save for the life of
+            // the process.
 
             const tasksToSave: PersistedTask[] = [];
 
@@ -3006,10 +2998,6 @@ export class TaskSpawner extends EventEmitter {
                 this.saveArchivedTasks(archivedTasksToSave);
             }
 
-            // Update our tracked modification time after successful save (PR #37 multi-instance guard)
-            const newStats = statSync(this.persistencePath);
-            this.fileModTimeOnLoad = newStats.mtimeMs;
-
             console.log(`[TaskSpawner] Saved ${tasksToSave.length} tasks, ${archivedTasksToSave.length} archived (metadata only)`);
         } catch (error) {
             console.error('[TaskSpawner] Failed to save tasks:', error);
@@ -3052,7 +3040,7 @@ export class TaskSpawner extends EventEmitter {
      * `saveNow`/shutdown keep calling the synchronous `saveTasks` unchanged, since
      * that path must complete before an abrupt process kill can interrupt it.
      *
-     * Same logic and same safety nets (mod-time conflict guard, refuse-to-overwrite
+     * Same logic and same safety nets (refuse-to-overwrite
      * -non-empty-with-empty guard, `.bak` rollover) as `saveTasks`. The only
      * structural difference: each live task's history-file handling is an
      * independent async job, run concurrently via `Promise.allSettled` instead of
@@ -3069,18 +3057,9 @@ export class TaskSpawner extends EventEmitter {
      */
     private async saveTasksAsync(): Promise<void> {
         try {
-            if (this.fileModTimeOnLoad !== null && existsSync(this.persistencePath)) {
-                const currentStats = statSync(this.persistencePath);
-                if (currentStats.mtimeMs > this.fileModTimeOnLoad) {
-                    console.error(`[TaskSpawner] ⚠️  WARNING: tasks.json was modified by another process!`);
-                    console.error(`[TaskSpawner]     Loaded at:  ${new Date(this.fileModTimeOnLoad).toISOString()}`);
-                    console.error(`[TaskSpawner]     Modified at: ${new Date(currentStats.mtimeMs).toISOString()}`);
-                    console.error(`[TaskSpawner]     REFUSING TO SAVE to prevent data loss!`);
-                    console.error(`[TaskSpawner]     This indicates multiple server instances are running.`);
-                    return;
-                }
-            }
-
+            // No mtime-based "another process wrote tasks.json" guard here — see
+            // the note in saveTasks(): single-instance exclusion is enforced at
+            // boot by instance-lock.ts.
             const tasksToSave: PersistedTask[] = [];
             const historyJobs: Promise<void>[] = [];
 
@@ -3210,9 +3189,6 @@ export class TaskSpawner extends EventEmitter {
             if (this.archivedDirty) {
                 await this.saveArchivedTasksAsync(archivedTasksToSave);
             }
-
-            const newStats = statSync(this.persistencePath);
-            this.fileModTimeOnLoad = newStats.mtimeMs;
 
             console.log(`[TaskSpawner] Saved ${tasksToSave.length} tasks, ${archivedTasksToSave.length} archived (metadata only) [async]`);
         } catch (error) {

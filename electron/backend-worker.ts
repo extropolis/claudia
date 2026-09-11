@@ -13,6 +13,11 @@
  */
 
 import { createApp } from '../backend/dist/server.js';
+import {
+    acquireInstanceLock,
+    InstanceLockError,
+    resolveBackendVersion,
+} from '../backend/dist/instance-lock.js';
 
 // Electron utility process has parentPort on the process object
 const parentPort = (process as any).parentPort;
@@ -44,7 +49,19 @@ parentPort?.on('message', async (e: any) => {
             const { port, basePath } = msg;
             console.log(`Starting backend on port ${port}...`);
 
-            const { server, tunnelManager } = await createApp(basePath || undefined);
+            // Claim the data directory before createApp() constructs any store.
+            // The desktop app is the launcher most likely to collide with a
+            // developer's `./start.sh` or a second copy of the app: it picks a
+            // fresh port every boot, so an EADDRINUSE would never fire, and
+            // both processes would write the same userData directory.
+            const lock = acquireInstanceLock(basePath || undefined, port, resolveBackendVersion());
+            // Best effort: a hard kill skips this, and the next start then
+            // resolves the lock as stale via its pid + health check.
+            const release = () => { try { lock.release(); } catch { /* exiting anyway */ } };
+            process.on('exit', release);
+            process.on('SIGTERM', () => { release(); process.exit(0); });
+
+            const { server, tunnelManager } = await createApp(basePath || undefined, lock.info);
 
             // Update tunnel manager with the actual dynamic port
             tunnelManager.setPort(port);
@@ -62,6 +79,15 @@ parentPort?.on('message', async (e: any) => {
 
             parentPort?.postMessage({ type: 'ready' });
         } catch (err) {
+            if (err instanceof InstanceLockError) {
+                const { pid, port: heldPort } = err.existing;
+                const message =
+                    `Claudia is already running (pid ${pid}) at http://localhost:${heldPort} ` +
+                    `— attach to it instead of starting a second instance.`;
+                console.error(message);
+                parentPort?.postMessage({ type: 'error', message });
+                return;
+            }
             const message = err instanceof Error ? err.message : String(err);
             console.error('Backend startup failed:', message);
             parentPort?.postMessage({ type: 'error', message });

@@ -34,6 +34,7 @@ jobs:
           FORBIDDEN_PATTERNS=(
             'backend/task-histories/'
             'backend/archived-histories/'
+            'backend/instance.json'
             'backend/tasks.json'
             'backend/archived-tasks.json'
             'backend/checkpoints.json'
