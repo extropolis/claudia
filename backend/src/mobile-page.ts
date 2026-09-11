@@ -951,6 +951,11 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
             if (selectedTaskId === taskId) {
                 // Collapse
                 selectedTaskId = null;
+                // Mobile shows ONE task at a time. Tell the server nothing is on
+                // screen so it stops streaming PTY output over the tunnel.
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'task:setVisible', payload: { taskIds: [] } }));
+                }
                 renderAccordion();
                 return;
             }
@@ -964,8 +969,13 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
             }
 
             // Tell server to activate this task (triggers task:restore with history)
+            // and then declare it the ONLY visible task. Without the second message
+            // the server's visible set would accumulate every task the user opened
+            // (it is a set now, for desktop split screen), and a phone would keep
+            // receiving PTY output for all of them over the tunnel.
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'task:select', payload: { taskId: taskId } }));
+                ws.send(JSON.stringify({ type: 'task:setVisible', payload: { taskIds: [taskId] } }));
             }
 
             renderAccordion();
@@ -1207,6 +1217,7 @@ export function getMobilePageHtml(wsUrl: string, token: string): string {
                             taskRestorePending[p.task.id] = true;
                             if (ws && ws.readyState === WebSocket.OPEN) {
                                 ws.send(JSON.stringify({ type: 'task:select', payload: { taskId: p.task.id } }));
+                                ws.send(JSON.stringify({ type: 'task:setVisible', payload: { taskIds: [p.task.id] } }));
                             }
                         }
                         renderAccordion();

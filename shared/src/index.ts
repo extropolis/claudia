@@ -352,6 +352,8 @@ export type WSMessageType =
     | 'task:stateChanged'
     | 'task:output'
     | 'task:restore'
+    // Split screen: server's ack of the visible-task set a client declared.
+    | 'task:visibleSet'
     | 'task:destroyed'
     | 'task:stopped'
     | 'task:stopAll:result'

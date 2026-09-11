@@ -18,6 +18,11 @@ interface TaskInputBarProps {
     wsRef: React.RefObject<WebSocket | null>;
 }
 
+// Module-level so it is shared by every mounted TaskInputBar and survives blur.
+// null = nobody has focused an input yet (preserves the original single-pane
+// behaviour of grabbing the caret on window focus).
+let lastFocusedTaskInputId: string | null = null;
+
 export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -49,6 +54,14 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
 
     const inputId = `task-${task.id}`;
     const isFocused = focusedInputId === inputId;
+
+    // Split-screen: remember which input bar last held focus, ACROSS instances and
+    // across blur. `focusedInputId` in the store is cleared by handleBlur (and blur
+    // fires when the browser window loses focus), so it cannot answer "which pane
+    // should get the caret back when the user returns to the window". Without this,
+    // every mounted TaskInputBar calls focus() on window-focus and the last one
+    // registered wins — meaning the caret lands in an arbitrary pane.
+    const claimInputFocus = () => { lastFocusedTaskInputId = inputId; };
 
     // Auto-resize textarea based on content
     useEffect(() => {
@@ -82,13 +95,17 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
     // keypress goes to the PTY instead of the input bar.
     useEffect(() => {
         const handleWindowFocus = () => {
+            // Only the pane whose input last had focus reclaims the caret. See
+            // lastFocusedTaskInputId above for why the store's focusedInputId
+            // cannot be used here.
+            if (lastFocusedTaskInputId !== null && lastFocusedTaskInputId !== inputId) return;
             if (inputRef.current && !isDisabled) {
                 inputRef.current.focus();
             }
         };
         window.addEventListener('focus', handleWindowFocus);
         return () => window.removeEventListener('focus', handleWindowFocus);
-    }, [isDisabled]);
+    }, [isDisabled, inputId]);
 
     // Append voice transcript to message when this input is focused
     // We use a ref to track processed transcripts to prevent duplicate appending
@@ -329,6 +346,7 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
     };
 
     const handleFocus = () => {
+        claimInputFocus();
         setFocusedInputId(inputId);
     };
 
