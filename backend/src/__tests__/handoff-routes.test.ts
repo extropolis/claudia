@@ -60,7 +60,8 @@ describe('import + handoff HTTP routes', () => {
 
     afterEach(async () => {
         await harness.stop();
-        rmSync(sandbox, { recursive: true, force: true });
+        // Retries: on Windows a just-killed PTY can hold its cwd briefly.
+        rmSync(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     });
 
     // -----------------------------------------------------------------------
@@ -208,7 +209,11 @@ describe('import + handoff HTTP routes', () => {
         await harness.send('POST', '/api/handoff/reclaim');
         let reclaimedError: unknown = null;
         try {
-            await spawner.createTask('hello', workspace);
+            const created = await spawner.createTask('hello', workspace);
+            // If a process did spawn, kill it now: on Windows a live PTY whose
+            // cwd is `workspace` holds the directory open, and the afterEach
+            // cleanup of the sandbox fails with EBUSY.
+            if (created?.id) spawner.destroyTask(created.id);
         } catch (error) {
             reclaimedError = error;
         }

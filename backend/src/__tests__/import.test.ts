@@ -210,6 +210,35 @@ describe('import', () => {
             const remap = new PathRemapper([['/work/', '/srv/']]);
             expect(remap.apply('/work/api')).toBe('/srv/api');
         });
+
+        // Windows semantics are decided by the path's own shape, not the host
+        // OS, so these hold identically on every CI leg.
+        it('keeps the operator\'s spelling in the rule table and in rewritten paths', () => {
+            const remap = new PathRemapper([['C:\\Old\\Root\\', 'D:\\New\\Root']]);
+            expect(remap.rules).toEqual([['C:\\Old\\Root', 'D:\\New\\Root']]);
+            expect(remap.apply('C:\\Old\\Root\\Proj')).toBe('D:\\New\\Root\\Proj');
+        });
+
+        it('matches Windows paths case- and separator-insensitively', () => {
+            const remap = new PathRemapper([['C:\\Users\\Ana', 'D:\\Ana']]);
+            expect(remap.apply('c:/users/ana/Work/Api')).toBe('D:\\Ana\\Work\\Api');
+            expect(remap.apply('C:\\USERS\\ANA')).toBe('D:\\Ana');
+            // Boundary still applies after folding.
+            expect(remap.apply('C:\\Users\\Anatole\\x')).toBe('C:\\Users\\Anatole\\x');
+        });
+
+        it('keeps POSIX paths case-sensitive', () => {
+            const remap = new PathRemapper([['/Work', '/srv']]);
+            expect(remap.apply('/work/api')).toBe('/work/api');
+            expect(remap.apply('/Work/api')).toBe('/srv/api');
+        });
+
+        it('rewrites tail separators to the target style across platforms', () => {
+            const toWin = new PathRemapper([['/home/ana', 'C:\\Users\\ana']]);
+            expect(toWin.apply('/home/ana/code/api')).toBe('C:\\Users\\ana\\code\\api');
+            const toPosix = new PathRemapper([['C:\\Users\\ana', '/home/ana']]);
+            expect(toPosix.apply('C:\\Users\\ana\\code\\api')).toBe('/home/ana/code/api');
+        });
     });
 
     // -----------------------------------------------------------------------

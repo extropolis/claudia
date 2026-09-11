@@ -48,6 +48,11 @@ function makeRepo(dir: string, remote?: string): string {
     git(dir, 'config', 'user.email', 'test@example.com');
     git(dir, 'config', 'user.name', 'Test User');
     git(dir, 'config', 'commit.gpgsign', 'false');
+    // The handoff code runs git with the real environment, and Git for
+    // Windows ships core.autocrlf=true in its system config — which would
+    // check the restored tree out as CRLF. Pin it per repo so the byte-level
+    // content assertions mean the same thing on every OS.
+    git(dir, 'config', 'core.autocrlf', 'false');
     writeFileSync(join(dir, 'README.md'), '# base\n');
     git(dir, 'add', '.');
     git(dir, 'commit', '-m', 'init');
@@ -261,7 +266,8 @@ describe('export → import round trip', () => {
             repoA = makeRepo(join(rootA, 'alpha'), bare);
             repoB = join(rootB, 'alpha');
             rmSync(repoB, { recursive: true, force: true });
-            git(rootB, 'clone', bare, repoB);
+            // `-c` persists into the clone's config and covers its first checkout.
+            git(rootB, 'clone', '-c', 'core.autocrlf=false', bare, repoB);
             git(repoB, 'config', 'user.email', 'test@example.com');
             git(repoB, 'config', 'user.name', 'Test User');
             git(repoB, 'config', 'commit.gpgsign', 'false');

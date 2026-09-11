@@ -53,7 +53,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, copyFileSync } from 'fs';
-import { join, resolve, sep, dirname } from 'path';
+import { join, resolve, dirname } from 'path';
 import { homedir } from 'os';
 
 import { LEGACY_DATA_DIR } from '../paths.js';
@@ -124,22 +124,30 @@ function isPlainObject(value: Json): value is Record<string, Json> {
  * table is the thing an operator needs to check before trusting the import.
  */
 export class PathRemapper {
-    /** Rules, longest `from` first. Length order is what makes matching total. */
+    /**
+     * Rules, longest `from` first, in the operator's own spelling (only
+     * trailing separators are trimmed). Length order is what makes matching
+     * total. This is what `--dry-run` prints, so it must never show a
+     * case-folded or separator-rewritten form the operator did not type.
+     */
     readonly rules: Array<[string, string]>;
+    /** Comparison key of each rule's `from`, index-aligned with `rules`. */
+    private readonly keys: string[];
     /** Paths that matched no rule, deduplicated, in first-seen order. */
     private readonly unmatched = new Set<string>();
 
     constructor(pairs: Array<[string, string]>) {
-        const seen = new Map<string, string>();
+        const seen = new Map<string, [string, string]>();
         for (const [from, to] of pairs) {
-            const f = normalize(from);
-            const t = normalize(to);
+            const key = normalize(from);
             // A later rule for the same source wins; duplicates are otherwise
             // silently redundant and a duplicate that *disagrees* is a bug the
             // operator wants resolved deterministically.
-            if (f) seen.set(f, t);
+            if (key) seen.set(key, [trimPath(from), trimPath(to)]);
         }
-        this.rules = [...seen.entries()].sort((a, b) => b[0].length - a[0].length);
+        const ordered = [...seen.entries()].sort((a, b) => b[0].length - a[0].length);
+        this.keys = ordered.map(([key]) => key);
+        this.rules = ordered.map(([, rule]) => rule);
     }
 
     /**
@@ -148,18 +156,21 @@ export class PathRemapper {
      */
     apply(value: string): string {
         if (!value) return value;
-        const normalized = normalize(value);
-        for (const [from, to] of this.rules) {
-            if (normalized === from) return to;
+        const key = normalize(value);
+        for (let i = 0; i < this.rules.length; i++) {
+            const fromKey = this.keys[i];
+            const [from, to] = this.rules[i];
+            if (key === fromKey) return to;
             // Boundary check: `/work/api` must not match `/work/api-v2`. The
             // separator has to be part of the comparison, not an afterthought.
-            if (normalized.startsWith(from.endsWith(sep) ? from : from + sep)) {
-                // Slice the tail off the ORIGINAL, not the normalized copy:
-                // normalization case-folds on Windows, and the remainder of the
-                // path must come back with the caller's own spelling intact.
-                // Both transforms are length-preserving, so the offsets agree.
-                const tail = value.slice(from.length);
-                return to.replace(/[\\/]+$/, '') + tail;
+            // Keys always use `/`, whatever the path's native separator.
+            if (key.startsWith(fromKey + '/')) {
+                // Slice the tail off the ORIGINAL, not the key: the key may be
+                // case-folded, and the remainder of the path must come back
+                // with the caller's own spelling intact. Key derivation is
+                // length-preserving, so the offsets agree.
+                const tail = value.trim().slice(fromKey.length);
+                return to + retargetSeparators(tail, from, to);
             }
         }
         this.unmatched.add(value);
@@ -173,18 +184,45 @@ export class PathRemapper {
 }
 
 /**
- * Normalize a path for prefix comparison: strip trailing separators, and on
- * Windows unify separators and case so `C:\Work` matches `c:/work`.
+ * A path that follows Windows rules: drive-letter (`C:\`, `c:/`) or UNC
+ * (`\\server\share`). Decided by the path itself, not by the host running the
+ * import — an export from a Windows machine is imported on Linux too, and a
+ * POSIX path from a Linux export stays POSIX on a Windows target.
+ */
+function isWindowsPath(p: string): boolean {
+    return /^[a-zA-Z]:([\\/]|$)/.test(p) || /^[\\/]{2}[^\\/]/.test(p);
+}
+
+/** Trim whitespace and trailing separators, keeping the spelling otherwise. */
+function trimPath(p: string): string {
+    return p.trim().replace(/[\\/]+$/, '');
+}
+
+/**
+ * Comparison key for prefix matching: trailing separators stripped and, for
+ * Windows paths only, separators unified to `/` and case folded — so
+ * `C:\Work` matches `c:/work`.
  *
- * POSIX paths are deliberately left case-sensitive — `/Work` and `/work` are
- * genuinely different directories on Linux, and folding them would let one
- * rule silently capture the other's paths.
+ * POSIX paths are deliberately left as-is: `/Work` and `/work` are genuinely
+ * different directories on Linux, and `\` is a legal filename character
+ * there, so folding either would let one rule silently capture another
+ * directory's paths.
  */
 function normalize(p: string): string {
     if (!p) return '';
-    let out = p.trim().replace(/[\\/]+$/, '');
-    if (process.platform === 'win32') out = out.replace(/\//g, '\\').toLowerCase();
-    return out;
+    const out = trimPath(p);
+    return isWindowsPath(out) ? out.replace(/\\/g, '/').toLowerCase() : out;
+}
+
+/**
+ * When a rule crosses between Windows and POSIX spellings, rewrite the
+ * separators in the carried-over tail to the target's style, so
+ * `/home/ana/api` → `C:\Users\ana` yields `C:\Users\ana\api`, not a mixed
+ * `C:\Users\ana/api`. POSIX-to-POSIX tails are left verbatim.
+ */
+function retargetSeparators(tail: string, from: string, to: string): string {
+    if (!isWindowsPath(from) && !isWindowsPath(to)) return tail;
+    return tail.replace(/[\\/]/g, isWindowsPath(to) ? '\\' : '/');
 }
 
 // ---------------------------------------------------------------------------
