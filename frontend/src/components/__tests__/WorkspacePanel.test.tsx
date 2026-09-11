@@ -9,7 +9,7 @@
  * Queried by role / label / text / title only; never by CSS class.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, within, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, within, fireEvent, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Task, Workspace } from '@claudia/shared';
 import { WorkspacePanel } from '../WorkspacePanel';
@@ -141,6 +141,18 @@ function draggableFor(label: string): HTMLElement {
         el = el.parentElement;
     }
     throw new Error(`no draggable element for "${label}"`);
+}
+
+/**
+ * The task rows currently on screen, in DOM order. Each row's prompt <span>
+ * carries `title={task.prompt}`, so this reads rendered order without touching
+ * CSS classes — and it sees nested subtask rows too, which is the point when
+ * asserting that a reorder did not unnest anything.
+ */
+function renderedTaskPrompts(): string[] {
+    return Array.from(document.querySelectorAll<HTMLElement>('[title]'))
+        .map(el => el.getAttribute('title')!)
+        .filter(t => t.startsWith('task '));
 }
 
 /** Open a workspace's kebab ("Workspace settings") menu. */
@@ -538,6 +550,118 @@ describe('WorkspacePanel', () => {
             { taskId: 't3', order: 1 },
             { taskId: 't1', order: 2 },
         ]);
+    });
+
+    it('reorders the task the user grabbed even when Recent sort re-sorts the list mid-drag', () => {
+        // Recent (last-modified) mode, no manual order yet: visible [a, b, c].
+        const { props } = renderWorkspacePanel({
+            store: { taskSortBy: 'last-modified' },
+            tasks: [
+                makeTask('a', '/repos/alpha', { prompt: 'task alpha', lastActivity: new Date(T0.getTime() + 3000) }),
+                makeTask('b', '/repos/alpha', { prompt: 'task bravo', lastActivity: new Date(T0.getTime() + 2000) }),
+                makeTask('c', '/repos/alpha', { prompt: 'task charlie', lastActivity: new Date(T0.getTime() + 1000) }),
+            ],
+        });
+
+        const dataTransfer = makeDataTransfer();
+        fireEvent.dragStart(draggableFor('task alpha'), { dataTransfer }); // alpha is idx 0
+
+        // A busy task produces output mid-drag: charlie's lastActivity jumps, the
+        // list re-sorts to [c, a, b] and alpha is now idx 1.
+        act(() => {
+            useTaskStore.getState().updateTask({
+                ...useTaskStore.getState().tasks.get('c')!,
+                lastActivity: new Date(T0.getTime() + 10_000),
+            });
+        });
+
+        fireEvent.dragEnter(draggableFor('task bravo'), { dataTransfer }); // bravo is idx 2 now
+        fireEvent.dragEnd(draggableFor('task alpha'), { dataTransfer });
+
+        // alpha (the grabbed row) lands at the bottom: [c, b, a].
+        const orders = useTaskStore.getState().tasks;
+        expect(orders.get('c')!.order).toBe(0);
+        expect(orders.get('b')!.order).toBe(1);
+        expect(orders.get('a')!.order).toBe(2);
+        expect(props.onReorderTasksOnServer).toHaveBeenCalledTimes(1);
+    });
+
+    it('drops onto the row the cursor is over when Recent re-sorts AFTER dragenter', () => {
+        // The dragged task is tracked by id and its index re-derived at drop; the
+        // DROP index is a positional slot captured at dragenter. This asserts the
+        // two stay in the SAME index space when the list re-sorts in between —
+        // i.e. the row highlighted as the drop target is the slot the task lands in.
+        const { props } = renderWorkspacePanel({
+            store: { taskSortBy: 'last-modified' },
+            tasks: [
+                makeTask('a', '/repos/alpha', { prompt: 'task alpha', lastActivity: new Date(T0.getTime() + 3000) }),
+                makeTask('b', '/repos/alpha', { prompt: 'task bravo', lastActivity: new Date(T0.getTime() + 2000) }),
+                makeTask('c', '/repos/alpha', { prompt: 'task charlie', lastActivity: new Date(T0.getTime() + 1000) }),
+            ],
+        });
+        expect(renderedTaskPrompts()).toEqual(['task alpha', 'task bravo', 'task charlie']);
+
+        const dataTransfer = makeDataTransfer();
+        fireEvent.dragStart(draggableFor('task charlie'), { dataTransfer }); // charlie is idx 2
+        fireEvent.dragEnter(draggableFor('task alpha'), { dataTransfer });   // aim at the top slot
+
+        // Only NOW does a busy task bump: the list re-sorts to [b, a, c] while the
+        // pointer has not moved, so no further dragenter fires.
+        act(() => {
+            useTaskStore.getState().updateTask({
+                ...useTaskStore.getState().tasks.get('b')!,
+                lastActivity: new Date(T0.getTime() + 10_000),
+            });
+        });
+        expect(renderedTaskPrompts()).toEqual(['task bravo', 'task alpha', 'task charlie']);
+
+        fireEvent.dragEnd(draggableFor('task charlie'), { dataTransfer });
+
+        // charlie (the grabbed row) lands in the top slot the cursor was over.
+        expect(renderedTaskPrompts()).toEqual(['task charlie', 'task bravo', 'task alpha']);
+        const orders = useTaskStore.getState().tasks;
+        expect(orders.get('c')!.order).toBe(0);
+        expect(orders.get('b')!.order).toBe(1);
+        expect(orders.get('a')!.order).toBe(2);
+        expect(props.onReorderTasksOnServer).toHaveBeenCalledTimes(1);
+    });
+
+    it('reorders over top-level rows only, leaving a nested subtask nested', () => {
+        // Drag indexes are assigned over top-level rows; the child does not occupy
+        // one. If the store spliced over the full task list instead, dragging the
+        // last sibling to the top would move the hidden child rather than the row.
+        const { props } = renderWorkspacePanel({
+            tasks: [
+                makeTask('P', '/repos/alpha', { prompt: 'task parent', createdAt: new Date(T0.getTime() + 4000) }),
+                makeTask('C', '/repos/alpha', { prompt: 'task child', createdAt: new Date(T0.getTime() + 3000), parentTaskId: 'P' }),
+                makeTask('S1', '/repos/alpha', { prompt: 'task sib one', createdAt: new Date(T0.getTime() + 2000) }),
+                makeTask('S2', '/repos/alpha', { prompt: 'task sib two', createdAt: new Date(T0.getTime() + 1000) }),
+            ],
+        });
+        // The child renders under its parent, not as a third top-level row.
+        expect(renderedTaskPrompts()).toEqual(['task parent', 'task child', 'task sib one', 'task sib two']);
+        expect(screen.getByTitle('Hide subtasks')).toBeInTheDocument();
+
+        const dataTransfer = makeDataTransfer();
+        fireEvent.dragStart(draggableFor('task sib two'), { dataTransfer }); // top-level idx 2
+        fireEvent.dragEnter(draggableFor('task parent'), { dataTransfer });  // top-level idx 0
+        fireEvent.dragEnd(draggableFor('task sib two'), { dataTransfer });
+
+        // The row the user grabbed moved; the child stayed under its parent.
+        expect(renderedTaskPrompts()).toEqual(['task sib two', 'task parent', 'task child', 'task sib one']);
+        const orders = useTaskStore.getState().tasks;
+        expect(orders.get('S2')!.order).toBe(0);
+        expect(orders.get('P')!.order).toBe(1);
+        expect(orders.get('S1')!.order).toBe(2);
+        // The subtask occupies no drag slot, so it is given no order at all.
+        expect(orders.get('C')!.order).toBeUndefined();
+
+        // Nesting is by parentTaskId, not by order: collapsing the parent still hides it.
+        fireEvent.click(screen.getByTitle('Hide subtasks'));
+        expect(renderedTaskPrompts()).toEqual(['task sib two', 'task parent', 'task sib one']);
+
+        const sent = (props.onReorderTasksOnServer as ReturnType<typeof vi.fn>).mock.calls[0][0];
+        expect(sent.map((o: { taskId: string }) => o.taskId).sort()).toEqual(['P', 'S1', 'S2']);
     });
 
     it('adds a workspace from an OS folder drop that carries a real path', () => {

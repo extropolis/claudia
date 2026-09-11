@@ -8,6 +8,9 @@ describe('taskStore', () => {
         // Must match ALL fields from the store's initial state exactly
         useTaskStore.setState({
             tasks: new Map(),
+            // reorderTasks is sort-mode dependent; pin the default so a test that
+            // switches to 'last-modified' cannot leak the mode into later tests.
+            taskSortBy: 'date-created',
             archivedTasks: [],
             showArchivedTasks: false,
             selectedTaskId: null,
@@ -606,26 +609,109 @@ describe('taskStore', () => {
         ];
 
         beforeEach(() => {
+            // reorderTasks reads taskSortBy from the store; pin it for determinism.
+            useTaskStore.getState().setTaskSortBy('date-created');
             for (const task of tasks) {
                 useTaskStore.getState().addTask(task);
             }
         });
 
-        it('should reorder tasks within a workspace', () => {
-            // Reorder first task to last position in /ws1
+        // Helper: task ids in current stored order (ascending order field), for the workspace.
+        const orderedIds = (wsId: string) =>
+            Array.from(useTaskStore.getState().tasks.values())
+                .filter(t => t.workspaceId === wsId)
+                .sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
+                .map(t => t.id);
+
+        it('should reorder tasks within a workspace and move the correct task', () => {
+            // date-created display order (newest first): [task-c, task-b, task-a].
+            // Drag the first visible task (task-c, index 0) to the last position (index 2).
             useTaskStore.getState().reorderTasks('/ws1', 0, 2);
 
-            const storedTasks = useTaskStore.getState().tasks;
-            // All tasks should have order fields after reorder
-            const ws1Tasks = Array.from(storedTasks.values())
+            const ws1Tasks = Array.from(useTaskStore.getState().tasks.values())
                 .filter(t => t.workspaceId === '/ws1')
                 .sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
 
             expect(ws1Tasks).toHaveLength(3);
-            // After reorder, order fields should be set
-            expect(ws1Tasks[0].order).toBe(0);
-            expect(ws1Tasks[1].order).toBe(1);
-            expect(ws1Tasks[2].order).toBe(2);
+            // Contiguous order fields...
+            expect(ws1Tasks.map(t => t.order)).toEqual([0, 1, 2]);
+            // ...and, crucially, the RIGHT task moved: task-c ends up last.
+            expect(orderedIds('/ws1')).toEqual(['task-b', 'task-a', 'task-c']);
+        });
+
+        it('should reorder correctly in last-modified sort mode (regression)', () => {
+            // Give distinct lastActivity so last-modified order differs from date-created.
+            // last-modified desc order: [task-a, task-b, task-c] (task-a most recent activity).
+            // Set directly to bypass updateTask's timestamp-regression guard.
+            const base = Date.now() + 100_000; // safely newer than the setup timestamps
+            const withActivity = new Map(useTaskStore.getState().tasks);
+            withActivity.set('task-a', { ...withActivity.get('task-a')!, lastActivity: new Date(base) });
+            withActivity.set('task-b', { ...withActivity.get('task-b')!, lastActivity: new Date(base - 1000) });
+            withActivity.set('task-c', { ...withActivity.get('task-c')!, lastActivity: new Date(base - 2000) });
+            useTaskStore.setState({ tasks: withActivity });
+            useTaskStore.getState().setTaskSortBy('last-modified');
+
+            // Visible order is [a, b, c]; drag the bottom task (task-c, index 2) to the top (index 0).
+            useTaskStore.getState().reorderTasks('/ws1', 2, 0);
+
+            // task-c must land first, NOT some other task (the pre-fix bug moved the wrong one).
+            expect(orderedIds('/ws1')).toEqual(['task-c', 'task-a', 'task-b']);
+        });
+
+        it('should reorder with mixed order/no-order tasks in last-modified mode', () => {
+            // task-a pinned with a manual order; b and c unordered with distinct activity.
+            // Visible order: [a (ordered first), b (newer activity), c].
+            const base = Date.now() + 100_000;
+            const mixed = new Map(useTaskStore.getState().tasks);
+            mixed.set('task-a', { ...mixed.get('task-a')!, order: 0, lastActivity: new Date(base - 5000) });
+            mixed.set('task-b', { ...mixed.get('task-b')!, lastActivity: new Date(base - 1000) });
+            mixed.set('task-c', { ...mixed.get('task-c')!, lastActivity: new Date(base - 2000) });
+            useTaskStore.setState({ tasks: mixed });
+            useTaskStore.getState().setTaskSortBy('last-modified');
+
+            // Drag the bottom task (task-c, index 2) to the top (index 0).
+            useTaskStore.getState().reorderTasks('/ws1', 2, 0);
+            expect(orderedIds('/ws1')).toEqual(['task-c', 'task-a', 'task-b']);
+        });
+
+        it('should reorder over top-level rows only when a subtask is nested under a parent', () => {
+            // Sidebar nests task-s under task-c, so visible rows are [task-c, task-b, task-a]
+            // (idx 0..2) even though the workspace holds four tasks. Dragging by visible
+            // index must not be shifted by the hidden subtask.
+            useTaskStore.getState().addTask({
+                id: 'task-s', prompt: 'Sub', state: 'idle', workspaceId: '/ws1', parentTaskId: 'task-c',
+                createdAt: new Date(now.getTime() - 1500), lastActivity: now,
+            });
+            // Drag bottom visible row (task-a, idx 2) to the top (idx 0).
+            useTaskStore.getState().reorderTasks('/ws1', 2, 0);
+
+            const topLevel = Array.from(useTaskStore.getState().tasks.values())
+                .filter(t => t.workspaceId === '/ws1' && !t.parentTaskId)
+                .sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
+                .map(t => t.id);
+            expect(topLevel).toEqual(['task-a', 'task-c', 'task-b']);
+            // The nested subtask is not part of the manual index space.
+            expect(useTaskStore.getState().tasks.get('task-s')!.order).toBeUndefined();
+        });
+
+        it('should reorder correctly when timestamps arrive as ISO strings (WS payload shape)', () => {
+            // JSON.parse over the WebSocket yields strings, not Date objects.
+            const base = Date.now() + 100_000;
+            const asStrings = new Map(useTaskStore.getState().tasks);
+            for (const [id, offset] of [['task-a', 0], ['task-b', 1000], ['task-c', 2000]] as const) {
+                const t = asStrings.get(id)!;
+                asStrings.set(id, {
+                    ...t,
+                    createdAt: t.createdAt.toISOString() as unknown as Date,
+                    lastActivity: new Date(base - offset).toISOString() as unknown as Date,
+                });
+            }
+            useTaskStore.setState({ tasks: asStrings });
+            useTaskStore.getState().setTaskSortBy('last-modified');
+
+            // Visible: [a, b, c]; drag c (idx 2) to top.
+            useTaskStore.getState().reorderTasks('/ws1', 2, 0);
+            expect(orderedIds('/ws1')).toEqual(['task-c', 'task-a', 'task-b']);
         });
 
         it('should not reorder tasks with same index', () => {

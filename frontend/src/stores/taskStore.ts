@@ -3,6 +3,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask, TaskTokenUsage, TodoItem } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
 import { ThemePreference } from '../types/theme';
+import { compareTasksForDisplay, createTopLevelResolver } from '../utils/taskSort';
 
 // Info about a task that is waiting for user input
 export interface WaitingInputInfo {
@@ -738,24 +739,26 @@ export const useTaskStore = create<TaskStore>()(
 
             // Task reordering within a workspace
             reorderTasks: (workspaceId, fromIndex, toIndex) => {
-                const { tasks } = get();
+                const { tasks, taskSortBy } = get();
                 if (fromIndex === toIndex) return;
 
-                // Get tasks for this workspace, sorted EXACTLY like the display
-                // (must match WorkspacePanel's getTasksForWorkspace sorting)
-                const workspaceTasks = Array.from(tasks.values())
-                    .filter(t => t.workspaceId === workspaceId)
-                    .sort((a, b) => {
-                        // If both have order, sort by order (ascending)
-                        if (a.order !== undefined && b.order !== undefined) {
-                            return a.order - b.order;
-                        }
-                        // If only one has order, it comes first
-                        if (a.order !== undefined) return -1;
-                        if (b.order !== undefined) return 1;
-                        // Neither has order, sort by creation time (newest first)
-                        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-                    });
+                // Get tasks for this workspace, sorted EXACTLY like the display.
+                // Uses the shared canonical comparator (respecting taskSortBy) so
+                // the fromIndex/toIndex the UI computes map to the same tasks here.
+                // A mismatched tie-break here silently moves the wrong task.
+                //
+                // Only TOP-LEVEL tasks occupy drag indexes: subtasks render nested
+                // under their parent (WorkspacePanel builds idx over topLevelTasks),
+                // so they must be excluded here or the index space is off by one
+                // per hidden subtask and the wrong task moves.
+                const allWorkspaceTasks = Array.from(tasks.values())
+                    .filter(t => t.workspaceId === workspaceId);
+                const isTopLevel = createTopLevelResolver(allWorkspaceTasks);
+                // Sort BEFORE filtering so the resolver is consulted in display
+                // order, exactly as WorkspacePanel does over its sorted `tasks` prop.
+                const workspaceTasks = allWorkspaceTasks
+                    .sort((a, b) => compareTasksForDisplay(a, b, taskSortBy))
+                    .filter(isTopLevel);
 
                 if (fromIndex < 0 || fromIndex >= workspaceTasks.length) return;
                 if (toIndex < 0 || toIndex >= workspaceTasks.length) return;
@@ -764,7 +767,7 @@ export const useTaskStore = create<TaskStore>()(
                 const [removed] = workspaceTasks.splice(fromIndex, 1);
                 workspaceTasks.splice(toIndex, 0, removed);
 
-                // Update order values for all tasks in workspace
+                // Update order values for all top-level tasks in workspace
                 const newTasks = new Map(tasks);
                 workspaceTasks.forEach((task, index) => {
                     const updatedTask = { ...task, order: index };
