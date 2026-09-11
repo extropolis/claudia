@@ -20,16 +20,27 @@ printf '%s\n' "$@" > "$FAKE_DIR/args.log"
 : > "$FAKE_DIR/input.log"
 echo "$$" > "$FAKE_DIR/alive"
 
+trap 'rm -f "$FAKE_DIR/alive"; exit 0' TERM INT HUP
+
+sleep 0.2
+
 # Session file like the real CLI: HOME/.claude/projects/<cwd encoded>/<sid>.jsonl
+#
+# Written AFTER the startup delay, not at exec. The spawner pre-assigns
+# `--session-id <random>` (which this fake ignores), so a test only ever sees
+# CLAUDIA_FAKE_SID via the capture fallback — and that fallback adopts a file
+# only if it is NEW relative to the directory listing startSessionCapture()
+# takes right after the PTY spawn. Writing at exec raced that listing: on a
+# fast multi-core runner bash landed the file inside the synchronous
+# saveTasks()/taskCreated window, the file counted as pre-existing, and the
+# task kept the random id forever (flaky e2e-task-lifecycle / sleep-wake on
+# ubuntu). The real CLI flushes its .jsonl lazily too, never at process start.
 SID="${CLAUDIA_FAKE_SID:-11111111-2222-3333-4444-555566667777}"
 ENC=$(pwd | sed 's/[^a-zA-Z0-9-]/-/g')
 SESS_DIR="$HOME/.claude/projects/$ENC"
 mkdir -p "$SESS_DIR"
 echo "{\"type\":\"user\",\"sessionId\":\"$SID\"}" > "$SESS_DIR/$SID.jsonl"
 
-trap 'rm -f "$FAKE_DIR/alive"; exit 0' TERM INT HUP
-
-sleep 0.2
 # Ready banner (matches isReadyForInitialInput patterns)
 printf '\n───────────\n❯ ready\n? for shortcuts\n'
 

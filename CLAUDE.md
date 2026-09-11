@@ -114,7 +114,11 @@ rejected before ever reaching the code under test.
 .\start.ps1
 ```
 
-The lock file will prevent accidental duplicate starts.
+Duplicate starts are prevented by the single-instance lock: the backend claims
+`<dataDir>/instance.json` (`backend/src/instance-lock.ts`) and refuses to boot a
+second time against the same data directory, whatever port it was given.
+`start.sh` checks the same file first so it can point you at the running server.
+Ask a live backend who it is with `curl localhost:4001/api/server-info`.
 
 ## Cross-Platform Notes
 
@@ -128,6 +132,11 @@ The lock file will prevent accidental duplicate starts.
 
 ## Known Gotchas
 
+- **One backend per data directory** — `instance-lock.ts` claims
+  `<dataDir>/instance.json` at startup. A lock naming a LIVE pid is not enough
+  to refuse: under `tsx watch` the outgoing process is still alive while the new
+  one boots, so the holder must also answer `/api/health` within 500ms before a
+  start is rejected.
 - **MCP sync skips claudia's own workspace** to prevent tsx watch restart loops (writes .mcp.json to workspace roots)
 - **History files** cap at 10MB on disk, 2MB sent to clients, 512KB loaded into memory on reconnect
 - **Terminal resize** buffers PTY output for 250ms after resize to prevent width-mismatch corruption
