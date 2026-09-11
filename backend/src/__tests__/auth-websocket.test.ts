@@ -35,9 +35,9 @@ afterAll(async () => {
 });
 
 /** Attempt an upgrade; resolve 'open' or the HTTP status the server refused with. */
-function tryUpgrade(query: string): Promise<'open' | number> {
+function tryUpgrade(query: string, headers?: Record<string, string>): Promise<'open' | number> {
     return new Promise((resolve) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${h.port}${query}`);
+        const ws = new WebSocket(`ws://127.0.0.1:${h.port}${query}`, headers ? { headers } : undefined);
         const done = (v: 'open' | number) => {
             try { ws.close(); } catch { /* already gone */ }
             resolve(v);
@@ -78,6 +78,23 @@ describe('WebSocket upgrade authentication', () => {
         expect(await tryUpgrade('?token=')).toBe(401);
         expect(await tryUpgrade('?token=x')).toBe(401);
     });
+
+    // Regression for the bypass task #225 reported against main: an upgrade
+    // whose Host looked like a tunnel and carried ANY `?token=` value, without
+    // `mobile=1`, passed the upgrade gate on the token's mere presence and was
+    // then never validated (the connection handler only checked `mobile=1`).
+    // The Host header is client-controlled, so it must not matter either way.
+    it.each(['abc123.ngrok-free.app', 'abc123.ngrok.io', 'myapp.loca.lt'])(
+        'rejects a tunnel-Host (%s) upgrade carrying an arbitrary token',
+        async (tunnelHost) => {
+            const headers = { Host: tunnelHost };
+            expect(await tryUpgrade('?token=anything', headers)).toBe(401);
+            expect(await tryUpgrade(`?token=${'0'.repeat(64)}`, headers)).toBe(401);
+            expect(await tryUpgrade('', headers)).toBe(401);
+            // …while the real token is accepted regardless of the Host it names.
+            expect(await tryUpgrade(`?token=${getAuthToken(h.base)}`, headers)).toBe('open');
+        },
+    );
 
     it('rejects an unauthenticated Vite HMR socket rather than admitting it', async () => {
         const status = await new Promise<'open' | number>((resolve) => {
