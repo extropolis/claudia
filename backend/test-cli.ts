@@ -3040,10 +3040,18 @@ async function main() {
     // Auth first: every /api route and every WS upgrade needs a token, and the
     // Jira/tunnel commands below are pure HTTP that would 401 without one.
     installCliAuthFetch();
+    // Ask the backend we are ABOUT TO DRIVE for its token. `--url` wins, then
+    // CLAUDIA_BACKEND_URL, then the default. This used to ignore --url, so
+    // `--url http://127.0.0.1:4811 ...` fetched the token from :4001 — a
+    // different instance — and then presented that foreign token to :4811,
+    // which refused every WebSocket upgrade with a 401.
+    const argv = process.argv.slice(2);
     await bootstrapCliAuth(
-        (process.env.CLAUDIA_BACKEND_URL || 'http://localhost:4001')
-            .replace('ws://', 'http://')
-            .replace('wss://', 'https://'),
+        argv.includes('--url')
+            ? httpBaseFromArgv(argv)
+            : (process.env.CLAUDIA_BACKEND_URL || 'http://localhost:4001')
+                .replace('ws://', 'http://')
+                .replace('wss://', 'https://'),
     );
 
     // Jira commands short-circuit before the WS machinery.
