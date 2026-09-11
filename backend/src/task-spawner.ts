@@ -18,6 +18,7 @@ import { createLogger } from './logger.js';
 import { getSharedMcpToken } from './mcp-auth.js';
 import { CodeBackend, BackendTask, createBackend } from './backends/index.js';
 import { resolveAgentCapabilities } from './agents/index.js';
+import { claudeSessionDir, claudeProjectsRoot } from './backends/claude-code-backend.js';
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
@@ -3207,16 +3208,16 @@ export class TaskSpawner extends EventEmitter {
         return null;
     }
 
-    private workspaceToClaudeFolder(workspacePath: string): string {
-        // Claude Code converts workspace paths to folder names by replacing
-        // every non-alphanumeric character (except dashes) with a dash individually
-        return workspacePath.replace(/[^a-zA-Z0-9-]/g, '-');
-    }
-
-    private getClaudeProjectsDir(workspacePath: string): string {
-        const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-        const folderName = this.workspaceToClaudeFolder(workspacePath);
-        return join(homeDir, '.claude', 'projects', folderName);
+    /**
+     * Directory holding the active runtime's session transcripts for a workspace.
+     *
+     * Routed through the CodeBackend seam so other runtimes can define their own
+     * layout. Backends with no on-disk sessions (OpenCode) return null; we then
+     * fall back to the Claude Code layout, which is what these session-recovery
+     * paths have always scanned regardless of the configured backend.
+     */
+    private getSessionDir(workspacePath: string): string {
+        return this.backend?.sessionDir(workspacePath) ?? claudeSessionDir(workspacePath);
     }
 
     /**
@@ -3231,15 +3232,15 @@ export class TaskSpawner extends EventEmitter {
      * truly gone. Returns the full path, or null if not found anywhere.
      */
     private findSessionFile(workspacePath: string, sessionId: string): string | null {
-        const expected = join(this.getClaudeProjectsDir(workspacePath), `${sessionId}.jsonl`);
+        const expected = (this.backend?.sessionFiles(workspacePath, sessionId) ?? [])[0]
+            ?? join(this.getSessionDir(workspacePath), `${sessionId}.jsonl`);
         if (existsSync(expected)) return expected;
 
         // Fallback: scan every project folder for <sessionId>.jsonl. This is a cheap
         // existsSync per folder (no file reads), unlike findSessionForTask which has
         // to grep contents.
         try {
-            const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-            const projectsRoot = join(homeDir, '.claude', 'projects');
+            const projectsRoot = claudeProjectsRoot();
             if (!existsSync(projectsRoot)) return null;
             for (const folder of readdirSync(projectsRoot)) {
                 const candidate = join(projectsRoot, folder, `${sessionId}.jsonl`);
@@ -3352,7 +3353,7 @@ export class TaskSpawner extends EventEmitter {
         // Clear any existing capture for this task to prevent race conditions
         this.clearSessionCapture(taskId);
 
-        const claudeDir = this.getClaudeProjectsDir(workspaceId);
+        const claudeDir = this.getSessionDir(workspaceId);
 
         let existingFiles = new Set<string>();
         try {
@@ -6054,7 +6055,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // at a new path), which a bare existsSync on the expected path misses.
         let sessionIdToUse = persisted.sessionId;
         if (sessionIdToUse) {
-            const claudeDir = this.getClaudeProjectsDir(persisted.workspaceId);
+            const claudeDir = this.getSessionDir(persisted.workspaceId);
             const sessionFilePath = this.findSessionFile(persisted.workspaceId, sessionIdToUse);
             if (!sessionFilePath) {
                 // The persisted session file is gone. Starting fresh here would make the
@@ -6455,7 +6456,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         // so this scan is reached only by legacy tasks persisted before that change.
         let recoveredSessionAtDisconnect = false;
         if (!task.sessionId && (this.taskBackends.get(taskId) || 'claude-code') === 'claude-code') {
-            const recovered = this.findSessionForTask(taskId, this.getClaudeProjectsDir(task.workspaceId));
+            const recovered = this.findSessionForTask(taskId, this.getSessionDir(task.workspaceId));
             if (recovered && !this.sessionToTaskId.has(recovered)) {
                 logger.info('Recovered sessionId at disconnect', { taskId, sessionId: recovered });
                 task.sessionId = recovered;

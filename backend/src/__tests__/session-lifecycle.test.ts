@@ -69,7 +69,7 @@ beforeEach(() => {
     base = mkdtempSync(join(homedir(), '.claudia-session-test-'));
     workspace = join(base, 'ws');
     mkdirSync(workspace, { recursive: true });
-    vi.stubEnv('HOME', base); // getClaudeProjectsDir resolves under our temp HOME
+    vi.stubEnv('HOME', base); // getSessionDir resolves under our temp HOME
     claudeDir = join(base, '.claude', 'projects', encodeWorkspace(workspace));
     mkdirSync(claudeDir, { recursive: true });
 });

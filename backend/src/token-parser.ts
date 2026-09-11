@@ -9,20 +9,12 @@
  * FINAL entry to avoid double-counting. We track seen UUIDs for this purpose.
  */
 import * as fs from 'fs';
-import * as path from 'path';
 import * as readline from 'readline';
 import { TaskTokenUsage, ModelTokenUsage, ModelPricing } from '@claudia/shared';
+// Session-file locations live behind the CodeBackend seam; this standalone
+// module has no backend instance, so it uses the exported pure helper.
+import { claudeSessionFiles } from './backends/claude-code-backend.js';
 
-// Re-use same path resolution logic as conversation-parser.ts
-function workspacePathToClaudeFolderName(workspacePath: string): string {
-    return workspacePath.replace(/[^a-zA-Z0-9-]/g, '-');
-}
-
-function getClaudeProjectsDir(workspacePath: string): string {
-    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-    const folderName = workspacePathToClaudeFolderName(workspacePath);
-    return path.join(homeDir, '.claude', 'projects', folderName);
-}
 
 /** Usage fields from a Claude Code API response */
 interface JsonlUsage {
@@ -291,11 +283,11 @@ export async function getTaskTokenUsage(
     sessionId: string,
     pricingMap?: Record<string, ModelPricing>
 ): Promise<TaskTokenUsage | null> {
-    const projectDir = getClaudeProjectsDir(workspacePath);
-    const sessionFilePath = path.join(projectDir, `${sessionId}.jsonl`);
+    const [sessionFilePath] = claudeSessionFiles(workspacePath, sessionId);
 
     console.log(`[TokenParser] Getting token usage for session ${sessionId} in workspace ${workspacePath}`);
     console.log(`[TokenParser] Session file path: ${sessionFilePath}`);
 
+    if (!sessionFilePath) return null;
     return parseSessionTokenUsage(sessionFilePath, pricingMap);
 }
