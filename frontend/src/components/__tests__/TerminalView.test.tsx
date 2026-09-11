@@ -745,6 +745,83 @@ describe('TerminalView — refit on container/window resize', () => {
         expect(term.refreshCount).toBe(1);
     });
 
+    it('keeps a terminal that was tailing output pinned to the bottom across a refit', () => {
+        // Split screen: dragging a divider grows a pane's row count. xterm can
+        // leave the viewport short of the new bottom, and live output only
+        // auto-scrolls when already AT the bottom, so the pane froze on stale lines.
+        const { view, term } = mountTerminal();
+        const container = view.container.querySelector('.terminal-container') as HTMLElement;
+        Object.defineProperty(container, 'clientWidth', { configurable: true, value: 800 });
+        Object.defineProperty(container, 'clientHeight', { configurable: true, value: 600 });
+        term.buffer.active = { viewportY: 0, length: 24 }; // at the bottom
+        const before = term.scrollToBottomCount;
+
+        act(() => { window.dispatchEvent(new Event('resize')); });
+        act(() => { vi.advanceTimersByTime(150); });
+
+        // Pinned immediately and again after xterm's render frame (rAF is
+        // synchronous in these tests, so both land here).
+        expect(term.scrollToBottomCount).toBeGreaterThan(before);
+    });
+
+    it('keeps tailing output that lands while the refit geometry is still settling', () => {
+        // Right after a refit xterm can briefly report the viewport above the
+        // bottom. Output written in that window used to be treated as "user
+        // scrolled up" and pinned to the stale position for good.
+        const { socket, view, term } = mountTerminal();
+        const container = view.container.querySelector('.terminal-container') as HTMLElement;
+        Object.defineProperty(container, 'clientWidth', { configurable: true, value: 800 });
+        Object.defineProperty(container, 'clientHeight', { configurable: true, value: 600 });
+        term.buffer.active = { viewportY: 0, length: 24 };
+        act(() => { window.dispatchEvent(new Event('resize')); });
+        act(() => { vi.advanceTimersByTime(150); });
+
+        term.buffer.active = { viewportY: 10, length: 1000 }; // transient geometry
+        const before = term.scrollToBottomCount;
+        output(socket, 'post-resize line');
+
+        expect(term.scrollToBottomCount).toBe(before + 1);
+        expect(term.scrolledToLines).toEqual([]);
+
+        // Once the window has passed, a genuinely scrolled-up viewport is held.
+        act(() => { vi.advanceTimersByTime(1500); });
+        output(socket, 'later line');
+        expect(term.scrolledToLines).toEqual([10]);
+    });
+
+    it('trusts the visible viewport when the buffer geometry lags behind a write', () => {
+        // xterm parses writes asynchronously, so a pane on its last line can
+        // still report viewportY + rows < length. The DOM viewport says bottom.
+        const { view, term, viewport } = mountTerminal();
+        const container = view.container.querySelector('.terminal-container') as HTMLElement;
+        Object.defineProperty(container, 'clientWidth', { configurable: true, value: 800 });
+        Object.defineProperty(container, 'clientHeight', { configurable: true, value: 600 });
+        Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 241 });
+        Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 326 });
+        viewport.scrollTop = 85; // 326 - 85 - 241 = 0: visibly at the bottom
+        term.buffer.active = { viewportY: 0, length: 100 }; // lagging geometry
+        const before = term.scrollToBottomCount;
+
+        act(() => { window.dispatchEvent(new Event('resize')); });
+        act(() => { vi.advanceTimersByTime(150); });
+
+        expect(term.scrollToBottomCount).toBeGreaterThan(before);
+    });
+
+    it('does not yank a scrolled-up terminal to the bottom on refit', () => {
+        const { view, term } = mountTerminal();
+        const container = view.container.querySelector('.terminal-container') as HTMLElement;
+        Object.defineProperty(container, 'clientWidth', { configurable: true, value: 800 });
+        Object.defineProperty(container, 'clientHeight', { configurable: true, value: 600 });
+        term.buffer.active = { viewportY: 10, length: 1000 }; // reading history
+        const before = term.scrollToBottomCount;
+
+        act(() => { window.dispatchEvent(new Event('resize')); });
+        act(() => { vi.advanceTimersByTime(150); });
+
+        expect(term.scrollToBottomCount).toBe(before);
+    });
+
     it('skips the refit while the container has no dimensions', () => {
         const { term } = mountTerminal();
         const fitAddon = term.addons[0] as { fitCount: number };
@@ -867,11 +944,18 @@ describe('TerminalView — multi-client viewer model', () => {
         viewers(socket, { ownerClientId: OTHER, cols: 120, rows: 40 });
         socket.send.mockClear();
 
-        // The owner disconnected: the server broadcasts a null owner.
+        // The owner disconnected: the server broadcasts a null owner. We inherit
+        // the terminal and claim it straight away with our own size (the PTY is
+        // still at the departed owner's), then keep forwarding local resizes.
         viewers(socket, { ownerClientId: null, cols: 120, rows: 40 });
+        const claimed = frames(socket, 'task:resize');
+        expect(claimed).toEqual([
+            { type: 'task:resize', payload: { taskId: TASK_ID, cols: term.cols, rows: term.rows } },
+        ]);
+
         act(() => { term.resizeCb?.({ cols: 70, rows: 20 }); });
 
-        expect(frames(socket, 'task:resize')).toEqual([
+        expect(frames(socket, 'task:resize').slice(claimed.length)).toEqual([
             { type: 'task:resize', payload: { taskId: TASK_ID, cols: 70, rows: 20 } },
         ]);
     });
@@ -889,6 +973,24 @@ describe('TerminalView — multi-client viewer model', () => {
         viewers(socket, { ownerClientId: ME, cols: 120, rows: 40 });
 
         expect(fitAddon.fitCount).toBe(fitsBefore + 1);
+    });
+
+    it('pushes its own size to the PTY when it regains ownership, even if unchanged since it last sent', () => {
+        // Mount sent 80x24. Another client then owned the terminal (PTY at its
+        // 120x40, our xterm following). On taking it back, the refit lands on the
+        // size we last sent — which the small-change filter used to swallow,
+        // leaving the PTY at the other client's dimensions.
+        const { socket, term } = mountTerminal();
+        viewers(socket, { ownerClientId: OTHER, cols: 120, rows: 40 });
+        socket.send.mockClear();
+
+        viewers(socket, { ownerClientId: ME, cols: 120, rows: 40 });
+
+        const resizes = frames(socket, 'task:resize');
+        expect(resizes.length).toBeGreaterThan(0);
+        expect(resizes[resizes.length - 1]).toEqual({
+            type: 'task:resize', payload: { taskId: TASK_ID, cols: term.cols, rows: term.rows },
+        });
     });
 
     it('shows the owner\'s size as an unobtrusive badge, only while following', () => {

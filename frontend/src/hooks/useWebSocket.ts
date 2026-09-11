@@ -788,6 +788,13 @@ export function useWebSocket() {
         sendMessage('task:select', { taskId });
     }, [sendMessage]);
 
+    // Split-screen: authoritative sync of the full set of task ids currently mounted
+    // in panes. Sent on every layout change and on reconnect so the server can prune
+    // anything stale (a pane closed while the socket was down, etc).
+    const setVisibleTasksOnServer = useCallback((taskIds: string[]) => {
+        sendMessage('task:setVisible', { taskIds });
+    }, [sendMessage]);
+
     const sendTaskInput = useCallback((taskId: string, input: string) => {
         sendMessage('task:input', { taskId, input });
     }, [sendMessage]);
@@ -969,6 +976,7 @@ export function useWebSocket() {
     return {
         createTask,
         selectTaskOnServer,
+        setVisibleTasksOnServer,
         sendTaskInput,
         resizeTask,
         destroyTask,

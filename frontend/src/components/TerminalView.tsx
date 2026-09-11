@@ -58,15 +58,27 @@ interface TerminalViewProps {
     wsRef: React.RefObject<WebSocket | null>;
     workspace?: Workspace;
     isMobile?: boolean;
+    /**
+     * Split-screen pane chrome (split/close buttons), rendered at the end of the
+     * terminal header. Injected rather than overlaid so it shares the header's
+     * layout instead of colliding with the copy/learn/resume buttons.
+     */
+    paneControls?: React.ReactNode;
 }
 
-export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewProps) {
+export function TerminalView({ task, wsRef, workspace, isMobile, paneControls }: TerminalViewProps) {
     const effectiveTheme = useEffectiveTheme();
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
     const userHasScrolledRef = useRef(false); // Track if user manually scrolled up
     const programmaticScrollRef = useRef(false); // Track programmatic scrolls to ignore in scroll handler
+    // Until this timestamp, output keeps the terminal pinned to the bottom
+    // regardless of what the viewport geometry says. Armed by a refit of a
+    // terminal that was tailing its output: while xterm settles the new row
+    // count, `viewportY + rows` can briefly read as "scrolled up", and the
+    // output handler would then hold that stale position forever.
+    const pinToBottomUntilRef = useRef(0);
     const [copied, setCopied] = useState(false);
     const [isLoadingHistory, setIsLoadingHistory] = useState(true);
     const [showSpinner, setShowSpinner] = useState(false);
@@ -186,10 +198,48 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         }
 
         try {
+            // A refit must not unpin a terminal that was following its output.
+            // Growing the row count (a split-pane divider drag, a window resize)
+            // can leave xterm's viewport short of the new bottom, and the output
+            // handler only auto-scrolls when the viewport is AT the bottom — so a
+            // pane that was tailing live output would silently freeze on stale
+            // lines. Capture "was at bottom" before the fit and restore it after.
+            const term = xtermRef.current;
+            const buf = term.buffer.active;
+            // Two signals, either is enough. The buffer geometry alone lags:
+            // xterm parses writes asynchronously and our own auto-scroll runs
+            // in a rAF, so a terminal visibly tailing its output can still read
+            // `viewportY + rows < length` (observed: vy=0 len=20 rows=15 on a
+            // pane that was on its last line). The DOM viewport is what the user
+            // actually sees — the same 50px test handleViewportScroll uses.
+            // Skipped when it has no layout (clientHeight 0), e.g. under jsdom.
+            const vpEl = terminalRef.current.querySelector('.xterm-viewport') as HTMLElement | null;
+            const domAtBottom = !!vpEl && vpEl.clientHeight > 0
+                && vpEl.scrollHeight - vpEl.scrollTop - vpEl.clientHeight < 50;
+            const wasAtBottom = domAtBottom || buf.viewportY + term.rows >= buf.length - 2;
+            const beforeDims = `${term.cols}x${term.rows} vy=${buf.viewportY} len=${buf.length}`;
             fitAddonRef.current.fit();
+            const after = term.buffer.active;
+            console.log(`[TerminalView] refit ${task.id}: ${beforeDims} -> ${term.cols}x${term.rows} vy=${after.viewportY} len=${after.length} wasAtBottom=${wasAtBottom}`);
             // Force a full refresh to fix any rendering artifacts
-            const rows = xtermRef.current.rows;
-            xtermRef.current.refresh(0, rows - 1);
+            const rows = term.rows;
+            term.refresh(0, rows - 1);
+            if (wasAtBottom) {
+                pinToBottomUntilRef.current = Date.now() + 1000;
+                programmaticScrollRef.current = true;
+                term.scrollToBottom();
+                // Again after xterm's own render frame: it re-syncs its DOM
+                // viewport to the new row count asynchronously, and that sync can
+                // land the viewport rows above the bottom AFTER the call above
+                // (observed: a pane grown by a divider drag sat 10 rows up with
+                // the newest output hidden below it).
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        xtermRef.current?.scrollToBottom();
+                        setTimeout(() => { programmaticScrollRef.current = false; }, 100);
+                    });
+                });
+            }
         } catch (err) {
             console.warn('Failed to fit terminal:', err);
         }
@@ -339,6 +389,14 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                 const combined = resizeBuffer.join('');
                 resizeBuffer = [];
                 term.write(combined);
+                // The buffered output is exactly what the PTY printed while it
+                // re-rendered at the new size; a terminal that was tailing before
+                // the refit must still be tailing after it.
+                if (Date.now() < pinToBottomUntilRef.current) {
+                    programmaticScrollRef.current = true;
+                    term.scrollToBottom();
+                    setTimeout(() => { programmaticScrollRef.current = false; }, 100);
+                }
             }
         };
 
@@ -571,8 +629,15 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // fires after layout + paint have completed, so container dimensions are
         // final. A single rAF is NOT enough — flexbox/grid sizing may still be
         // in-progress during the first frame.
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
+        // Both handles are captured so the cleanup can cancel a frame that has not
+        // run yet. Without that, unmounting mid-flight still fires the inner callback
+        // (term.cols/rows read fine after dispose()) and sends a task:select for a
+        // task this pane no longer shows — which quietly re-adds it to the server's
+        // visible set and can push a real pane out past the cap.
+        let rafOuter = 0;
+        let rafInner = 0;
+        rafOuter = requestAnimationFrame(() => {
+            rafInner = requestAnimationFrame(() => {
                 try {
                     fitAddon.fit();
                 } catch (e) {
@@ -660,11 +725,14 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     // Check if user is at bottom BEFORE writing
                     const viewport = term.buffer.active.viewportY;
                     const totalRows = term.buffer.active.length;
-                    const wasAtBottom = viewport + term.rows >= totalRows - 2;
+                    // Inside the post-refit pin window the geometry is not
+                    // trustworthy yet (see pinToBottomUntilRef): stay pinned.
+                    const pinned = Date.now() < pinToBottomUntilRef.current;
+                    const wasAtBottom = pinned || viewport + term.rows >= totalRows - 2;
 
                     // Update userHasScrolledRef based on current position
                     if (!wasAtBottom && !userHasScrolledRef.current) {
-                        console.log(`[TerminalView] User has scrolled up, disabling auto-scroll for ${task.id}`);
+                        console.log(`[TerminalView] User has scrolled up, disabling auto-scroll for ${task.id} (viewportY=${viewport}, rows=${term.rows}, length=${totalRows})`);
                         userHasScrolledRef.current = true;
                     }
 
@@ -745,8 +813,28 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     } else if (owned && !wasOwner) {
                         // We just took (or inherited) the terminal — re-fit to
                         // our own container and push that size to the PTY.
-                        console.log(`[TerminalView] Became owner of ${task.id}, refitting`);
+                        //
+                        // The push must be explicit. The PTY is still at the
+                        // PREVIOUS owner's size (our xterm was following it), but
+                        // `lastSent*` still hold what WE sent before losing the
+                        // terminal. The refit usually lands on exactly that size,
+                        // so onResize's small-change filter swallowed it and the
+                        // PTY stayed at the other client's dimensions — our own
+                        // xterm at one width, the TUI drawing for another.
+                        console.log(`[TerminalView] Became owner of ${task.id}, refitting and re-sending size`);
+                        lastSentCols = 0;
+                        lastSentRows = 0;
                         fitTerminal();
+                        if (wsRef.current?.readyState === WebSocket.OPEN) {
+                            lastSentCols = term.cols;
+                            lastSentRows = term.rows;
+                            lastKnownTerminalSize.cols = term.cols;
+                            lastKnownTerminalSize.rows = term.rows;
+                            wsRef.current.send(JSON.stringify({
+                                type: 'task:resize',
+                                payload: { taskId: task.id, cols: term.cols, rows: term.rows }
+                            }));
+                        }
                     }
                 } else if (message.type === 'task:restore' && message.payload.taskId === task.id) {
                     const { history } = message.payload;
@@ -818,6 +906,8 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         // (after fitAddon.fit()) so that history arrives at the correct terminal size.
 
         return () => {
+            if (rafOuter) cancelAnimationFrame(rafOuter);
+            if (rafInner) cancelAnimationFrame(rafInner);
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
             if (resizeBufferTimer) window.clearTimeout(resizeBufferTimer);
             resizeObserver.disconnect();
@@ -909,6 +999,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     </span>
                 )}
                 <span className={`terminal-state ${task.state}`}>{stateLabel}</span>
+                {paneControls}
             </div>
             <div className="terminal-container-wrapper">
                 <div

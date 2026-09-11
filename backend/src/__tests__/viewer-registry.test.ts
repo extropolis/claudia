@@ -152,6 +152,92 @@ describe('ViewerRegistry — disconnect', () => {
     });
 });
 
+describe('ViewerRegistry — split screen (declared visible set)', () => {
+    let reg: ViewerRegistry;
+    beforeEach(() => { reg = new ViewerRegistry(); });
+
+    it('keeps ownership of every visible pane when focus moves between them', () => {
+        reg.setVisible(A, ['t1', 't2']);
+        reg.focus('t1', A);
+        // Mounting / clicking the second pane must NOT release the first.
+        expect(reg.focus('t2', A)).toEqual(['t2']);
+        expect(reg.owner('t1')).toBe(A);
+        expect(reg.owner('t2')).toBe(A);
+    });
+
+    it('stops another client claiming a pane the split client is still showing', () => {
+        reg.setVisible(A, ['t1', 't2']);
+        reg.focus('t1', A);
+        reg.focus('t2', A);
+        // A phone's bare resize on t1 must be dropped, not applied.
+        expect(reg.claim('t1', C)).toBe(false);
+        expect(reg.owner('t1')).toBe(A);
+    });
+
+    it('counts a split client as a viewer of every visible task', () => {
+        reg.setVisible(A, ['t1', 't2', 't3']);
+        expect(reg.count('t1')).toBe(1);
+        expect(reg.count('t2')).toBe(1);
+        expect(reg.count('t3')).toBe(1);
+        reg.focus('t1', B);
+        expect(reg.count('t1')).toBe(2);
+    });
+
+    it('declaring a layout does not steal ownership from another client', () => {
+        reg.focus('t1', B);
+        expect(reg.setVisible(A, ['t1'])).toEqual(['t1']); // count changed
+        expect(reg.owner('t1')).toBe(B);
+    });
+
+    it('releases a task whose pane closed and reports it as affected', () => {
+        reg.setVisible(A, ['t1', 't2']);
+        reg.focus('t1', A);
+        reg.focus('t2', A);
+        expect(reg.setVisible(A, ['t2'])).toEqual(['t1']);
+        expect(reg.owner('t1')).toBeNull();
+        expect(reg.count('t1')).toBe(0);
+        expect(reg.owner('t2')).toBe(A);
+    });
+
+    it('reports an unchanged set as no change', () => {
+        reg.setVisible(A, ['t1', 't2']);
+        expect(reg.setVisible(A, ['t2', 't1'])).toEqual([]);
+    });
+
+    it('ignores empty and non-string ids', () => {
+        reg.setVisible(A, ['t1', '', 42 as unknown as string]);
+        expect(reg.count('t1')).toBe(1);
+        expect(reg.count('')).toBe(0);
+    });
+
+    it('still releases a task focused OUTSIDE the declared set', () => {
+        reg.setVisible(A, ['t1']);
+        reg.focus('t1', A);
+        reg.focus('t9', A);          // not a pane — e.g. a stale mount
+        expect(reg.focus('t2', A).sort()).toEqual(['t2', 't9']);
+        expect(reg.owner('t1')).toBe(A);
+        expect(reg.owner('t9')).toBeNull();
+    });
+
+    it('forgets the declared set on disconnect and releases every pane', () => {
+        reg.setVisible(A, ['t1', 't2']);
+        reg.focus('t1', A);
+        reg.focus('t2', A);
+        expect(reg.dropClient(A).sort()).toEqual(['t1', 't2']);
+        expect(reg.count('t1')).toBe(0);
+        expect(reg.owner('t2')).toBeNull();
+    });
+
+    it('drops a destroyed task from the declared set', () => {
+        reg.setVisible(A, ['t1', 't2']);
+        reg.dropTask('t1');
+        expect(reg.count('t1')).toBe(0);
+        // t1 is no longer declared, so focusing t2 then t3 leaves only t2 kept.
+        reg.focus('t1', A);
+        expect(reg.focus('t3', A).sort()).toEqual(['t1', 't3']);
+    });
+});
+
 describe('ViewerRegistry — dropTask', () => {
     it('forgets a destroyed task so the maps cannot grow without bound', () => {
         const reg = new ViewerRegistry();

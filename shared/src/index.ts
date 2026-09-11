@@ -352,6 +352,8 @@ export type WSMessageType =
     | 'task:stateChanged'
     | 'task:output'
     | 'task:restore'
+    // Split screen: server's ack of the visible-task set a client declared.
+    | 'task:visibleSet'
     | 'task:destroyed'
     | 'task:stopped'
     | 'task:stopAll:result'
@@ -456,10 +458,11 @@ export interface TaskFocusPayload {
  * Outbound: broadcast whenever a task's viewer set or owner changes (focus,
  * an owner resize that changed the size, or a client disconnecting).
  *
- * `count` is the number of CONNECTED CLIENTS CURRENTLY FOCUSED ON THIS TASK —
- * not the number of sockets connected to the server. The UI renders exactly one
- * terminal at a time, so "focused" and "viewing" are the same thing, which makes
- * this both the useful definition and one we can compute exactly.
+ * `count` is the number of CONNECTED CLIENTS CURRENTLY DISPLAYING THIS TASK —
+ * not the number of sockets connected to the server. A single-terminal client
+ * displays the task it last focused; a split-screen client displays every task
+ * in the set it declared with `task:setVisible`, and keeps ownership of all of
+ * them rather than only the pane it last clicked.
  *
  * `cols`/`rows` are the OWNER's terminal dimensions, i.e. the size the PTY is
  * actually running at. Non-owner clients render at these dimensions inside

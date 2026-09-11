@@ -14,6 +14,17 @@ import { SystemStats } from './components/SystemStats';
 import { MobileAccessModal } from './components/MobileAccessModal';
 import { FileExplorer } from './components/FileExplorer';
 import { ShellTerminalView } from './components/ShellTerminalView';
+import { SplitContainer } from './components/SplitContainer';
+import { PaneHost } from './components/PaneHost';
+import {
+    useSplitLayoutStore,
+    visibleTaskIds,
+    countLeaves,
+    collectLeaves,
+    findLeaf,
+    MAX_PANES,
+    type LeafNode,
+} from './stores/splitLayoutStore';
 import { ActivityPanel } from './components/ActivityPanel';
 import { useTheme } from './hooks/useTheme';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -76,6 +87,7 @@ function App() {
         clearRecentWorkspace,
         rejectDeleteRequest,
         refreshTaskPr,
+        setVisibleTasksOnServer,
         approveJiraWrite,
         rejectJiraWrite,
         wsRef
@@ -301,9 +313,215 @@ function App() {
         setShowingShell(true);
     }, []);
 
+    // ---------------------------------------------------------------------
+    // Split-screen layout (desktop only)
+    // ---------------------------------------------------------------------
+    const splitRoot = useSplitLayoutStore(st => st.root);
+    const focusedPaneId = useSplitLayoutStore(st => st.focusedPaneId);
+    const splitPane = useSplitLayoutStore(st => st.splitPane);
+    const closePane = useSplitLayoutStore(st => st.closePane);
+    const setPaneTask = useSplitLayoutStore(st => st.setPaneTask);
+    const focusPane = useSplitLayoutStore(st => st.focusPane);
+    const setSizes = useSplitLayoutStore(st => st.setSizes);
+
+    const paneTaskIds = visibleTaskIds(splitRoot);
+    const paneCount = countLeaves(splitRoot);
+    const canSplit = paneCount < MAX_PANES;
+    const canClose = paneCount > 1;
+
+    // Tell the server exactly which tasks are on screen. It keeps their PTY output
+    // flowing and their scrollback in memory; everything else is pruned.
+    //
+    // Mobile must declare too, and declare exactly ONE task. `task:select` adds to
+    // the set rather than replacing it (that is the whole point of split screen),
+    // so a phone tapping through tasks would otherwise accumulate streams up to the
+    // server cap and pay for PTY output for tasks it cannot show.
+    //
+    // Joined into a string so the effect fires on real changes, not on every
+    // render's fresh array identity.
+    const visibleForServer = isMobile
+        ? (selectedTaskId ? [selectedTaskId] : [])
+        : paneTaskIds;
+    const visibleKey = visibleForServer.join(',');
+    useEffect(() => {
+        if (!isConnected) return;
+        setVisibleTasksOnServer(visibleForServer);
+        // visibleForServer is derived from visibleKey; isConnected re-syncs after a
+        // reconnect, when the server has forgotten the previous visible set.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [visibleKey, isConnected, setVisibleTasksOnServer]);
+
+    // One-time bootstrap: a user upgrading into this feature (or landing on a
+    // fresh layout) has an empty pane but a remembered selectedTaskId. Adopt it
+    // so the app looks exactly as it did before the split feature existed.
+    const bootstrappedRef = useRef(false);
+    useEffect(() => {
+        if (isMobile || bootstrappedRef.current) return;
+        if (!selectedTaskId) return;
+        if (paneTaskIds.length > 0) { bootstrappedRef.current = true; return; }
+        const leaves = collectLeaves(splitRoot);
+        if (leaves.length === 1 && leaves[0].taskId === null) {
+            setPaneTask(leaves[0].id, selectedTaskId);
+        }
+        bootstrappedRef.current = true;
+    }, [isMobile, selectedTaskId, paneTaskIds.length, splitRoot, setPaneTask]);
+
+    // A task shown in a pane can be archived or destroyed from the sidebar (or
+    // by another agent). Clear those panes instead of leaving them pointing at
+    // a task that no longer exists.
+    const hasTaskList = useTaskStore(st => st.hasTaskList);
+    useEffect(() => {
+        // Gated on hasTaskList, NOT on `tasks.size === 0`. Before the server's
+        // first task list arrives `tasks` is empty only because nothing has
+        // loaded — pruning then would wipe every pane of the persisted layout on
+        // each page reload. Once the list HAS arrived, an empty map is real:
+        // deleting the LAST task is exactly when panes are most stale, and they
+        // would otherwise keep reporting dead ids in the visible set.
+        if (isMobile || !hasTaskList) return;
+        for (const leaf of collectLeaves(splitRoot)) {
+            if (leaf.taskId && !tasks.has(leaf.taskId)) {
+                console.log(`[SplitLayout] pane ${leaf.id} pointed at missing task ${leaf.taskId} - clearing it`);
+                setPaneTask(leaf.id, null);
+            }
+        }
+    }, [isMobile, hasTaskList, tasks, splitRoot, setPaneTask]);
+
+    // Focusing a pane makes its task "the" selected task, so the File Explorer,
+    // AI Supervisor and sidebar highlight all follow the pane you are looking at.
+    const handleFocusPane = useCallback((paneId: string) => {
+        focusPane(paneId);
+    }, [focusPane]);
+
+    // Focus does not only move by clicking: closePane reassigns it to a sibling,
+    // and a pane's task can be cleared underneath it. Deriving the selection from
+    // focusedPaneId here — rather than only inside the click handler — is what
+    // keeps the sidebar highlight, File Explorer and AI Supervisor pointing at the
+    // pane the user is actually looking at after a close.
+    useEffect(() => {
+        if (isMobile) return;
+        const leaf = findLeaf(splitRoot, focusedPaneId);
+        if (leaf?.taskId && leaf.taskId !== selectedTaskId) {
+            useTaskStore.getState().selectTask(leaf.taskId);
+        }
+    }, [isMobile, splitRoot, focusedPaneId, selectedTaskId]);
+
+    const handleSplitPane = useCallback((paneId: string, direction: 'row' | 'column') => {
+        setShowingShell(false);
+        splitPane(paneId, direction);
+    }, [splitPane]);
+
+    // Closing a pane only stops SHOWING the task — the task keeps running.
+    const handleClosePane = useCallback((paneId: string) => {
+        closePane(paneId);
+    }, [closePane]);
+
+    // Drop a task from the sidebar directly onto a specific pane.
+    const handleDropTaskOnPane = useCallback((paneId: string, taskId: string) => {
+        setShowingShell(false);
+        setPaneTask(paneId, taskId);
+        handleFocusPane(paneId);
+        useTaskStore.getState().selectTask(taskId);
+    }, [setPaneTask, handleFocusPane]);
+
+    // Keyboard shortcuts, VSCode's bindings where they exist.
+    //
+    // Capture phase and an explicit preventDefault are both required: the focused
+    // pane is an xterm.js terminal, which attaches its own key handling and would
+    // otherwise swallow these and forward them to the PTY as control characters.
+    // Ctrl/Cmd+Alt+Arrow moves focus between panes in visual order.
+    useEffect(() => {
+        if (isMobile) return;
+        const onKeyDown = (e: KeyboardEvent) => {
+            const mod = e.ctrlKey || e.metaKey;
+            if (!mod) return;
+
+            // Don't hijack keys aimed at a text field — the supervisor chat, a
+            // task input bar, a modal. xterm's own hidden <textarea> is deliberately
+            // NOT excluded: a terminal pane is exactly where these shortcuts should
+            // work, which is why the check is "an input that is not inside a
+            // terminal" rather than "any input".
+            const target = e.target as HTMLElement | null;
+            if (target) {
+                const tag = target.tagName;
+                const isTextField = tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable;
+                if (isTextField && !target.closest('.terminal-container, .xterm')) return;
+            }
+
+            // Ctrl/Cmd+\  -> split right   |   Ctrl/Cmd+Shift+\ -> split down
+            if (e.key === '\\') {
+                e.preventDefault();
+                handleSplitPane(useSplitLayoutStore.getState().focusedPaneId, e.shiftKey ? 'column' : 'row');
+                return;
+            }
+
+            // Ctrl/Cmd+Alt+W closes the focused pane. NOT plain Ctrl+W, which the
+            // browser reads as "close tab" and which the terminal may want.
+            if (e.altKey && (e.key === 'w' || e.key === 'W')) {
+                e.preventDefault();
+                const { root, focusedPaneId: focused } = useSplitLayoutStore.getState();
+                if (countLeaves(root) > 1) handleClosePane(focused);
+                return;
+            }
+
+            // Ctrl/Cmd+Alt+Arrow cycles focus through panes in visual order.
+            if (e.altKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+                e.preventDefault();
+                const { root, focusedPaneId: focused } = useSplitLayoutStore.getState();
+                const leaves = collectLeaves(root);
+                if (leaves.length < 2) return;
+                const at = leaves.findIndex(l => l.id === focused);
+                const step = e.key === 'ArrowRight' ? 1 : -1;
+                const next = leaves[(at + step + leaves.length) % leaves.length];
+                focusPane(next.id);
+            }
+        };
+        window.addEventListener('keydown', onKeyDown, true);
+        return () => window.removeEventListener('keydown', onKeyDown, true);
+    }, [isMobile, handleSplitPane, handleClosePane, focusPane]);
+
+    const renderPaneLeaf = useCallback((leaf: LeafNode, isFocused: boolean) => {
+        const paneTask = leaf.taskId ? tasks.get(leaf.taskId) : undefined;
+        const paneWorkspace = paneTask
+            ? workspaces.find(w => w.id === paneTask.workspaceId)
+            : undefined;
+        return (
+            <PaneHost
+                leaf={leaf}
+                isFocused={isFocused}
+                task={paneTask}
+                workspace={paneWorkspace}
+                wsRef={wsRef}
+                refreshCounter={terminalRefreshCounter}
+                canSplit={canSplit}
+                canClose={canClose}
+                isOnlyPane={paneCount === 1}
+                onSplit={handleSplitPane}
+                onClose={handleClosePane}
+                onDropTask={handleDropTaskOnPane}
+            />
+        );
+    }, [tasks, workspaces, wsRef, terminalRefreshCounter, canSplit, canClose, paneCount,
+        handleSplitPane, handleClosePane, handleDropTaskOnPane]);
+
     const handleSelectTask = (taskId: string) => {
         // Hide shell view (but keep PTY alive) when selecting a task
         setShowingShell(false);
+        // Split-screen: load the task into the focused pane. Mirrors VSCode —
+        // clicking in the sidebar opens into wherever you are currently looking.
+        // Desktop only; mobile is a single full-screen terminal.
+        if (!isMobile) {
+            // If it is already open in another pane, focus THAT pane instead of
+            // moving it. setPaneTask enforces one-pane-per-task (a task is one PTY
+            // with one size), so loading it into the focused pane would silently
+            // blank the pane it came from — surprising when you just wanted to look
+            // at something already on screen.
+            const existing = collectLeaves(splitRoot).find(l => l.taskId === taskId);
+            if (existing && existing.id !== focusedPaneId) {
+                focusPane(existing.id);
+            } else {
+                setPaneTask(focusedPaneId, taskId);
+            }
+        }
         // NOTE: We intentionally do NOT remount on same-task click — that causes
         // a black flash and loses the first character typed. The terminal garbling
         // issues are addressed by the double-rAF fit + pending resize fixes.
@@ -743,34 +961,29 @@ function App() {
                                     />
                                 </div>
                             )}
-                            {/* Task terminal or empty state - shown when shell is hidden */}
+                            {/* Split-screen task grid - shown when shell is hidden.
+                                A single unsplit pane renders exactly like the old
+                                single-terminal view, so the default is unchanged. */}
                             {!showingShell && (
-                                selectedTask ? (
-                                    <>
-                                        {activeShellWorkspaceId && activeShellWorkspace && (
-                                            <button
-                                                className="shell-switch-banner"
-                                                onClick={handleShowShell}
-                                                title="Switch back to the running shell"
-                                            >
-                                                <Terminal size={14} />
-                                                <span>Shell running — {activeShellWorkspace.displayName || activeShellWorkspace.name}</span>
-                                            </button>
-                                        )}
-                                        <TerminalView
-                                            key={`${selectedTask.id}-${terminalRefreshCounter}`}
-                                            task={selectedTask}
-                                            wsRef={wsRef}
-                                            workspace={selectedWorkspace}
-                                        />
-                                    </>
-                                ) : (
-                                    <div className="empty-state-main">
-                                        <Terminal size={48} strokeWidth={1} />
-                                        <h2>Select a task to view its terminal</h2>
-                                        <p>Add a workspace and create a task to get started</p>
-                                    </div>
-                                )
+                                <>
+                                    {activeShellWorkspaceId && activeShellWorkspace && (
+                                        <button
+                                            className="shell-switch-banner"
+                                            onClick={handleShowShell}
+                                            title="Switch back to the running shell"
+                                        >
+                                            <Terminal size={14} />
+                                            <span>Shell running — {activeShellWorkspace.displayName || activeShellWorkspace.name}</span>
+                                        </button>
+                                    )}
+                                    <SplitContainer
+                                        root={splitRoot}
+                                        focusedPaneId={focusedPaneId}
+                                        renderLeaf={renderPaneLeaf}
+                                        onFocusPane={handleFocusPane}
+                                        onSizesChange={setSizes}
+                                    />
+                                </>
                             )}
                         </section>
 
