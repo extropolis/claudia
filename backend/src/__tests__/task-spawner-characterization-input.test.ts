@@ -276,56 +276,163 @@ describe('CHARACTERIZATION: sendPromptWithRetry framing', () => {
 });
 
 // ===========================================================================
-// 2. Enter-retry: the 800ms processing check and the 5-attempt ceiling
+// 2. Enter-retry: the 800ms acceptance check, the retry budget, and the
+//    give-up safety net
 // ===========================================================================
+//
+// Since #249, "was the Enter accepted?" depends on WHICH delivery path we are on
+// (classifyEnterOutcome in task-state-detection.ts):
+//
+//  * FOLLOW-UP input (isInitialPrompt: false): the task is already interactive,
+//    so > 10 bytes of output after Enter still means "accepted" — even if a
+//    near-instant turn (/clear) has already redrawn back to the idle prompt.
+//
+//  * INITIAL PROMPT / reconnect (isInitialPrompt: true): Claude Code's TUI keeps
+//    streaming startup output (MCP servers, rotating tips, footer repaints)
+//    while the typed prompt sits UNSUBMITTED in the input box. Pre-#249 that
+//    churn crossed the 10-byte threshold, a DROPPED Enter looked accepted, and
+//    the prompt was stranded. Here growth only counts while we are NOT parked at
+//    the input prompt; the positive signal is the active-turn marker
+//    "esc to interrupt" (whitespace-tolerant).
+//
+// Growth is measured from the output buffers appended AFTER the first Enter
+// (an anchor into outputHistory), not from totalOutputSize — the latter is a
+// ring-buffer size the 2MB trim decrements. So these tests feed bytes through
+// the real PTY onData handler rather than poking totalOutputSize.
 
-describe('CHARACTERIZATION: sendEnterWithRetry (800ms processing check)', () => {
-    it('re-sends Enter 1300ms later when no output growth follows it', () => {
+/** The "idle at the input prompt" screen of today's TUI. The mode footer is
+ *  ALSO on screen during a turn — only "esc to interrupt" tells them apart. */
+const IDLE_FOOTER = '\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)\n';
+/** Active-turn marker as #249's fake-claude.sh fixture prints it. */
+const ACTIVE_TURN = '✻ Thinking… (esc to interrupt)\n';
+/** Active-turn marker as today's footer renders it, wrapped by a narrow terminal. */
+const ACTIVE_TURN_FOOTER_WRAPPED = '\n⏵⏵ bypass permissions on (shift+tab to cycle) · esc to\ninterrupt · ← for agents\n';
+/** Startup output that keeps streaming after a dropped Enter. */
+const STARTUP_CHURN = 'MCP servers: 3 ready · Tip: use /help for shortcuts to common tasks\n'.repeat(4);
+/** Long enough to exhaust any budget used below, and deliberately SHORT of the
+ *  resource guard's unstubbed 60s tick: on POSIX that tick tries to measure the
+ *  fake PTY's pid and console.warns, which has nothing to do with Enter delivery. */
+const SETTLE_MS = 10_000;
+/** Only the give-up safety net's own warn — other subsystems may warn too. */
+function safetyNetWarns(warn: { mock: { calls: unknown[][] } }): unknown[][] {
+    return warn.mock.calls.filter(c => String(c[0]).includes('Initial prompt never positively confirmed'));
+}
+
+describe('CHARACTERIZATION: sendEnterWithRetry (800ms acceptance check)', () => {
+    /** A task whose PTY output flows through the real onData handler. */
+    function liveTask(overrides: Partial<InternalLike> = {}): InternalLike {
+        const task = makeTask(overrides);
+        internals.setupProcessHandlers(task);
+        return task;
+    }
+
+    it('re-sends Enter 1300ms later when no output follows it', () => {
         const task = makeTask({ state: 'idle' });
 
         internals.sendEnterWithRetry(task, 5, { isInitialPrompt: true });
         expect(task.process.writes).toEqual(['\r']);
 
-        // The growth check happens 800ms after Enter; the retry is armed 500ms
-        // after that. Nothing in between.
+        // The acceptance check happens 800ms after Enter; the retry is armed
+        // 500ms after that. Nothing in between.
         vi.advanceTimersByTime(1299);
         expect(task.process.writes).toEqual(['\r']);
         vi.advanceTimersByTime(1);
         expect(task.process.writes).toEqual(['\r', '\r']);
     });
 
-    it('stops retrying as soon as output grows by MORE than 10 bytes', () => {
-        const task = makeTask({ state: 'idle' });
+    it('FOLLOW-UP: stops retrying as soon as MORE than 10 bytes arrive after Enter', () => {
+        const task = liveTask({ state: 'idle' });
+        task.process.emitData(IDLE_FOOTER);
 
-        internals.sendEnterWithRetry(task, 5, { isInitialPrompt: true });
-        task.totalOutputSize = 11; // strictly greater than 0 + 10
+        internals.sendEnterWithRetry(task, 5, { isInitialPrompt: false });
+        task.process.emitData('abcdefghijk'); // 11 bytes: strictly greater than 10
 
         vi.advanceTimersByTime(60_000);
         expect(task.process.writes).toEqual(['\r']);
     });
 
-    it('treats growth of EXACTLY 10 bytes as "not processing" and retries', () => {
-        const task = makeTask({ state: 'idle' });
+    it('FOLLOW-UP: treats EXACTLY 10 bytes after Enter as "not accepted" and retries', () => {
+        const task = liveTask({ state: 'idle' });
+        task.process.emitData(IDLE_FOOTER);
 
-        internals.sendEnterWithRetry(task, 5, { isInitialPrompt: true });
-        task.totalOutputSize = 10; // `> before + 10` is false
+        internals.sendEnterWithRetry(task, 5, { isInitialPrompt: false });
+        task.process.emitData('abcdefghij'); // `delta > 10` is false
 
         vi.advanceTimersByTime(1300);
         expect(task.process.writes).toEqual(['\r', '\r']);
     });
 
-    it('accepts a processing INDICATOR in the output instead of growth', () => {
-        const task = makeTask({ state: 'idle' });
-        task.outputHistory.push(Buffer.from('✳ Thinking…', 'utf8'));
-        task.totalOutputSize = 0; // no growth accounted — the pattern is what saves it
+    it('the SAME post-Enter churn is accepted on the follow-up path but NOT on the initial-prompt path', () => {
+        // The whole point of #249. Identical bytes, landing back on the idle
+        // input footer: on a follow-up that is a finished near-instant turn; on
+        // the initial prompt it is startup churn around a DROPPED Enter.
+        const followup = liveTask({ id: 'task-followup', state: 'idle' });
+        const initial = liveTask({ id: 'task-initial', state: 'starting', hasStartedProcessing: false });
+        followup.process.emitData(IDLE_FOOTER);
+        initial.process.emitData(IDLE_FOOTER);
 
-        internals.sendEnterWithRetry(task, 5, { isInitialPrompt: true });
-        vi.advanceTimersByTime(60_000);
+        internals.sendEnterWithRetry(followup, 5, { isInitialPrompt: false });
+        internals.sendEnterWithRetry(initial, 5, { isInitialPrompt: true });
+        followup.process.emitData(STARTUP_CHURN + IDLE_FOOTER);
+        initial.process.emitData(STARTUP_CHURN + IDLE_FOOTER);
 
-        expect(task.process.writes).toEqual(['\r']);
+        vi.advanceTimersByTime(800);
+        expect(followup.state).toBe('busy');           // flipped before Enter, stays
+        expect(initial.state).toBe('starting');        // NOT accepted
+        expect(initial.hasStartedProcessing).toBe(false);
+
+        vi.advanceTimersByTime(500);
+        expect(followup.process.writes).toEqual(['\r']);
+        // Only Enter is re-sent — the prompt text is never re-typed.
+        expect(initial.process.writes).toEqual(['\r', '\r']);
     });
 
-    it('gives up after exactly 5 Enters', () => {
+    it('INITIAL PROMPT: growth while NOT parked at the input prompt is still accepted', () => {
+        // The guard only vetoes growth while the idle input footer is on screen.
+        // Output with no input chrome at all (a turn streaming) is acceptance.
+        const task = liveTask({ state: 'starting', hasStartedProcessing: false });
+
+        internals.sendEnterWithRetry(task, 5, { isInitialPrompt: true });
+        task.process.emitData('Reading backend/src/task-spawner.ts\n');
+
+        vi.advanceTimersByTime(60_000);
+        expect(task.process.writes).toEqual(['\r']);
+        expect(task.state).toBe('busy');
+    });
+
+    for (const [label, marker] of [
+        ['as the fake-CLI fixture prints it', ACTIVE_TURN],
+        ['wrapped across two lines in today\'s footer', ACTIVE_TURN_FOOTER_WRAPPED],
+    ] as const) {
+        it(`INITIAL PROMPT: accepts the "esc to interrupt" active-turn marker ${label}, alongside the idle footer`, () => {
+            const task = liveTask({ state: 'starting', hasStartedProcessing: false });
+            task.process.emitData(IDLE_FOOTER);
+
+            internals.sendEnterWithRetry(task, 5, { isInitialPrompt: true });
+            // The mode footer stays on screen during a turn; the marker wins.
+            task.process.emitData(marker + IDLE_FOOTER);
+
+            vi.advanceTimersByTime(60_000);
+            expect(task.process.writes).toEqual(['\r']);
+            expect(task.state).toBe('busy');
+        });
+    }
+
+    it('a spinner glyph printed BEFORE Enter is NOT acceptance evidence (it was pre-#249)', () => {
+        // Pre-#249 a "✳ Thinking…" anywhere in the tail stopped the retry loop.
+        // The ✻/✳ glyphs also appear in the startup "✻ Welcome to Claude Code"
+        // banner, so they cannot tell "turn started" from "still starting up";
+        // and evidence must post-date our Enter anyway.
+        const task = liveTask({ state: 'idle' });
+        task.process.emitData('✳ Thinking…');
+
+        internals.sendEnterWithRetry(task, 5, { isInitialPrompt: true });
+        vi.advanceTimersByTime(1300);
+
+        expect(task.process.writes).toEqual(['\r', '\r']);
+    });
+
+    it('gives up after exactly as many Enters as the budget it is handed', () => {
         const task = makeTask({ state: 'idle' });
 
         internals.sendEnterWithRetry(task, 5, { isInitialPrompt: true });
@@ -334,18 +441,94 @@ describe('CHARACTERIZATION: sendEnterWithRetry (800ms processing check)', () => 
         expect(task.process.writes.filter(w => w === '\r')).toHaveLength(5);
     });
 
-    it('flips starting -> busy on the initial prompt once processing is detected', () => {
+    it('the initial prompt gets a budget of 8 Enters (raised from 5 by #249)', () => {
+        // On a fresh create the TUI can take several seconds to become truly
+        // interactive, and each attempt only re-sends Enter.
         const task = makeTask({ state: 'starting', hasStartedProcessing: false });
+
+        internals.sendPromptWithRetry(task, 'hi');
+        vi.advanceTimersByTime(120_000);
+
+        expect(task.process.writes.filter(w => w === '\r')).toHaveLength(8);
+        // No output ever arrived, so the safety net below does not fire either.
+        expect(task.state).toBe('starting');
+    });
+
+    it('flips starting -> busy on the initial prompt once the active-turn marker appears', () => {
+        const task = liveTask({ state: 'starting', hasStartedProcessing: false });
         const states: string[] = [];
         spawner.on('taskStateChanged', (t: { state: string }) => states.push(t.state));
+        task.process.emitData(IDLE_FOOTER);
 
         internals.sendEnterWithRetry(task, 5, { isInitialPrompt: true });
-        task.totalOutputSize = 500;
+        task.process.emitData(ACTIVE_TURN);
         vi.advanceTimersByTime(800);
 
         expect(task.state).toBe('busy');
         expect(task.hasStartedProcessing).toBe(true);
         expect(states).toContain('busy');
+
+        // Accepted ⇒ no further Enters (no double submission).
+        vi.advanceTimersByTime(60_000);
+        expect(task.process.writes).toEqual(['\r']);
+    });
+
+    it('SAFETY NET: budget exhausted with growth since the FIRST Enter -> busy with a warn, never wedged in starting', () => {
+        // hasStartedProcessing is set only on a positive acceptance, and the state
+        // poller never moves starting -> idle. A turn that started and finished
+        // without the marker landing in a sample would otherwise leave the task in
+        // 'starting' forever. On give-up #249 falls back to the pre-fix growth
+        // heuristic (no worse than before) and says so at warn level.
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+        try {
+            const task = liveTask({ state: 'starting', hasStartedProcessing: false });
+            const states: string[] = [];
+            spawner.on('taskStateChanged', (t: { state: string }) => states.push(t.state));
+            task.process.emitData(IDLE_FOOTER);
+
+            internals.sendEnterWithRetry(task, 3, { isInitialPrompt: true });
+            // Only churn at the idle prompt ever follows: never positively accepted.
+            task.process.emitData(STARTUP_CHURN + IDLE_FOOTER);
+
+            // Just before the final give-up call the task is still 'starting'.
+            vi.advanceTimersByTime(3 * 1300 - 1);
+            expect(task.process.writes).toEqual(['\r', '\r', '\r']);
+            expect(task.state).toBe('starting');
+            expect(safetyNetWarns(warn)).toHaveLength(0);
+
+            vi.advanceTimersByTime(1);
+            expect(task.process.writes).toEqual(['\r', '\r', '\r']); // no 4th Enter, no burst
+            expect(task.state).toBe('busy');
+            expect(task.hasStartedProcessing).toBe(true);
+            expect(states).toEqual(['busy']);
+            expect(safetyNetWarns(warn)).toHaveLength(1);
+
+            // And it stays put: nothing further is written or re-classified.
+            vi.advanceTimersByTime(SETTLE_MS);
+            expect(task.process.writes).toHaveLength(3);
+            expect(task.state).toBe('busy');
+            expect(safetyNetWarns(warn)).toHaveLength(1);
+        } finally {
+            warn.mockRestore();
+        }
+    });
+
+    it('SAFETY NET does not fire (and does not warn) when nothing was printed after the first Enter', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+        try {
+            const task = liveTask({ state: 'starting', hasStartedProcessing: false });
+            task.process.emitData(IDLE_FOOTER);
+
+            internals.sendEnterWithRetry(task, 3, { isInitialPrompt: true });
+            vi.advanceTimersByTime(SETTLE_MS);
+
+            expect(task.process.writes).toEqual(['\r', '\r', '\r']);
+            expect(task.state).toBe('starting');
+            expect(task.hasStartedProcessing).toBe(false);
+            expect(safetyNetWarns(warn)).toHaveLength(0);
+        } finally {
+            warn.mockRestore();
+        }
     });
 
     it('flips idle -> busy BEFORE writing Enter for follow-up input (not for the initial prompt)', () => {

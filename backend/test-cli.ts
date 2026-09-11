@@ -1817,6 +1817,16 @@ STATE EXPORT (P0 task 10, spec §11.1):
   --with-secrets           Also write secrets.json (mode 0600) — API keys, MCP env/headers
   --with-histories         Also copy task-histories/ + archived-histories/ (gigabytes)
   --with-agent-sessions    Also copy session JSONL transcripts for non-archived tasks
+
+STATE IMPORT / HANDOFF (P0 task 11, spec §11.2 §11.3):
+  --import <dir>           Restore a portable export, remapping host paths
+  --map old=new            Path prefix mapping; repeatable, longest prefix wins
+  --dry-run                Print the remap table and unavailable list; write nothing
+  --force                  Overwrite a target data dir that already has tasks.json
+  --handoff                With --export: capture+push working trees, stop tasks,
+                           then freeze this host. With --import: restore those trees.
+  --allow-no-remote        Permit a handoff of a repo with no remote (ships a bundle)
+  --reclaim                Clear this instance's handoff mark so it can run tasks again
   --view-files             View code files for a task (requires --task-id)
   --archive-task           Archive a task (requires --task-id)
   --disconnect             Disconnect a task (requires --task-id)
@@ -2728,6 +2738,149 @@ async function handleJiraCommand(argv: string[]): Promise<boolean> {
 //   --tunnel-diagnose               probe which ngrok zones this network allows
 // ============================================================================
 // ============================================================================
+// Portable state import + handoff (P0 task 11, spec §11.2/§11.3). Pure HTTP.
+//   --import <dir> [--map old=new]... [--dry-run] [--handoff] [--force]
+//   --reclaim
+//
+// --map is repeatable and the pairs are matched longest-prefix-first, so
+// order on the command line does not matter; a more specific rule always wins.
+// ============================================================================
+
+/** Resolve the backend base URL, honouring --url. Shared by both commands. */
+function backendBase(argv: string[]): string {
+    const urlIdx = argv.indexOf('--url');
+    return (urlIdx >= 0 && argv[urlIdx + 1] ? argv[urlIdx + 1] : 'http://localhost:4001')
+        .replace(/^ws:/, 'http:')
+        .replace(/^wss:/, 'https:')
+        .replace(/\/$/, '');
+}
+
+/**
+ * Collect every `--map old=new` occurrence.
+ *
+ * Split on the FIRST `=` only: a Windows path can legitimately contain one
+ * (`C:\Users\ana`), and splitting on all of them would mangle it.
+ */
+function collectMappings(argv: string[]): { pairs: Array<[string, string]>; error?: string } {
+    const pairs: Array<[string, string]> = [];
+    for (let i = 0; i < argv.length; i++) {
+        if (argv[i] !== '--map') continue;
+        const raw = argv[i + 1];
+        if (!raw || raw.startsWith('--')) return { pairs, error: '--map requires an old=new argument' };
+        const eq = raw.indexOf('=');
+        if (eq <= 0 || eq === raw.length - 1) {
+            return { pairs, error: `--map ${raw} is not in old=new form` };
+        }
+        pairs.push([raw.slice(0, eq), raw.slice(eq + 1)]);
+    }
+    return { pairs };
+}
+
+async function handleImportCommand(argv: string[]): Promise<boolean> {
+    const i = argv.indexOf('--import');
+    if (i < 0) return false;
+
+    const exportDir = argv[i + 1];
+    if (!exportDir || exportDir.startsWith('--')) {
+        console.error('❌ --import requires an export directory');
+        process.exitCode = 1;
+        return true;
+    }
+
+    const { pairs, error } = collectMappings(argv);
+    if (error) {
+        console.error(`❌ ${error}`);
+        process.exitCode = 1;
+        return true;
+    }
+
+    const dryRun = argv.includes('--dry-run');
+    const body = {
+        exportDir,
+        map: pairs,
+        dryRun,
+        handoff: argv.includes('--handoff'),
+        force: argv.includes('--force'),
+    };
+
+    console.log(`📥 Importing state ← ${exportDir}${dryRun ? '  (DRY RUN — nothing will be written)' : ''}`);
+    if (pairs.length === 0) {
+        console.log('   mappings: none given (only the implicit home-directory rule will apply)');
+    } else {
+        for (const [from, to] of pairs) console.log(`   map: ${from}  →  ${to}`);
+    }
+
+    const res = await fetch(`${backendBase(argv)}/api/import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const payload = (await res.json().catch(() => ({}))) as any;
+
+    if (!res.ok) {
+        console.error(`❌ Import failed (HTTP ${res.status}): ${payload.error ?? JSON.stringify(payload)}`);
+        process.exitCode = 1;
+        return true;
+    }
+
+    const r = payload.report;
+    if (!r) {
+        console.error(`❌ No report in the response (HTTP ${res.status}). Is the backend running this build?`);
+        process.exitCode = 1;
+        return true;
+    }
+
+    console.log(`\n${r.dryRun ? '🔎 Dry run complete — nothing was written' : '✅ Import complete'}\n`);
+
+    console.log(`   remap table (${r.remapTable.length} rule(s), longest prefix first):`);
+    if (r.remapTable.length === 0) console.log('     (none — paths carried across verbatim)');
+    for (const [from, to] of r.remapTable) console.log(`     ${from}  →  ${to}`);
+
+    const unavailable = r.workspaces.filter((w: any) => !w.exists);
+    console.log(`\n   workspaces (${r.workspaces.length}, ${unavailable.length} unavailable here):`);
+    for (const w of r.workspaces.slice(0, 25)) {
+        const changed = w.id === w.newId ? '(unchanged)' : `← ${w.id}`;
+        console.log(`     ${w.exists ? '✓' : '✗'} ${w.newId}  ${changed}`);
+    }
+    if (r.workspaces.length > 25) console.log(`     … and ${r.workspaces.length - 25} more`);
+
+    console.log(`\n   state files written : ${r.filesWritten.length}${r.filesWritten.length ? ` (${r.filesWritten.join(', ')})` : ''}`);
+    console.log(`   sessions placed     : ${r.sessionsPlaced}`);
+
+    if (r.handoff?.length) {
+        console.log(`\n   handoff — working trees (${r.handoff.length}):`);
+        for (const h of r.handoff) {
+            console.log(`     ${h.restored ? '✓ restored' : `– skipped (${h.skipped ?? 'unknown'})`}  ${h.workspaceId}`);
+        }
+    }
+
+    if (r.skipped.length) {
+        console.log(`\n   skipped (${r.skipped.length}):`);
+        for (const sk of r.skipped) console.log(`     - ${sk}`);
+    }
+    if (r.warnings.length) {
+        console.log(`\n⚠️  warnings (${r.warnings.length}):`);
+        for (const w of r.warnings) console.log(`     - ${w}`);
+    }
+    return true;
+}
+
+async function handleReclaimCommand(argv: string[]): Promise<boolean> {
+    if (!argv.includes('--reclaim')) return false;
+
+    const res = await fetch(`${backendBase(argv)}/api/handoff/reclaim`, { method: 'POST' });
+    const payload = (await res.json().catch(() => ({}))) as any;
+
+    if (!res.ok) {
+        console.error(`❌ Reclaim failed (HTTP ${res.status}): ${payload.error ?? JSON.stringify(payload)}`);
+        process.exitCode = 1;
+        return true;
+    }
+    console.log(payload.reclaimed ? `✅ ${payload.message}` : `ℹ️  ${payload.message}`);
+    return true;
+}
+
+// ============================================================================
 // Portable state export (P0 task 10, spec §11.1). Pure HTTP, no WebSocket.
 //   --export <dir> [--with-secrets] [--with-histories] [--with-agent-sessions]
 //
@@ -2760,6 +2913,11 @@ async function handleExportCommand(argv: string[]): Promise<boolean> {
         withSecrets: argv.includes('--with-secrets'),
         withHistories: argv.includes('--with-histories'),
         withAgentSessions: argv.includes('--with-agent-sessions'),
+        // --handoff forces the agent-sessions tier on server-side; it is not
+        // set here so the tier list printed below reflects what the operator
+        // actually asked for rather than what the server derived.
+        handoff: argv.includes('--handoff'),
+        allowNoRemote: argv.includes('--allow-no-remote'),
     };
 
     console.log(`📦 Exporting state → ${out}`);
@@ -2940,6 +3098,14 @@ async function main() {
 
     // State export — pure HTTP too.
     if (await handleExportCommand(process.argv.slice(2))) {
+        process.exit(process.exitCode ?? 0);
+    }
+
+    // State import and handoff reclaim — pure HTTP as well.
+    if (await handleImportCommand(process.argv.slice(2))) {
+        process.exit(process.exitCode ?? 0);
+    }
+    if (await handleReclaimCommand(process.argv.slice(2))) {
         process.exit(process.exitCode ?? 0);
     }
 

@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { writeFile as writeFileAsync, rename as renameAsync, unlink as unlinkAsync, appendFile as appendFileAsync, stat as statAsync, open as openAsync } from 'fs/promises';
 import { tmpdir, homedir, cpus, CpuInfo } from 'os';
+import { readHandoffMark } from './export-import/handoff.js';
 import { execFileSync, execSync } from 'child_process';
 import { atomicWriteFileSync, atomicWriteFileAsync } from './utils/atomic-write.js';
 import { buildSettingsLocalContent } from './settings-local.js';
@@ -22,6 +23,7 @@ import { claudeSessionDir, claudeProjectsRoot } from './backends/claude-code-bac
 import { LearningsStore, LearningSearchResult } from './learnings-store.js';
 import { getConversationHistory } from './conversation-parser.js';
 import { getTaskTokenUsage } from './token-parser.js';
+import { classifyEnterOutcome, hasActiveTurnIndicator, hasChoiceDialog, isReadyForInitialInput as detectReadyForInitialInput } from './task-state-detection.js';
 import { randomBytes, randomUUID } from 'crypto';
 import { SharedMcpManager } from './shared-mcp-manager.js';
 import {
@@ -1287,6 +1289,67 @@ export class TaskSpawner extends EventEmitter {
         return join(dirname(this.persistencePath), 'archived-tasks.json');
     }
 
+    // -----------------------------------------------------------------------
+    // Handoff guard (P0 task 11, spec §11.3)
+    //
+    // Once this host has handed its work off, it must stop being a writer. The
+    // failure this prevents is not a lost file: it is TWO hosts resuming the
+    // same agent session, both appending to one transcript and both pushing to
+    // one branch. Nothing downstream can repair that, so the guard sits at the
+    // two doors through which a runtime process can be created — createTask and
+    // reconnectTask — rather than at the API layer, where a WebSocket message,
+    // an MCP call, a cron fire or the boot-time auto-reconnect could each walk
+    // straight past it.
+    // -----------------------------------------------------------------------
+
+    /** Cached handoff mark, invalidated by instance.json's mtime. */
+    private handoffMarkCache: { mtimeMs: number; mark: ReturnType<typeof readHandoffMark> } | null = null;
+
+    /**
+     * The handoff mark for this data directory, or `null` if the host is free.
+     *
+     * Cached on mtime because boot-time auto-reconnect calls this once per
+     * task; the file is tiny, but re-reading it a hundred times in a loop is
+     * pointless I/O.
+     */
+    private getHandoffMark(): ReturnType<typeof readHandoffMark> {
+        const dataDir = dirname(this.persistencePath);
+        const lockPath = join(dataDir, 'instance.json');
+        let mtimeMs = 0;
+        try {
+            mtimeMs = existsSync(lockPath) ? statSync(lockPath).mtimeMs : 0;
+        } catch {
+            mtimeMs = 0;
+        }
+        if (mtimeMs === 0) {
+            this.handoffMarkCache = null;
+            return null;
+        }
+        if (this.handoffMarkCache?.mtimeMs === mtimeMs) return this.handoffMarkCache.mark;
+        const mark = readHandoffMark(dataDir);
+        this.handoffMarkCache = { mtimeMs, mark };
+        return mark;
+    }
+
+    /**
+     * Throw if this host has been handed off. Called before anything spawns.
+     *
+     * The error text names `--reclaim` explicitly: an operator who hits this is
+     * usually one who expected the handoff to have been undone already, and the
+     * remedy needs to be in the message rather than in the docs.
+     */
+    private assertNotHandedOff(action: string): void {
+        const mark = this.getHandoffMark();
+        if (!mark) return;
+        throw new Error(
+            `This Claudia instance was handed off at ${mark.handedOffAt} and will not ${action}. ` +
+                `Its tasks are running on another host; starting them here too would have two ` +
+                `machines appending to the same agent sessions. ` +
+                `If the handoff was a mistake or the other host never came up, reclaim this one ` +
+                `(test-cli --reclaim, or POST /api/handoff/reclaim) and try again.`
+        );
+    }
+
     private getTaskHistoryPath(taskId: string): string {
         return join(this.getHistoryDir(), `${taskId}.txt`);
     }
@@ -2371,6 +2434,21 @@ export class TaskSpawner extends EventEmitter {
         // of 29 eligible tasks, ~182s serial becomes ~5s. This matters because
         // the WebSocket init path used to block on waitForReconnect(), so every
         // second here was a second the UI showed nothing.
+        // A handed-off host reconnects nothing. Checked once here as well as
+        // inside reconnectTask: both loop call sites catch per-task errors, so
+        // without this the boot log would carry one stack trace per task and
+        // bury the single fact the operator needs — that this instance is
+        // frozen and needs --reclaim.
+        const bootMark = this.getHandoffMark();
+        if (bootMark) {
+            console.warn(
+                `[TaskSpawner] Skipping auto-reconnect of ${tasksToReconnect.length} task(s): ` +
+                `this instance was handed off at ${bootMark.handedOffAt}. ` +
+                `They are running on another host. Run --reclaim (or POST /api/handoff/reclaim) to take them back.`
+            );
+            return;
+        }
+
         const concurrency = this.reconnectConcurrency;
         const settleMs = this.reconnectSettleMs;
         const totalWaves = Math.ceil(tasksToReconnect.length / concurrency);
@@ -3509,11 +3587,10 @@ export class TaskSpawner extends EventEmitter {
     }
 
     private isReadyForInitialInput(str: string): boolean {
-        return str.includes('Try "') ||
-            str.includes('? for shortcuts') ||
-            str.includes('bypass permissions') ||
-            str.includes('shift+tab') ||
-            (str.includes('───') && str.includes('❯'));
+        // Single source of truth: classifyEnterOutcome (task-state-detection) uses
+        // the same markers to decide "still parked at the input", so the two must
+        // never drift apart again.
+        return detectReadyForInitialInput(str);
     }
 
     /**
@@ -3599,6 +3676,92 @@ export class TaskSpawner extends EventEmitter {
         const combined = Buffer.concat(buffers);
         const str = combined.toString('utf8');
         return this.stripAnsi(str.slice(-maxBytes));
+    }
+
+    /**
+     * The output that arrived after a given point in the stream, identified by
+     * the LAST buffer present at that point (the "anchor").
+     *
+     * Why an anchor and not a byte delta: `task.totalOutputSize` is the size of
+     * the in-memory ring buffer, not a monotonic byte counter — the PTY handler
+     * DECREMENTS it while trimming `outputHistory` down to the 2MB cap. On a
+     * long-running task at that cap, every new chunk evicts an equal-sized old
+     * one, so a delta computed from it reads ~0 (or negative) even while a turn
+     * is streaming, and the Enter classifier reads an accepted submission as
+     * dropped. Buffer identity is stable across the trim: if the anchor itself
+     * has been evicted, everything still held is by definition post-anchor.
+     *
+     * The text is capped at `cap` bytes (byte-exact, not character-sliced —
+     * a character slice over multi-byte box-drawing/spinner glyphs silently
+     * widens the window and can pull the pre-Enter prompt echo back into view).
+     */
+    private getOutputSinceAnchor(
+        task: InternalTask,
+        anchor: Buffer | undefined,
+        cap = 65536
+    ): { text: string; bytes: number; truncated: boolean } {
+        const idx = anchor ? task.outputHistory.lastIndexOf(anchor) : -1;
+        const since = task.outputHistory.slice(idx >= 0 ? idx + 1 : 0);
+        const combined = Buffer.concat(since);
+        const truncated = combined.length > cap;
+        const window = truncated ? combined.subarray(combined.length - cap) : combined;
+        return {
+            text: this.stripAnsi(window.toString('utf8')),
+            bytes: combined.length,
+            truncated,
+        };
+    }
+
+    /**
+     * Classify, against the CURRENT screen, whether the Enter anchored at
+     * `anchor` was accepted. Shared by the post-Enter check and by the
+     * re-check performed immediately before a retry Enter is written.
+     */
+    private classifyEnterNow(
+        task: InternalTask,
+        anchor: Buffer | undefined,
+        isInitialPrompt: boolean
+    ): { outcome: 'accepted' | 'retry'; activeTurn: boolean; choiceDialog: boolean; outputDelta: number; recentOutput: string } {
+        const sinceEnter = this.getOutputSinceAnchor(task, anchor);
+        // Sample 4096 bytes (matching the ready-detection window) so the idle
+        // input footer isn't pushed out of view by a partial repaint above it,
+        // which could otherwise let growth be accepted while Enter was dropped.
+        const recentOutput = this.getRecentOutput(task, 4096);
+        // Active-turn AND dialog evidence are taken from output printed strictly
+        // AFTER our Enter. Scanning the trailing window instead is wrong in both
+        // directions: the pre-Enter prompt echo can contain the marker or dialog
+        // chrome verbatim (prompts that quote them — this repo writes them), and
+        // a marker painted right after Enter scrolls out of a fixed 4096-byte
+        // tail once a few KB of turn output stream past.
+        const outputSinceEnter = sinceEnter.text;
+        return {
+            outcome: classifyEnterOutcome({
+                outputDeltaBytes: sinceEnter.bytes,
+                recentOutput,
+                outputSinceEnter,
+                outputSinceEnterTruncated: sinceEnter.truncated,
+                // Guard growth-based acceptance against startup/resume churn only for
+                // the initial-prompt/reconnect delivery; a plain follow-up is already
+                // interactive, so growth there reliably means the message was accepted.
+                guardAgainstIdleChurn: isInitialPrompt,
+            }),
+            activeTurn: hasActiveTurnIndicator(outputSinceEnter),
+            choiceDialog: hasChoiceDialog(outputSinceEnter),
+            outputDelta: sinceEnter.bytes,
+            recentOutput,
+        };
+    }
+
+    /**
+     * Mark an initial prompt as having positively started a turn. Idempotent.
+     */
+    private markInitialPromptAccepted(task: InternalTask, isInitialPrompt: boolean): void {
+        if (isInitialPrompt && task.state === 'starting' && !task.hasStartedProcessing) {
+            task.hasStartedProcessing = true;
+            task.state = 'busy';
+            console.log(`[TaskSpawner] Task ${task.id} transitioned: starting → busy`);
+            this.emit('taskStateChanged', this.toPublicTask(task));
+        }
     }
 
     /**
@@ -3789,7 +3952,11 @@ export class TaskSpawner extends EventEmitter {
         return task.state;
     }
 
-    private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 5): void {
+    // Initial-prompt Enter is retried more times than a normal follow-up: on a
+    // fresh create the TUI can take several seconds to become truly interactive,
+    // and each attempt only re-sends Enter (never re-types the prompt), so extra
+    // attempts are safe — an Enter on an already-submitted/empty box is a no-op.
+    private sendPromptWithRetry(task: InternalTask, prompt: string, maxRetries = 8): void {
         // Guard: abort if PTY has exited — writing to a dead native handle causes segfaults
         if (task.state === 'exited' || !this.tasks.has(task.id)) {
             console.log(`[TaskSpawner] Aborting prompt write: task ${task.id} is no longer alive`);
@@ -3839,30 +4006,9 @@ export class TaskSpawner extends EventEmitter {
 
             setTimeout(() => {
                 if (task.state === 'exited' || !this.tasks.has(task.id)) return;
-                this.sendEnterWithRetry(task, 5, { isInitialPrompt: true });
+                this.sendEnterWithRetry(task, maxRetries, { isInitialPrompt: true });
             }, delayMs);
         }
-    }
-
-    /**
-     * Check if recent output indicates Claude has started processing
-     * Look for spinner characters, "Thinking", "Working", etc.
-     */
-    private hasProcessingIndicators(task: InternalTask): boolean {
-        const recentOutput = this.getRecentOutput(task, 1024);
-        // Look for Claude processing indicators
-        const processingPatterns = [
-            /Thinking/i,
-            /Working/i,
-            /Concocting/i,
-            /Analyzing/i,
-            /Reading/i,
-            /Writing/i,
-            /⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/,  // Spinner characters
-            /✶|✳|✢|·|✻|✽|✺/,  // Claude spinner chars
-            /───.*Claude/,  // Header lines
-        ];
-        return processingPatterns.some(pattern => pattern.test(recentOutput));
     }
 
     /**
@@ -3875,7 +4021,7 @@ export class TaskSpawner extends EventEmitter {
     private sendEnterWithRetry(
         task: InternalTask,
         retriesLeft: number,
-        options: { isInitialPrompt?: boolean; enterKey?: string; outputLengthAtSend?: number } = {}
+        options: { isInitialPrompt?: boolean; enterKey?: string; outputAnchorAtSend?: Buffer } = {}
     ): void {
         const { isInitialPrompt = false, enterKey = '\r' } = options;
         const context = isInitialPrompt ? 'initial prompt' : 'input';
@@ -3887,9 +4033,69 @@ export class TaskSpawner extends EventEmitter {
         }
 
         if (retriesLeft <= 0) {
-            console.log(`[TaskSpawner] Max retries reached for ${context} on task ${task.id}, giving up`);
+            // Diagnostic: dump the recent tail so a future non-delivery is debuggable.
+            // If the prompt is still visibly sitting in the input box here, the TUI
+            // never accepted any of our Enters within the retry budget.
+            const tail = this.getRecentOutput(task, 4096);
+            // `in` rather than `!== undefined`: the anchor is legitimately undefined
+            // when nothing had been printed yet at the first Enter, and that retry
+            // still threads the key — the whole history is then post-Enter output.
+            const deltaSinceFirstEnter = 'outputAnchorAtSend' in options
+                ? this.getOutputSinceAnchor(task, options.outputAnchorAtSend).bytes
+                : 0;
+            console.log(`[TaskSpawner] Max retries reached for ${context} on task ${task.id}, giving up (outputDeltaSinceFirstEnter=${deltaSinceFirstEnter}). Recent output: ${JSON.stringify(tail.slice(-512))}`);
+            // Safety net for the initial prompt: hasStartedProcessing is set ONLY on
+            // a positive acceptance below, and the poller never moves starting → idle.
+            // If a turn started and finished without "esc to interrupt" ever landing
+            // in our sample window, refusing to advance would wedge the task in
+            // 'starting' forever. Fall back to the pre-fix growth heuristic here (no
+            // worse than before); the poller then settles busy → idle.
+            if (isInitialPrompt && task.state === 'starting' && !task.hasStartedProcessing
+                && (hasActiveTurnIndicator(tail) || deltaSinceFirstEnter > 10)) {
+                logger.warn('Initial prompt never positively confirmed; advancing on output growth so the task does not wedge in starting', {
+                    taskId: task.id,
+                    attempts: task.promptSubmitAttempts,
+                    outputDeltaSinceFirstEnter: deltaSinceFirstEnter,
+                    // Without these the warn alone cannot distinguish "marker never
+                    // sampled" from "prompt genuinely never submitted".
+                    activeTurnInTail: hasActiveTurnIndicator(tail),
+                    stillIdleAtInput: this.isReadyForInitialInput(tail),
+                    choiceDialog: hasChoiceDialog(tail),  // trailing tail: diagnostic only, never a decision
+                    tail: tail.slice(-512),
+                });
+                task.hasStartedProcessing = true;
+                task.state = 'busy';
+                this.emit('taskStateChanged', this.toPublicTask(task));
+            }
             // Just return, do not send burst to avoid PTY crashes
             return;
+        }
+
+        // This call is a RETRY when an anchor was threaded from an earlier attempt.
+        // The classification that scheduled it is 500ms stale, and the TUI moves in
+        // that gap: a turn that only just started painting the active-turn marker —
+        // or worse, one that parked on a choice/permission dialog — would EAT this
+        // Enter. On a dialog that means selecting the highlighted option (auto-
+        // answering an AskUserQuestion, auto-approving a tool). Re-check against the
+        // current screen and stand down if the submission has since been confirmed.
+        // Same decision function as the post-Enter check, just a later sample, so
+        // this can only stop the loop where the loop would have stopped anyway.
+        if ('outputAnchorAtSend' in options) {
+            const late = this.classifyEnterNow(task, options.outputAnchorAtSend, isInitialPrompt);
+            if (late.outcome === 'accepted') {
+                console.log(`[TaskSpawner] Submission confirmed for ${context} on task ${task.id} before retry Enter was written — standing down (activeTurn=${late.activeTurn}, choiceDialog=${late.choiceDialog}, outputDelta=${late.outputDelta})`);
+                logger.debug('Retry Enter cancelled by pre-write re-check', {
+                    taskId: task.id,
+                    context,
+                    attempt: task.promptSubmitAttempts,
+                    retriesLeft,
+                    activeTurn: late.activeTurn,
+                    choiceDialog: late.choiceDialog,
+                    outputDelta: late.outputDelta,
+                });
+                this.markInitialPromptAccepted(task, isInitialPrompt);
+                return;
+            }
         }
 
         task.promptSubmitAttempts = (task.promptSubmitAttempts || 0) + 1;
@@ -3903,34 +4109,62 @@ export class TaskSpawner extends EventEmitter {
             this.emit('taskStateChanged', this.toPublicTask(task));
         }
 
-        // Record output length just before sending Enter so we can detect any output growth
-        const outputLengthBeforeEnter = options.outputLengthAtSend ??
-            task.totalOutputSize;
+        // Anchor the stream just before sending Enter so every later sample can tell
+        // post-Enter output from the prompt echo that preceded it. Sticky across
+        // retries: the anchor stays at the FIRST Enter so the evidence window only
+        // ever grows, and it survives the 2MB history trim (see getOutputSinceAnchor).
+        // `in` rather than `??`, for the same reason the give-up path uses it: the
+        // anchor is legitimately `undefined` when nothing had been printed at the
+        // first Enter (the whole history is then post-Enter output). With `??` that
+        // case silently RE-anchors on every retry, shrinking the evidence window
+        // back to "since the latest Enter" — the opposite of sticky.
+        const outputAnchorBeforeEnter = 'outputAnchorAtSend' in options
+            ? options.outputAnchorAtSend
+            : task.outputHistory[task.outputHistory.length - 1];
 
         // Send Enter
         task.process.write(enterKey);
 
         setTimeout(() => {
-            // Check if output has grown since we sent Enter (more reliable than pattern matching)
-            // even small output changes (≥10 bytes) indicate Claude accepted the Enter
-            const currentOutputLength = task.totalOutputSize;
-            const outputGrew = currentOutputLength > outputLengthBeforeEnter + 10;
+            // Decide whether the Enter was actually accepted (prompt submitted, turn
+            // started) or dropped and needs a retry. We deliberately do NOT treat raw
+            // output growth alone as success: on a fresh create the TUI is still
+            // streaming startup output (MCP load, rotating tips, footer repaints),
+            // which would cross a byte threshold and make a DROPPED Enter look
+            // accepted — leaving the typed prompt sitting unsubmitted in the input
+            // box (the intermittent bug). classifyEnterOutcome only accepts growth
+            // when we are no longer parked at the idle input prompt, and always
+            // accepts on a genuine active-turn marker ("esc to interrupt").
+            // Note the mode footer ("bypass permissions … shift+tab") stays on screen
+            // during a turn too, so on the guarded path "esc to interrupt" (or a
+            // choice dialog) is in practice the only thing that confirms acceptance.
+            const { outcome, activeTurn, choiceDialog, outputDelta, recentOutput } =
+                this.classifyEnterNow(task, outputAnchorBeforeEnter, isInitialPrompt);
+            const stillIdleAtInput = !activeTurn && this.isReadyForInitialInput(recentOutput);
+            logger.debug('Classified Enter outcome', {
+                taskId: task.id,
+                context,
+                attempt: task.promptSubmitAttempts,
+                retriesLeft,
+                outputDelta,
+                activeTurn,
+                choiceDialog,
+                stillIdleAtInput,
+                guardAgainstIdleChurn: isInitialPrompt,
+                outcome,
+            });
 
-            // Check if Claude started processing (pattern-based or output-growth-based)
-            if (outputGrew || this.hasProcessingIndicators(task)) {
-                console.log(`[TaskSpawner] Claude processing detected for ${context} after attempt ${task.promptSubmitAttempts} (outputGrew=${outputGrew}, outputDelta=${currentOutputLength - outputLengthBeforeEnter})`);
-                if (isInitialPrompt && task.state === 'starting' && !task.hasStartedProcessing) {
-                    task.hasStartedProcessing = true;
-                    task.state = 'busy';
-                    console.log(`[TaskSpawner] Task ${task.id} transitioned: starting → busy`);
-                    this.emit('taskStateChanged', this.toPublicTask(task));
-                }
+            if (outcome === 'accepted') {
+                console.log(`[TaskSpawner] Submission accepted for ${context} after attempt ${task.promptSubmitAttempts} (activeTurn=${activeTurn}, choiceDialog=${choiceDialog}, outputDelta=${outputDelta})`);
+                this.markInitialPromptAccepted(task, isInitialPrompt);
                 return;
             }
 
-            // Not started yet - schedule retry with longer delay
-            console.log(`[TaskSpawner] No processing indicators found for ${context} (outputDelta=${currentOutputLength - outputLengthBeforeEnter}), will retry Enter in 500ms`);
-            setTimeout(() => this.sendEnterWithRetry(task, retriesLeft - 1, { ...options, outputLengthAtSend: outputLengthBeforeEnter }), 500);
+            // Not accepted — the Enter was dropped or the TUI is still at the idle
+            // input prompt. Retry (re-send Enter only; the prompt text is already in
+            // the box and must never be re-typed) until a real turn starts.
+            console.log(`[TaskSpawner] ${context} not yet accepted for task ${task.id} (activeTurn=${activeTurn}, choiceDialog=${choiceDialog}, outputDelta=${outputDelta}, stillIdleAtInput=${stillIdleAtInput}), retrying Enter in 500ms (${retriesLeft - 1} retries left)`);
+            setTimeout(() => this.sendEnterWithRetry(task, retriesLeft - 1, { ...options, outputAnchorAtSend: outputAnchorBeforeEnter }), 500);
         }, 800);
     }
 
@@ -3942,6 +4176,10 @@ export class TaskSpawner extends EventEmitter {
      * @returns The created task object
      */
     async createTask(prompt: string, workspaceId: string, systemPrompt?: string, initialCols?: number, initialRows?: number, modelOverride?: string, parentTaskId?: string): Promise<Task> {
+        // Single-writer guard: a handed-off host creates nothing. See
+        // assertNotHandedOff above for why this lives here and not at the API.
+        this.assertNotHandedOff('start new tasks');
+
         // Sanitize prompt to prevent command injection and other issues
         const sanitizedPrompt = sanitizePrompt(prompt);
         let sanitizedSystemPrompt = systemPrompt ? sanitizePrompt(systemPrompt) : undefined;
@@ -5983,6 +6221,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
     }
 
     reconnectTask(taskId: string, pendingInput?: string): Task | null {
+        // Single-writer guard. Resuming is the more dangerous of the two doors:
+        // it reattaches to an EXISTING agent session, which is precisely the
+        // thing the other host is now doing.
+        this.assertNotHandedOff('resume tasks');
+
         // This task is coming back to life — any undelivered "has exited"
         // notice queued for its parent is now stale and must not be delivered.
         this.retractParentNotificationsFor(taskId);
