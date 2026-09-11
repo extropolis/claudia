@@ -3,7 +3,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
-import { startServer, stopServer, findRunningBackend, resolveBackend, ServerInfo } from './server-manager.js';
+import { startServer, stopServer, findRunningBackend, resolveBackend, resolveBackendToken, ServerInfo } from './server-manager.js';
 import { initUpdater, disposeUpdater } from './updater.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -108,31 +108,16 @@ const menuTemplate: Electron.MenuItemConstructorOptions[] = [
 Menu.setApplicationMenu(Menu.buildFromTemplate(menuTemplate));
 
 /**
- * Ask the backend for the API token.
- *
- * Every /api route and every WebSocket upgrade requires one now (see
- * backend/src/auth-token.ts). Electron asks the backend over loopback rather
- * than reading the token file directly: `GET /api/auth/local` is gated on the
- * socket peer, which Electron always satisfies, and it is the same code path
- * whether Electron spawned this backend or is attaching to one that was already
- * running (#204) — no data-directory path arithmetic in two places.
+ * The API token the window hands the SPA — see resolveBackendToken() in
+ * server-manager.ts. The SPA then attaches it to every /api fetch and every
+ * WebSocket upgrade, so this one lookup authenticates the whole session whether
+ * Electron spawned the backend or attached to one already running.
  *
  * Returns null on failure, in which case the window loads without a token and
  * the SPA shows its token gate rather than a blank app.
  */
-async function fetchBackendToken(backendUrl: string): Promise<string | null> {
-    try {
-        const res = await fetch(`${backendUrl}/api/auth/local`);
-        if (!res.ok) {
-            console.warn(`[Main] Auth bootstrap refused (HTTP ${res.status})`);
-            return null;
-        }
-        const body = await res.json() as { token?: string };
-        return body?.token?.trim() || null;
-    } catch (error) {
-        console.warn('[Main] Auth bootstrap failed:', error);
-        return null;
-    }
+function fetchBackendToken(backendUrl: string): Promise<string | null> {
+    return resolveBackendToken(backendUrl);
 }
 
 async function createWindow(backendUrl: string): Promise<void> {

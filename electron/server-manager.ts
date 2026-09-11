@@ -173,6 +173,51 @@ export async function resolveBackend(deps: {
 }
 
 /**
+ * The API token for the backend at `backendUrl`, or null if none can be had.
+ *
+ * Every /api route and every WebSocket upgrade requires one (backend
+ * auth-token.ts). The probe above is the only unauthenticated call; everything
+ * after it — the SPA's fetches and its WS — carries the token this returns,
+ * which main.ts hands to the window as `?token=`.
+ *
+ * `CLAUDIA_AUTH_TOKEN` wins when set: it is the same override the MCP server and
+ * test-cli honor, and it is the only way to attach to a NON-local backend
+ * (`CLAUDIA_BACKEND_URL` pointing at another host), because the fallback —
+ * `GET /api/auth/local` — is served only to a loopback peer. That bootstrap is
+ * what a local attach or a spawned backend uses, and it needs no data-dir path
+ * arithmetic: the backend tells us its own token.
+ */
+export async function resolveBackendToken(
+    backendUrl: string,
+    opts: { env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch } = {}
+): Promise<string | null> {
+    const fromEnv = (opts.env ?? process.env).CLAUDIA_AUTH_TOKEN?.trim();
+    if (fromEnv) {
+        console.log('[Auth] Using CLAUDIA_AUTH_TOKEN from the environment');
+        return fromEnv;
+    }
+
+    const doFetch = opts.fetchImpl ?? fetch;
+    const base = backendUrl.replace(/\/+$/, '');
+    try {
+        const res = await doFetch(`${base}/api/auth/local`);
+        if (!res.ok) {
+            console.warn(
+                `[Auth] ${base} refused the local auth bootstrap (HTTP ${res.status}). ` +
+                'For a non-local backend, set CLAUDIA_AUTH_TOKEN; otherwise the app will prompt.'
+            );
+            return null;
+        }
+        const body = (await res.json()) as { token?: unknown } | null;
+        const token = typeof body?.token === 'string' ? body.token.trim() : '';
+        return token || null;
+    } catch (error) {
+        console.warn(`[Auth] Auth bootstrap at ${base} failed:`, error);
+        return null;
+    }
+}
+
+/**
  * Start the Express backend server in a utility process.
  *
  * The backend runs in a separate process because node-pty (native module)

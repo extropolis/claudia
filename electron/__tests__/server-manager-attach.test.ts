@@ -9,7 +9,7 @@ vi.mock('electron', () => ({
 vi.mock('get-port', () => ({ default: vi.fn(async () => 3001) }));
 
 const { utilityProcess } = await import('electron');
-const { findRunningBackend, resolveBackend, startServer, stopServer } =
+const { findRunningBackend, resolveBackend, resolveBackendToken, startServer, stopServer } =
     await import('../server-manager.js');
 type ServerInfo = Awaited<ReturnType<typeof resolveBackend>>['info'];
 
@@ -123,6 +123,86 @@ describe('findRunningBackend via /api/server-info', () => {
 
         expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:4001/api/server-info');
         expect(info?.url).toBe('http://localhost:4001');
+    });
+
+    // The real route (#259 + #261): unauthenticated, always `authRequired: true`,
+    // and `dataDir` only for a loopback caller.
+    it('reads the merged payload from a loopback caller, dataDir included', async () => {
+        routeFetch({ serverInfo: json({ ...SERVER_INFO, authRequired: true }) });
+
+        const info = await findRunningBackend('http://localhost:4001');
+
+        expect(info?.instanceId).toBe('inst-abc123');
+        expect(info?.dataDir).toBe('/Users/dev/.claudia');
+        expect(fetchMock).toHaveBeenCalledOnce();
+        // The probe runs before any credential exists, so it must not send one.
+        const init = fetchMock.mock.calls[0][1] as RequestInit;
+        expect(JSON.stringify(init?.headers ?? {})).not.toMatch(/token|authorization/i);
+    });
+
+    it('still attaches, by identity, when a non-local caller gets no dataDir', async () => {
+        const { dataDir: _omitted, ...remote } = SERVER_INFO;
+        routeFetch({ serverInfo: json({ ...remote, authRequired: true }) });
+
+        const info = await findRunningBackend('https://claudia.example.ts.net');
+
+        expect(info?.instanceId).toBe('inst-abc123');
+        expect(info?.dataDir).toBeNull();
+        // Identified from server-info alone — no fallback to the identity-less health probe.
+        expect(fetchMock).toHaveBeenCalledOnce();
+    });
+});
+
+describe('resolveBackendToken', () => {
+    beforeEach(() => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+
+    it('prefers CLAUDIA_AUTH_TOKEN and never touches the network', async () => {
+        const token = await resolveBackendToken('https://claudia.example.ts.net', {
+            env: { CLAUDIA_AUTH_TOKEN: '  remote-token  ' }
+        });
+        expect(token).toBe('remote-token');
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('ignores a whitespace-only CLAUDIA_AUTH_TOKEN and uses the loopback bootstrap', async () => {
+        fetchMock.mockResolvedValue(json({ token: 'local-token' }));
+        const token = await resolveBackendToken('http://localhost:4001', { env: { CLAUDIA_AUTH_TOKEN: '   ' } });
+        expect(token).toBe('local-token');
+    });
+
+    it('asks /api/auth/local on the backend it was given, and trims the token', async () => {
+        fetchMock.mockResolvedValue(json({ token: '  abc123  ' }));
+
+        const token = await resolveBackendToken('http://localhost:4001/', { env: {} });
+
+        expect(token).toBe('abc123');
+        expect(fetchMock).toHaveBeenCalledOnce();
+        expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:4001/api/auth/local');
+    });
+
+    it('uses an injected fetch when one is given', async () => {
+        const fetchImpl = vi.fn(async () => json({ token: 'injected' })) as unknown as typeof fetch;
+        expect(await resolveBackendToken('http://localhost:4001', { env: {}, fetchImpl })).toBe('injected');
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('returns null when the bootstrap is refused (a non-local backend)', async () => {
+        fetchMock.mockResolvedValue(json({ error: 'loopback only' }, 403));
+        expect(await resolveBackendToken('https://claudia.example.ts.net', { env: {} })).toBeNull();
+    });
+
+    it('returns null when the bootstrap answers without a usable token', async () => {
+        fetchMock.mockResolvedValue(json({ token: 42 }));
+        expect(await resolveBackendToken('http://localhost:4001', { env: {} })).toBeNull();
+        fetchMock.mockResolvedValue(json(null));
+        expect(await resolveBackendToken('http://localhost:4001', { env: {} })).toBeNull();
+    });
+
+    it('returns null instead of throwing on a network error', async () => {
+        fetchMock.mockRejectedValue(new TypeError('fetch failed'));
+        expect(await resolveBackendToken('http://localhost:4001', { env: {} })).toBeNull();
     });
 });
 
