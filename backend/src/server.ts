@@ -498,10 +498,12 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
      * Routes reachable without a credential.
      *
      * `/api/health` is a liveness probe — a container orchestrator has no token
-     * and must not need one. `/api/server-info` tells an unauthenticated client
-     * what it is talking to and that a token is required, which is how a remote
-     * desktop client knows to prompt instead of silently failing. Neither
-     * reveals anything about workspaces, tasks, or the filesystem.
+     * and must not need one. `/api/server-info` is the instance-identity probe
+     * (see its handler): a launcher asks it "is that you, and do I need a
+     * token?" before it holds a credential, which is how Electron decides to
+     * attach and how a remote client knows to prompt instead of silently
+     * failing. Neither reveals workspaces or tasks, and server-info returns its
+     * one filesystem field, `dataDir`, only to a loopback caller.
      *
      * `/api/auth/local` is handled separately: it is not open, it is gated on
      * the socket peer being loopback.
@@ -616,17 +618,6 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
             `${AUTH_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly;${secure} SameSite=Strict`);
         logger.info('Served auth token to loopback client', { peer: req.socket?.remoteAddress });
         res.json({ token });
-    });
-
-    /**
-     * Unauthenticated identity probe.
-     *
-     * A client that has no token yet still needs to know what it reached and
-     * that a credential is required, so it can prompt for one rather than
-     * showing a broken UI. Deliberately says nothing about state.
-     */
-    app.get('/api/server-info', (_req: Request, res: Response) => {
-        res.json({ name: 'claudia', authRequired: true });
     });
 
     // ===== Tunnel → React Frontend Proxy =====
@@ -3759,17 +3750,27 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
      * backend "is that you?" before deciding whether to start another one, and
      * that question has to be answerable before any credential exists.
      *
-     * The payload is therefore restricted to identity and location — never
-     * tokens, tunnel URLs, workspace contents or task data. `protocolVersion`
-     * lets a future launcher tell an old backend from a new one.
+     * The payload is therefore restricted to identity — never tokens, tunnel
+     * URLs, workspace contents or task data. `protocolVersion` lets a future
+     * launcher tell an old backend from a new one, and `authRequired` tells a
+     * client without a credential that it must obtain one (every other /api
+     * route and every WebSocket upgrade requires it).
+     *
+     * `dataDir` is a filesystem path, so it is returned ONLY to a loopback
+     * caller — the local launcher deciding whether this backend holds the same
+     * data directory. `isLoopbackPeer` decides from the socket and refuses any
+     * forwarded request, so a caller over the ngrok tunnel or a reverse proxy
+     * (which connect from 127.0.0.1 but add X-Forwarded-*) gets everything else
+     * without it.
      */
-    app.get('/api/server-info', (_req, res) => {
+    app.get('/api/server-info', (req: Request, res: Response) => {
         res.json({
             instanceId: instance.instanceId,
             version: instance.version,
             protocolVersion: SERVER_INFO_PROTOCOL_VERSION,
-            dataDir: dataDir ?? null,
             startedAt: instance.startedAt,
+            authRequired: true,
+            ...(isLoopbackPeer(req) ? { dataDir: dataDir ?? null } : {}),
         });
     });
 

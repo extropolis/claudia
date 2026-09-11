@@ -179,9 +179,11 @@ describe('every /api route rejects an unauthenticated request', () => {
 
     it('leaves the unauthenticated allowlist reachable', async () => {
         expect((await h.fetch('/api/health')).status).toBe(200);
-        const info = await h.req<{ name: string; authRequired: boolean }>('/api/server-info');
+        const info = await h.req<{ instanceId: string; authRequired: boolean }>('/api/server-info');
         expect(info.status).toBe(200);
         expect(info.body.authRequired).toBe(true);
+        // The real identity route (instance-lock), not a stub.
+        expect(typeof info.body.instanceId).toBe('string');
     });
 });
 
