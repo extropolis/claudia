@@ -309,6 +309,14 @@ const ACTIVE_TURN = '✻ Thinking… (esc to interrupt)\n';
 const ACTIVE_TURN_FOOTER_WRAPPED = '\n⏵⏵ bypass permissions on (shift+tab to cycle) · esc to\ninterrupt · ← for agents\n';
 /** Startup output that keeps streaming after a dropped Enter. */
 const STARTUP_CHURN = 'MCP servers: 3 ready · Tip: use /help for shortcuts to common tasks\n'.repeat(4);
+/** Long enough to exhaust any budget used below, and deliberately SHORT of the
+ *  resource guard's unstubbed 60s tick: on POSIX that tick tries to measure the
+ *  fake PTY's pid and console.warns, which has nothing to do with Enter delivery. */
+const SETTLE_MS = 10_000;
+/** Only the give-up safety net's own warn — other subsystems may warn too. */
+function safetyNetWarns(warn: { mock: { calls: unknown[][] } }): unknown[][] {
+    return warn.mock.calls.filter(c => String(c[0]).includes('Initial prompt never positively confirmed'));
+}
 
 describe('CHARACTERIZATION: sendEnterWithRetry (800ms acceptance check)', () => {
     /** A task whose PTY output flows through the real onData handler. */
@@ -486,20 +494,20 @@ describe('CHARACTERIZATION: sendEnterWithRetry (800ms acceptance check)', () => 
             vi.advanceTimersByTime(3 * 1300 - 1);
             expect(task.process.writes).toEqual(['\r', '\r', '\r']);
             expect(task.state).toBe('starting');
-            expect(warn).not.toHaveBeenCalled();
+            expect(safetyNetWarns(warn)).toHaveLength(0);
 
             vi.advanceTimersByTime(1);
             expect(task.process.writes).toEqual(['\r', '\r', '\r']); // no 4th Enter, no burst
             expect(task.state).toBe('busy');
             expect(task.hasStartedProcessing).toBe(true);
             expect(states).toEqual(['busy']);
-            expect(warn).toHaveBeenCalledTimes(1);
-            expect(String(warn.mock.calls[0][0])).toContain('Initial prompt never positively confirmed');
+            expect(safetyNetWarns(warn)).toHaveLength(1);
 
             // And it stays put: nothing further is written or re-classified.
-            vi.advanceTimersByTime(60_000);
+            vi.advanceTimersByTime(SETTLE_MS);
             expect(task.process.writes).toHaveLength(3);
             expect(task.state).toBe('busy');
+            expect(safetyNetWarns(warn)).toHaveLength(1);
         } finally {
             warn.mockRestore();
         }
@@ -512,12 +520,12 @@ describe('CHARACTERIZATION: sendEnterWithRetry (800ms acceptance check)', () => 
             task.process.emitData(IDLE_FOOTER);
 
             internals.sendEnterWithRetry(task, 3, { isInitialPrompt: true });
-            vi.advanceTimersByTime(60_000);
+            vi.advanceTimersByTime(SETTLE_MS);
 
             expect(task.process.writes).toEqual(['\r', '\r', '\r']);
             expect(task.state).toBe('starting');
             expect(task.hasStartedProcessing).toBe(false);
-            expect(warn).not.toHaveBeenCalled();
+            expect(safetyNetWarns(warn)).toHaveLength(0);
         } finally {
             warn.mockRestore();
         }
