@@ -23,6 +23,7 @@ import { listAgents, setOpencodePortProvider } from './agents/index.js';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
+import { UsageService } from './usage-service.js';
 import { validateConfigUpdate, validateWorkspacePath, isPathInside, isValidNgrokDomain } from './validation.js';
 import { isVoiceTokenAcceptable } from './voice-auth.js';
 import { evaluateCorsOrigin, CORS_REJECTED } from './cors-policy.js';
@@ -138,6 +139,7 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'checkpoint:restore-force',
     'checkpoint:delete',
     'checkpoint:fork',
+    'usage:get',
     'jira:writeRequest',
     'jira:writeApproved',
     'jira:writeRejected',
@@ -414,6 +416,13 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
     // This is critical for tunnel access: Vite HMR WebSocket connections need
     // to be proxied to the Vite dev server, not handled by our app's WSS.
     const wss = new WebSocketServer({ noServer: true });
+
+    // Plan usage service (Anthropic OAuth usage endpoint). Hard-cached and
+    // slowly polled — see usage-service.ts for the rate-limit discipline.
+    // Inert under vitest (integration suites boot many servers; none of them
+    // may touch the OS keychain or the live endpoint) and when opted out.
+    const planUsageDisabled = process.env['CLAUDIA_PLAN_USAGE'] === 'off' || !!process.env['VITEST'];
+    const usageService = new UsageService({ disabled: planUsageDisabled });
 
     // TunnelManager for mobile remote access (ngrok-based). Created before the
     // CORS middleware because that middleware needs to consult the active
@@ -1996,6 +2005,22 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
         if (tunnelStatus.active) {
             ws.send(JSON.stringify({ type: 'tunnel:status' as WSMessageType, payload: tunnelStatus }));
         }
+        // Push current plan usage to the new client — loopback clients only,
+        // the same scoping as Jira broadcasts (plan state is account-private;
+        // see GET /api/usage). Every socket here is already authenticated (the
+        // upgrade handler refuses a missing/invalid token), so this reaches
+        // exactly the authenticated, loopback sockets. Served from the hard
+        // cache (or a single gated fetch), so a reconnect storm cannot hammer
+        // upstream.
+        if (loopbackClients.has(ws)) {
+            void usageService.getUsage().then((usage) => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'usage:updated', payload: usage }));
+                }
+            });
+        } else {
+            logger.debug('Skipping plan usage push to non-loopback client', { clientId });
+        }
 
         ws.on('message', async (data: Buffer) => {
             let messageTypeForError: string | undefined;
@@ -2227,6 +2252,20 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
                         // Lightweight trigger from frontend hover — refresh PR info immediately
                         const { taskId } = payload as { taskId?: string };
                         if (taskId) void refreshTaskPrInfo(taskId);
+                        break;
+                    }
+
+                    case 'usage:get': {
+                        // Reply with current plan usage to just this socket —
+                        // loopback clients only (see GET /api/usage).
+                        if (!loopbackClients.has(ws)) {
+                            logger.debug('Ignoring usage:get from non-loopback client', { clientId });
+                            break;
+                        }
+                        const usage = await usageService.getUsage();
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ type: 'usage:updated', payload: usage }));
+                        }
                         break;
                     }
 
@@ -3774,6 +3813,24 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
             authRequired: true,
             ...(isLoopbackPeer(req) ? { dataDir: dataDir ?? null } : {}),
         });
+    });
+
+    // Anthropic plan usage (session + weekly limits). Served from the hard cache
+    // in UsageService; this never triggers an unthrottled upstream fetch.
+    // Two gates: the global token middleware above (this path is deliberately
+    // NOT in UNAUTHENTICATED_API_PATHS, so an untokened request gets 401), and
+    // then loopback-only, exactly like the Jira routes (same isLoopbackRequest
+    // + isTunnelHost test as jiraLoopbackOnly): plan state is account-private,
+    // so it is never served to a tunnel/proxied client — not even one holding a
+    // valid token.
+    app.get('/api/usage', async (req, res) => {
+        const host = req.headers.host || '';
+        if (!isLoopbackRequest(req) || isTunnelHost(host)) {
+            logger.warn('Blocked non-loopback plan usage request', { host });
+            res.status(403).json({ error: 'Plan usage is only accessible from localhost.' });
+            return;
+        }
+        res.json(await usageService.getUsage());
     });
 
     // Short-ref resolution for REST: every route with a :taskId param accepts
@@ -8038,6 +8095,7 @@ Guidelines:
 
         // Clear heartbeat interval
         clearInterval(heartbeatInterval);
+        usageService.stopPolling();
         clearInterval(prInfoInterval);
         clearInterval(worktreeScanInterval);
         clearInterval(worktreeSweepInterval);
@@ -8063,6 +8121,15 @@ Guidelines:
         }, 500);
     }
 
+    // Begin slow background polling of plan usage. Only fetches while at least
+    // one LOOPBACK WS client is connected (nobody else is ever sent it); the
+    // service enforces TTL + 429 backoff so this never hammers the upstream
+    // endpoint. Broadcasts on change, loopback-only like Jira (see GET /api/usage).
+    usageService.startPolling(
+        () => [...clients].some((c) => loopbackClients.has(c)),
+        (usage) => broadcastToLoopback({ type: 'usage:updated', payload: usage })
+    );
+
     // Note: SIGINT/SIGTERM handlers are set up in index.ts to avoid duplicate handlers
     // The gracefulShutdown function is exported for use by the restart endpoint
 
@@ -8076,6 +8143,7 @@ Guidelines:
      */
     async function shutdownForTests(): Promise<void> {
         clearInterval(heartbeatInterval);
+        usageService.stopPolling();
         clearInterval(prInfoInterval);
         clearInterval(worktreeScanInterval);
         // Union of both teardown paths: each branch cleared only the timers it
