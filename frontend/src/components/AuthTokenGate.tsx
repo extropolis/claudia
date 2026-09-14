@@ -1,31 +1,26 @@
 import { useState } from 'react';
 import { KeyRound } from 'lucide-react';
-import { setAuthToken, fetchLocalToken } from '../config/auth-client';
+import { setAuthToken, fetchLocalToken, validateAuthToken } from '../config/auth-client';
 import './AuthTokenGate.css';
 
-/**
- * Shown when this page has no API token.
- *
- * Every `/api` route and every WebSocket upgrade requires a credential now
- * (backend/src/auth-token.ts), so a page without one can do nothing at all —
- * it would render an empty task list and a socket that never opens, with no
- * explanation. This says what is missing and offers the two ways to fix it.
- *
- * It is deliberately NOT a second way to hand out tokens. The existing mobile
- * flow is the way: the backend prints a URL carrying the token, and
- * MobileAccessModal renders that same URL as a QR code. This gate points at
- * those and accepts a paste, nothing more.
- */
+/** Connect only after the host accepts the supplied credential. */
 export function AuthTokenGate({ onAuthenticated }: { onAuthenticated: () => void }) {
     const [value, setValue] = useState('');
     const [error, setError] = useState<string | null>(null);
     const [retrying, setRetrying] = useState(false);
 
-    const submit = (e: React.FormEvent) => {
+    const submit = async (e: React.FormEvent) => {
         e.preventDefault();
         const trimmed = value.trim();
         if (!trimmed) {
             setError('Paste the token from the URL Claudia printed at startup.');
+            return;
+        }
+        setRetrying(true);
+        const result = await validateAuthToken(trimmed);
+        setRetrying(false);
+        if (result !== 'ok') {
+            setError(result === 'rejected' ? 'Token rejected. Copy the current token from your host.' : 'Host unavailable. Check that your host is awake and both devices are connected to Tailscale, then retry.');
             return;
         }
         setAuthToken(trimmed);
@@ -45,8 +40,8 @@ export function AuthTokenGate({ onAuthenticated }: { onAuthenticated: () => void
             return;
         }
         setError('The backend did not grant a token. It only does that for a browser ' +
-                 'on the same machine — from another device, use the link or QR code ' +
-                 'from Mobile Access.');
+                 'on the same machine — from another device, paste the token ' +
+                 'from your host.');
     };
 
     return (
@@ -57,10 +52,9 @@ export function AuthTokenGate({ onAuthenticated }: { onAuthenticated: () => void
                     <h2>Claudia needs a token</h2>
                 </div>
                 <p className="auth-gate-body">
-                    Every API request and WebSocket connection is authenticated. On this
-                    machine <code>./start.sh</code> prints a URL that already carries the
-                    token; from a phone or another device, open the link or scan the QR
-                    code in Mobile Access.
+                    Connect to your host with Tailscale, then paste its Claudia token.
+                    Obtain the token locally on the host from its startup URL or auth-token file.
+                    Your tasks and files stay on that host.
                 </p>
                 <input
                     className="auth-gate-input"
@@ -76,7 +70,7 @@ export function AuthTokenGate({ onAuthenticated }: { onAuthenticated: () => void
                     <button type="button" className="auth-gate-secondary" onClick={retryLocal} disabled={retrying}>
                         {retrying ? 'Asking…' : 'Try this machine again'}
                     </button>
-                    <button type="submit" className="auth-gate-primary">Connect</button>
+                    <button type="submit" className="auth-gate-primary" disabled={retrying}>{retrying ? 'Connecting…' : 'Connect'}</button>
                 </div>
             </form>
         </div>

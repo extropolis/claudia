@@ -43,6 +43,7 @@ function setLocation(partial: Record<string, unknown>) {
 
 beforeEach(() => {
     __resetAuthFetchForTests(REAL_FETCH);
+    vi.spyOn(window.history, 'replaceState').mockImplementation(() => {});
     window.sessionStorage.clear();
     delete (window as any).electronAPI;
     setLocation({});
@@ -109,11 +110,11 @@ describe('fetchLocalToken', () => {
 });
 
 describe('bootstrapAuth', () => {
-    it('keeps a token it already has and does not call the backend', async () => {
+    it('validates a stored token before connecting', async () => {
         setAuthToken('already-have-one');
-        const f = vi.fn();
+        const f = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ authenticated: true }) });
         expect(await bootstrapAuth(f as unknown as typeof fetch)).toBe(true);
-        expect(f).not.toHaveBeenCalled();
+        expect(f).toHaveBeenCalled();
     });
 
     it('adopts the token from the loopback bootstrap', async () => {
@@ -221,5 +222,32 @@ describe('installAuthFetch', () => {
         const afterFirst = window.fetch;
         installAuthFetch();
         expect(window.fetch).toBe(afterFirst);
+    });
+});
+
+describe('remote session isolation', () => {
+    it('does not reuse credentials when Electron switches backend origin', () => {
+        (window as any).electronAPI = { getBackendUrl: () => 'https://one.tail.ts.net' };
+        setAuthToken('one-token');
+        (window as any).electronAPI = { getBackendUrl: () => 'https://two.tail.ts.net' };
+        expect(getAuthToken()).toBeNull();
+    });
+    it('removes query credentials while retaining other parameters', () => {
+        setLocation({ search: '?token=secret&view=tasks', pathname: '/', hash: '#task' });
+        expect(getAuthToken()).toBe('secret');
+        expect(window.history.replaceState).toHaveBeenCalledWith(null, '', '/?view=tasks#task');
+        clearAuthToken();
+        expect(getAuthToken()).toBeNull();
+    });
+    it('requests login again when a backend request rejects the active credential', async () => {
+        window.fetch = vi.fn().mockResolvedValue(new Response('{}', { status: 401 }));
+        setAuthToken('expired');
+        const listener = vi.fn();
+        window.addEventListener('claudia:authRequired', listener);
+        installAuthFetch();
+        await window.fetch('/api/tasks');
+        expect(getAuthToken()).toBeNull();
+        expect(listener).toHaveBeenCalledTimes(1);
+        window.removeEventListener('claudia:authRequired', listener);
     });
 });

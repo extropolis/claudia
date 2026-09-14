@@ -74,7 +74,16 @@ export function isLoopbackPeer(req: PeerCarrier, env: NodeJS.ProcessEnv = proces
     void env;
     if (!isLoopbackAddress(req.socket?.remoteAddress)) return false;
     const h = req.headers;
-    if (h?.['x-forwarded-for'] || h?.['x-forwarded-host'] || h?.['forwarded']) return false;
+    if (h?.['x-forwarded-for'] || h?.['x-forwarded-host'] || h?.['x-forwarded-proto'] || h?.['forwarded'] ||
+        h?.['tailscale-user-login'] || h?.['tailscale-user-name']) return false;
+    // Serve preserves the external authority. A local socket with a remote
+    // Host is still a remote request, even if a proxy strips forwarding headers.
+    const host = h?.host;
+    if (typeof host !== 'string') return false;
+    try {
+        const hostname = new URL(`http://${host}`).hostname;
+        if (!['localhost', '[::1]'].includes(hostname) && !isLoopbackAddress(hostname)) return false;
+    } catch { return false; }
     return true;
 }
 
@@ -91,7 +100,7 @@ export function isSecureRequest(
     env: NodeJS.ProcessEnv = process.env,
 ): boolean {
     if (req.protocol === 'https' || req.secure === true) return true;
-    if (!isTrustedProxyConfigured(env)) return false;
+    if (!isTrustedProxyConfigured(env) || !isLoopbackAddress(req.socket?.remoteAddress)) return false;
     const proto = req.headers?.['x-forwarded-proto'];
     const first = Array.isArray(proto) ? proto[0] : proto;
     return typeof first === 'string' && first.split(',')[0].trim().toLowerCase() === 'https';

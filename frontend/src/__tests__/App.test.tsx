@@ -132,18 +132,11 @@ vi.mock('../components/UsageDashboard', () => ({
 
 vi.mock('../components/MobileAccessModal', () => ({
     MobileAccessModal: (props: {
-        isOpen: boolean; onClose: () => void; error?: string | null;
-        tunnelActive?: boolean; tunnelLoading?: boolean;
-        onStopTunnel?: () => void; onStartTunnel?: () => void;
+        isOpen: boolean; onClose: () => void;
     }) => {
         H.lastProps.MobileAccessModal = props as unknown as Record<string, unknown>;
         return props.isOpen ? (
             <div data-testid="mobile-access-modal">
-                <span>active:{String(props.tunnelActive)}</span>
-                <span>loading:{String(props.tunnelLoading)}</span>
-                {props.error && <span>error:{props.error}</span>}
-                <button onClick={props.onStartTunnel}>stub-start-tunnel</button>
-                <button onClick={props.onStopTunnel}>stub-stop-tunnel</button>
                 <button onClick={props.onClose}>close-mobile</button>
             </div>
         ) : null;
@@ -766,102 +759,6 @@ describe('App — header actions', () => {
 
         act(() => { useTaskStore.setState({ showSystemStats: true }); });
         expect(screen.getByTestId('system-stats')).toBeInTheDocument();
-    });
-});
-
-describe('App — tunnel', () => {
-    it('reflects the tunnel status fetched on mount', async () => {
-        stubFetch({ '/api/tunnel/status': { active: true } });
-        renderApp();
-
-        await waitFor(() => {
-            expect(screen.getByTitle('View Mobile Tunnel')).toBeInTheDocument();
-        });
-    });
-
-    it('reacts to the claudia:tunnelStatus DOM event', async () => {
-        renderApp();
-        await waitFor(() => expect(screen.getByTitle('Start Mobile Tunnel')).toBeInTheDocument());
-
-        act(() => {
-            window.dispatchEvent(new CustomEvent('claudia:tunnelStatus', { detail: { active: true } }));
-        });
-        expect(screen.getByTitle('View Mobile Tunnel')).toBeInTheDocument();
-
-        act(() => {
-            window.dispatchEvent(new CustomEvent('claudia:tunnelStatus', {
-                detail: { active: false, error: 'ngrok died' },
-            }));
-        });
-        expect(screen.getByTitle('Start Mobile Tunnel')).toBeInTheDocument();
-    });
-
-    it('surfaces a tunnelStatus error through the mobile modal', async () => {
-        const user = userEvent.setup();
-        renderApp();
-
-        act(() => {
-            window.dispatchEvent(new CustomEvent('claudia:tunnelStatus', {
-                detail: { active: false, error: 'ngrok died' },
-            }));
-        });
-        await user.click(screen.getByTitle('Start Mobile Tunnel'));
-
-        expect(screen.getByTestId('mobile-access-modal')).toHaveTextContent('error:ngrok died');
-    });
-
-    it('starts the tunnel from the modal and marks it active', async () => {
-        stubFetch({ '/api/tunnel/start': { url: 'https://x.ngrok.app' } });
-        const user = userEvent.setup();
-        renderApp();
-
-        await user.click(screen.getByTitle('Start Mobile Tunnel'));
-        await user.click(screen.getByRole('button', { name: 'stub-start-tunnel' }));
-
-        await waitFor(() => {
-            expect(screen.getByTestId('mobile-access-modal')).toHaveTextContent('active:true');
-        });
-        expect(screen.getByTestId('mobile-access-modal')).toHaveTextContent('loading:false');
-    });
-
-    it('surfaces a start failure returned by the backend', async () => {
-        stubFetch({ '/api/tunnel/start': { error: 'ngrok not installed' } });
-        const user = userEvent.setup();
-        renderApp();
-
-        await user.click(screen.getByTitle('Start Mobile Tunnel'));
-        await user.click(screen.getByRole('button', { name: 'stub-start-tunnel' }));
-
-        await waitFor(() => {
-            expect(screen.getByTestId('mobile-access-modal')).toHaveTextContent('error:ngrok not installed');
-        });
-        expect(screen.getByTestId('mobile-access-modal')).toHaveTextContent('active:false');
-    });
-
-    it('stops the tunnel and keeps the modal open', async () => {
-        const fetchMock = stubFetch({ '/api/tunnel/status': { active: true } });
-        const user = userEvent.setup();
-        renderApp();
-
-        await waitFor(() => expect(screen.getByTitle('View Mobile Tunnel')).toBeInTheDocument());
-        await user.click(screen.getByTitle('View Mobile Tunnel'));
-        await user.click(screen.getByRole('button', { name: 'stub-stop-tunnel' }));
-
-        await waitFor(() => {
-            expect(fetchMock.mock.calls.some(c => String(c[0]).includes('/api/tunnel/stop'))).toBe(true);
-        });
-        expect(screen.getByTestId('mobile-access-modal')).toHaveTextContent('active:false');
-    });
-
-    it('closes the mobile modal', async () => {
-        const user = userEvent.setup();
-        renderApp();
-
-        await user.click(screen.getByTitle('Start Mobile Tunnel'));
-        expect(screen.getByTestId('mobile-access-modal')).toBeInTheDocument();
-
-        await user.click(screen.getByRole('button', { name: 'close-mobile' }));
-        expect(screen.queryByTestId('mobile-access-modal')).not.toBeInTheDocument();
     });
 });
 

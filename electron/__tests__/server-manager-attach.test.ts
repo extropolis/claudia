@@ -454,3 +454,11 @@ describe('stopServer', () => {
         expect(child.kill).toHaveBeenCalledOnce();
     });
 });
+
+describe('explicit remote attachment', () => {
+    it('does not spawn a different local session when the remote host is unavailable', async () => {
+        const spawn = vi.fn();
+        await expect(resolveBackend({ remoteOnly: true, probe: async () => null, spawn })).rejects.toThrow('Remote Claudia host is unavailable');
+        expect(spawn).not.toHaveBeenCalled();
+    });
+});

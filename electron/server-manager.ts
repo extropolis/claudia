@@ -164,11 +164,13 @@ export async function findRunningBackend(
  * be exercised in a unit test.
  */
 export async function resolveBackend(deps: {
+    remoteOnly?: boolean;
     probe: () => Promise<ServerInfo | null>;
     spawn: () => Promise<ServerInfo>;
 }): Promise<{ info: ServerInfo; attached: boolean }> {
     const found = await deps.probe();
     if (found) return { info: found, attached: true };
+    if (deps.remoteOnly) throw new Error('Remote Claudia host is unavailable. Check Tailscale and retry.');
     return { info: await deps.spawn(), attached: false };
 }
 

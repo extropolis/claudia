@@ -26,7 +26,7 @@ export const CORS_REJECTED = 'CORS: origin not allowed';
 export interface CorsOriginDecision {
     allowed: boolean;
     /** Why the decision went the way it did — logged on rejection. */
-    reason: 'no-origin' | 'loopback' | 'same-origin' | 'tunnel-origin' | 'malformed' | 'cross-origin';
+    reason: 'no-origin' | 'loopback' | 'same-origin' | 'configured-origin' | 'malformed' | 'cross-origin';
 }
 
 /** 127.0.0.0/8 — the whole IPv4 loopback block, and ONLY dotted-quad forms. */
@@ -51,14 +51,14 @@ function hostnameIsLoopback(hostname: string): boolean {
  *
  * @param origin      The request's `Origin` header (undefined when absent).
  * @param host        The request's `Host` header — what the browser asked for.
- * @param tunnelUrl   The active tunnel's public URL, if any. Matching against
+ * @param externalOrigin   The configured external origin, if any. Matching against
  *                    it covers the case where a proxy rewrote `Host` before the
  *                    request reached us, so `Origin === Host` no longer holds.
  */
 export function evaluateCorsOrigin(
     origin: string | undefined,
     host: string | undefined,
-    tunnelUrl?: string | null,
+    externalOrigin?: string | null,
 ): CorsOriginDecision {
     // No Origin: same-origin navigation, curl, Electron, native clients.
     if (!origin) return { allowed: true, reason: 'no-origin' };
@@ -79,17 +79,14 @@ export function evaluateCorsOrigin(
         return { allowed: true, reason: 'same-origin' };
     }
 
-    // The active tunnel's own origin, even if Host was rewritten en route.
-    // Compared as full origins (scheme included), not bare hosts: ngrok serves
-    // the tunnel over https, so an `http://<same-host>` Origin is a downgraded
-    // or MITM-injected page rather than the real tunnel, and a host-only match
-    // would have waved it through.
-    if (tunnelUrl) {
+    // The configured external origin, even if Host was rewritten en route.
+    // Compare the configured origin including its scheme and port.
+    if (externalOrigin) {
         try {
-            if (new URL(tunnelUrl).origin.toLowerCase() === originUrl.origin.toLowerCase()) {
-                return { allowed: true, reason: 'tunnel-origin' };
+            if (new URL(externalOrigin).origin.toLowerCase() === originUrl.origin.toLowerCase()) {
+                return { allowed: true, reason: 'configured-origin' };
             }
-        } catch { /* malformed tunnel URL — fall through to reject */ }
+        } catch { /* malformed external origin — fall through to reject */ }
     }
 
     return { allowed: false, reason: 'cross-origin' };

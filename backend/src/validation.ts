@@ -51,25 +51,11 @@ interface MCPServerConfig {
 }
 
 /**
- * A bare hostname suitable for `ngrok http --url <x>`: labels and dots only.
- *
- * Exported so the NGROK_DOMAIN environment variable is held to the same rule
- * as the stored setting. The value lands on an argv (no shell), so this is not
- * the last line of defence against injection — but an unvalidated `https://x`
- * or `x:8080` from the env silently produced a tunnel that never came up, with
- * no error pointing at the typo.
- */
-export function isValidNgrokDomain(value: string): boolean {
-    if (value.length > 253) return false;
-    return /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(value);
-}
-
-/**
  * Config update payload validation
  */
 export interface ConfigUpdatePayload {
     rules?: string;
-    ngrokDomain?: string;
+    tailscaleUrl?: string;
     todoEnabled?: boolean;
     worktreeRetentionDays?: number;
     mcpServers?: MCPServerConfig[];
@@ -157,23 +143,19 @@ export function validateConfigUpdate(body: unknown): ValidationResult<ConfigUpda
         result.rules = payload.rules;
     }
 
-    // Validate ngrokDomain (optional hostname; empty string clears it back to
-    // ngrok's assigned URL).
-    if (payload.ngrokDomain !== undefined) {
-        const d = payload.ngrokDomain;
-        if (typeof d !== 'string') {
-            return { valid: false, error: 'ngrokDomain must be a string' };
-        }
-        const trimmed = d.trim();
-        if (trimmed !== '' && !isValidNgrokDomain(trimmed)) {
-            return {
-                valid: false,
-                error: trimmed.length > 253
-                    ? 'ngrokDomain must be 253 characters or fewer'
-                    : 'ngrokDomain must be a bare hostname such as "claudia.ngrok.app" (no https://, port, or path)',
-            };
-        }
-        result.ngrokDomain = trimmed;
+    if (payload.tailscaleUrl !== undefined) {
+        if (typeof payload.tailscaleUrl !== 'string') return { valid: false, error: 'tailscaleUrl must be a string' };
+        const value = payload.tailscaleUrl.trim();
+        if (value) {
+            try {
+                const url = new URL(value);
+                if (url.protocol !== 'https:' || !url.hostname.endsWith('.ts.net') ||
+                    url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error();
+                result.tailscaleUrl = url.origin;
+            } catch {
+                return { valid: false, error: 'Use the HTTPS .ts.net address from tailscale serve status, without a path or token' };
+            }
+        } else result.tailscaleUrl = '';
     }
 
     // Validate todoEnabled (optional boolean). Without this the store's

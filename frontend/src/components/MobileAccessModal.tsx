@@ -1,274 +1,86 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Smartphone, Copy, Check, StopCircle, Play, AlertTriangle } from 'lucide-react';
-import QRCode from 'qrcode';
+import { useState, useEffect } from 'react';
+import { X, Smartphone } from 'lucide-react';
 import { getApiBaseUrl } from '../config/api-config';
+import { logout } from '../config/auth-client';
 import './MobileAccessModal.css';
 
-interface TunnelStatus {
-    active: boolean;
-    url: string | null;
-    token: string | null;
-    startedAt: string | null;
-    error: string | null;
-    publicIp: string | null;
-    /** Reserved ngrok domain the tunnel is pinned to, null = ngrok assigns it. */
-    domain?: string | null;
-    /** null = not probed. false = the URL did not answer from the host machine. */
-    reachable?: boolean | null;
-    warning?: string | null;
-}
-
-interface MobileAccessModalProps {
-    isOpen: boolean;
-    onClose: () => void;
-    error?: string | null;
-    tunnelActive?: boolean;
-    tunnelLoading?: boolean;
-    onStopTunnel?: () => void;
-    onStartTunnel?: () => void;
-}
-
-export function MobileAccessModal({ isOpen, onClose, error, tunnelLoading, onStopTunnel, onStartTunnel }: MobileAccessModalProps) {
-    const [status, setStatus] = useState<TunnelStatus | null>(null);
-    const [copied, setCopied] = useState(false);
-    const [domainInput, setDomainInput] = useState('');
-    const [domainSaved, setDomainSaved] = useState(false);
-    const [domainError, setDomainError] = useState<string | null>(null);
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-
-    const apiBase = getApiBaseUrl();
-
-    // Fetch current tunnel status
-    const fetchStatus = useCallback(async () => {
-        try {
-            const res = await fetch(`${apiBase}/api/tunnel/status`);
-            const data = await res.json();
-            setStatus(data);
-            return data;
-        } catch (err) {
-            console.error('[MobileAccess] Failed to fetch status:', err);
-            return null;
-        }
-    }, [apiBase]);
-
-    // Seed the domain field from saved config each time the modal opens.
+/** Tailscale is operator-managed: this panel never starts a public tunnel. */
+export function MobileAccessModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+    const [address, setAddress] = useState('');
+    const [saved, setSaved] = useState('');
+    const [message, setMessage] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [instanceId, setInstanceId] = useState('');
     useEffect(() => {
         if (!isOpen) return;
         let cancelled = false;
-        (async () => {
-            try {
-                const res = await fetch(`${apiBase}/api/config`);
-                const cfg = await res.json();
-                if (!cancelled) setDomainInput(cfg?.ngrokDomain || '');
-            } catch (err) {
-                console.error('[MobileAccess] Failed to load ngrokDomain:', err);
+        setMessage('');
+        void Promise.all([
+            fetch(`${getApiBaseUrl()}/api/config`).then(r => { if (!r.ok) throw new Error(); return r.json(); }),
+            fetch(`${getApiBaseUrl()}/api/server-info`).then(r => r.json()),
+        ]).then(([config, info]) => {
+            if (!cancelled) {
+                setAddress(config.tailscaleUrl || '');
+                setSaved(config.tailscaleUrl || '');
+                setInstanceId(info.instanceId || '');
             }
-        })();
+        }).catch(() => { if (!cancelled) setMessage('Could not load host settings. Reopen Devices to retry.'); });
         return () => { cancelled = true; };
-    }, [isOpen, apiBase]);
-
-    const saveDomain = useCallback(async () => {
-        setDomainError(null);
-        try {
-            const res = await fetch(`${apiBase}/api/config`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ngrokDomain: domainInput.trim() }),
-            });
-            if (!res.ok) {
-                const body = await res.json().catch(() => ({}));
-                setDomainError(body?.error || `Save failed (HTTP ${res.status})`);
-                return;
-            }
-            console.log('[MobileAccess] ngrokDomain saved:', domainInput.trim() || '(ngrok-assigned)');
-            setDomainSaved(true);
-            setTimeout(() => setDomainSaved(false), 2000);
-        } catch (err) {
-            setDomainError(err instanceof Error ? err.message : String(err));
-        }
-    }, [apiBase, domainInput]);
-
-    // Poll for tunnel status when modal is open (tunnel may still be starting)
-    useEffect(() => {
-        if (!isOpen || error) return;
-
-        // Fetch immediately
-        fetchStatus();
-
-        // Poll every 2s until we have an active URL
-        const interval = setInterval(async () => {
-            const data = await fetchStatus();
-            if (data?.active && data?.url) {
-                clearInterval(interval);
-            }
-        }, 2000);
-
-        return () => clearInterval(interval);
-    }, [isOpen, error, fetchStatus]);
-
-    // Generate QR code when URL changes or modal reopens (canvas is a new DOM element each time)
-    useEffect(() => {
-        if (!isOpen || !status?.active || !status.url || !status.token || !canvasRef.current) return;
-
-        const mobileUrl = `${status.url}/?token=${status.token}`;
-        console.log('[MobileAccess] Generating QR for:', mobileUrl);
-
-        QRCode.toCanvas(canvasRef.current, mobileUrl, {
-            width: 200,
-            margin: 2,
-            color: {
-                dark: '#e6edf3',
-                light: '#0d1117'
-            }
-        }).catch((err: Error) => {
-            console.error('[MobileAccess] QR generation failed:', err);
-        });
-    }, [isOpen, status?.active, status?.url, status?.token]);
-
-    // Copy URL to clipboard
-    const copyUrl = () => {
-        if (!status?.url || !status?.token) return;
-        const mobileUrl = `${status.url}/?token=${status.token}`;
-        navigator.clipboard.writeText(mobileUrl).then(() => {
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
-        });
-    };
-
+    }, [isOpen]);
     if (!isOpen) return null;
 
-    const mobileUrl = status?.active && status?.url && status?.token
-        ? `${status.url}/?token=${status.token}`
-        : '';
-
+    const save = async () => {
+        setBusy(true);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/config`, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tailscaleUrl: address.trim() }),
+            });
+            const body = await res.json();
+            if (!res.ok) throw new Error(body.error || 'Could not save address.');
+            const normalized = address.trim() ? new URL(address.trim()).origin : '';
+            setSaved(normalized); setAddress(normalized);
+            setMessage(normalized ? 'Address saved. Check the connection from each device.' : 'Address cleared. Tailscale Serve remains managed on your host.');
+        } catch (err) { setMessage(err instanceof Error ? err.message : 'Could not save address.'); }
+        finally { setBusy(false); }
+    };
+    const check = async () => {
+        setBusy(true);
+        try {
+            // Identity is public. Never send the instance credential to an unverified address.
+            const res = await fetch(`${saved}/api/server-info`, { credentials: 'omit', signal: AbortSignal.timeout(8000) });
+            if (!res.ok) throw new Error();
+            const info = await res.json();
+            if (!instanceId || info.instanceId !== instanceId) {
+                setMessage('This address points to a different host. Check the Serve address.');
+            } else setMessage('This Claudia host is reachable from this device. Other devices must check their own connection.');
+        } catch { setMessage('Could not verify this address. Check Tailscale, Serve, and that your host is awake. Try opening the address on the other device.'); }
+        finally { setBusy(false); }
+    };
     return (
         <div className="mobile-access-overlay" onClick={onClose}>
-            <div className="mobile-access-modal" onClick={e => e.stopPropagation()} style={{ position: 'relative' }}>
-                <button className="modal-close" onClick={onClose}>
-                    <X size={18} />
-                </button>
-
-                <h2>
-                    <Smartphone size={20} />
-                    Mobile Voice Access
-                </h2>
-
-                {/* Status */}
-                <div className="tunnel-status">
-                    <span className={`status-dot ${status?.active ? 'active' : error ? 'error' : tunnelLoading ? 'starting' : 'inactive'}`} />
-                    <span>
-                        {status?.active
-                            ? 'Tunnel active'
-                            : error
-                                ? 'Connection failed'
-                                : tunnelLoading
-                                    ? 'Starting tunnel...'
-                                    : 'Tunnel not running'}
-                    </span>
-                    {tunnelLoading && <span className="loading-spinner" />}
+            <section className="mobile-access-modal" role="dialog" aria-modal="true" aria-label="Connect devices" onClick={e => e.stopPropagation()}>
+                <button className="modal-close" aria-label="Close" onClick={onClose}><X size={18} /></button>
+                <h2><Smartphone size={20} /> Connect devices</h2>
+                <p>Use Tailscale to control this host from your phone or another computer. Tasks and files stay on the host; keep it awake.</p>
+                <ol>
+                    <li>Install Tailscale on the host and each device, and sign into the same tailnet.</li>
+                    <li>Follow the <a href="https://github.com/extropolis/claudia/blob/main/docs/tailscale.md" target="_blank" rel="noreferrer">host setup guide</a>, then copy the HTTPS address from <code>tailscale serve status</code>.</li>
+                    <li>Open that address on your device and paste the Claudia token obtained locally from your host.</li>
+                </ol>
+                <label htmlFor="tailscale-address">Tailscale HTTPS address</label>
+                <input id="tailscale-address" type="url" placeholder="https://my-pc.tailnet.ts.net" value={address} onChange={e => setAddress(e.target.value)} />
+                <div className="device-actions">
+                    <button onClick={save} disabled={busy}>Save address</button>
+                    <button disabled={busy || !saved || saved !== address} onClick={() => {
+                        void navigator.clipboard.writeText(saved).then(() => setMessage('Address copied. It contains no token.')).catch(() => setMessage('Could not copy. Select the address and copy it manually.'));
+                    }}>Copy address</button>
+                    <button disabled={busy || !saved || saved !== address} onClick={check}>{busy ? 'Working…' : 'Check connection'}</button>
                 </div>
-
-                {/* Error message */}
-                {error && (
-                    <div className="tunnel-error">
-                        {error}
-                    </div>
-                )}
-
-                {/* QR Code */}
-                <div className="qr-code-area">
-                    {status?.active ? (
-                        <canvas ref={canvasRef} />
-                    ) : error ? (
-                        <div className="qr-placeholder error">
-                            Failed
-                        </div>
-                    ) : tunnelLoading ? (
-                        <div className="qr-placeholder">
-                            Starting...
-                        </div>
-                    ) : (
-                        <div className="qr-placeholder">
-                            Not connected
-                        </div>
-                    )}
-                </div>
-
-                {/* URL - always rendered to maintain layout */}
-                <div className="tunnel-url-area">
-                    <label>Mobile URL</label>
-                    <div className="tunnel-url-row">
-                        <input type="text" readOnly value={mobileUrl || ''} placeholder="Not connected" />
-                        <button onClick={copyUrl} title="Copy URL" disabled={!mobileUrl}>
-                            {copied ? <Check size={14} /> : <Copy size={14} />}
-                            {copied ? 'Copied!' : 'Copy'}
-                        </button>
-                    </div>
-                </div>
-
-                {/* Unreachable-URL warning. A tunnel can be "active" while its
-                    hostname is blocked on the network, in which case phones get
-                    a blank page and nothing else in the UI would say so. */}
-                {status?.active && status?.reachable === false && (
-                    <div className="tunnel-error" role="alert">
-                        <AlertTriangle size={14} style={{ verticalAlign: 'text-bottom', marginRight: 6 }} />
-                        {status.warning || 'The tunnel URL could not be reached from this machine.'}
-                    </div>
-                )}
-
-                {/* Reserved domain (paid ngrok). Blank = free tier, ngrok picks
-                    the URL and it changes between sessions. */}
-                <div className="tunnel-url-area">
-                    <label>ngrok domain (optional)</label>
-                    <div className="tunnel-url-row">
-                        <input
-                            type="text"
-                            value={domainInput}
-                            onChange={(e) => setDomainInput(e.target.value)}
-                            placeholder="blank = free tier, ngrok assigns the URL"
-                            spellCheck={false}
-                            autoCapitalize="none"
-                            autoCorrect="off"
-                        />
-                        <button onClick={saveDomain} title="Save reserved domain">
-                            {domainSaved ? <Check size={14} /> : null}
-                            {domainSaved ? 'Saved' : 'Save'}
-                        </button>
-                    </div>
-                    <small>
-                        Paid plans can pin a reserved domain (e.g. <code>claudia.ngrok.app</code>) so the URL
-                        never changes. It also gets you off <code>ngrok-free.dev</code>, which some networks
-                        and mobile carriers block outright. Applies on the next tunnel start.
-                    </small>
-                    {domainError && <div className="tunnel-error">{domainError}</div>}
-                </div>
-
-                {/* Instructions */}
-                <div className="mobile-instructions">
-                    <ol>
-                        <li>Scan the QR code with your phone's camera</li>
-                        <li>Tap the mic button to talk to the AI Supervisor</li>
-                        <li>You can also type messages using the text input</li>
-                    </ol>
-                </div>
-
-                {/* Actions */}
-                <div className="mobile-access-actions">
-                    {status?.active && onStopTunnel && (
-                        <button className="danger" onClick={onStopTunnel}>
-                            <StopCircle size={14} />
-                            Stop Tunnel
-                        </button>
-                    )}
-                    {!status?.active && !tunnelLoading && onStartTunnel && (
-                        <button className="primary" onClick={onStartTunnel}>
-                            <Play size={14} />
-                            Start Tunnel
-                        </button>
-                    )}
-                    <button onClick={onClose}>Close</button>
-                </div>
-            </div>
+                {message && <p role="status">{message}</p>}
+                <p className="device-note">The token grants full control of this host. It is kept for this browser tab. Tailscale access is managed separately in your tailnet.</p>
+                <button onClick={() => { void logout().catch(() => {}); }}>Log out of this browser</button>
+            </section>
         </div>
     );
 }

@@ -17,7 +17,7 @@ A multi-instance Claude Code orchestrator — a web UI (and Electron desktop app
 - **Task Persistence** - Tasks survive server restarts with automatic reconnection
 - **Task Archival** - Archive completed tasks with lazy-loaded history
 - **Learning System** - Extract and store learnings from completed tasks using semantic search
-- **Mobile Access** - Remote access via ngrok tunnel with QR code for mobile devices
+- **Device Access** - Private HTTPS access through Tailscale from phones and other computers ([setup](docs/tailscale.md))
 - **System Monitoring** - Real-time CPU and memory usage stats
 - **Conversation History** - View parsed conversation history from Claude Code sessions
 - **Cross-Platform** - Runs on Windows, macOS, and Linux
@@ -151,7 +151,7 @@ On first launch, the Settings panel will open automatically:
 4. **Interact** — Send follow-up messages or interrupt tasks as needed
 5. **Use Supervisor Chat** — Toggle the right panel for AI-assisted task management with tool-calling
 6. **Review Learnings** — After tasks complete, extract and save learnings from conversations
-7. **Mobile Access** — Open Settings to enable mobile tunnel and scan the QR code on your phone
+7. **Device Access** — Open Devices and follow the [Tailscale setup](docs/tailscale.md) to connect your phone or another computer
 
 ### Best Practices
 
@@ -381,7 +381,6 @@ claudia/
 │   │   ├── task-state-detection.ts # Terminal output state analysis
 │   │   ├── conversation-parser.ts # Claude conversation history parser
 │   │   ├── git-utils.ts           # Git state tracking and revert
-│   │   ├── tunnel-manager.ts      # ngrok tunnel for mobile access
 │   │   ├── usage-reporter.ts      # Token usage analytics
 │   │   ├── backends/              # Pluggable backend implementations
 │   │   │   ├── claude-code-backend.ts  # Claude Code CLI (PTY)

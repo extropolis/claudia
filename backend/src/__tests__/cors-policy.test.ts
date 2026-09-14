@@ -79,7 +79,7 @@ describe('evaluateCorsOrigin', () => {
 
     it('allows the active tunnel origin even if Host was rewritten en route', () => {
         const d = evaluateCorsOrigin(TUNNEL, 'localhost:4001', TUNNEL);
-        expect(d).toEqual({ allowed: true, reason: 'tunnel-origin' });
+        expect(d).toEqual({ allowed: true, reason: 'configured-origin' });
     });
 
     it('rejects a different ngrok domain — a tunnel host is not a free pass', () => {
@@ -88,7 +88,7 @@ describe('evaluateCorsOrigin', () => {
     });
 
     it('rejects an http:// origin on the tunnel host — ngrok serves https only', () => {
-        // The tunnel-origin branch used to compare bare hosts, so a downgraded
+        // The configured-origin branch used to compare bare hosts, so a downgraded
         // or MITM-injected plaintext page on the very same hostname matched and
         // was handed the credentialed CORS headers meant for the real tunnel.
         const d = evaluateCorsOrigin(`http://${TUNNEL_HOST}`, 'localhost:4001', TUNNEL);

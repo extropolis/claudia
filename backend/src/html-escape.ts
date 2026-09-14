@@ -3,7 +3,7 @@
  *
  * Embedding an untrusted value in an HTML document is not one problem but
  * several, and the correct escaping depends entirely on which slot the value
- * lands in. Every interpolation in mobile-page.ts and voice-agent-page.ts is an
+ * lands in. Every interpolation in voice-agent-page.ts is an
  * inline-`<script>` slot, so that is the one context implemented here. If an
  * attribute or text-content slot is ever added to those pages, add the matching
  * helper rather than reaching for this one — `jsLiteral` is not correct there.

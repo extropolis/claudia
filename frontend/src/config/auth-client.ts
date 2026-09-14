@@ -1,44 +1,32 @@
 /**
- * The SPA's half of mandatory API authentication.
- *
- * Every `/api` route and every WebSocket upgrade on the backend now requires a
- * token (see backend/src/auth-token.ts). Before this, `/api/*` was authenticated
- * only when the request's Host header matched a tunnel substring, so the SPA
- * never had to think about credentials on localhost or on a LAN address — and
- * neither did anyone else who could reach the port.
- *
- * Three ways the SPA gets a token, in the order they are tried:
- *
- *  1. `?token=` in the page URL. This is what the mobile QR flow already hands
- *     out and what Electron appends when it launches the window, so both keep
- *     working unchanged.
- *  2. `sessionStorage`, so a reload inside one tab does not re-bootstrap.
- *  3. `GET /api/auth/local` — the loopback bootstrap. The backend serves the
- *     token only to a caller whose SOCKET is loopback, so this succeeds for a
- *     browser on the same machine and fails for everyone else. That is what
- *     keeps `./start.sh` + open-a-browser working with no copy-paste.
- *
- * If all three fail the SPA has no credential and every request will 401; the
- * app surfaces that through the existing mobile-access/token UI rather than a
- * second, parallel prompt.
- *
- * WHY sessionStorage AND NOT localStorage: the token is a full-authority
- * credential. Scoping it to the tab means closing the tab drops it, and a
- * shared/kiosk browser does not leave it behind for the next person.
+ * Backend-scoped browser credentials. Local launchers may supply a query token;
+ * remote clients paste one. Validate before mounting the app, remove credentials
+ * from navigation URLs, and return to login when an API request is rejected.
  */
 import { getApiBaseUrl } from './api-config';
 
 /** Header the backend reads. Also accepts Authorization: Bearer and ?token=. */
 export const TOKEN_HEADER = 'x-claudia-token';
 
-const STORAGE_KEY = 'claudia.authToken';
+const storageKey = () => `claudia.authToken:${getApiBaseUrl()}`;
+export const AUTH_REQUIRED_EVENT = 'claudia:authRequired';
+let tokenOrigin: string | null = null;
+let consumedUrl = false;
 
 let token: string | null = null;
 
 /** Read the token from the page URL, if the launcher put one there. */
 function tokenFromUrl(): string | null {
     try {
-        const fromQuery = new URLSearchParams(window.location.search).get('token');
+        if (consumedUrl) return null;
+        consumedUrl = true;
+        const params = new URLSearchParams(window.location.search);
+        const fromQuery = params.get('token');
+        if (params.has('token')) {
+            params.delete('token');
+            const query = params.toString();
+            window.history.replaceState(null, '', `${window.location.pathname || '/'}${query ? '?' + query : ''}${window.location.hash || ''}`);
+        }
         return fromQuery && fromQuery.trim() ? fromQuery.trim() : null;
     } catch {
         return null;
@@ -47,7 +35,7 @@ function tokenFromUrl(): string | null {
 
 function readStored(): string | null {
     try {
-        const v = window.sessionStorage.getItem(STORAGE_KEY);
+        const v = window.sessionStorage.getItem(storageKey());
         return v && v.trim() ? v : null;
     } catch {
         // Private mode / storage disabled — the in-memory copy still works for
@@ -58,7 +46,7 @@ function readStored(): string | null {
 
 function writeStored(value: string): void {
     try {
-        window.sessionStorage.setItem(STORAGE_KEY, value);
+        window.sessionStorage.setItem(storageKey(), value);
     } catch {
         // Non-fatal: see readStored().
     }
@@ -66,6 +54,8 @@ function writeStored(value: string): void {
 
 /** The token this page will present, or null if it has none yet. */
 export function getAuthToken(): string | null {
+    const origin = getApiBaseUrl();
+    if (tokenOrigin !== origin) { token = null; tokenOrigin = origin; }
     if (token) return token;
     token = tokenFromUrl() ?? readStored();
     if (token) writeStored(token);
@@ -74,6 +64,7 @@ export function getAuthToken(): string | null {
 
 /** Adopt a token (from the bootstrap, or from a user-supplied prompt). */
 export function setAuthToken(value: string): void {
+    tokenOrigin = getApiBaseUrl();
     token = value.trim();
     writeStored(token);
 }
@@ -81,7 +72,7 @@ export function setAuthToken(value: string): void {
 /** Forget the token — used when the backend rejects it, so the UI can re-prompt. */
 export function clearAuthToken(): void {
     token = null;
-    try { window.sessionStorage.removeItem(STORAGE_KEY); } catch { /* see readStored() */ }
+    try { window.sessionStorage.removeItem(storageKey()); } catch { /* see readStored() */ }
 }
 
 /**
@@ -93,7 +84,7 @@ export function clearAuthToken(): void {
  */
 export async function fetchLocalToken(fetchImpl: typeof fetch = fetch): Promise<string | null> {
     try {
-        const res = await fetchImpl(`${getApiBaseUrl()}/api/auth/local`);
+        const res = await fetchImpl(`${getApiBaseUrl()}/api/auth/local`, { signal: AbortSignal.timeout(8000) });
         if (!res.ok) return null;
         const body = await res.json() as { token?: string };
         return body?.token?.trim() || null;
@@ -109,13 +100,31 @@ export async function fetchLocalToken(fetchImpl: typeof fetch = fetch): Promise<
  * a SPA with no token still renders, and the app shows the token prompt.
  */
 export async function bootstrapAuth(fetchImpl: typeof fetch = fetch): Promise<boolean> {
-    if (getAuthToken()) return true;
+    if (getAuthToken()) return (await validateAuthToken(getAuthToken()!, fetchImpl)) === 'ok';
     const local = await fetchLocalToken(fetchImpl);
     if (local) {
         setAuthToken(local);
         return true;
     }
     return false;
+}
+
+/** Validate without fetching workspace data or opening a socket. */
+export async function validateAuthToken(value: string, fetchImpl: typeof fetch = fetch): Promise<'ok' | 'rejected' | 'offline'> {
+    try {
+        const res = await fetchImpl(`${getApiBaseUrl()}/api/auth/check`, {
+            headers: { [TOKEN_HEADER]: value }, signal: AbortSignal.timeout(8000),
+        });
+        if (res.status === 401) { clearAuthToken(); return 'rejected'; }
+        if (!res.ok) return 'offline';
+        const body = await res.json();
+        return body.authenticated === true ? 'ok' : 'offline';
+    } catch { return 'offline'; }
+}
+
+export async function logout(): Promise<void> {
+    try { await fetch(`${getApiBaseUrl()}/api/auth/logout`, { method: 'POST', signal: AbortSignal.timeout(3000) }); }
+    finally { clearAuthToken(); window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT)); }
 }
 
 /** Does this URL address the Claudia backend (and therefore need the token)? */
@@ -163,7 +172,13 @@ export function installAuthFetch(): void {
             init?.headers ?? (typeof input === 'object' && 'headers' in input ? input.headers : undefined),
         );
         if (!headers.has(TOKEN_HEADER)) headers.set(TOKEN_HEADER, value);
-        return original(input as RequestInfo, { ...init, headers });
+        return original(input as RequestInfo, { ...init, headers }).then(res => {
+            if (res.status === 401 && getAuthToken() === value) {
+                clearAuthToken();
+                window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+            }
+            return res;
+        });
     }) as typeof window.fetch;
 }
 
@@ -171,5 +186,7 @@ export function installAuthFetch(): void {
 export function __resetAuthFetchForTests(original?: typeof fetch): void {
     installed = false;
     token = null;
+    tokenOrigin = null;
+    consumedUrl = false;
     if (original) window.fetch = original;
 }

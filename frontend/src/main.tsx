@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import { NotificationProvider } from './components/NotificationContainer';
 import { AuthTokenGate } from './components/AuthTokenGate';
 import { setupAudioUnlock } from './utils/browserCapabilities';
-import { installAuthFetch, bootstrapAuth } from './config/auth-client';
+import { installAuthFetch, bootstrapAuth, AUTH_REQUIRED_EVENT } from './config/auth-client';
 import './styles/index.css';
 
 // Set up AudioContext unlock on first user interaction (required for iOS/Android)
@@ -21,6 +21,11 @@ setupAudioUnlock();
  */
 function Root({ authenticated }: { authenticated: boolean }) {
     const [ok, setOk] = useState(authenticated);
+    useEffect(() => {
+        const required = () => setOk(false);
+        window.addEventListener(AUTH_REQUIRED_EVENT, required);
+        return () => window.removeEventListener(AUTH_REQUIRED_EVENT, required);
+    }, []);
     if (!ok) return <AuthTokenGate onAuthenticated={() => setOk(true)} />;
     return (
         <NotificationProvider>
@@ -31,7 +36,7 @@ function Root({ authenticated }: { authenticated: boolean }) {
 
 // installAuthFetch wraps window.fetch once so the ~100 existing call sites stay
 // untouched and the next one somebody writes is covered too. bootstrapAuth then
-// fills in the token — from ?token= (Electron, the mobile QR link), from
+// fills in the token — from ?token= (local launchers), from
 // sessionStorage, or from the backend's loopback bootstrap, which is what makes
 // "run start.sh, open a browser" keep working with no copy-paste.
 //

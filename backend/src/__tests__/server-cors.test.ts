@@ -56,7 +56,7 @@ describe('CORS origin policy over HTTP', () => {
     it('serves a same-origin request that carries an Origin header', async () => {
         // Exactly the shape a <script type="module"> fetch takes from the
         // tunnel page. Before the fix this was a 500.
-        const res = await raw('/api/tunnel/status', {
+        const res = await raw('/api/auth/check', {
             host: 'yasmin-untrammelled-doug.ngrok-free.dev',
             origin: 'https://yasmin-untrammelled-doug.ngrok-free.dev',
         });
@@ -67,7 +67,7 @@ describe('CORS origin policy over HTTP', () => {
     });
 
     it('serves loopback origins', async () => {
-        const res = await raw('/api/tunnel/status', {
+        const res = await raw('/api/auth/check', {
             host: `127.0.0.1:${h.port}`,
             origin: 'http://localhost:5173',
         });
@@ -76,7 +76,7 @@ describe('CORS origin policy over HTTP', () => {
     });
 
     it('rejects a cross-origin request with 403 and no stack trace', async () => {
-        const res = await raw('/api/tunnel/status', {
+        const res = await raw('/api/auth/check', {
             host: `127.0.0.1:${h.port}`,
             origin: 'https://evil.example',
         });
@@ -87,7 +87,7 @@ describe('CORS origin policy over HTTP', () => {
     });
 
     it('still serves originless requests (curl, native clients)', async () => {
-        const res = await raw('/api/tunnel/status', { host: `127.0.0.1:${h.port}` });
+        const res = await raw('/api/auth/check', { host: `127.0.0.1:${h.port}` });
         expect(res.status).toBe(200);
     });
 });
