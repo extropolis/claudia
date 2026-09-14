@@ -157,9 +157,6 @@ function App() {
     const [showMobileAccess, setShowMobileAccess] = useState(false);
     const [showActivityPanel, setShowActivityPanel] = useState(false);
     const [soundMuted, setSoundMuted] = useState(() => !isSoundEnabled());
-    const [tunnelActive, setTunnelActive] = useState(false);
-    const [tunnelLoading, setTunnelLoading] = useState(false);
-    const [tunnelError, setTunnelError] = useState<string | null>(null);
     const sidebarRef = useRef<HTMLElement>(null);
     const aiCoreCheckDoneRef = useRef(false);
 
@@ -417,36 +414,6 @@ function App() {
         }
     }, []);
 
-    // Check tunnel status on mount
-    useEffect(() => {
-        (async () => {
-            try {
-                const res = await fetch(`${getApiBaseUrl()}/api/tunnel/status`);
-                const data = await res.json();
-                setTunnelActive(data.active === true);
-            } catch {
-                // ignore
-            }
-        })();
-    }, []);
-
-    // Keep tunnel active state in sync with server-pushed tunnel:status WS messages.
-    // This handles tsx watch reloads where the backend adopts the existing ngrok process
-    // and re-emits tunnel:ready — without this the button would stay grey.
-    useEffect(() => {
-        const handler = (e: Event) => {
-            const detail = (e as CustomEvent<{ active: boolean; error?: string | null }>).detail;
-            setTunnelActive(detail.active === true);
-            if (!detail.active && detail.error) {
-                setTunnelError(detail.error);
-            } else if (detail.active) {
-                setTunnelError(null);
-            }
-        };
-        window.addEventListener('claudia:tunnelStatus', handler);
-        return () => window.removeEventListener('claudia:tunnelStatus', handler);
-    }, []);
-
     // Show toast when a Claude session creates a TODO for the user
     const { showInfo } = useNotification();
     useEffect(() => {
@@ -459,46 +426,6 @@ function App() {
         window.addEventListener('claudia:todoCreated', handler);
         return () => window.removeEventListener('claudia:todoCreated', handler);
     }, [showInfo]);
-
-    // Start tunnel (used by both the header button and the modal's Start button)
-    const startTunnel = useCallback(async () => {
-        setTunnelLoading(true);
-        setTunnelError(null);
-        try {
-            const res = await fetch(`${getApiBaseUrl()}/api/tunnel/start`, { method: 'POST' });
-            const data = await res.json();
-            if (data.error) {
-                console.error('[Tunnel] Failed to start:', data.error);
-                setTunnelActive(false);
-                setTunnelError(data.error);
-            } else {
-                setTunnelActive(true);
-            }
-        } catch (err) {
-            console.error('[Tunnel] Failed to start:', err);
-            setTunnelActive(false);
-            setTunnelError(err instanceof Error ? err.message : 'Failed to connect');
-        } finally {
-            setTunnelLoading(false);
-        }
-    }, []);
-
-    // Mobile button: just open the modal — user starts tunnel explicitly from inside
-    const handleMobileToggle = useCallback(() => {
-        setShowMobileAccess(true);
-    }, []);
-
-    // Explicitly stop tunnel (called from modal) — keep modal open so user can restart
-    const handleStopTunnel = useCallback(async () => {
-        try {
-            await fetch(`${getApiBaseUrl()}/api/tunnel/stop`, { method: 'POST' });
-        } catch {
-            // ignore
-        }
-        setTunnelActive(false);
-        setTunnelLoading(false);
-        setTunnelError(null);
-    }, []);
 
     // Determine what to show on mobile
     const mobileShowingTerminal = isMobile && mobileShowTerminal && selectedTask;
@@ -555,16 +482,14 @@ function App() {
                             {hasUnreadMessages && <span className="message-badge">{chatMessages.length}</span>}
                         </button>
                     )}
-                    {!isMobile && (
+                    {(
                         <button
-                            className={`chat-toggle-button mobile-tunnel-btn ${tunnelActive ? 'tunnel-active' : ''} ${tunnelLoading ? 'loading' : ''}`}
-                            onClick={handleMobileToggle}
-                            title={tunnelActive ? 'View Mobile Tunnel' : 'Start Mobile Tunnel'}
-                            disabled={tunnelLoading}
+                            className="chat-toggle-button"
+                            onClick={() => setShowMobileAccess(true)}
+                            title="Connect devices with Tailscale"
                         >
                             <Smartphone size={18} />
-                            <span className="btn-label">{tunnelLoading ? 'Connecting...' : 'Mobile'}</span>
-                            {tunnelActive && <span className="tunnel-active-dot" />}
+                            <span className="btn-label">Devices</span>
                         </button>
                     )}
                     {!isMobile && (
@@ -816,7 +741,7 @@ function App() {
             <ProjectPicker onSelect={handleProjectSelect} wsRef={wsRef} requestRecentWorkspaces={requestRecentWorkspaces} clearRecentWorkspace={clearRecentWorkspace} />
             <SettingsMenu isOpen={showSettings} onClose={handleSettingsClose} initialPanel={settingsInitialPanel} />
             <UsageDashboard isOpen={showUsageDashboard} onClose={() => setShowUsageDashboard(false)} />
-            {!isMobile && <MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} error={tunnelError} tunnelActive={tunnelActive} tunnelLoading={tunnelLoading} onStopTunnel={handleStopTunnel} onStartTunnel={startTunnel} />}
+            {<MobileAccessModal isOpen={showMobileAccess} onClose={() => setShowMobileAccess(false)} />}
             <GlobalVoiceManager />
             <ThinkingSoundManager />
             <TaskCompletionVoiceManager />

@@ -14,7 +14,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act, cleanup } from '@testing-library/react';
 
 const hoisted = vi.hoisted(() => ({
-    tunnel: { enabled: false },
     WS_URL: 'ws://claudia.test:9999',
     API_URL: 'http://claudia.test:9999',
 }));
@@ -22,7 +21,6 @@ const hoisted = vi.hoisted(() => ({
 vi.mock('../../config/api-config', () => ({
     getWebSocketUrl: () => hoisted.WS_URL,
     getApiBaseUrl: () => hoisted.API_URL,
-    isTunnelAccess: () => hoisted.tunnel.enabled,
     getMobileToken: () => null,
     isElectron: () => false,
 }));
@@ -262,7 +260,6 @@ beforeEach(() => {
     realWebSocket = global.WebSocket;
     global.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     FakeWebSocket.reset();
-    hoisted.tunnel.enabled = false;
     resetStore();
     localStorage.clear();
     stubFetch({});
@@ -898,23 +895,6 @@ describe('useWebSocket — inbound dispatch', () => {
             ws.simulateMessage('server:reconnecting', { message: 'restoring 3 tasks' });
         });
         expect(useTaskStore.getState().isServerReloading).toBe(true);
-    });
-
-    it('tunnel:status is re-broadcast as a DOM event for App to pick up', () => {
-        const { ws } = mountConnected();
-        const listener = vi.fn();
-        window.addEventListener('claudia:tunnelStatus', listener);
-
-        act(() => {
-            ws.simulateMessage('tunnel:status', { active: true, url: 'https://x.loca.lt' });
-        });
-
-        window.removeEventListener('claudia:tunnelStatus', listener);
-        expect(listener).toHaveBeenCalledTimes(1);
-        expect((listener.mock.calls[0][0] as CustomEvent).detail).toEqual({
-            active: true,
-            url: 'https://x.loca.lt',
-        });
     });
 
     it('error surfaces the server message to the user', () => {
@@ -1843,86 +1823,3 @@ describe('useWebSocket — notification click', () => {
 });
 
 // ===========================================================================
-
-describe('useWebSocket — tunnel warmup', () => {
-    beforeEach(() => {
-        hoisted.tunnel.enabled = true;
-    });
-
-    it('warms the tunnel over HTTP before opening the socket', async () => {
-        const fetchMock = stubFetch({ '/api/tunnel/status': { ok: true } });
-
-        const view = renderHook(() => useWebSocket());
-        // No socket yet — we are awaiting the warmup request.
-        expect(FakeWebSocket.instances).toHaveLength(0);
-
-        await act(async () => {
-            await Promise.resolve();
-            await Promise.resolve();
-        });
-
-        expect(fetchMock).toHaveBeenCalledWith(
-            expect.stringContaining('/api/tunnel/status'),
-            expect.objectContaining({ credentials: 'include' }),
-        );
-        expect(FakeWebSocket.instances).toHaveLength(1);
-        view.unmount();
-    });
-
-    it('retries the warmup every 2s while the tunnel returns non-OK', async () => {
-        global.fetch = vi.fn(async () => ({ ok: false, status: 502, statusText: 'Bad Gateway', json: async () => ({}) })) as unknown as typeof fetch;
-
-        const view = renderHook(() => useWebSocket());
-        await act(async () => {
-            await Promise.resolve();
-            await Promise.resolve();
-        });
-        expect(FakeWebSocket.instances).toHaveLength(0);
-
-        // Warmup now succeeds; the queued retry should get through.
-        stubFetch({ '/api/tunnel/status': { ok: true } });
-        await act(async () => {
-            vi.advanceTimersByTime(2000);
-            await Promise.resolve();
-            await Promise.resolve();
-        });
-
-        expect(FakeWebSocket.instances).toHaveLength(1);
-        view.unmount();
-    });
-
-    it('retries the warmup when the request throws outright', async () => {
-        global.fetch = vi.fn(async () => {
-            throw new Error('tunnel unreachable');
-        }) as unknown as typeof fetch;
-
-        const view = renderHook(() => useWebSocket());
-        await act(async () => {
-            await Promise.resolve();
-            await Promise.resolve();
-        });
-
-        expect(FakeWebSocket.instances).toHaveLength(0);
-        expect(vi.getTimerCount()).toBeGreaterThan(0);
-        view.unmount();
-    });
-
-    it('abandons the warmup retry when the hook unmounts mid-flight', async () => {
-        global.fetch = vi.fn(async () => {
-            throw new Error('tunnel unreachable');
-        }) as unknown as typeof fetch;
-
-        const view = renderHook(() => useWebSocket());
-        await act(async () => {
-            await Promise.resolve();
-            await Promise.resolve();
-        });
-
-        view.unmount();
-        act(() => {
-            vi.advanceTimersByTime(120_000);
-        });
-
-        expect(FakeWebSocket.instances).toHaveLength(0);
-    });
-});

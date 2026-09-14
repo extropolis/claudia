@@ -217,6 +217,7 @@ async function startApp(): Promise<void> {
         console.log(`   Probing for a running backend at ${attachUrl}...`);
 
         const { info, attached } = await resolveBackend({
+            remoteOnly: Boolean(process.env.CLAUDIA_BACKEND_URL),
             probe: () => findRunningBackend(attachUrl),
             spawn: () => {
                 // Only meaningful when we own the backend: an attached one uses

@@ -32,7 +32,6 @@ import { useTaskStore, ActivityEvent } from '../../stores/taskStore';
 
 const H = vi.hoisted(() => ({
     sendWsMessage: vi.fn(),
-    qrToCanvas: vi.fn(async (_canvas?: unknown, _text?: string, _options?: unknown) => undefined),
 }));
 
 vi.mock('../../hooks/useWebSocket', () => ({
@@ -40,10 +39,7 @@ vi.mock('../../hooks/useWebSocket', () => ({
     useWebSocket: () => ({}),
 }));
 
-vi.mock('qrcode', () => ({
-    default: { toCanvas: H.qrToCanvas },
-    toCanvas: H.qrToCanvas,
-}));
+
 
 vi.mock('../VoiceInput', () => ({
     VoiceInput: ({ onTranscript, disabled }: {
@@ -63,7 +59,6 @@ import { ActivityPanel } from '../ActivityPanel';
 import { ConversationHistory } from '../ConversationHistory';
 import { FileContentModal } from '../FileContentModal';
 import { LearnFromConversationModal } from '../LearnFromConversationModal';
-import { MobileAccessModal } from '../MobileAccessModal';
 import { ProjectPicker } from '../ProjectPicker';
 import { ScheduledTasksModal } from '../ScheduledTasksModal';
 import { SupervisorChat } from '../SupervisorChat';
@@ -116,12 +111,6 @@ function stubFetch(routes: Record<string, RouteBody | RouteSpec> = {}) {
 
 function urlsOf(fetchMock: ReturnType<typeof stubFetch>) {
     return fetchMock.mock.calls.map(c => String(c[0]));
-}
-
-/** Tunnel-status polls only. The modal also GETs /api/config for the reserved
- * ngrok domain, which is not part of the polling contract under test. */
-function statusPollsOf(fetchMock: ReturnType<typeof stubFetch>) {
-    return urlsOf(fetchMock).filter(u => u.includes('/api/tunnel/status'));
 }
 
 let clipboardWrite: ReturnType<typeof vi.fn>;
@@ -744,152 +733,6 @@ describe('LearnFromConversationModal', () => {
 
 // ===========================================================================
 // MobileAccessModal
-// ===========================================================================
-
-describe('MobileAccessModal', () => {
-    const activeStatus = {
-        active: true,
-        url: 'https://demo.ngrok.app',
-        token: 'tok-9',
-        startedAt: null,
-        error: null,
-        publicIp: null,
-    };
-
-    it('renders nothing while closed and issues no request', () => {
-        const fetchMock = stubFetch();
-        render(<MobileAccessModal isOpen={false} onClose={vi.fn()} />);
-
-        expect(screen.queryByRole('heading', { name: /Mobile Voice Access/ })).not.toBeInTheDocument();
-        expect(fetchMock).not.toHaveBeenCalled();
-    });
-
-    it('fetches the tunnel status on open and shows the mobile URL', async () => {
-        const fetchMock = stubFetch({ '/api/tunnel/status': activeStatus });
-        render(<MobileAccessModal isOpen onClose={vi.fn()} />);
-
-        expect(await screen.findByText('Tunnel active')).toBeInTheDocument();
-        // By placeholder: the reserved-domain field is a second textbox.
-        expect(screen.getByPlaceholderText('Not connected')).toHaveValue('https://demo.ngrok.app/?token=tok-9');
-        expect(statusPollsOf(fetchMock)).toHaveLength(1);
-    });
-
-    it('shows the not-connected placeholder when no tunnel is up', async () => {
-        stubFetch({ '/api/tunnel/status': { active: false, url: null, token: null } });
-        render(<MobileAccessModal isOpen onClose={vi.fn()} />);
-
-        expect(await screen.findByText('Tunnel not running')).toBeInTheDocument();
-        expect(screen.getByText('Not connected')).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: 'Copy' })).toBeDisabled();
-    });
-
-    it('shows the error state and skips polling entirely', () => {
-        const fetchMock = stubFetch({ '/api/tunnel/status': activeStatus });
-        render(<MobileAccessModal isOpen onClose={vi.fn()} error="ngrok not installed" />);
-
-        expect(screen.getByText('Connection failed')).toBeInTheDocument();
-        expect(screen.getByText('ngrok not installed')).toBeInTheDocument();
-        expect(screen.getByText('Failed')).toBeInTheDocument();
-        // The reserved-domain field still loads its saved value; what a failed
-        // tunnel must not do is poll for status.
-        expect(statusPollsOf(fetchMock)).toHaveLength(0);
-    });
-
-    it('shows the starting state while the tunnel spins up', async () => {
-        stubFetch({ '/api/tunnel/status': { active: false } });
-        render(<MobileAccessModal isOpen onClose={vi.fn()} tunnelLoading />);
-
-        expect(await screen.findByText('Starting tunnel...')).toBeInTheDocument();
-        expect(screen.getByText('Starting...')).toBeInTheDocument();
-    });
-
-    it('keeps polling every 2s until the tunnel reports active', async () => {
-        vi.useFakeTimers();
-        let active = false;
-        const fetchMock = stubFetch({
-            '/api/tunnel/status': () => (active ? activeStatus : { active: false, url: null, token: null }),
-        });
-        render(<MobileAccessModal isOpen onClose={vi.fn()} />);
-
-        await act(async () => { await Promise.resolve(); });
-        expect(statusPollsOf(fetchMock)).toHaveLength(1);
-
-        await act(async () => { vi.advanceTimersByTime(2000); });
-        expect(statusPollsOf(fetchMock)).toHaveLength(2);
-
-        active = true;
-        await act(async () => { vi.advanceTimersByTime(2000); });
-        expect(statusPollsOf(fetchMock)).toHaveLength(3);
-
-        // Polling has stopped now that the tunnel is up.
-        await act(async () => { vi.advanceTimersByTime(6000); });
-        expect(statusPollsOf(fetchMock)).toHaveLength(3);
-    });
-
-    it('generates a QR code for the mobile URL once the tunnel is active', async () => {
-        stubFetch({ '/api/tunnel/status': activeStatus });
-        render(<MobileAccessModal isOpen onClose={vi.fn()} />);
-
-        await waitFor(() => expect(H.qrToCanvas).toHaveBeenCalled());
-        expect(H.qrToCanvas.mock.calls[0][1]).toBe('https://demo.ngrok.app/?token=tok-9');
-    });
-
-    it('copies the mobile URL', async () => {
-        stubFetch({ '/api/tunnel/status': activeStatus });
-        render(<MobileAccessModal isOpen onClose={vi.fn()} />);
-
-        await waitFor(() => expect(screen.getByRole('button', { name: 'Copy' })).toBeEnabled());
-        await act(async () => {
-            fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
-        });
-
-        expect(clipboardWrite).toHaveBeenCalledWith('https://demo.ngrok.app/?token=tok-9');
-        expect(await screen.findByText('Copied!')).toBeInTheDocument();
-    });
-
-    it('offers Start when idle and Stop when active — never both', async () => {
-        const onStartTunnel = vi.fn();
-        const onStopTunnel = vi.fn();
-        stubFetch({ '/api/tunnel/status': { active: false } });
-        const user = userEvent.setup();
-        const { rerender } = render(
-            <MobileAccessModal isOpen onClose={vi.fn()} onStartTunnel={onStartTunnel} onStopTunnel={onStopTunnel} />
-        );
-
-        await user.click(await screen.findByRole('button', { name: /Start Tunnel/ }));
-        expect(onStartTunnel).toHaveBeenCalled();
-        expect(screen.queryByRole('button', { name: /Stop Tunnel/ })).not.toBeInTheDocument();
-
-        stubFetch({ '/api/tunnel/status': activeStatus });
-        rerender(
-            <MobileAccessModal isOpen={false} onClose={vi.fn()} onStartTunnel={onStartTunnel} onStopTunnel={onStopTunnel} />
-        );
-        rerender(
-            <MobileAccessModal isOpen onClose={vi.fn()} onStartTunnel={onStartTunnel} onStopTunnel={onStopTunnel} />
-        );
-
-        await user.click(await screen.findByRole('button', { name: /Stop Tunnel/ }));
-        expect(onStopTunnel).toHaveBeenCalled();
-        expect(screen.queryByRole('button', { name: /Start Tunnel/ })).not.toBeInTheDocument();
-    });
-
-    it('closes from the Close button and the overlay, but not from the modal body', async () => {
-        const onClose = vi.fn();
-        stubFetch({ '/api/tunnel/status': { active: false } });
-        const user = userEvent.setup();
-        render(<MobileAccessModal isOpen onClose={onClose} />);
-
-        await user.click(screen.getByRole('button', { name: 'Close' }));
-        expect(onClose).toHaveBeenCalledTimes(1);
-
-        // Clicking the modal's own content must not bubble a dismiss.
-        await user.click(screen.getByRole('heading', { name: /Mobile Voice Access/ }));
-        expect(onClose).toHaveBeenCalledTimes(1);
-    });
-});
-
-// ===========================================================================
-// ProjectPicker
 // ===========================================================================
 
 describe('ProjectPicker', () => {

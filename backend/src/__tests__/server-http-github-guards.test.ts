@@ -343,14 +343,14 @@ describe.skipIf(!SUPPORTS_FAKE_CLI)('voice-agent config + tunnel status (local, 
         expect(Array.isArray(r.body.tools)).toBe(true);
     });
 
-    it('reports an inactive tunnel', async () => {
+    it('does not expose the removed tunnel status API', async () => {
         const r = await h.req<any>('/api/tunnel/status');
-        expect(r.status).toBe(200);
-        expect(r.body.active).toBe(false);
+        expect(r.status).toBe(404);
+        expect(r.body.error).toBe('Unknown API route');
     });
 
     it('GET /voice denies access without a token', async () => {
-        const res = await h.fetch('/voice');
+        const res = await fetch(`${h.baseUrl}/voice`);
         expect(res.status).toBe(401);
         expect(await res.text()).toContain('Access denied');
     });

@@ -113,7 +113,7 @@ export function validateAuthToken(dataDir: string | undefined, presented: string
 /**
  * Constant-time equality for two secrets of unknown length.
  *
- * Exported because `tunnel-manager.ts` needs the same guarantee for the tunnel
+ * Exported so other credential stores can use the same guarantee for their
  * token and had been using `===`, which short-circuits on the first differing
  * byte.
  */

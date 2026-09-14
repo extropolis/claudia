@@ -61,13 +61,10 @@ parentPort?.on('message', async (e: any) => {
             process.on('exit', release);
             process.on('SIGTERM', () => { release(); process.exit(0); });
 
-            const { server, tunnelManager } = await createApp(basePath || undefined, lock.info);
-
-            // Update tunnel manager with the actual dynamic port
-            tunnelManager.setPort(port);
+            const { server } = await createApp(basePath || undefined, lock.info);
 
             await new Promise<void>((resolve, reject) => {
-                server.listen(port, () => {
+                server.listen({ port, host: process.env.CLAUDIA_BIND_HOST || undefined }, () => {
                     console.log(`Backend server running on http://localhost:${port}`);
                     resolve();
                 });

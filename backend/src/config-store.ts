@@ -130,18 +130,7 @@ export interface AppConfig {
     todoEnabled?: boolean;  // Enable per-task TODO list feature (default: false)
     jiraEnabled: boolean;  // Master toggle for the Jira integration (default false)
     jira?: JiraConfig;  // Jira Cloud connection (only set once the user configures it)
-    /**
-     * Reserved ngrok domain to pin the tunnel to, e.g. "claudia.ngrok.app" or a
-     * custom domain on a paid plan. Empty/undefined keeps the free behaviour:
-     * ngrok picks the URL and it can change between sessions.
-     *
-     * This is not only a convenience. ngrok hands free tunnels out on
-     * `*.ngrok-free.dev`, and that domain is blocked outright on some networks
-     * and mobile carriers — the TLS handshake fails before any HTTP happens,
-     * so the tunnel looks dead from the phone while the agent reports healthy.
-     * Pinning a domain on another zone is the way out of that.
-     */
-    ngrokDomain?: string;
+    tailscaleUrl?: string;
 
     /**
      * Opt in to Anthropic's cloud surfaces for Claudia-spawned sessions.
@@ -250,7 +239,7 @@ const DEFAULT_CONFIG: AppConfig = {
     worktreeRetentionDays: 30,  // Per the archived-worktree retention spec
     jiraEnabled: false,  // Jira integration off by default
     jira: undefined,
-    ngrokDomain: undefined,  // free tier: let ngrok assign the URL
+    tailscaleUrl: undefined,  // operator-managed Tailscale Serve HTTPS origin
     claudeCloudSyncEnabled: false  // never mirror Claudia sessions to claude.ai
 };
 
@@ -308,7 +297,7 @@ export class ConfigStore {
             jira: loaded.jira,
             worktreeRetentionDays: loaded.worktreeRetentionDays ?? 30,
             todoEnabled: loaded.todoEnabled ?? false,
-            ngrokDomain: loaded.ngrokDomain,
+            tailscaleUrl: loaded.tailscaleUrl,
             // Absent means "not opted in" — sessions stay off claude.ai.
             claudeCloudSyncEnabled: loaded.claudeCloudSyncEnabled ?? false
         };
@@ -363,8 +352,8 @@ export class ConfigStore {
         if (updates.worktreeRetentionDays !== undefined) {
             this.config.worktreeRetentionDays = updates.worktreeRetentionDays;
         }
-        if (updates.ngrokDomain !== undefined) {
-            this.config.ngrokDomain = updates.ngrokDomain || undefined;
+        if (updates.tailscaleUrl !== undefined) {
+            this.config.tailscaleUrl = updates.tailscaleUrl || undefined;
         }
         if (updates.todoEnabled !== undefined) {
             this.config.todoEnabled = updates.todoEnabled;

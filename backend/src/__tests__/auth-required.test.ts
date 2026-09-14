@@ -195,7 +195,6 @@ describe('a valid token is accepted everywhere it may be presented', () => {
             ['x-claudia-token', '/api/tasks', { headers: { 'x-claudia-token': token } }],
             ['bearer', '/api/tasks', { headers: { authorization: `Bearer ${token}` } }],
             ['cookie', '/api/tasks', { headers: { cookie: `claudia_token=${token}` } }],
-            ['legacy cookie', '/api/tasks', { headers: { cookie: `claudia_tunnel_token=${token}` } }],
         ];
 
         for (const [label, path, init] of ok) {

@@ -67,7 +67,6 @@ export default defineConfig({
                 // .ts, backends/opencode-backend.ts) deliberately are NOT gated:
                 // their suites skip on Windows, so a per-file floor would fail
                 // the Windows leg even though the code is well covered.
-                'src/tunnel-manager.ts': { lines: 85 },
                 'src/backends/index.ts': { lines: 90 },
             },
         },

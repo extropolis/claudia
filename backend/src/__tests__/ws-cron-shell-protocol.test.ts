@@ -392,9 +392,4 @@ describe.skipIf(!SUPPORTS_FAKE_CLI)('supervisor + tunnel handlers that need no n
         expect(client.isClosed).toBe(false);
     }, 15000);
 
-    it('tunnel:status reports local status without dialling out', async () => {
-        const res = await client.request('tunnel:status', {}, 'tunnel:status');
-        expect(res.payload).toBeDefined();
-        expect(typeof res.payload).toBe('object');
-    }, 15000);
 });

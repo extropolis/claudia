@@ -35,7 +35,6 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { jsLiteral } from '../html-escape.js';
 import { getVoiceAgentPageHtml } from '../voice-agent-page.js';
-import { getMobilePageHtml } from '../mobile-page.js';
 import { startHarness, type Harness } from './helpers/server-harness.js';
 
 /** A value with no HTML/JS significance, used to take the baseline counts. */
@@ -202,16 +201,6 @@ describe('voice-agent-page: inline <script> escaping', () => {
         try { new Function(line!)(); } catch { /* a throw is also "did not execute" */ }
         expect(g.__CLAUDIA_XSS_PWNED, 'payload executed — it escaped the string literal').toBeUndefined();
         delete g.__CLAUDIA_XSS_PWNED;
-    });
-});
-
-describe('mobile-page: inline <script> escaping', () => {
-    it('escapes the token', () => {
-        assertEscapes(v => getMobilePageHtml('ws://localhost:1234', v), 'TOKEN');
-    });
-
-    it('escapes the wsUrl', () => {
-        assertEscapes(v => getMobilePageHtml(v, 'local-tok'), 'WS_URL');
     });
 });
 

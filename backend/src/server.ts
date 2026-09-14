@@ -1,5 +1,5 @@
 import express, { type Request, type Response, type NextFunction, type ErrorRequestHandler } from 'express';
-import { createServer, request as httpRequest } from 'http';
+import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import os from 'os';
@@ -23,7 +23,7 @@ import { listAgents, setOpencodePortProvider } from './agents/index.js';
 import { CronScheduler, validateCronExpression, describeCronExpression } from './cron-scheduler.js';
 import { TodoStore } from './todo-store.js';
 import { CheckpointStore } from './checkpoint-store.js';
-import { validateConfigUpdate, validateWorkspacePath, isPathInside, isValidNgrokDomain } from './validation.js';
+import { validateConfigUpdate, validateWorkspacePath, isPathInside } from './validation.js';
 import { isVoiceTokenAcceptable } from './voice-auth.js';
 import { evaluateCorsOrigin, CORS_REJECTED } from './cors-policy.js';
 import { isGitRepo, getDefaultBranch, getCurrentBranch, checkoutBranch, getPrForBranch, getTaskWorkStatus } from './git-utils.js';
@@ -31,8 +31,6 @@ import { selectWorkspacesToRefresh } from './pr-refresh.js';
 import { WorktreeManager } from './worktree-manager.js';
 import { classifyWorktree, reapWorktree } from './worktree-reaper.js';
 import { LearningsStore } from './learnings-store.js';
-import { TunnelManager } from './tunnel-manager.js';
-import { getMobilePageHtml } from './mobile-page.js';
 import { getVoiceAgentPageHtml } from './voice-agent-page.js';
 import { VoiceSupervisor } from './voice-supervisor.js';
 // import { ElevenLabsTTS } from './elevenlabs-tts.js'; // TODO: Implement ElevenLabs TTS
@@ -120,7 +118,6 @@ const VALID_WS_MESSAGE_TYPES = new Set([
     'supervisor:chat:clear',
     'task:disconnect',
     'task:clear',
-    'tunnel:status',
     'cron:create',
     'cron:delete',
     'cron:update',
@@ -411,29 +408,8 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
     const app = express();
     const server = createServer(app);
     // Use noServer mode so we can manually route WebSocket upgrade requests.
-    // This is critical for tunnel access: Vite HMR WebSocket connections need
-    // to be proxied to the Vite dev server, not handled by our app's WSS.
+    // Authenticate every application WebSocket upgrade before accepting it.
     const wss = new WebSocketServer({ noServer: true });
-
-    // TunnelManager for mobile remote access (ngrok-based). Created before the
-    // CORS middleware because that middleware needs to consult the active
-    // tunnel URL to recognise the tunnel page's own origin as same-origin.
-    const tunnelManager = new TunnelManager(PORTS.BACKEND);
-    logger.info('TunnelManager created (ngrok)');
-    // Auto-recover any orphaned ngrok left by a previous server instance (tsx
-    // watch restart) — but only once we know the port we actually bound, since
-    // adoption is scoped to tunnels forwarding to THIS server. Deferring to
-    // 'listening' is what keeps a second instance (the integration-test
-    // harness on an ephemeral port, a second backend) from adopting the live
-    // server's tunnel and then killing it on teardown.
-    server.once('listening', () => {
-        const addr = server.address();
-        if (addr && typeof addr === 'object') tunnelManager.setPort(addr.port);
-        logger.info('Tunnel auto-recover starting', { port: tunnelManager.getPort() });
-        tunnelManager.autoRecover().catch(err =>
-            logger.warn('Tunnel auto-recover failed', { error: err instanceof Error ? err.message : String(err) })
-        );
-    });
 
     // Middleware
     // Restrict CORS to localhost + same-origin — Claudia is a local-first app.
@@ -444,7 +420,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
         const decision = evaluateCorsOrigin(
             req.headers.origin,
             req.headers.host,
-            tunnelManager.getStatus().url,
+            configStore.getConfig().tailscaleUrl,
         );
         if (decision.allowed) {
             return callback(null, { origin: true, credentials: true });
@@ -474,27 +450,10 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
 
     // ===== API Authentication (unconditional) =====
     //
-    // WHAT THIS REPLACES. `/api/*` used to require a token only when the Host
-    // header matched a tunnel substring (`.loca.lt`, `ngrok`, …). Every other
-    // reachable name — a LAN IP, a Tailscale MagicDNS name, a custom domain, a
-    // *.fly.dev host — fell through with NO authentication at all, and
-    // `server.listen(PORT)` binds every interface. Anything on the same network
-    // could POST /api/tasks and get arbitrary code execution as this user.
-    // Hostname was never a security boundary, so nothing branches on it here.
-    //
-    // ACCEPTED CREDENTIALS, in the order a client is likely to send them:
-    //   Authorization: Bearer <t> | x-claudia-token: <t> | ?token=<t> | cookie
-    // Two secrets are honored: the persistent API token (auth-token.ts) and the
-    // live tunnel token, which is a real per-session credential the tunnel
-    // manager issued and is what the existing mobile QR flow hands out.
-    //
     // Presenting a valid token once mints an HttpOnly cookie so a browser's
     // subsequent same-origin requests carry it without every fetch call site
     // knowing about auth.
     const AUTH_COOKIE = 'claudia_token';
-    // Kept readable so a phone that still holds the pre-rename cookie from a
-    // live tunnel session isn't logged out by this deploy.
-    const LEGACY_AUTH_COOKIE = 'claudia_tunnel_token';
 
     /**
      * Routes reachable without a credential.
@@ -512,6 +471,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
      */
     const UNAUTHENTICATED_API_PATHS = new Set(['/api/health', '/api/server-info']);
     const LOOPBACK_BOOTSTRAP_PATH = '/api/auth/local';
+    app.use('/api/auth', (_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
 
     function readCookie(req: Request, name: string): string | undefined {
         const header = req.headers.cookie || '';
@@ -529,13 +489,13 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
         if (typeof header === 'string' && header) return header;
         const query = req.query.token;
         if (typeof query === 'string' && query) return query;
-        return readCookie(req, AUTH_COOKIE) ?? readCookie(req, LEGACY_AUTH_COOKIE);
+        return readCookie(req, AUTH_COOKIE);
     }
 
-    /** Is this string one of the two credentials this server accepts? */
+    /** Does this match the persistent instance credential? */
     function isAcceptedToken(candidate: string | undefined): boolean {
         if (!candidate) return false;
-        return validateAuthToken(dataDir, candidate) || tunnelManager.validateToken(candidate);
+        return validateAuthToken(dataDir, candidate);
     }
 
     /**
@@ -598,14 +558,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
      * reading the token file, which any local process could also do.
      */
     app.get(LOOPBACK_BOOTSTRAP_PATH, (req: Request, res: Response) => {
-        // isTunnelHost as well as isLoopbackPeer, and the tunnel check is the
-        // load-bearing one: the ngrok agent runs on THIS machine, so a request
-        // that came in over the public tunnel reaches us from 127.0.0.1 and
-        // looks local at the socket. isLoopbackPeer already refuses anything
-        // carrying X-Forwarded-*, which is what ngrok sends; this is the second
-        // lock, in case a tunnel is ever configured to strip those headers.
-        // Getting this wrong hands the API token to the open internet.
-        if (!isLoopbackPeer(req) || isTunnelHost(req.headers.host || '')) {
+        if (!isLoopbackPeer(req)) {
             logger.warn('Rejected non-loopback auth bootstrap', {
                 peer: req.socket?.remoteAddress,
                 host: req.headers.host,
@@ -622,87 +575,6 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
         res.json({ token });
     });
 
-    // ===== Tunnel → React Frontend Proxy =====
-    // When accessed through the tunnel, proxy non-API requests to the Vite
-    // dev server (development) or fall through to the static server (production).
-    // Instead of relying on env vars, we try Vite first and fall back to static
-    // if Vite isn't running (connection refused = production mode).
-
-    // Is this request being served through the tunnel's reverse proxy?
-    //
-    // This is a ROUTING question, not a security one: the tunnel serves the SPA
-    // on the backend's own origin, so those requests must be proxied to Vite
-    // (or the static bundle) instead of 404ing. Authentication is decided by
-    // the middleware above and never consults the Host header. Answering it
-    // from the active tunnel's own URL rather than a substring match on
-    // "ngrok" also means a custom tunnel domain routes correctly.
-    function isTunnelHost(host: string): boolean {
-        if (!host) return false;
-        const status = tunnelManager.getStatus();
-        if (!status.active || !status.url) return false;
-        try {
-            return new URL(status.url).host.toLowerCase() === host.toLowerCase();
-        } catch {
-            return false;
-        }
-    }
-
-    app.use((req, res, next) => {
-        const host = req.headers.host || '';
-        if (!isTunnelHost(host)) {
-            return next();
-        }
-
-        // Tunnel visitor at root: redirect with the current token if missing or stale.
-        // This handles server restarts (tsx watch) where the token changes — mobile
-        // browsers that still have the old URL/token get seamlessly refreshed.
-        if (req.path === '/') {
-            const status = tunnelManager.getStatus();
-            if (status.active && status.token) {
-                const requestToken = req.query.token as string | undefined;
-                if (!requestToken || !isAcceptedToken(requestToken)) {
-                    logger.info('Tunnel visitor at root with missing/stale token, redirecting', { host });
-                    return res.redirect(`/?token=${status.token}`);
-                }
-                // #77: mint an httpOnly cookie so the SPA's same-origin /api
-                // fetches are authenticated without frontend changes. Secure +
-                // SameSite=Strict — tunnel origins are always https.
-                res.setHeader('Set-Cookie',
-                    `${AUTH_COOKIE}=${encodeURIComponent(requestToken)}; Path=/; HttpOnly; Secure; SameSite=Strict`);
-            }
-        }
-
-        // /api/* already passed the unconditional auth middleware above — there
-        // is no separate, weaker tunnel rule any more. Hand it to the routes.
-        if (routedPath(req).startsWith('/api/')) {
-            return next();
-        }
-
-        // Try proxying to the Vite dev server first. If Vite isn't running
-        // (production), the connection is refused and we fall through to the
-        // static file server registered later in the middleware chain.
-        const proxyReq = httpRequest({
-            hostname: 'localhost',
-            port: PORTS.FRONTEND,
-            path: req.originalUrl,
-            method: req.method,
-            headers: { ...req.headers, host: `localhost:${PORTS.FRONTEND}` },
-        }, (proxyRes) => {
-            res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
-            proxyRes.pipe(res);
-        });
-        proxyReq.on('error', (err) => {
-            // Connection refused → Vite not running → fall through to static files
-            if ((err as NodeJS.ErrnoException).code === 'ECONNREFUSED') {
-                logger.info('Vite dev server not running, falling through to static files', { path: req.path });
-                return next();
-            }
-            logger.error('Vite proxy error', { error: err.message, path: req.path });
-            res.status(502).send('Frontend proxy error');
-        });
-        req.pipe(proxyReq);
-    });
-
     // Surfaced early and unconditionally: an operator deploying a container needs
     // to see in the first lines of output whether their volume mount took effect.
     logger.info(describeDataDir(dataDir));
@@ -713,29 +585,6 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
     // The agent registry is loaded at import time (no config store yet), so
     // hand the OpenCode adapter's health probe the configured port now.
     setOpencodePortProvider(() => configStore.getOpencodePort());
-
-    // Pin the tunnel to a reserved ngrok domain if one is configured. NGROK_DOMAIN
-    // wins over the stored setting so a deployment can force it without touching
-    // config.json. Empty on both = free tier, ngrok assigns the URL.
-    // The stored setting is validated on the way in by validateConfigUpdate;
-    // the env var bypassed that entirely, so a typo like `https://x.ngrok.app`
-    // or `x.ngrok.app:443` reached ngrok's argv and produced a tunnel that
-    // silently never came up. Hold both to the same rule and say so loudly.
-    const resolveNgrokDomain = (): string | null => {
-        const env = process.env.NGROK_DOMAIN?.trim();
-        if (env) {
-            if (isValidNgrokDomain(env)) return env;
-            logger.error(
-                'NGROK_DOMAIN is not a bare hostname and is being ignored — expected something like ' +
-                '"claudia.ngrok.app", with no scheme, port or path',
-                { value: env },
-            );
-        }
-        const stored = configStore.getConfig().ngrokDomain?.trim();
-        return stored || null;
-    };
-    tunnelManager.setDomain(resolveNgrokDomain());
-    logger.info('Tunnel domain resolved', { domain: tunnelManager.getDomain() || '(ngrok-assigned)' });
 
     // Initialize Plugin System
     logger.info('Initializing plugin system...');
@@ -882,20 +731,6 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
 
     // CheckpointStore for per-task git snapshots / restore points
     const checkpointStore = new CheckpointStore(dataDir);
-
-    // Wire up tunnel events for broadcasting
-    tunnelManager.on('tunnel:ready', (data: { url: string; token: string }) => {
-        logger.info('Tunnel ready, broadcasting status', { url: data.url });
-        broadcast({ type: 'tunnel:status' as WSMessageType, payload: tunnelManager.getStatus() });
-    });
-    tunnelManager.on('tunnel:error', (error: string) => {
-        logger.error('Tunnel error', { error });
-        broadcast({ type: 'tunnel:status' as WSMessageType, payload: { ...tunnelManager.getStatus(), error } });
-    });
-    tunnelManager.on('tunnel:closed', () => {
-        logger.info('Tunnel closed, broadcasting status');
-        broadcast({ type: 'tunnel:status' as WSMessageType, payload: tunnelManager.getStatus() });
-    });
 
     // Helper to extract rules from CLAUDE.md (reverse sync) - async version
     async function extractRulesFromClaudeMd(workspacePath: string): Promise<string | null> {
@@ -1891,10 +1726,11 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
     server.on('upgrade', (req, socket, head) => {
         const host = req.headers.host || '';
         const url = new URL(req.url || '/', `http://${host || 'localhost'}`);
-        const token = url.searchParams.get('token') || undefined;
+        const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '')?.[1];
+        const token = bearer || url.searchParams.get('token') || undefined;
 
         logger.info('WebSocket upgrade request', {
-            url: req.url,
+            path: url.pathname,
             host,
             peer: req.socket?.remoteAddress,
             hasToken: !!token,
@@ -1910,8 +1746,14 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
         const isViteHmr = process.env.NODE_ENV !== 'production'
             && subprotocols.split(',').some(p => p.trim() === 'vite-hmr');
         if (isViteHmr) {
-            logger.info('Rejecting Vite HMR WebSocket (not an app connection)', { path: req.url });
+            logger.info('Rejecting Vite HMR WebSocket (not an app connection)', { path: url.pathname });
             socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+            socket.destroy();
+            return;
+        }
+
+        if (!evaluateCorsOrigin(req.headers.origin, host, configStore.getConfig().tailscaleUrl).allowed) {
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
             return;
         }
@@ -1948,18 +1790,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
         clients.add(ws);
         clientAliveMap.set(ws, true); // Mark as alive on connection
 
-        // Tag loopback (localhost) connections, used to scope sensitive
-        // broadcasts (Jira) to local clients only.
-        //
-        // The socket peer alone is not sufficient here, and this is the one
-        // place where the tunnel's identity legitimately matters: the ngrok
-        // agent runs on this machine, so a phone's connection arrives from
-        // 127.0.0.1 like any local browser. This is a privacy-scoping decision
-        // about a feature, not an authentication decision — the connection is
-        // already authenticated — and it now asks the tunnel manager for its
-        // real URL instead of substring-matching the Host header.
-        const viaTunnel = isMobile || isTunnelHost(req.headers.host || '');
-        if (!viaTunnel && isLoopbackPeer(req)) loopbackClients.add(ws);
+        if (isLoopbackPeer(req)) loopbackClients.add(ws);
 
         // Handle pong responses to keep connection alive
         ws.on('pong', () => {
@@ -1990,13 +1821,6 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
             // task:viewers to know whether its own resizes will be honoured.
             payload: { tasks, workspaces, clientId }
         }));
-        // Send tunnel status so reconnecting clients (e.g. after tsx watch restart) know
-        // the tunnel is still active without waiting for a user action to trigger it.
-        const tunnelStatus = tunnelManager.getStatus();
-        if (tunnelStatus.active) {
-            ws.send(JSON.stringify({ type: 'tunnel:status' as WSMessageType, payload: tunnelStatus }));
-        }
-
         ws.on('message', async (data: Buffer) => {
             let messageTypeForError: string | undefined;
             try {
@@ -3292,15 +3116,6 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
                         break;
                     }
 
-                    case 'tunnel:status': {
-                        // Request tunnel status
-                        ws.send(JSON.stringify({
-                            type: 'tunnel:status',
-                            payload: tunnelManager.getStatus()
-                        }));
-                        break;
-                    }
-
                     // ===== Scheduled Tasks (Cron) =====
 
                     case 'cron:create': {
@@ -3765,6 +3580,12 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
      * (which connect from 127.0.0.1 but add X-Forwarded-*) gets everything else
      * without it.
      */
+    app.get('/api/auth/check', (_req, res) => res.json({ authenticated: true }));
+    app.post('/api/auth/logout', (_req, res) => {
+        res.clearCookie(AUTH_COOKIE, { path: '/', httpOnly: true, sameSite: 'strict' });
+        res.json({ success: true });
+    });
+
     app.get('/api/server-info', (req: Request, res: Response) => {
         res.json({
             instanceId: instance.instanceId,
@@ -4127,47 +3948,6 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
         }
     });
 
-    // ===== Tunnel Management Routes =====
-    app.post('/api/tunnel/start', async (_req, res) => {
-        try {
-            logger.info('Starting tunnel via API', { domain: tunnelManager.getDomain() || '(ngrok-assigned)' });
-            const status = await tunnelManager.start();
-            res.json(status);
-
-            // Confirm the public URL actually answers, AFTER responding so the
-            // QR code is not held up by a 15 s probe. A tunnel can be "up" —
-            // agent connected, local API healthy — while the hostname is
-            // blocked on the network and every phone gets nothing; this is the
-            // only signal that distinguishes the two.
-            void tunnelManager.checkReachable().then((reachable) => {
-                if (reachable === false) {
-                    logger.warn('Tunnel started but its public URL is unreachable from this machine');
-                }
-                broadcast({ type: 'tunnel:status' as WSMessageType, payload: tunnelManager.getStatus() });
-            }).catch(() => { /* probe is best-effort */ });
-        } catch (err) {
-            const errorMsg = err instanceof Error ? err.message : String(err);
-            logger.error('Failed to start tunnel', { error: errorMsg });
-            res.status(500).json({ error: errorMsg });
-        }
-    });
-
-    app.post('/api/tunnel/stop', async (_req, res) => {
-        try {
-            logger.info('Stopping tunnel via API');
-            await tunnelManager.stop();
-            res.json({ active: false });
-        } catch (err) {
-            const errorMsg = err instanceof Error ? err.message : String(err);
-            logger.error('Failed to stop tunnel', { error: errorMsg });
-            res.status(500).json({ error: errorMsg });
-        }
-    });
-
-    app.get('/api/tunnel/status', (_req, res) => {
-        res.json(tunnelManager.getStatus());
-    });
-
     // ===== Voice Agent API =====
 
     // Streaming voice message endpoint - streams text chunks and audio in real-time
@@ -4350,19 +4130,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
 
     // Voice agent page route
     app.get('/voice', (req, res) => {
-        let token = req.query.token as string;
-
-        if (!token) {
-            const host = req.headers.host || '';
-            const tunnelStatus = tunnelManager.getStatus();
-
-            if (isTunnelHost(host) && tunnelStatus.active && tunnelStatus.token) {
-                token = tunnelStatus.token;
-            } else {
-                res.status(401).send('Access denied: Missing token');
-                return;
-            }
-        }
+        const token = presentedToken(req) || '';
 
         // This page embeds the Deepgram API key, so it takes a real credential
         // on every host — see voice-auth.ts for the self-minted `local-` token
@@ -4375,7 +4143,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
         }
 
         // Use WebSocket URL from request
-        const protocol = req.protocol === 'https' ? 'wss' : 'ws';
+        const protocol = isSecureRequest(req) ? 'wss' : 'ws';
         const host = req.get('host');
         const wsUrl = `${protocol}://${host}`;
 
@@ -4401,34 +4169,6 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
                 }));
             }
         });
-    });
-
-    // ===== Mobile Route (legacy redirect) =====
-    // Old /mobile route now redirects to the React app root with the token.
-    // The responsive React frontend handles mobile layout automatically.
-    app.get('/mobile', (req, res) => {
-        let token = req.query.token as string;
-
-        if (!token) {
-            const host = req.headers.host || '';
-            const tunnelStatus = tunnelManager.getStatus();
-
-            if (isTunnelHost(host) && tunnelStatus.active && tunnelStatus.token) {
-                token = tunnelStatus.token;
-            } else {
-                res.status(401).send('Access denied: Missing token');
-                return;
-            }
-        }
-
-        if (!tunnelManager.validateToken(token)) {
-            res.status(401).send('Access denied: Invalid or expired token');
-            return;
-        }
-
-        // Redirect to the React app with the auth token
-        logger.info('Redirecting /mobile to React app', { hasToken: !!token });
-        res.redirect(`/?token=${token}`);
     });
 
     // ===== ElevenLabs TTS Route =====
@@ -6569,12 +6309,6 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
             // aiCoreCredentials, ...) are all-optional while AppConfig requires their fields.
             const updatedConfig = configStore.updateConfig(configUpdate as Parameters<typeof configStore.updateConfig>[0]);
 
-            // Tunnel domain: applies to the NEXT start(), so a running tunnel keeps
-            // its URL and no already-connected phone is cut off mid-session.
-            if (configUpdate.ngrokDomain !== undefined) {
-                tunnelManager.setDomain(resolveNgrokDomain());
-                broadcast({ type: 'tunnel:status' as WSMessageType, payload: tunnelManager.getStatus() });
-            }
 
             // If backend was changed, switch the task spawner's backend
             if (newBackend && newBackend !== currentBackend) {
@@ -6655,7 +6389,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
      */
     function jiraGuard(req: express.Request, res: express.Response, next: express.NextFunction): void {
         const host = req.headers.host || '';
-        if (!isLoopbackRequest(req) || isTunnelHost(host)) {
+        if (!isLoopbackRequest(req)) {
             logger.warn('Blocked non-loopback Jira request', { host });
             res.status(403).json({ error: 'Jira is only accessible from localhost.' });
             return;
@@ -6675,7 +6409,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
      */
     function jiraLoopbackOnly(req: express.Request, res: express.Response, next: express.NextFunction): void {
         const host = req.headers.host || '';
-        if (!isLoopbackRequest(req) || isTunnelHost(host)) {
+        if (!isLoopbackRequest(req)) {
             logger.warn('Blocked non-loopback Jira config request', { host });
             res.status(403).json({ error: 'Jira is only accessible from localhost.' });
             return;
@@ -8002,6 +7736,8 @@ Guidelines:
     // When installed via npm (no Vite dev server), serve the pre-built frontend
     const __server_filename = fileURLToPath(import.meta.url);
     const __server_dirname = dirname(__server_filename);
+    app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown API route' }));
+
     const frontendDistPath = join(__server_dirname, '..', '..', 'frontend', 'dist');
     if (existsSync(frontendDistPath)) {
         logger.info('Serving frontend from static dist', { path: frontendDistPath });
@@ -8010,6 +7746,8 @@ Guidelines:
         app.get('*', (_req, res) => {
             res.sendFile(join(frontendDistPath, 'index.html'));
         });
+    } else {
+        app.get('*', (_req, res) => res.status(503).send('Claudia frontend is not built. Run npm run build:frontend on the host.'));
     }
 
     // Graceful shutdown handler. exitCode 75 signals the start-script relaunch
@@ -8048,8 +7786,6 @@ Guidelines:
 
         // Give clients time to receive the message, then clean up
         setTimeout(() => {
-            // Stop tunnel if active
-            tunnelManager.stop().catch(() => {});
 
             taskSpawner.destroy();
 
@@ -8087,7 +7823,6 @@ Guidelines:
         clearTimeout(worktreeScanKickoff);
         clearTimeout(worktreeSweepKickoff);
 
-        try { await tunnelManager.stop(); } catch { /* best effort */ }
 
         // Kills child PTYs and clears the spawner's own intervals.
         taskSpawner.destroy();
@@ -8108,5 +7843,5 @@ Guidelines:
         });
     }
 
-    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, shutdownForTests, tunnelManager };
+    return { app, server, wss, taskSpawner, workspaceStore, supervisorChat, gracefulShutdown, shutdownForTests };
 }

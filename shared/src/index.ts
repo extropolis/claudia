@@ -434,7 +434,6 @@ export type WSMessageType =
     | 'server:reconnecting'
     | 'init'
     // Tunnel status
-    | 'tunnel:status'
     // Error handling
     | 'error';
 

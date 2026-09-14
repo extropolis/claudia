@@ -166,7 +166,7 @@ describe('isLoopbackPeer', () => {
     });
 
     it('accepts a genuine loopback socket', () => {
-        expect(isLoopbackPeer({ socket: { remoteAddress: '::ffff:127.0.0.1' }, headers: {} }, env())).toBe(true);
+        expect(isLoopbackPeer({ socket: { remoteAddress: '::ffff:127.0.0.1' }, headers: { host: 'localhost:4001' } }, env())).toBe(true);
     });
 
     it('refuses a forwarded request even when the socket really is loopback', () => {
@@ -189,7 +189,7 @@ describe('isLoopbackPeer', () => {
         const base = { socket: { remoteAddress: '127.0.0.1' } };
         expect(isLoopbackPeer({ ...base, headers: { 'x-forwarded-host': 'x.ngrok.app' } }, env())).toBe(false);
         expect(isLoopbackPeer({ ...base, headers: { forwarded: 'for=203.0.113.4' } }, env())).toBe(false);
-        expect(isLoopbackPeer({ ...base, headers: {} }, env())).toBe(true);
+        expect(isLoopbackPeer({ ...base, headers: { host: 'localhost:4001' } }, env())).toBe(true);
     });
 
     it('handles a request with no socket at all', () => {
@@ -220,15 +220,32 @@ describe('isSecureRequest', () => {
     });
 
     it('ignores X-Forwarded-Proto unless a trusted proxy is declared', () => {
-        const req = { protocol: 'http', headers: { 'x-forwarded-proto': 'https' } };
+        const req = { socket: { remoteAddress: '127.0.0.1' }, protocol: 'http', headers: { 'x-forwarded-proto': 'https' } };
         expect(isSecureRequest(req, {})).toBe(false);
         expect(isSecureRequest(req, { [TRUSTED_PROXY_ENV]: '1' })).toBe(true);
     });
 
     it('reads only the first hop of a multi-value X-Forwarded-Proto', () => {
         const trusted = { [TRUSTED_PROXY_ENV]: '1' };
-        expect(isSecureRequest({ headers: { 'x-forwarded-proto': 'https,http' } }, trusted)).toBe(true);
-        expect(isSecureRequest({ headers: { 'x-forwarded-proto': 'http,https' } }, trusted)).toBe(false);
-        expect(isSecureRequest({ headers: { 'x-forwarded-proto': ['https'] } }, trusted)).toBe(true);
+        expect(isSecureRequest({ socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-proto': 'https,http' } }, trusted)).toBe(true);
+        expect(isSecureRequest({ socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-proto': 'http,https' } }, trusted)).toBe(false);
+        expect(isSecureRequest({ socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-proto': ['https'] } }, trusted)).toBe(true);
+    });
+});
+
+describe('Serve peer hardening', () => {
+    const socket = { remoteAddress: '127.0.0.1' };
+    it.each(['pc.tail.ts.net', '127.attacker.example', '[invalid', ''])('rejects external or malformed local authority %s', host => {
+        expect(isLoopbackPeer({ socket, headers: { host } })).toBe(false);
+    });
+    it('fails closed without Host and permits local IPv6', () => {
+        expect(isLoopbackPeer({ socket })).toBe(false);
+        expect(isLoopbackPeer({ socket, headers: { host: '[::1]:4001' } })).toBe(true);
+    });
+    it('does not trust HTTPS headers from non-loopback peers', () => {
+        expect(isSecureRequest({ socket: { remoteAddress: '100.101.102.103' }, headers: { 'x-forwarded-proto': 'https' } }, { CLAUDIA_TRUSTED_PROXY: '1' })).toBe(false);
+    });
+    it('requires a scheme header on the configured loopback proxy', () => {
+        expect(isSecureRequest({ socket }, { CLAUDIA_TRUSTED_PROXY: '1' })).toBe(false);
     });
 });

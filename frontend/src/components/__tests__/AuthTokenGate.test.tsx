@@ -17,6 +17,7 @@ const REAL_FETCH = window.fetch;
 beforeEach(() => {
     clearAuthToken();
     window.sessionStorage.clear();
+    window.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ authenticated: true }) });
 });
 
 afterEach(() => {
@@ -82,5 +83,19 @@ describe('AuthTokenGate', () => {
 
         await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/same machine/i));
         expect(onAuthenticated).not.toHaveBeenCalled();
+    });
+});
+
+describe('remote login failures', () => {
+    it.each([401, 503])('does not connect after HTTP %s', async status => {
+        window.fetch = vi.fn().mockResolvedValue(new Response('{}', { status }));
+        const connected = vi.fn();
+        const user = userEvent.setup();
+        render(<AuthTokenGate onAuthenticated={connected} />);
+        await user.type(screen.getByLabelText('API token'), 'wrong');
+        await user.click(screen.getByRole('button', { name: 'Connect' }));
+        expect(await screen.findByRole('alert')).toHaveTextContent(status === 401 ? 'Token rejected' : 'Host unavailable');
+        expect(connected).not.toHaveBeenCalled();
+        expect(getAuthToken()).toBeNull();
     });
 });

@@ -10,11 +10,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { httpBaseFromWsUrl } from './src/utils/backend-url.js';
 
-const DEFAULT_BACKEND_URL = 'ws://localhost:4001';
+const DEFAULT_BACKEND_URL = (process.env.CLAUDIA_BACKEND_URL || 'ws://localhost:4001').replace('https://', 'wss://').replace('http://', 'ws://');
 
 /**
  * Read `--url` straight from argv for subcommands that run before parseArgs()
- * (Jira, tunnel). Returns the HTTP base so those handlers hit the same host
+ * (Jira, remote status). Returns the HTTP base so those handlers hit the same host
  * and port as the WebSocket client would.
  */
 function httpBaseFromArgv(argv: string[]): string {
@@ -70,7 +70,8 @@ const realFetch = globalThis.fetch.bind(globalThis);
 /** Attach the token to every backend request the CLI makes. */
 function installCliAuthFetch(): void {
     globalThis.fetch = ((input: any, init?: RequestInit) => {
-        if (!cliAuthToken) return realFetch(input, init);
+        const target = new URL(typeof input === 'string' ? input : input.url || String(input));
+        if (!cliAuthToken || target.origin !== new URL(httpBaseFromArgv(process.argv.slice(2))).origin) return realFetch(input, init);
         const headers = new Headers(init?.headers);
         if (!headers.has('x-claudia-token')) headers.set('x-claudia-token', cliAuthToken);
         return realFetch(input, { ...init, headers });
@@ -1805,11 +1806,7 @@ TASK OPERATIONS:
                            --task-id list and print the broadcast (deletes nothing)
   --clear-tasks            Clear all tasks
   --list-tasks             List all tasks with their status
-  --tunnel-status          Show tunnel state (url, token, domain, reachability)
-  --tunnel-start           Start the tunnel and probe whether its URL is reachable
-  --tunnel-stop            Stop the tunnel
-  --tunnel-domain <host>   Pin a reserved ngrok domain ("" clears it)
-  --tunnel-diagnose        Probe which ngrok domains this network allows
+  --remote-status          Check host identity and authentication (respects --url)
 
 STATE EXPORT (P0 task 10, spec §11.1):
   --export <dir>           Write a portable state export to <dir> (server-side path)
@@ -2731,11 +2728,6 @@ async function handleJiraCommand(argv: string[]): Promise<boolean> {
 
 // ============================================================================
 // Tunnel test commands (HTTP-based, self-contained).
-//   --tunnel-status                 show tunnel state incl. domain + reachability
-//   --tunnel-start                  start the tunnel
-//   --tunnel-stop                   stop the tunnel
-//   --tunnel-domain <host|"">       pin a reserved ngrok domain ("" clears it)
-//   --tunnel-diagnose               probe which ngrok zones this network allows
 // ============================================================================
 // ============================================================================
 // Portable state import + handoff (P0 task 11, spec §11.2/§11.3). Pure HTTP.
@@ -2991,108 +2983,23 @@ async function handleExportCommand(argv: string[]): Promise<boolean> {
     return true;
 }
 
-async function handleTunnelCommand(argv: string[]): Promise<boolean> {
-    const base = httpBaseFromArgv(argv);
-    const idx = (flag: string) => argv.indexOf(flag);
-    const val = (flag: string) => { const i = idx(flag); return i >= 0 ? argv[i + 1] : undefined; };
-
-    const show = (s: Record<string, unknown>) => {
-        console.log(`  active:     ${s.active}`);
-        console.log(`  url:        ${s.url ?? '(none)'}`);
-        console.log(`  token:      ${s.token ?? '(none)'}`);
-        console.log(`  domain:     ${s.domain ?? '(ngrok-assigned)'}`);
-        console.log(`  reachable:  ${s.reachable === null || s.reachable === undefined ? '(not probed)' : s.reachable}`);
-        if (s.publicIp) console.log(`  publicIp:   ${s.publicIp}`);
-        if (s.error) console.log(`  error:      ${s.error}`);
-        if (s.warning) console.log(`
-  WARNING: ${s.warning}`);
-        if (s.active && s.url && s.token) console.log(`
-  Open: ${s.url}/?token=${s.token}`);
-    };
-
-    if (idx('--tunnel-status') >= 0) {
-        show(await (await fetch(`${base}/api/tunnel/status`)).json());
-        return true;
-    }
-
-    if (idx('--tunnel-stop') >= 0) {
-        const res = await fetch(`${base}/api/tunnel/stop`, { method: 'POST' });
-        console.log(`Stopped (HTTP ${res.status})`);
-        return true;
-    }
-
-    if (idx('--tunnel-domain') >= 0) {
-        const domain = val('--tunnel-domain') ?? '';
-        const res = await fetch(`${base}/api/config`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ngrokDomain: domain }),
-        });
-        if (!res.ok) {
-            console.log(`Failed (HTTP ${res.status}): ${await res.text()}`);
-            return true;
-        }
-        console.log(`ngrokDomain set to ${domain ? `"${domain}"` : '(ngrok-assigned)'}`);
-        console.log('Takes effect on the next --tunnel-start (a running tunnel keeps its URL).');
-        return true;
-    }
-
-    if (idx('--tunnel-start') >= 0) {
-        console.log('Starting tunnel...');
-        const status = await (await fetch(`${base}/api/tunnel/start`, { method: 'POST' })).json();
-        show(status);
-        if (status.active && status.url) {
-            // The server probes asynchronously; give it a beat, then re-read.
-            console.log('\nProbing reachability...');
-            await new Promise(r => setTimeout(r, 16000));
-            show(await (await fetch(`${base}/api/tunnel/status`)).json());
-        }
-        return true;
-    }
-
-    if (idx('--tunnel-diagnose') >= 0) {
-        // Which ngrok zones does THIS network actually allow? A network that
-        // drops one zone by SNI makes a perfectly healthy tunnel unreachable,
-        // and nothing else in the stack can tell you that.
-        const zones = ['ngrok.com', 'probe.ngrok.app', 'probe.ngrok.io', 'probe.ngrok-free.app', 'probe.ngrok-free.dev'];
-        console.log('Probing ngrok domains from this machine (404 = reachable, ngrok just has no such endpoint):\n');
-        for (const host of zones) {
-            const ctrl = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), 12000);
-            try {
-                const res = await fetch(`https://${host}/`, { signal: ctrl.signal });
-                console.log(`  ${host.padEnd(26)} OK    (HTTP ${res.status})`);
-            } catch (e) {
-                console.log(`  ${host.padEnd(26)} BLOCKED  ${e instanceof Error ? e.message : String(e)}`);
-            } finally {
-                clearTimeout(timer);
-            }
-        }
-        console.log('\nIf one zone is BLOCKED while others are OK, this network filters that domain.');
-        console.log('Pin a reserved domain on a working zone:  --tunnel-domain <your>.ngrok.app');
-        return true;
-    }
-
-    return false;
-}
-
 async function main() {
     // Auth first: every /api route and every WS upgrade needs a token, and the
-    // Jira/tunnel commands below are pure HTTP that would 401 without one.
+    // Jira commands below are pure HTTP that would 401 without one.
     installCliAuthFetch();
-    await bootstrapCliAuth(
-        (process.env.CLAUDIA_BACKEND_URL || 'http://localhost:4001')
-            .replace('ws://', 'http://')
-            .replace('wss://', 'https://'),
-    );
+    await bootstrapCliAuth(httpBaseFromArgv(process.argv.slice(2)));
+    if (process.argv.includes('--remote-status')) {
+        const base = httpBaseFromArgv(process.argv.slice(2));
+        const info = await fetch(`${base}/api/server-info`, { signal: AbortSignal.timeout(8000) });
+        if (!info.ok) throw new Error(`Host probe failed: HTTP ${info.status}`);
+        const identity = await info.json() as { instanceId?: string; version?: string };
+        const auth = await fetch(`${base}/api/auth/check`, { signal: AbortSignal.timeout(8000) });
+        console.log(JSON.stringify({ backend: base, instanceId: identity.instanceId, version: identity.version, authenticated: auth.ok }, null, 2));
+        process.exit(auth.ok && identity.instanceId ? 0 : 1);
+    }
 
     // Jira commands short-circuit before the WS machinery.
     if (await handleJiraCommand(process.argv.slice(2))) {
-        process.exit(0);
-    }
-
-    // Tunnel commands likewise — pure HTTP, no WebSocket needed.
-    if (await handleTunnelCommand(process.argv.slice(2))) {
         process.exit(0);
     }
 

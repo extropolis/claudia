@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useTaskStore } from '../stores/taskStore';
 import { WSMessage, WSErrorPayload, Task, Workspace, TaskSummary, SuggestedAction, ChatMessage, WaitingInputType } from '@claudia/shared';
-import { getWebSocketUrl, getApiBaseUrl, isTunnelAccess } from '../config/api-config';
+import { getWebSocketUrl, getApiBaseUrl } from '../config/api-config';
 import { playTaskCompletionSound, sendTaskCompletionNotification, sendTaskWaitingInputNotification } from '../utils/browserCapabilities';
 import { clientIdentity } from '../config/client-identity';
 
@@ -38,34 +38,6 @@ export function sendWsMessage(type: string, payload: unknown): void {
 const RECONNECT_BASE_DELAY = 1000;
 /** Maximum reconnection delay in ms */
 const RECONNECT_MAX_DELAY = 30000;
-
-/**
- * Warm up the tunnel connection before attempting WebSocket.
- * Makes an HTTP request to the backend first to ensure the tunnel is
- * responsive and any proxy layers have been initialized.
- * Returns true if warmup succeeded, false otherwise.
- */
-async function warmUpTunnel(): Promise<boolean> {
-    if (!isTunnelAccess()) return true; // no warmup needed for local connections
-
-    try {
-        console.log('[WebSocket] 🌐 Tunnel detected, warming up HTTP connection first...');
-        console.log('[WebSocket] Fetching:', `${API_URL}/api/tunnel/status`);
-        const res = await fetch(`${API_URL}/api/tunnel/status`, {
-            credentials: 'include', // Ensure cookies are sent/received
-        });
-        console.log('[WebSocket] Warmup fetch response status:', res.status, res.statusText);
-        if (res.ok) {
-            console.log('[WebSocket] ✓ Tunnel warmup succeeded');
-            return true;
-        }
-        console.warn('[WebSocket] ⚠️ Tunnel warmup returned non-OK status:', res.status);
-        return false;
-    } catch (err) {
-        console.warn('[WebSocket] ❌ Tunnel warmup failed with error:', err);
-        return false;
-    }
-}
 
 // Note: Polling removed for performance - WebSocket handles all state updates reliably
 
@@ -112,7 +84,7 @@ export function useWebSocket() {
 
     const connect = useCallback(async () => {
         const currentState = wsRef.current?.readyState;
-        console.log(`[WebSocket] connect() called - current state: ${currentState}, isTunnel: ${isTunnelAccess()}`);
+        console.log(`[WebSocket] connect() called - current state: ${currentState}`);
 
         if (isUnmountedRef.current) {
             console.log('[WebSocket] Skipping connect - hook is unmounted');
@@ -131,24 +103,6 @@ export function useWebSocket() {
             wsRef.current?.readyState === WebSocket.CONNECTING) {
             console.log('[WebSocket] Skipping connect - already OPEN or CONNECTING');
             return;
-        }
-
-        // For tunnel connections, warm up with HTTP first to ensure
-        // the tunnel proxy is responsive before attempting WebSocket
-        if (isTunnelAccess()) {
-            console.log('[WebSocket] Tunnel detected - starting warmup...');
-            const warmupOk = await warmUpTunnel();
-            if (!warmupOk) {
-                console.warn('[WebSocket] ❌ Tunnel warmup FAILED - scheduling retry in 2s...');
-                reconnectTimeoutRef.current = window.setTimeout(connect, 2000);
-                return;
-            }
-            console.log('[WebSocket] ✓ Tunnel warmup SUCCESS - proceeding with WebSocket...');
-            // We awaited — the hook may have unmounted in the meantime.
-            if (isUnmountedRef.current) {
-                console.log('[WebSocket] Aborting connect after warmup - hook is unmounted');
-                return;
-            }
         }
 
         // Built here, per attempt, so a token acquired (or replaced) after boot
@@ -683,15 +637,6 @@ export function useWebSocket() {
                             const store = useTaskStore.getState();
                             for (const t of payload.todos) store.updateTodo(t);
                         }
-                        break;
-                    }
-                    case 'tunnel:status': {
-                        // Broadcast tunnel status change to App.tsx via a custom DOM event.
-                        // The tunnel token may have changed (e.g. after tsx watch reload + adopt),
-                        // so the UI needs to refresh its copy of the active state.
-                        const payload = message.payload as { active: boolean; url?: string | null; error?: string | null };
-                        console.log('[WebSocket] Tunnel status update:', payload.active, payload.url);
-                        window.dispatchEvent(new CustomEvent('claudia:tunnelStatus', { detail: payload }));
                         break;
                     }
                     case 'error': {

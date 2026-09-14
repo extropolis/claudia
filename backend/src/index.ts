@@ -125,7 +125,7 @@ if (process.env.CLAUDIA_SHARED_MCP !== '0') {
 console.log(`[Index] Starting server on port ${PORT}...`);
 let httpServer: ReturnType<typeof server.listen> | undefined;
 try {
-    httpServer = server.listen(PORT, () => {
+    httpServer = server.listen({ port: PORT_NUMBER, host: process.env.CLAUDIA_BIND_HOST || undefined }, () => {
         console.log(`Claude Code UI running on http://localhost:${PORT}`);
         console.log(`WebSocket available at ws://localhost:${PORT}`);
         console.log(`[Index] Server successfully listening`);
