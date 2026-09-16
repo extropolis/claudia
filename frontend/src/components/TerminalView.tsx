@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, MutableRefObject } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -12,6 +12,7 @@ import { TaskTokenStats } from './TaskTokenStats';
 import { useEffectiveTheme } from '../hooks/useTheme';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
 import { getApiBaseUrl } from '../config/api-config';
+import { subscribeToWsMessages } from '../hooks/useWebSocket';
 import { lastKnownTerminalSize } from '../config/terminal-size';
 import { clientIdentity } from '../config/client-identity';
 import '@xterm/xterm/css/xterm.css';
@@ -72,6 +73,24 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     const [showSpinner, setShowSpinner] = useState(false);
     const historyLoadedRef = useRef(false);
 
+    // task.prompt from the task list is now a truncated preview (see backend
+    // TaskSpawner.getTaskListForBroadcast) — the bulk broadcast dropped full
+    // prompt text since this is the only place in the app that needs it in
+    // full. Fetch it once per task selection; fall back to the preview while
+    // in flight or if the fetch fails, so nothing blocks on it.
+    const [fullPrompt, setFullPrompt] = useState(task.prompt);
+    useEffect(() => {
+        setFullPrompt(task.prompt);
+        let cancelled = false;
+        fetch(`${getApiBaseUrl()}/api/tasks/${task.id}`)
+            .then(r => r.ok ? r.json() : null)
+            .then((full: { prompt?: string } | null) => {
+                if (!cancelled && full?.prompt) setFullPrompt(full.prompt);
+            })
+            .catch(() => { /* keep the preview */ });
+        return () => { cancelled = true; };
+    }, [task.id]);
+
     // Chunked history scrollback: we keep the loaded portion of the on-disk
     // history file as a string and lazy-load earlier chunks when the user
     // scrolls within ~100px of the top. `topOffsetRef` is the byte offset
@@ -79,6 +98,42 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     // When `topOffsetRef.current === 0` we've loaded everything.
     const loadedHistoryRef = useRef<string>('');
     const topOffsetRef = useRef<number>(0);
+
+    // Cap on loadedHistoryRef's live-output growth (see appendToLoadedHistory).
+    // Matches the initial restore's own truncation cap (server.ts / TerminalView
+    // history fetch), so the buffer never exceeds what a fresh restore would load.
+    const MAX_LOADED_HISTORY = 2 * 1024 * 1024;
+
+    // Appends a live-output chunk to loadedHistoryRef, trimming from the front
+    // once the buffer exceeds MAX_LOADED_HISTORY.
+    //
+    // Without this, loadedHistoryRef grows forever for as long as the terminal
+    // stays mounted — every live output chunk appends and nothing ever removes.
+    // A task left open for a long session keeps accumulating megabytes it never
+    // needs (measured: over 500KB within minutes on a moderately active task),
+    // and it's all rewritten into xterm in one `term.write()` call the next time
+    // the user scrolls up to load earlier history — the longer the session runs
+    // before that happens, the bigger that rewrite gets.
+    //
+    // The cut point is aligned to the next newline (within 1KB of the target) so
+    // trimming can't split a line — and with it, an escape sequence — in half.
+    // Mirrors the same alignment the backend's history-file rotation uses.
+    // Returns the number of characters trimmed from the front, if any — callers
+    // advance topOffsetRef by this amount so a later scroll-up fetch still lands
+    // where the (now-shorter) in-memory buffer actually starts on disk.
+    function appendToLoadedHistory(ref: MutableRefObject<string>, chunk: string): number {
+        let next = ref.current + chunk;
+        let trimmed = 0;
+        if (next.length > MAX_LOADED_HISTORY) {
+            const excess = next.length - MAX_LOADED_HISTORY;
+            const nl = next.indexOf('\n', excess);
+            const cut = nl >= 0 && nl < excess + 1024 ? nl + 1 : excess;
+            next = next.slice(cut);
+            trimmed = cut;
+        }
+        ref.current = next;
+        return trimmed;
+    }
 
     // --- Multi-client viewer model -------------------------------------------
     // One backend serves many clients, but a PTY has exactly one size. The
@@ -163,7 +218,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
 
     const copyToClipboard = async () => {
         try {
-            await navigator.clipboard.writeText(task.prompt);
+            await navigator.clipboard.writeText(fullPrompt);
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
         } catch (err) {
@@ -632,10 +687,13 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
         };
         window.addEventListener('resize', handleWindowResize);
 
-        // Message handler
-        const handleMessage = (event: MessageEvent) => {
+        // Message handler. Receives already-parsed messages via subscribeToWsMessages
+        // (useWebSocket.ts parses each WS frame once and fans it out) rather than
+        // attaching our own listener to the raw socket and re-parsing every frame —
+        // tasks:updated alone can be a couple MB, and this component doesn't even
+        // care about that type.
+        const handleMessage = (message: { type: string; payload: any }) => {
             try {
-                const message = JSON.parse(event.data);
                 if (message.type === 'task:output' && message.payload.taskId === task.id) {
                     const data = message.payload.data;
 
@@ -649,7 +707,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                         // scroll-up (term.reset + rewrite) — replaying raw live
                         // queries would make xterm re-answer them into the PTY.
                         if (loadedHistoryRef.current !== '') {
-                            loadedHistoryRef.current += stripTerminalQueries(data);
+                            topOffsetRef.current += appendToLoadedHistory(loadedHistoryRef, stripTerminalQueries(data));
                         }
                         if (totalSizeRef.current > 0) {
                             totalSizeRef.current += data.length;
@@ -679,7 +737,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
                     // live term.write above stays raw — the live TUI needs its
                     // queries answered in real time).
                     if (loadedHistoryRef.current !== '') {
-                        loadedHistoryRef.current += stripTerminalQueries(message.payload.data);
+                        topOffsetRef.current += appendToLoadedHistory(loadedHistoryRef, stripTerminalQueries(message.payload.data));
                     }
                     if (totalSizeRef.current > 0) {
                         // Match the byte count the backend file is growing by so
@@ -801,9 +859,11 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             }
         };
 
-        if (wsRef.current) {
-            wsRef.current.addEventListener('message', handleMessage);
-        }
+        const unsubscribers = [
+            subscribeToWsMessages('task:output', handleMessage),
+            subscribeToWsMessages('task:viewers', handleMessage),
+            subscribeToWsMessages('task:restore', handleMessage),
+        ];
 
         // Interacting with the terminal claims it. `focusin` covers keyboard
         // navigation into xterm's hidden textarea; `mousedown` covers a click
@@ -825,9 +885,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
             if (viewport) {
                 viewport.removeEventListener('scroll', handleViewportScroll);
             }
-            if (wsRef.current) {
-                wsRef.current.removeEventListener('message', handleMessage);
-            }
+            for (const unsubscribe of unsubscribers) unsubscribe();
             container.removeEventListener('focusin', claimOnInteraction);
             container.removeEventListener('mousedown', claimOnInteraction);
             term.dispose();
@@ -868,7 +926,7 @@ export function TerminalView({ task, wsRef, workspace, isMobile }: TerminalViewP
     return (
         <div className="terminal-view" data-testid="terminal">
             <div className="terminal-header">
-                <span className="terminal-title" data-testid="terminal-title">{task.prompt}</span>
+                <span className="terminal-title" data-testid="terminal-title">{fullPrompt}</span>
                 <button
                     className={`copy-button ${copied ? 'copied' : ''}`}
                     onClick={copyToClipboard}

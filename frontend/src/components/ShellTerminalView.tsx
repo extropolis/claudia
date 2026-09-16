@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { X, Copy, Check } from 'lucide-react';
 import { useEffectiveTheme } from '../hooks/useTheme';
+import { subscribeToWsMessages } from '../hooks/useWebSocket';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../types/theme';
 import '@xterm/xterm/css/xterm.css';
 import './ShellTerminalView.css';
@@ -193,10 +194,11 @@ export function ShellTerminalView({ workspaceId, workspaceName, wsRef, onClose, 
         };
         window.addEventListener('resize', handleWindowResize);
 
-        // Listen for shell output and exit from backend
-        const handleMessage = (event: MessageEvent) => {
+        // Listen for shell output and exit from backend. Subscribes to
+        // already-parsed messages (see useWebSocket.ts) instead of attaching our
+        // own raw socket listener and re-parsing every frame.
+        const handleMessage = (message: { type: string; payload: any }) => {
             try {
-                const message = JSON.parse(event.data);
                 if (message.type === 'shell:output' && message.payload.workspaceId === workspaceId) {
                     term.write(message.payload.data);
                 } else if (message.type === 'shell:exited' && message.payload.workspaceId === workspaceId) {
@@ -209,9 +211,11 @@ export function ShellTerminalView({ workspaceId, workspaceName, wsRef, onClose, 
             }
         };
 
-        if (wsRef.current) {
-            wsRef.current.addEventListener('message', handleMessage);
-        }
+        const unsubscribers = [
+            subscribeToWsMessages('shell:output', handleMessage),
+            subscribeToWsMessages('shell:exited', handleMessage),
+            subscribeToWsMessages('shell:closed', handleMessage),
+        ];
 
         // Create the shell session on the backend
         if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -226,9 +230,7 @@ export function ShellTerminalView({ workspaceId, workspaceName, wsRef, onClose, 
             if (resizeTimeout) window.clearTimeout(resizeTimeout);
             resizeObserver.disconnect();
             window.removeEventListener('resize', handleWindowResize);
-            if (wsRef.current) {
-                wsRef.current.removeEventListener('message', handleMessage);
-            }
+            for (const unsubscribe of unsubscribers) unsubscribe();
             term.dispose();
             xtermRef.current = null;
             fitAddonRef.current = null;
