@@ -19,7 +19,7 @@
  */
 import { existsSync } from 'fs';
 import { test, expect } from '../fixtures/test.js';
-import { DEFAULT_STATE_FILES, STATE_DIR } from '../harness/env.js';
+import { DEFAULT_STATE_FILES, STATE_DIR, legacyBaseline, legacyState } from '../harness/env.js';
 import { makeGitRepo, type TempRepo } from '../harness/repo.js';
 import { addWorkspace, createTask, openApp } from '../harness/ui.js';
 
@@ -52,7 +52,14 @@ test('the sandbox state dir is the one that actually gets written', async ({ pag
 });
 
 test('no state escaped the sandbox over the whole run', () => {
-    const leaked = DEFAULT_STATE_FILES.filter((f) => existsSync(f));
+    // Same bookkeeping as 00-isolation: compare against the snapshot taken
+    // before the backend booted, not against "does the file exist". The unit
+    // suites legitimately leave files like backend/mcp-token behind, and a
+    // developer's checkout may carry real state — neither is a leak. Only a
+    // file this run CREATED or MODIFIED is.
+    const before = legacyBaseline();
+    const after = legacyState();
+    const leaked = DEFAULT_STATE_FILES.filter((f) => after[f] !== before[f]);
     expect(
         leaked,
         'a store wrote outside CLAUDIA_DATA_DIR — these files live in the ' +
