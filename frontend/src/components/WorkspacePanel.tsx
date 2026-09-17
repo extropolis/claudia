@@ -16,6 +16,7 @@ import { ScheduledTasksModal } from './ScheduledTasksModal';
 import { WorkspaceManager } from './WorkspaceManager';
 import { SessionUsageMeter } from './SessionUsageMeter';
 import './WorkspacePanel.css';
+import { TASK_DRAG_MIME } from '../config/drag-constants';
 
 // Prompt template for the "Analyze Sessions → Issues" quick action.
 // Spawns a task that mines this machine's Claude Code session history for
@@ -302,6 +303,9 @@ function TaskItem({ task, index, onDeleteTask, onInterruptTask, onArchiveTask, o
                     e.dataTransfer.setDragImage(taskItemRef.current, 10, 10);
                 }
                 e.dataTransfer.effectAllowed = 'move';
+                // Split-screen: carry the task id so a pane can accept this drag.
+                // Purely additive — sidebar reordering still uses the index below.
+                e.dataTransfer.setData(TASK_DRAG_MIME, task.id);
                 onDragStart(index);
             }}
             onDragEnd={onDragEnd}

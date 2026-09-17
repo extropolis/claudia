@@ -1,0 +1,145 @@
+/*
+ * Split-pane layout primitive.
+ *
+ * All colours come from the app-wide custom properties defined in
+ * src/styles/index.css (:root / [data-theme="light"]), so this respects
+ * useTheme's light/dark switch automatically. No hardcoded hex values.
+ *
+ * Layout note: this is NOT a nested flex tree. Every leaf in the pane tree is
+ * an absolutely positioned direct child of .split-root, with its rect computed
+ * from the tree in JS (see the header comment in SplitContainer.tsx — the flat
+ * structure is what stops React from remounting live xterm instances whenever
+ * the tree is restructured). Dividers are overlays centred on the boundary and
+ * consume no layout space, which keeps the drag math exact.
+ */
+
+.split-root {
+    position: relative;
+    /*
+     * `flex: 1 1 auto` so that when the parent (.main-panel, a flex column)
+     * also renders the shell-switch banner, this shrinks to the space actually
+     * left over instead of overflowing by the banner's height. The 100%
+     * width/height keep it filling a non-flex parent too.
+     */
+    flex: 1 1 auto;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--bg-primary);
+}
+
+/* Suppress text selection and pointer-events churn while a divider is dragged. */
+.split-root--dragging {
+    user-select: none;
+}
+
+.split-root--dragging .split-leaf {
+    pointer-events: none;
+}
+
+/* --- Leaf ---------------------------------------------------------------- */
+
+/*
+ * The min-width/min-height are a belt-and-braces PIXEL floor.
+ * MIN_PANE_FRACTION already stops a pane from taking too small a FRACTION of
+ * its parent, but in a narrow window 8% of the viewport is still only a handful
+ * of xterm columns. These floors make a pane overflow (and be clipped by
+ * .split-root) rather than collapse into an unusable sliver.
+ */
+.split-leaf {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    min-width: 80px;
+    min-height: 80px;
+    overflow: hidden;
+    background: var(--bg-primary);
+    border: 1px solid transparent;
+    border-radius: 4px;
+    box-sizing: border-box;
+}
+
+.split-leaf > * {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+}
+
+.split-leaf--focused {
+    border-color: var(--accent-secondary);
+    box-shadow: inset 0 0 0 1px var(--accent-secondary);
+    z-index: 1;
+}
+
+/* --- Divider ------------------------------------------------------------- */
+
+/*
+ * The divider is a 6px hit strip with a 1px visible line centred in it, plus a
+ * wider invisible grab zone via the ::before pseudo-element so the cursor
+ * catches it without pixel-hunting. It is positioned so its CENTRE sits exactly
+ * on the boundary between the two panes it resizes (negative margin of half the
+ * strip width), and it overlays the panes instead of displacing them.
+ */
+.split-divider {
+    position: absolute;
+    background: transparent;
+    z-index: 2;
+}
+
+.split-divider::before {
+    content: '';
+    position: absolute;
+    inset: -3px;
+}
+
+.split-divider--row {
+    cursor: col-resize;
+}
+
+.split-divider--column {
+    cursor: row-resize;
+}
+
+.split-divider__line {
+    position: absolute;
+    background: var(--border-color);
+    transition: background 0.12s ease;
+}
+
+.split-divider--row .split-divider__line {
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 1px;
+    transform: translateX(-50%);
+}
+
+.split-divider--column .split-divider__line {
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 1px;
+    transform: translateY(-50%);
+}
+
+.split-divider:hover .split-divider__line,
+.split-divider:focus-visible .split-divider__line,
+.split-root--dragging .split-divider .split-divider__line {
+    background: var(--accent-secondary);
+}
+
+.split-divider--row:hover .split-divider__line,
+.split-divider--row:focus-visible .split-divider__line {
+    width: 2px;
+}
+
+.split-divider--column:hover .split-divider__line,
+.split-divider--column:focus-visible .split-divider__line {
+    height: 2px;
+}
+
+.split-divider:focus-visible {
+    outline: none;
+}

@@ -1,0 +1,194 @@
+/*
+ * One pane of the split grid. Colours come from the app-wide custom properties
+ * in src/styles/index.css so this follows the light/dark theme switch.
+ */
+
+.pane-host {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.pane-host > .terminal-view {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+/*
+ * Narrow panes. The terminal header is a single non-wrapping row with
+ * overflow: hidden, sized for a full-width terminal: in a ~300px pane the title
+ * collapsed to nothing and the pane controls (split / close) were clipped off
+ * the right edge — unreachable. The app's mobile breakpoint cannot help, since
+ * a pane is narrow on a wide screen, so each pane is a size container and the
+ * header compacts on the PANE's width instead of the viewport's.
+ */
+.pane-host {
+    container-type: inline-size;
+    container-name: pane;
+}
+
+/* Every selector below is prefixed with .pane-host: at equal specificity the
+   bundle's CSS order decides, and TerminalView.css's own .copy-button rule was
+   winning — the copy button stayed visible and its width came out of the title. */
+@container pane (max-width: 560px) {
+    .pane-host .terminal-header {
+        padding: 6px 10px;
+        gap: 4px;
+    }
+    .pane-host .terminal-title {
+        /* Shrinks first, but never to nothing. */
+        min-width: 6ch;
+        -webkit-line-clamp: 1;
+        max-height: calc(1 * 1.4em);
+        font-size: 13px;
+    }
+    /* Icon-only Learn button, as on mobile. */
+    .pane-host .learn-button {
+        padding: 4px 6px;
+        font-size: 0;
+        gap: 0;
+    }
+    .pane-host .terminal-viewing-badge {
+        max-width: 12ch;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .pane-host .pane-controls {
+        margin-left: auto;
+    }
+}
+
+@container pane (max-width: 380px) {
+    .pane-host .copy-button,
+    .pane-host .terminal-viewing-badge {
+        display: none;
+    }
+    .pane-host .terminal-state {
+        font-size: 10px;
+        padding: 2px 5px;
+    }
+}
+
+/* ---- Pane chrome (injected into the terminal header) ---- */
+
+.pane-controls {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+    margin-left: 6px;
+    padding-left: 6px;
+    border-left: 1px solid var(--border-color);
+}
+
+.pane-control-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+
+.pane-control-button:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.pane-control-button:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.pane-control-close:hover:not(:disabled) {
+    background: var(--accent-red);
+    color: #fff;
+}
+
+/* ---- Empty pane ---- */
+
+.pane-empty {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    background: var(--bg-primary);
+}
+
+.pane-empty-chrome {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+
+/* The chrome divider reads as a stray line when it is the only thing in the bar. */
+.pane-empty-chrome .pane-controls {
+    border-left: none;
+    padding-left: 0;
+    margin-left: 0;
+}
+
+.pane-empty-body {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 16px;
+    text-align: center;
+    color: var(--text-muted);
+    min-height: 0;
+}
+
+.pane-empty-body h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.pane-empty-body p {
+    margin: 0;
+    font-size: 13px;
+    max-width: 30ch;
+    line-height: 1.45;
+}
+
+/* ---- Drop target ---- */
+
+.pane-host--drop-target {
+    outline: 2px dashed var(--accent-primary);
+    outline-offset: -2px;
+}
+
+.pane-drop-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+    /* Must not eat the dragover/drop events firing on .pane-host. */
+    pointer-events: none;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--accent-primary) 18%, transparent);
+}
