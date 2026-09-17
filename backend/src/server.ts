@@ -877,10 +877,15 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
     );
     cronScheduler.start();
 
-    // TodoStore for per-task user TODOs
+    // TodoStore for per-task user TODOs.
+    // MUST be `dataDir`, not `basePath`/nothing: `basePath` is only set when
+    // Electron passes userData, so a CLI/container/E2E instance configured with
+    // CLAUDIA_DATA_DIR would fall back to the in-source-tree backend/todos.json
+    // and write outside its configured data directory.
     const todoStore = new TodoStore(dataDir);
 
-    // CheckpointStore for per-task git snapshots / restore points
+    // CheckpointStore for per-task git snapshots / restore points.
+    // Same reason as above — `basePath` is undefined under CLAUDIA_DATA_DIR.
     const checkpointStore = new CheckpointStore(dataDir);
 
     // Wire up tunnel events for broadcasting

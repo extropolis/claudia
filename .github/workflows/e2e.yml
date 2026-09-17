@@ -1,0 +1,64 @@
+name: E2E (browser)
+
+# Browser-level end-to-end tests: real backend + real frontend build + real
+# Chromium, on sandboxed ports with an isolated state dir and a fake Claude CLI.
+# Owned by the e2e/ suite — unit/integration coverage gating lives in tests.yml.
+
+# NOT a required PR check on day one. The suite boots a real backend, a real
+# frontend build and a real browser; until it has proven itself stable across a
+# few weeks of nightly runs it must not be able to block a merge. Promote it to
+# `pull_request:` once the nightly history is green.
+on:
+  workflow_dispatch:
+  schedule:
+    # 07:00 UTC daily.
+    - cron: '0 7 * * *'
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: Playwright (ubuntu, node 20)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      # The suite builds shared/backend/frontend itself at config-load time so
+      # the frontend bundle is compiled with the sandboxed backend port baked
+      # in. No separate build step here — a hand-built bundle would silently
+      # point at the default port.
+      - name: Run E2E tests
+        run: npx playwright test
+        env:
+          CI: 'true'
+
+      - name: Upload HTML report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 14
+
+      - name: Upload traces, screenshots and videos
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: test-results/
+          retention-days: 14

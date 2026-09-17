@@ -418,6 +418,7 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
                         rows={1}
                         className="task-input-textarea"
                         data-input-type="task-input"
+                        data-testid="task-input"
                     />
                     {showInterim && (
                         <span className="interim-indicator">{voiceInterimTranscript}</span>
@@ -459,6 +460,7 @@ export function TaskInputBar({ task, wsRef }: TaskInputBarProps) {
                     onClick={() => sendMessage()}
                     disabled={isDisabled || (!message.trim() && images.length === 0)}
                     className="task-input-send"
+                    data-testid="task-input-send"
                     title="Send message (Enter)"
                 >
                     <Send size={18} />
