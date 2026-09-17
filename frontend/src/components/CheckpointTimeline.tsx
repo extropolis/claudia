@@ -11,6 +11,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { Checkpoint } from '@claudia/shared';
+import { subscribeToWsMessages } from '../hooks/useWebSocket';
 import './CheckpointTimeline.css';
 
 interface CheckpointTimelineProps {
@@ -52,12 +53,12 @@ export function CheckpointTimeline({ taskId, workspaceId, wsRef }: CheckpointTim
   }, [fetchCheckpoints]);
 
   useEffect(() => {
-    const ws = wsRef.current;
-    if (!ws) return;
-
-    const handler = (event: MessageEvent) => {
+    // Subscribes to already-parsed messages (see useWebSocket.ts) instead of
+    // attaching our own raw socket listener — this component mounts under
+    // every open TerminalView, so a raw listener here re-parsed every WS
+    // frame (including multi-MB tasks:updated broadcasts) a second time.
+    const handler = (msg: { type: string; payload: any }) => {
       try {
-        const msg = JSON.parse(event.data);
         switch (msg.type) {
           case 'checkpoint:list':
             setCheckpoints(msg.payload.checkpoints || []);
@@ -111,9 +112,17 @@ export function CheckpointTimeline({ taskId, workspaceId, wsRef }: CheckpointTim
       }
     };
 
-    ws.addEventListener('message', handler);
-    return () => ws.removeEventListener('message', handler);
-  }, [wsRef, fetchCheckpoints, taskId, checkpoints]);
+    const unsubscribers = [
+      'checkpoint:list',
+      'checkpoint:created',
+      'checkpoint:deleted',
+      'checkpoint:restored',
+      'checkpoint:forked',
+      'checkpoint:restore-selective-result',
+      'checkpoint:restore-force-result',
+    ].map((type) => subscribeToWsMessages(type, handler));
+    return () => { for (const unsubscribe of unsubscribers) unsubscribe(); };
+  }, [fetchCheckpoints, taskId, checkpoints]);
 
   const handleCreate = () => {
     sendWS('checkpoint:create', { taskId, workspaceId, name: newName || undefined });

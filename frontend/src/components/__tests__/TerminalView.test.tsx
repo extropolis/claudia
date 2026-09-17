@@ -118,6 +118,7 @@ import { useTaskStore } from '../../stores/taskStore';
 import { clientIdentity } from '../../config/client-identity';
 import { getApiBaseUrl } from '../../config/api-config';
 import { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME } from '../../types/theme';
+import { dispatchToSubscribers } from '../../hooks/useWebSocket';
 
 const TASK_ID = 'task-1';
 const RESIZE_BUFFER_MS = 250;
@@ -147,9 +148,15 @@ function frames(socket: FakeSocket, type?: string) {
         .filter(m => !type || m.type === type);
 }
 
-function emit(socket: FakeSocket, message: unknown) {
+// TerminalView subscribes via subscribeToWsMessages (useWebSocket.ts parses each
+// frame once and fans it out) rather than listening on the raw socket, so tests
+// simulate an incoming message the same way the real ws.onmessage delivers it.
+// `socket` is unused here but kept in the signature — every call site already
+// passes it, and it documents which fake connection the message conceptually
+// arrived on.
+function emit(_socket: FakeSocket, message: { type: string; payload: unknown }) {
     act(() => {
-        socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(message) }));
+        dispatchToSubscribers(message as Parameters<typeof dispatchToSubscribers>[0]);
     });
 }
 
@@ -425,6 +432,12 @@ describe('TerminalView — chunked scroll-up history loading', () => {
         const { totalSize = 1000, isBase64Legacy = false } = opts;
         const fetchMock = vi.fn(async (url: unknown) => {
             const u = String(url);
+            // TerminalView also fetches the full (untruncated) prompt on mount —
+            // unrelated to scrollback chunking, so it gets its own branch rather
+            // than falling into the chunk-request assumption below.
+            if (u.includes('/api/tasks/')) {
+                return { ok: true, json: async () => ({}) };
+            }
             if (u.includes('maxBytes=0')) {
                 return { ok: true, json: async () => ({ totalSize, isBase64Legacy }) };
             }
@@ -450,7 +463,9 @@ describe('TerminalView — chunked scroll-up history loading', () => {
     }
 
     function chunkCalls(fetchMock: ReturnType<typeof vi.fn>) {
-        return fetchMock.mock.calls.map(c => String(c[0])).filter(u => !u.includes('maxBytes=0'));
+        return fetchMock.mock.calls
+            .map(c => String(c[0]))
+            .filter(u => u.includes('/history?') && !u.includes('maxBytes=0'));
     }
 
     it('requests the previous chunk when the user scrolls to the top', async () => {
@@ -759,11 +774,15 @@ describe('TerminalView — refit on container/window resize', () => {
 });
 
 describe('TerminalView — malformed traffic', () => {
-    it('survives a non-JSON WebSocket frame', () => {
+    // Raw-JSON parsing now happens once in useWebSocket.ts (see its own
+    // 'malformed input' suite) — TerminalView receives already-parsed messages
+    // via subscribeToWsMessages, so what it needs to survive is a malformed
+    // *payload* for a type it handles, not invalid JSON.
+    it('survives a task:output message with a missing payload', () => {
         const { socket, term } = mountTerminal();
         term.writes = [];
 
-        act(() => { socket.dispatchEvent(new MessageEvent('message', { data: 'not json{' })); });
+        emit(socket, { type: 'task:output', payload: undefined });
 
         expect(term.writes).toEqual([]);
         expect(term.disposed).toBe(false);

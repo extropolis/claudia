@@ -34,6 +34,53 @@ export function sendWsMessage(type: string, payload: unknown): void {
     }
 }
 
+type MessageSubscriber = (message: WSMessage) => void;
+
+/**
+ * Per-type subscriber registry for parsed WS messages.
+ *
+ * Several components (TerminalView, ShellTerminalView, CheckpointTimeline,
+ * ProjectPicker) need raw access to high-frequency message types like
+ * task:output — before this existed, each attached its own
+ * `addEventListener('message', ...)` directly on the socket and ran its own
+ * `JSON.parse(event.data)`. tasks:updated alone can be a couple MB (the full
+ * task list, including disconnected/archived), and it was getting parsed
+ * once per listener on every batched flush — 3-4x the necessary main-thread
+ * work, competing with keystroke handling for the same thread.
+ *
+ * ws.onmessage below parses each message exactly once and fans it out here.
+ */
+const messageSubscribers = new Map<string, Set<MessageSubscriber>>();
+
+/**
+ * Subscribe to already-parsed WS messages of a given type. Returns an
+ * unsubscribe function — call it from a cleanup effect.
+ */
+export function subscribeToWsMessages(type: string, callback: MessageSubscriber): () => void {
+    let subs = messageSubscribers.get(type);
+    if (!subs) {
+        subs = new Set();
+        messageSubscribers.set(type, subs);
+    }
+    subs.add(callback);
+    return () => {
+        subs!.delete(callback);
+    };
+}
+
+/** Test seam: lets component tests simulate an incoming message without standing up the full hook. */
+export function dispatchToSubscribers(message: WSMessage): void {
+    const subs = messageSubscribers.get(message.type as string);
+    if (!subs || subs.size === 0) return;
+    for (const callback of subs) {
+        try {
+            callback(message);
+        } catch (err) {
+            console.error('[WebSocket] Subscriber threw for', message.type, err);
+        }
+    }
+}
+
 /** Base delay for reconnection in ms */
 const RECONNECT_BASE_DELAY = 1000;
 /** Maximum reconnection delay in ms */
@@ -209,6 +256,10 @@ export function useWebSocket() {
                 if (msgType !== 'task:output' && msgType !== 'shell:output' && msgType !== 'supervisor:chat:typing') {
                     console.log('[WebSocket] Received:', message.type);
                 }
+
+                // Fan out to per-type subscribers (TerminalView et al.) using this
+                // single parse — see messageSubscribers above.
+                dispatchToSubscribers(message);
 
                 switch (message.type) {
                     case 'init': {

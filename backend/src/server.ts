@@ -1114,7 +1114,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
 
         // Send tasks:updated only once if flagged
         if (pendingTasksUpdated) {
-            broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+            broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getTaskListForBroadcast() } });
             pendingTasksUpdated = false;
         }
 
@@ -1385,12 +1385,21 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
     }, 5_000);
 
     // Immediately refresh PR info for a single task (workspace + session worktree).
-    // Called on task:select and task:refreshPr (hover) — fire-and-forget, no await needed.
+    // Called on task:select AND task:refreshPr (mouse hover, once per sidebar row
+    // the cursor crosses) — fire-and-forget, no await needed.
+    //
+    // Does NOT force/bypass refreshPrInfoFor's cache: this used to, so every
+    // click and every hover re-spawned `git branch` + `git rev-parse` (x2-3) +
+    // `gh pr view` regardless of whether anything had changed. Each subprocess
+    // spawn costs real wall-clock time (worse under endpoint security agents
+    // that hook process creation), and scrolling the mouse down a long task
+    // list fires this once per row — a burst of redundant git/gh spawns for
+    // no new information. The existing in-flight + branch-unchanged guards
+    // already keep this fresh whenever there's actually something to refresh.
     async function refreshTaskPrInfo(taskId: string): Promise<void> {
         const task = taskSpawner.getAllTasks().find(t => t.id === taskId);
         if (!task) return;
-        // Workspace-level prInfo — bypass in-flight guard since this is user-triggered
-        void refreshPrInfoFor(task.workspaceId, true, true);
+        void refreshPrInfoFor(task.workspaceId);
         // Task session worktree prInfo (branch created by Claude inside the session)
         if (task.sessionWorktreeBranch) {
             try {
@@ -1875,7 +1884,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
     taskSpawner.on('reconnectComplete', (result: { total: number; failed: number; failedIds: string[] }) => {
         console.log(`[Server] Reconnection complete: ${result.total - result.failed}/${result.total} tasks`);
         // Send updated task list after reconnection (immediate, not batched - important for startup)
-        broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+        broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getTaskListForBroadcast() } });
     });
 
     taskSpawner.on('taskTokenUsage', (taskId: string, tokenUsage: TaskTokenUsage) => {
@@ -1995,8 +2004,11 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
             }));
         }
 
-        // Send current state to new client
-        const tasks = taskSpawner.getAllTasks();
+        // Send current state to new client. Trimmed (see getTaskListForBroadcast) —
+        // this fires on every reconnect, which is frequent (dev-server restarts,
+        // network blips, tab backgrounding), so it's worth not re-sending every
+        // task's full prompt/systemPrompt each time.
+        const tasks = taskSpawner.getTaskListForBroadcast();
         const workspaces = workspaceStore.getWorkspaces();
         ws.send(JSON.stringify({
             type: 'init',
@@ -2601,7 +2613,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
                         if (!taskId || displayName === undefined) break;
                         const renamed = taskSpawner.renameTask(taskId, displayName, source || 'user');
                         if (renamed) {
-                            broadcast({ type: 'tasks:updated' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
+                            broadcast({ type: 'tasks:updated' as WSMessageType, payload: { tasks: taskSpawner.getTaskListForBroadcast() } });
                             // If this task lives in a worktree workspace, update the workspace displayName
                             // so the inline group header shows a human-readable label instead of the branch slug.
                             // worktreeBranch (the git branch) remains unchanged.
@@ -2628,7 +2640,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
                         const reordered = taskSpawner.reorderTasks(taskOrders);
                         if (reordered) {
                             // Broadcast updated task list to all clients (including sender)
-                            broadcast({ type: 'tasks:reordered' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
+                            broadcast({ type: 'tasks:reordered' as WSMessageType, payload: { tasks: taskSpawner.getTaskListForBroadcast() } });
                         }
                         break;
                     }
@@ -2652,7 +2664,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
                                 // Ensure reconnected task becomes active so output is streamed
                                 // and history is restored immediately.
                                 taskSpawner.setTaskActive(taskId, true);
-                                broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+                                broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getTaskListForBroadcast() } });
                             }
                         } catch (error) {
                             const errorMessage = error instanceof Error ? error.message : String(error);
@@ -2673,7 +2685,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
                             payload: { taskId, ...result }
                         }));
                         if (result.success) {
-                            broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+                            broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getTaskListForBroadcast() } });
                         }
                         break;
                     }
@@ -2724,7 +2736,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
                                 type: 'task:archived:restored',
                                 payload: { task: restoredTask }
                             }));
-                            broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+                            broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getTaskListForBroadcast() } });
                         } else {
                             ws.send(JSON.stringify({
                                 type: 'task:archived:restoreError',
@@ -2744,7 +2756,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
                                 type: 'task:archived:continued',
                                 payload: { task: continuedTask }
                             }));
-                            broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+                            broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getTaskListForBroadcast() } });
                         } else {
                             ws.send(JSON.stringify({
                                 type: 'task:archived:continueError',
@@ -2764,7 +2776,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
                             payload: { taskId, success: deleted }
                         }));
                         if (deleted) {
-                            broadcast({ type: 'tasks:updated' as WSMessageType, payload: { tasks: taskSpawner.getAllTasks() } });
+                            broadcast({ type: 'tasks:updated' as WSMessageType, payload: { tasks: taskSpawner.getTaskListForBroadcast() } });
                         }
                         break;
                     }
@@ -3170,7 +3182,7 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
                         }
 
                         // Broadcast updated tasks to all clients
-                        broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getAllTasks() } });
+                        broadcast({ type: 'tasks:updated', payload: { tasks: taskSpawner.getTaskListForBroadcast() } });
 
                         // Branch changed (e.g. back to main) — re-resolve PR info so the
                         // badge updates/clears for the newly checked-out branch.
@@ -4902,6 +4914,20 @@ export async function createApp(basePath?: string, instanceInfo?: InstanceInfo) 
             // Original behavior - only active + disconnected tasks
             res.json(taskSpawner.getAllTasks());
         }
+    });
+
+    // Full-fidelity single-task fetch (untruncated prompt/systemPrompt/gitState) —
+    // for the one consumer that needs it (TerminalView's copy-prompt button and
+    // header), since the bulk tasks:updated/init broadcasts now send a trimmed
+    // preview instead. See TaskSpawner.getTaskListForBroadcast().
+    app.get('/api/tasks/:taskId', (req, res) => {
+        const { taskId } = req.params;
+        const task = taskSpawner.getAllTasks().find(t => t.id === taskId);
+        if (!task) {
+            res.status(404).json({ error: 'Task not found' });
+            return;
+        }
+        res.json(task);
     });
 
     // Poll endpoint for task status - returns stored state (Stop hook manages transitions)

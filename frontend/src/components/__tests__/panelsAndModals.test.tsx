@@ -30,13 +30,36 @@ import { useTaskStore, ActivityEvent } from '../../stores/taskStore';
 // jsdom test.
 // ---------------------------------------------------------------------------
 
-const H = vi.hoisted(() => ({
-    sendWsMessage: vi.fn(),
-    qrToCanvas: vi.fn(async (_canvas?: unknown, _text?: string, _options?: unknown) => undefined),
-}));
+const H = vi.hoisted(() => {
+    // Minimal stand-in for useWebSocket.ts's per-type subscriber registry —
+    // ProjectPicker subscribes to parsed messages rather than listening on the
+    // raw socket, so tests need a way to fan a message out to subscribers.
+    const subscribers = new Map<string, Set<(message: { type: string; payload: unknown }) => void>>();
+    const subscribeToWsMessages = vi.fn((type: string, callback: (message: { type: string; payload: unknown }) => void) => {
+        let subs = subscribers.get(type);
+        if (!subs) {
+            subs = new Set();
+            subscribers.set(type, subs);
+        }
+        subs.add(callback);
+        return () => subs!.delete(callback);
+    });
+    const dispatchWsMessage = (message: { type: string; payload?: unknown }) => {
+        const subs = subscribers.get(message.type);
+        if (!subs) return;
+        for (const callback of subs) callback(message as { type: string; payload: unknown });
+    };
+    return {
+        sendWsMessage: vi.fn(),
+        qrToCanvas: vi.fn(async (_canvas?: unknown, _text?: string, _options?: unknown) => undefined),
+        subscribeToWsMessages,
+        dispatchWsMessage,
+    };
+});
 
 vi.mock('../../hooks/useWebSocket', () => ({
     sendWsMessage: H.sendWsMessage,
+    subscribeToWsMessages: H.subscribeToWsMessages,
     useWebSocket: () => ({}),
 }));
 
@@ -893,23 +916,13 @@ describe('MobileAccessModal', () => {
 // ===========================================================================
 
 describe('ProjectPicker', () => {
-    /** Minimal WebSocket stand-in with a real EventTarget underneath. */
+    /**
+     * Minimal WebSocket stand-in — ProjectPicker only reads `readyState` off it
+     * directly (incoming messages arrive via the mocked subscribeToWsMessages/
+     * H.dispatchWsMessage instead of a raw 'message' event on this object).
+     */
     function makeFakeWs() {
-        const target = new EventTarget();
-        const ws = {
-            readyState: 1, // WebSocket.OPEN
-            addEventListener: target.addEventListener.bind(target),
-            removeEventListener: target.removeEventListener.bind(target),
-            emit(payload: unknown) {
-                ws.emitRaw(JSON.stringify(payload));
-            },
-            emitRaw(data: string) {
-                const ev = new Event('message') as Event & { data: string };
-                ev.data = data;
-                target.dispatchEvent(ev);
-            },
-        };
-        return ws as unknown as WebSocket & { emit: (p: unknown) => void; emitRaw: (d: string) => void };
+        return { readyState: 1 } as unknown as WebSocket; // WebSocket.OPEN
     }
 
     function renderPicker(over: Partial<{
@@ -998,7 +1011,7 @@ describe('ProjectPicker', () => {
     });
 
     it('requests recent workspaces over the shared socket and renders the reply', async () => {
-        const { ws, requestRecentWorkspaces, clearRecentWorkspace } = renderPicker();
+        const { requestRecentWorkspaces, clearRecentWorkspace } = renderPicker();
         const user = userEvent.setup();
 
         act(() => { useTaskStore.getState().setShowProjectPicker(true); });
@@ -1006,7 +1019,7 @@ describe('ProjectPicker', () => {
         expect(requestRecentWorkspaces).toHaveBeenCalled();
 
         act(() => {
-            ws.emit({
+            H.dispatchWsMessage({
                 type: 'workspace:recent:list',
                 payload: {
                     recentWorkspaces: [
@@ -1024,24 +1037,27 @@ describe('ProjectPicker', () => {
     });
 
     it('accepts a folder chosen through the socket browse response', async () => {
-        const { ws, onSelect } = renderPicker();
+        const { onSelect } = renderPicker();
 
         act(() => { useTaskStore.getState().setShowProjectPicker(true); });
         await screen.findByRole('heading', { name: 'Add Workspace' });
 
-        act(() => { ws.emit({ type: 'workspace:browseFolder', payload: { path: '/ws/from-socket' } }); });
+        act(() => { H.dispatchWsMessage({ type: 'workspace:browseFolder', payload: { path: '/ws/from-socket' } }); });
 
         expect(onSelect).toHaveBeenCalledWith('/ws/from-socket');
         expect(screen.queryByRole('heading', { name: 'Add Workspace' })).not.toBeInTheDocument();
     });
 
-    it('survives a malformed socket frame', async () => {
-        const { ws, onSelect } = renderPicker();
+    // Raw-JSON parsing now happens once in useWebSocket.ts — ProjectPicker
+    // receives already-parsed messages via subscribeToWsMessages, so what it
+    // needs to survive is a malformed *payload*, not invalid JSON.
+    it('survives a malformed payload', async () => {
+        const { onSelect } = renderPicker();
 
         act(() => { useTaskStore.getState().setShowProjectPicker(true); });
         await screen.findByRole('heading', { name: 'Add Workspace' });
 
-        act(() => { ws.emitRaw('not json'); });
+        act(() => { H.dispatchWsMessage({ type: 'workspace:browseFolder', payload: undefined }); });
 
         expect(screen.getByRole('heading', { name: 'Add Workspace' })).toBeInTheDocument();
         expect(onSelect).not.toHaveBeenCalled();

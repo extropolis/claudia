@@ -5,7 +5,7 @@ import { Task, TaskState, TaskGitState, WaitingInputType, BackendType, PORTS, Ta
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, appendFileSync, statSync, openSync, readSync, closeSync } from 'fs';
-import { writeFile as writeFileAsync, rename as renameAsync, unlink as unlinkAsync, appendFile as appendFileAsync, stat as statAsync, open as openAsync } from 'fs/promises';
+import { writeFile as writeFileAsync, rename as renameAsync, unlink as unlinkAsync, appendFile as appendFileAsync, stat as statAsync, open as openAsync, readFile as readFileAsync } from 'fs/promises';
 import { tmpdir, homedir, cpus, CpuInfo } from 'os';
 import { readHandoffMark } from './export-import/handoff.js';
 import { execFileSync, execSync } from 'child_process';
@@ -1521,6 +1521,43 @@ export class TaskSpawner extends EventEmitter {
     private historyAppendCarry: Map<string, string> = new Map();
 
     /**
+     * Coalescing buffer for the taskOutput event — see setupProcessHandlers.
+     *
+     * Measured on a live session: a busy Claude Code task emits raw PTY chunks
+     * fast enough to produce bursts around 200 task:output WS messages/second.
+     * Each one is cheap on its own, but every message is a separate browser
+     * event-loop task (console.log, viewport math, xterm write, RAF scheduling
+     * on the frontend) — at that rate they queue up faster than the browser can
+     * drain them, and anything else waiting for a turn on the main thread (a
+     * keystroke's own handler included) queues up behind all of them. Measured
+     * impact: a single keypress took 6.6s to even reach `ws.send()` while a task
+     * was streaming, despite no individual browser task exceeding 50ms — pure
+     * queue starvation from message count, not from any one slow operation.
+     *
+     * Buffering raw chunks for OUTPUT_COALESCE_MS and emitting the concatenated
+     * result once per window cuts the message count (and therefore the queueing)
+     * without perceptibly delaying output — the window is well under a frame.
+     */
+    private pendingOutputBuffer: Map<string, string> = new Map();
+    private pendingOutputTimer: Map<string, NodeJS.Timeout> = new Map();
+    private static readonly OUTPUT_COALESCE_MS = 16;
+
+    /**
+     * Discard any buffered output for a task — call on disconnect/destroy so a
+     * stale timer can't fire after cleanup. Not a flush: the buffered bytes are
+     * already in task.outputHistory (pushed synchronously, before buffering —
+     * see setupProcessHandlers), so nothing is lost for persistence/reconnect
+     * purposes. Only the live WS stream to currently-connected clients for
+     * those last few ms is skipped, which is moot once the task is gone.
+     */
+    private clearPendingOutput(taskId: string): void {
+        const timer = this.pendingOutputTimer.get(taskId);
+        if (timer) clearTimeout(timer);
+        this.pendingOutputTimer.delete(taskId);
+        this.pendingOutputBuffer.delete(taskId);
+    }
+
+    /**
      * Atomically write history to disk via a per-process temp file + rename.
      * Mirrors the pattern used for tasks.json so a crash mid-write can't leave
      * a truncated history file. Per-process tmp name avoids races between
@@ -1967,6 +2004,7 @@ export class TaskSpawner extends EventEmitter {
             // Process might already be dead
         }
         if (pid) this.taskkillTrees([pid]);
+        this.clearPendingOutput(task.id);
     }
 
     private reapIdleTasks(): void {
@@ -4781,9 +4819,21 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
             // Note: State detection is now handled by polling in checkTaskStates()
 
-            // Stream output to active task
+            // Stream output to active task — coalesced (see pendingOutputBuffer)
+            // rather than emitted per raw PTY chunk, so a fast-streaming task
+            // doesn't flood clients with dozens of tiny WS messages per second.
             if (task.isActive) {
-                this.emit('taskOutput', task.id, data);
+                const existing = this.pendingOutputBuffer.get(task.id) || '';
+                this.pendingOutputBuffer.set(task.id, existing + data);
+                if (!this.pendingOutputTimer.has(task.id)) {
+                    const timer = setTimeout(() => {
+                        this.pendingOutputTimer.delete(task.id);
+                        const buffered = this.pendingOutputBuffer.get(task.id);
+                        this.pendingOutputBuffer.delete(task.id);
+                        if (buffered) this.emit('taskOutput', task.id, buffered);
+                    }, TaskSpawner.OUTPUT_COALESCE_MS);
+                    this.pendingOutputTimer.set(task.id, timer);
+                }
                 // Reset the flag when task becomes active again
                 task.inactiveOutputLogged = false;
             } else {
@@ -4919,8 +4969,12 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
      * notices, which only delivers to a live, idle task and re-tries on its
      * next idle otherwise — so this never types into a running session.
      *
-     * One notice per failing run: the alert re-arms only after the PR reports
-     * green or a fresh run starts, which is exactly the push that follows a fix.
+     * One notice per failing run — and the alert only re-arms once the PR
+     * actually goes green. It deliberately does NOT re-arm on 'running': that
+     * used to also count as "resolved," so a PR stuck in failed -> running ->
+     * failed -> running (retries or fresh pushes that never actually fix it)
+     * fired a brand new alert on every single cycle. Nothing was ever fixed
+     * in that loop, so nothing about it should look new to the task.
      *
      * @returns false when the task is not live (disconnected tasks never reach
      * this map, so nothing could be delivered to it). Callers picking one owner
@@ -4941,8 +4995,11 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             return true;
         }
         if (prInfo.ci !== 'failed') {
-            // 'passed'/'running' both mean the red run is history — re-arm.
-            if (prInfo.ci === 'passed' || prInfo.ci === 'running') this.ciAlertsSent.delete(taskId);
+            // Only a real green run means the problem is actually resolved.
+            // 'running' is deliberately NOT treated as resolved here — a PR
+            // stuck cycling failed -> running -> failed without ever going
+            // green must not get a fresh alert every cycle (see doc comment).
+            if (prInfo.ci === 'passed') this.ciAlertsSent.delete(taskId);
             return true;
         }
 
@@ -5357,7 +5414,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                 }
 
                 // Send combined history (PTY output) first, then enhance with JSONL if needed
-                this.sendTaskHistory(task);
+                void this.sendTaskHistory(task);
             } else {
                 // Notify backend if using OpenCode
                 const taskBackend = this.taskBackends.get(taskId);
@@ -5378,8 +5435,8 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
      * Always emits taskRestore (even with empty string) so the frontend
      * knows history loading is complete and can clear the loading spinner.
      */
-    private sendTaskHistory(task: InternalTask): void {
-        let history = this.getCombinedHistory(task);
+    private async sendTaskHistory(task: InternalTask): Promise<void> {
+        let history = await this.getCombinedHistory(task);
         // Append the resume separator for display (it's not in outputHistory / not saved to disk)
         if (task.resumeSeparator) {
             history = (history || '') + task.resumeSeparator;
@@ -5397,7 +5454,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
      * This also handles lazy loading - history may be stored as base64 and
      * decoded only when the task is actually selected.
      */
-    private getCombinedHistory(task: InternalTask): string | null {
+    private async getCombinedHistory(task: InternalTask): Promise<string | null> {
         // Limit history sent to frontend. Smaller = faster xterm rendering.
         // 512KB is ~128 full terminal screens, well beyond what's visually useful.
         const MAX_HISTORY_TO_SEND = 2 * 1024 * 1024; // 2MB max
@@ -5407,14 +5464,18 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
             const historyPath = this.getTaskHistoryPath(task.id);
             if (existsSync(historyPath)) {
                 try {
-                    const stat = statSync(historyPath);
+                    const stat = await statAsync(historyPath);
                     const fileSize = stat.size;
 
                     // Check file format (Base64 vs Raw Text) by reading a small sample
-                    const fdCheck = openSync(historyPath, 'r');
+                    const checkHandle = await openAsync(historyPath, 'r');
                     const checkBuf = Buffer.alloc(Math.min(100, fileSize));
-                    const bytesReadCheck = readSync(fdCheck, checkBuf, 0, checkBuf.length, 0);
-                    closeSync(fdCheck);
+                    let bytesReadCheck: number;
+                    try {
+                        ({ bytesRead: bytesReadCheck } = await checkHandle.read(checkBuf, 0, checkBuf.length, 0));
+                    } finally {
+                        await checkHandle.close();
+                    }
 
                     const sample = checkBuf.subarray(0, bytesReadCheck).toString('utf8');
                     // Heuristic: Raw terminal output contains ESC or spaces.
@@ -5428,11 +5489,14 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                     if (isRawText) {
                         // Raw text file - read strictly the last portion as utf8
                         if (fileSize > MAX_HISTORY_TO_SEND) {
-                            const fd = openSync(historyPath, 'r');
+                            const handle = await openAsync(historyPath, 'r');
                             const buffer = Buffer.alloc(MAX_HISTORY_TO_SEND);
                             const offset = fileSize - MAX_HISTORY_TO_SEND;
-                            readSync(fd, buffer, 0, MAX_HISTORY_TO_SEND, offset);
-                            closeSync(fd);
+                            try {
+                                await handle.read(buffer, 0, MAX_HISTORY_TO_SEND, offset);
+                            } finally {
+                                await handle.close();
+                            }
                             // Since it's raw text, we treat it as the decoded content directly
                             // But we need to pretend it was base64 for the logic below, OR change logic below.
                             // Changing logic below is better.
@@ -5440,7 +5504,7 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
                             base64Content = buffer.toString('base64');
                             console.log(`[TaskSpawner] Loaded tail of RAW history: ${fileSize} bytes -> ${MAX_HISTORY_TO_SEND} bytes`);
                         } else {
-                            const rawContent = readFileSync(historyPath, 'utf8');
+                            const rawContent = await readFileAsync(historyPath, 'utf8');
                             base64Content = Buffer.from(rawContent, 'utf8').toString('base64');
                             console.log(`[TaskSpawner] Loaded complete RAW history: ${fileSize} bytes`);
                         }
@@ -5450,16 +5514,19 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
 
                         if (fileSize > maxBase64Size) {
                             // Only read the last portion of the file
-                            const fd = openSync(historyPath, 'r');
+                            const handle = await openAsync(historyPath, 'r');
                             const buffer = Buffer.alloc(maxBase64Size);
                             const offset = fileSize - maxBase64Size;
-                            readSync(fd, buffer, 0, maxBase64Size, offset);
-                            closeSync(fd);
+                            try {
+                                await handle.read(buffer, 0, maxBase64Size, offset);
+                            } finally {
+                                await handle.close();
+                            }
                             base64Content = buffer.toString('utf-8');
                             console.log(`[TaskSpawner] Loaded tail of Base64 history from file for ${task.id}: ${fileSize} bytes (file) -> ${maxBase64Size} bytes (loaded)`);
                         } else {
                             // File is small enough, read it all
-                            base64Content = readFileSync(historyPath, 'utf-8');
+                            base64Content = await readFileAsync(historyPath, 'utf-8');
                             console.log(`[TaskSpawner] Loaded complete Base64 history from file for ${task.id}: ${fileSize} bytes`);
                         }
                     }
@@ -6289,6 +6356,30 @@ ${this.configStore?.getTodoEnabled() ? `**TODO work-plan (keep it live in the to
         }));
 
         return [...liveTasks, ...disconnectedTasks];
+    }
+
+    /** Prompt preview length for the bulk broadcast — see getTaskListForBroadcast. */
+    private static readonly BROADCAST_PROMPT_PREVIEW_CHARS = 500;
+
+    /**
+     * Same data as getAllTasks(), trimmed for the tasks:updated/init
+     * broadcasts. systemPrompt has no frontend consumer at all (confirmed by
+     * grep) so it's dropped entirely; prompt is truncated to a preview —
+     * every bulk-list consumer (sidebar rows, tooltips, notification
+     * fallbacks, voice-announcement labels) only ever shows a short string
+     * anyway. Measured on a real 89-task workspace this cuts the payload from
+     * 1.09MB to roughly a tenth of that. The one consumer that needs the full
+     * prompt (TerminalView's copy button/header, scoped to the single open
+     * task) fetches it via GET /api/tasks/:taskId instead.
+     */
+    getTaskListForBroadcast(): Task[] {
+        return this.getAllTasks().map(t => ({
+            ...t,
+            prompt: t.prompt.length > TaskSpawner.BROADCAST_PROMPT_PREVIEW_CHARS
+                ? t.prompt.slice(0, TaskSpawner.BROADCAST_PROMPT_PREVIEW_CHARS) + '…'
+                : t.prompt,
+            systemPrompt: undefined,
+        }));
     }
 
     reconnectTask(taskId: string, pendingInput?: string): Task | null {

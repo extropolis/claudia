@@ -5,6 +5,7 @@ import { getBrowserCapabilities } from '../utils/browserCapabilities';
 import { PathInputModal } from './PathInputModal';
 import { RecentWorkspace } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
+import { subscribeToWsMessages } from '../hooks/useWebSocket';
 
 interface ProjectPickerProps {
     onSelect: (path: string) => void;
@@ -49,10 +50,10 @@ export function ProjectPicker({ onSelect, wsRef, requestRecentWorkspaces, clearR
             return;
         }
 
-        // Listen for responses on the shared WebSocket
-        const handler = (event: MessageEvent) => {
+        // Listen for responses via subscribeToWsMessages (already-parsed, see
+        // useWebSocket.ts) instead of a raw socket listener that re-parses every frame.
+        const handler = (message: { type: string; payload: any }) => {
             try {
-                const message = JSON.parse(event.data);
                 if (message.type === 'workspace:recent:list') {
                     console.log('[ProjectPicker] Received recent workspaces:', message.payload.recentWorkspaces);
                     setRecentWorkspaces(message.payload.recentWorkspaces || []);
@@ -72,14 +73,17 @@ export function ProjectPicker({ onSelect, wsRef, requestRecentWorkspaces, clearR
             }
         };
 
-        ws.addEventListener('message', handler);
+        const unsubscribers = [
+            subscribeToWsMessages('workspace:recent:list', handler),
+            subscribeToWsMessages('workspace:browseFolder', handler),
+        ];
 
         // Request recent workspaces through the shared connection
         console.log('[ProjectPicker] Requesting recent workspaces via shared WebSocket');
         requestRecentWorkspaces();
 
         return () => {
-            ws.removeEventListener('message', handler);
+            for (const unsubscribe of unsubscribers) unsubscribe();
         };
     }, [showPathInput, wsRef, requestRecentWorkspaces, onSelect]);
 
