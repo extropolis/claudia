@@ -164,6 +164,8 @@ export function useWebSocket() {
             setConnected(true);
             // Reset reconnection attempts on successful connection
             reconnectAttempts.current = 0;
+            // Plan usage is pushed by the server (`usage:updated`) right after
+            // `init`, so nothing needs requesting here.
         };
 
         ws.onclose = (event) => {
@@ -559,6 +561,11 @@ export function useWebSocket() {
                     case 'task:tokenUsage': {
                         const payload = message.payload as { taskId: string; tokenUsage: import('@claudia/shared').TaskTokenUsage };
                         useTaskStore.getState().updateTaskTokenUsage(payload.taskId, payload.tokenUsage);
+                        break;
+                    }
+                    case 'usage:updated': {
+                        const payload = message.payload as import('@claudia/shared').PlanUsage;
+                        useTaskStore.getState().setPlanUsage(payload);
                         break;
                     }
                     case 'task:archived:list': {

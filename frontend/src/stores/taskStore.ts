@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask, TaskTokenUsage, TodoItem } from '@claudia/shared';
+import { Task, Workspace, TaskSummary, ChatMessage, WaitingInputType, ScheduledTask, TaskTokenUsage, TodoItem, PlanUsage } from '@claudia/shared';
 import { getApiBaseUrl } from '../config/api-config';
 import { ThemePreference } from '../types/theme';
 import { compareTasksForDisplay, createTopLevelResolver } from '../utils/taskSort';
@@ -41,6 +41,9 @@ interface TaskStore {
     isServerReloading: boolean;  // True when server is restarting (hot reload)
     isOffline: boolean;  // True when browser has no internet connection
     errorNotification: { message: string; code?: string; timestamp: Date } | null;
+
+    // Anthropic plan usage (session + weekly limits), pushed from the backend
+    planUsage: PlanUsage | null;
 
     // Workspace state
     workspaces: Workspace[];
@@ -134,6 +137,7 @@ interface TaskStore {
     setOffline: (offline: boolean) => void;
     setErrorNotification: (message: string, code?: string) => void;
     clearErrorNotification: () => void;
+    setPlanUsage: (usage: PlanUsage | null) => void;
     selectTask: (id: string | null) => void;
     setTasks: (tasks: Task[]) => void;
     addTask: (task: Task) => void;
@@ -292,6 +296,7 @@ export const useTaskStore = create<TaskStore>()(
             isServerReloading: false,
             isOffline: typeof navigator !== 'undefined' ? !navigator.onLine : false,
             errorNotification: null,
+            planUsage: null,
             workspaces: [],
             expandedWorkspaces: new Set<string>(),
             expandedWorkspacesInitialized: false,
@@ -396,6 +401,7 @@ export const useTaskStore = create<TaskStore>()(
             setOffline: (offline) => set({ isOffline: offline }),
             setErrorNotification: (message, code) => set({ errorNotification: { message, code, timestamp: new Date() } }),
             clearErrorNotification: () => set({ errorNotification: null }),
+            setPlanUsage: (usage) => set({ planUsage: usage }),
 
             selectTask: (id) => {
                 const { tasks, lastSelectedTaskByWorkspace, unreadTaskIds } = get();
