@@ -6,8 +6,8 @@
 #   .\start.ps1 -Restart   # kill any existing Claudia server first, then start (true restart)
 #
 # Without -Restart, the script refuses to start when a server is already running
-# (lock file present or a port in use) so it never spawns a duplicate. Use
-# -Restart to stop the running instance and take over the ports.
+# (instance lock held and serving, or a port in use) so it never spawns a
+# duplicate. Use -Restart to stop the running instance and take over the ports.
 
 param(
     [switch]$Watch,
@@ -25,12 +25,62 @@ $FRONTEND_PORT = 5173
 $OPENCODE_PORT = 4097
 # ============================================
 
-# Lock file to prevent recursive starts
-$LOCK_FILE = Join-Path $env:TEMP "claudia-server.lock"
+# ============================================
+# SINGLE INSTANCE CHECK
+# ============================================
+# Authoritative mutual exclusion lives in the backend: instance-lock.ts claims
+# <dataDir>/instance.json at startup and refuses to boot a second backend
+# against the same data directory. This block is only the friendly front door
+# for that check -- it tells the user WHERE the running Claudia is instead of
+# letting npm spend ten seconds booting a process that immediately exits 1.
+#
+# This replaces an earlier %TEMP%\claudia-server.lock file (mirrors start.sh's
+# fix), which guarded the wrong thing: a live pid alone is ambiguous (a
+# tsx-watch process on its way out still has one, and Windows recycles pids
+# after a reboot -- the exact bug that motivated this rewrite), so the holder
+# must also still be SERVING before we refuse to start.
+$InstanceDir = if ($env:CLAUDIA_DATA_DIR) { $env:CLAUDIA_DATA_DIR } else { Join-Path $PSScriptRoot "backend" }
+$InstanceFile = Join-Path $InstanceDir "instance.json"
 
-# -Restart: stop any running Claudia server (by lock PID and by whatever owns the
-# ports) so this invocation can cleanly take over. Without this, a running server
-# would make the start below a no-op ("already running" / "port in use").
+function Get-InstanceHolder {
+    if (-not (Test-Path $InstanceFile)) { return $null }
+    try {
+        $info = Get-Content $InstanceFile -Raw | ConvertFrom-Json
+        if (-not $info.pid -or -not $info.port) { return $null }
+        return $info
+    } catch {
+        return $null
+    }
+}
+
+function Test-HolderServing($info) {
+    if (-not $info) { return $false }
+    if (-not (Get-Process -Id $info.pid -ErrorAction SilentlyContinue)) { return $false }
+    try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$($info.port)/api/server-info" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+        return $resp.StatusCode -eq 200
+    } catch {
+        return $false
+    }
+}
+
+$holder = Get-InstanceHolder
+$holderServing = Test-HolderServing $holder
+
+if ($holder -and -not $holderServing) {
+    Write-Host "Ignoring stale instance lock from PID $($holder.pid) (not serving)."
+} elseif ($holderServing -and -not $Restart) {
+    Write-Host "Claudia is already running (PID: $($holder.pid)) at http://localhost:$($holder.port)"
+    Write-Host "   It holds the data directory: $InstanceDir"
+    Write-Host "   Attach to it instead of starting a second instance, or stop it first,"
+    Write-Host "   or re-run with -Restart to replace it."
+    exit 1
+}
+
+# -Restart: stop any running Claudia server (by the instance lock's PID and by
+# whatever owns the ports) so this invocation can cleanly take over. Without
+# this, a running server would make the start below a no-op ("already
+# running" / "port in use").
 if ($Restart) {
     Write-Host "Restart requested - stopping any running Claudia server..."
 
@@ -48,12 +98,8 @@ if ($Restart) {
         Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
     }
 
-    # 1) Stop the process recorded in the lock file
-    if (Test-Path $LOCK_FILE) {
-        $LOCK_PID = Get-Content $LOCK_FILE -ErrorAction SilentlyContinue
-        if ($LOCK_PID) { Stop-ProcTree ([int]$LOCK_PID) }
-        Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
-    }
+    # 1) Stop the process recorded in the instance lock
+    if ($holder) { Stop-ProcTree ([int]$holder.pid) }
 
     # 2) Stop whatever currently owns the ports (covers servers started without the lock)
     foreach ($port in @($BACKEND_PORT, $FRONTEND_PORT, $OPENCODE_PORT)) {
@@ -65,29 +111,6 @@ if ($Restart) {
 
     Start-Sleep -Seconds 2
     Write-Host "Existing server stopped."
-}
-
-# Check if server is already running (lock file exists and process is alive)
-if (Test-Path $LOCK_FILE) {
-    $LOCK_PID = Get-Content $LOCK_FILE -ErrorAction SilentlyContinue
-    if ($LOCK_PID) {
-        $proc = Get-Process -Id $LOCK_PID -ErrorAction SilentlyContinue
-        if ($proc) {
-            Write-Host "Claudia is already running (PID: $LOCK_PID)."
-            Write-Host "   Stop it first, or re-run with -Restart to replace it."
-            exit 1
-        }
-    }
-    Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
-}
-
-# Create lock file with our PID
-$PID | Out-File $LOCK_FILE -NoNewline
-
-# Clean up lock file on exit
-$null = Register-EngineEvent PowerShell.Exiting -Action {
-    $lockFile = Join-Path $env:TEMP "claudia-server.lock"
-    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "Checking ports..."
@@ -108,7 +131,6 @@ if ($ports_busy) {
     Write-Host ""
     Write-Host "Please free the ports above and try again, or re-run with -Restart to stop the existing server automatically."
     Write-Host "You can kill a process on a port with: Stop-Process -Id (Get-NetTCPConnection -LocalPort <port>).OwningProcess -Force"
-    Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
     exit 1
 }
 
@@ -189,6 +211,5 @@ try {
     Write-Host "Shutting down..."
     if ($backendProc)  { Stop-Tree $backendProc.Id }
     if ($frontendProc) { Stop-Tree $frontendProc.Id }
-    Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
     Write-Host "Stopped."
 }
